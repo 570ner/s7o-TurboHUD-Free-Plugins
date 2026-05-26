@@ -40,6 +40,7 @@ namespace Turbo.Plugins.s7o
         public bool ShowAlwaysOnCooldowns { get; set; }
         public bool ShowAlwaysOnEquippedLegendaryGems { get; set; }
         public bool ShowGemUpgradesNearPortraits { get; set; }
+        public bool ShowNemesisBracersNearPortraits { get; set; }
 
         // Compact portrait cleanup options. These affect only the small portrait bars.
         public bool ShowCompactSkillKeys { get; set; }
@@ -61,6 +62,11 @@ namespace Turbo.Plugins.s7o
         // Fine-tune the compact skillbar Y position in pixels.
         // Negative moves it upward to make room for the expanded row 2 below.
         public float PortraitSkillYOffsetPx { get; set; }
+
+        // Nemesis Bracers portrait marker layout.
+        public float PortraitNemesisIconScale { get; set; }
+        public float PortraitNemesisIconXOffset { get; set; }
+        public float PortraitNemesisIconYOffset { get; set; }
 
         // Compact legendary gem icon layout (used only when ShowAlwaysOnEquippedLegendaryGems is true).
         public float PortraitGemIconScale { get; set; }
@@ -127,6 +133,8 @@ namespace Turbo.Plugins.s7o
         private IBrush _gemAccentBrush;
         private IBrush _portraitGemBackBrush;
         private IBrush _cubeItemBackBrush;
+        private IBrush _archonSkillOverlayBrush;
+        private IBrush _nemesisIconBorderBrush;
 
         public s7o_PartyInspector()
         {
@@ -141,6 +149,7 @@ namespace Turbo.Plugins.s7o
             ShowAlwaysOnCooldowns = true;
             ShowAlwaysOnEquippedLegendaryGems = false;
             ShowGemUpgradesNearPortraits = true;
+            ShowNemesisBracersNearPortraits = true;
 
             ShowCompactSkillKeys = false;
             ShowCompactRuneLetters = false;
@@ -179,6 +188,10 @@ namespace Turbo.Plugins.s7o
 
             // Move the compact skillbar slightly upward to make room for the second row.
             PortraitSkillYOffsetPx = -5.0f;
+
+            PortraitNemesisIconScale = 0.62f;
+            PortraitNemesisIconXOffset = 0.0f;
+            PortraitNemesisIconYOffset = 0.0f;
 
             // Compact gem icon layout (always-on only — off by default).
             PortraitGemIconScale = 0.58f;
@@ -268,6 +281,8 @@ namespace Turbo.Plugins.s7o
             // regardless of item type (ring, weapon, etc).  Eliminates the transparency
             // mismatch caused by the inventory background textures varying by item height.
             _cubeItemBackBrush   = Hud.Render.CreateBrush(200,  18,  10,   5, 0);
+            _archonSkillOverlayBrush = Hud.Render.CreateBrush(125, 0, 0, 0, 0);
+            _nemesisIconBorderBrush = Hud.Render.CreateBrush(255, 0, 0, 0, 1.25f);
 
             // Thick black outlines — 2.5px gives strong contrast against the colourful icons.
             _skillBorderBrush    = Hud.Render.CreateBrush(255,   0,   0,   0, 2.5f);
@@ -315,6 +330,7 @@ namespace Turbo.Plugins.s7o
             bool needsPortraitOverlay =
                 ShowAlwaysOnPartySkillBars ||
                 ShowGemUpgradesNearPortraits ||
+                ShowNemesisBracersNearPortraits ||
                 ShowPanel;
 
             if (needsPortraitOverlay)
@@ -464,6 +480,9 @@ namespace Turbo.Plugins.s7o
                 if (ShowPanel)
                     DrawExpandedPortraitBuildDetails(player);
 
+                if (ShowNemesisBracersNearPortraits)
+                    DrawPortraitNemesisBracersMarker(player);
+
                 // Gem-upgrade counters: independent from F12, gated by Urshi.
                 if (gemUpgradeContextActive)
                     DrawCompactPortraitGemUpgradeCount(player);
@@ -554,6 +573,7 @@ namespace Turbo.Plugins.s7o
             float x = layout.X;
             float y = layout.Y;
             float size = layout.IconSize;
+            int drawnSkills = 0;
 
             foreach (var skill in player.Powers.SkillSlots)
             {
@@ -566,6 +586,7 @@ namespace Turbo.Plugins.s7o
 
                 var rect = new DXRectangleF(x, y, size, size);
                 DrawCompactSkill(skill, rect);
+                drawnSkills++;
 
                 if (Hud.Window.CursorInsideRect(rect.X, rect.Y, rect.Width, rect.Height))
                 {
@@ -583,6 +604,10 @@ namespace Turbo.Plugins.s7o
 
                 x += size + layout.Gap;
             }
+
+            double archonSeconds;
+            if (drawnSkills > 0 && TryGetActiveArchonSeconds(player, out archonSeconds))
+                DrawArchonSkillbarOverlay(layout, drawnSkills, archonSeconds);
         }
 
         private ISnoPower GetSkillPower(IPlayerSkill skill)
@@ -592,8 +617,8 @@ namespace Turbo.Plugins.s7o
 
             try
             {
-                if (skill.CurrentSnoPower != null)
-                    return skill.CurrentSnoPower;
+                if (skill.SnoPower != null)
+                    return skill.SnoPower;
             }
             catch
             {
@@ -601,7 +626,7 @@ namespace Turbo.Plugins.s7o
 
             try
             {
-                return skill.SnoPower;
+                return skill.CurrentSnoPower;
             }
             catch
             {
@@ -627,6 +652,195 @@ namespace Turbo.Plugins.s7o
 
             if (ShowCompactRuneLetters)
                 DrawSkillRuneHint(skill, rect.X, rect.Y, rect.Width);
+        }
+
+        // -----------------------------------------------------------------------
+        // Nemesis Bracers portrait marker
+        // -----------------------------------------------------------------------
+
+        private bool HasNemesisBracers(IPlayer player)
+        {
+            if (player == null || player.Powers == null)
+                return false;
+
+            try
+            {
+                if (player.Powers.BuffIsActive(Hud.Sno.SnoPowers.NemesisBracers.Sno))
+                    return true;
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                var buff = player.Powers.UsedLegendaryPowers.NemesisBracers;
+                if (buff != null && buff.Active)
+                    return true;
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                uint nemesisSno = Hud.Sno.SnoItems.Unique_Bracer_106_x1.Sno;
+                if ((player.CubeSnoItem1 != null && player.CubeSnoItem1.Sno == nemesisSno) ||
+                    (player.CubeSnoItem2 != null && player.CubeSnoItem2.Sno == nemesisSno) ||
+                    (player.CubeSnoItem3 != null && player.CubeSnoItem3.Sno == nemesisSno) ||
+                    (player.CubeSnoItem4 != null && player.CubeSnoItem4.Sno == nemesisSno))
+                    return true;
+            }
+            catch
+            {
+            }
+
+            return false;
+        }
+
+        private void DrawPortraitNemesisBracersMarker(IPlayer player)
+        {
+            if (player == null || player.PortraitUiElement == null || !HasNemesisBracers(player))
+                return;
+
+            var portraitRect = player.PortraitUiElement.Rectangle;
+            if (portraitRect.Width <= 0 || portraitRect.Height <= 0)
+                return;
+
+            ISnoItem item = null;
+            try
+            {
+                item = Hud.Sno.SnoItems.Unique_Bracer_106_x1;
+            }
+            catch
+            {
+                item = null;
+            }
+
+            float height = Math.Max(36.0f, portraitRect.Width * PortraitNemesisIconScale);
+            float ratio = 0.50f;
+            if (item != null && item.ItemWidth > 0 && item.ItemHeight > 0)
+                ratio = (float)item.ItemWidth / item.ItemHeight;
+
+            float width = height * ratio;
+            float padding = 2.0f;
+            float x = portraitRect.X + padding + PortraitNemesisIconXOffset;
+            float y = portraitRect.Y + (portraitRect.Height * 0.42f) + PortraitNemesisIconYOffset;
+
+            float minY = portraitRect.Y + padding;
+            float maxY = portraitRect.Bottom - height - padding;
+            if (maxY > minY)
+                y = Math.Min(Math.Max(y, minY), maxY);
+
+            bool drew = false;
+
+            if (item != null)
+                drew = DrawSnoItemInventoryIcon(item, x, y, width, height, 0.95f);
+
+            if (!drew && _smallFont != null)
+            {
+                var textLayout = _smallFont.GetTextLayout("N");
+                _smallFont.DrawText(
+                    textLayout,
+                    x + ((width - textLayout.Metrics.Width) * 0.5f),
+                    y + ((height - textLayout.Metrics.Height) * 0.5f));
+            }
+
+            if (_nemesisIconBorderBrush != null)
+                _nemesisIconBorderBrush.DrawRectangle(x, y, width, height);
+
+            if (Hud.Window.CursorInsideRect(x, y, width, height))
+            {
+                try
+                {
+                    Hud.Render.SetHint(item != null ? item.NameLocalized : "Nemesis Bracers");
+                }
+                catch
+                {
+                }
+            }
+        }
+
+        // -----------------------------------------------------------------------
+        // Archon compact skillbar state
+        // -----------------------------------------------------------------------
+
+        private bool TryGetActiveArchonSeconds(IPlayer player, out double seconds)
+        {
+            seconds = 0.0d;
+
+            if (player == null || player.Powers == null)
+                return false;
+
+            try
+            {
+                if (!player.Powers.BuffIsActive(Hud.Sno.SnoPowers.Wizard_Archon.Sno, 2))
+                    return false;
+            }
+            catch
+            {
+                return false;
+            }
+
+            try
+            {
+                var buff = player.Powers.GetBuff(Hud.Sno.SnoPowers.Wizard_Archon.Sno);
+                if (buff != null && buff.TimeLeftSeconds != null)
+                {
+                    if (buff.TimeLeftSeconds.Length > 2 && buff.TimeLeftSeconds[2] > 0.0d)
+                    {
+                        seconds = buff.TimeLeftSeconds[2];
+                        return true;
+                    }
+
+                    foreach (double value in buff.TimeLeftSeconds)
+                    {
+                        if (value > seconds)
+                            seconds = value;
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            return true;
+        }
+
+        private void DrawArchonSkillbarOverlay(PortraitBarLayout layout, int drawnSkills, double seconds)
+        {
+            if (drawnSkills <= 0)
+                return;
+
+            float width = (drawnSkills * layout.IconSize) + ((drawnSkills - 1) * layout.Gap);
+            if (width <= 0.0f)
+                return;
+
+            if (_archonSkillOverlayBrush != null)
+                _archonSkillOverlayBrush.DrawRectangle(layout.X, layout.Y, width, layout.IconSize);
+
+            IFont font = _compactCooldownFont ?? _cooldownFont ?? _smallFont;
+            if (font == null)
+                return;
+
+            string text = seconds > 0.0d
+                ? "A:" + Math.Ceiling(seconds).ToString("F0", CultureInfo.InvariantCulture) + "s"
+                : "Archon";
+
+            var textLayout = font.GetTextLayout(text);
+            float x = layout.X + ((width - textLayout.Metrics.Width) * 0.5f);
+            float y = layout.Y + ((layout.IconSize - textLayout.Metrics.Height) * 0.5f);
+
+            if (_warningBackBrush != null)
+            {
+                _warningBackBrush.DrawRectangle(
+                    x - 2.0f,
+                    y - 1.0f,
+                    textLayout.Metrics.Width + 4.0f,
+                    textLayout.Metrics.Height + 2.0f);
+            }
+
+            font.DrawText(textLayout, x, y);
         }
 
         // -----------------------------------------------------------------------
@@ -1452,11 +1666,11 @@ namespace Turbo.Plugins.s7o
 
         private void DrawPlayerSkills(IPlayer player, float x, float y)
         {
-            if (player == null || player.Powers == null || player.Powers.CurrentSkills == null)
+            if (player == null || player.Powers == null || player.Powers.SkillSlots == null)
                 return;
 
-            var skills = player.Powers.CurrentSkills
-                .Where(s => s != null && s.CurrentSnoPower != null)
+            var skills = player.Powers.SkillSlots
+                .Where(s => s != null && GetSkillPower(s) != null)
                 .OrderBy(s => (int)s.Key)
                 .Take(6)
                 .ToList();
@@ -1800,6 +2014,35 @@ namespace Turbo.Plugins.s7o
                 float drawY = y + (height - drawHeight) * 0.5f;
 
                 texture.Draw(drawX, drawY, drawWidth, drawHeight, opacity);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private bool DrawSnoItemInventoryIcon(ISnoItem item, float x, float y, float width, float height, float opacity)
+        {
+            if (item == null || width <= 0.0f || height <= 0.0f)
+                return false;
+
+            try
+            {
+                var slotTexture = Hud.Texture.InventorySlotTexture;
+                if (slotTexture != null)
+                    slotTexture.Draw(x, y, width, height, opacity);
+
+                var background = item.SetItemBonusesSno == uint.MaxValue
+                    ? (item.ItemHeight == 1 ? Hud.Texture.InventoryLegendaryBackgroundSmall : Hud.Texture.InventoryLegendaryBackgroundLarge)
+                    : (item.ItemHeight == 1 ? Hud.Texture.InventorySetBackgroundSmall : Hud.Texture.InventorySetBackgroundLarge);
+
+                if (background != null)
+                    background.Draw(x, y, width, height, opacity);
+
+                var itemTexture = Hud.Texture.GetItemTexture(item);
+                if (itemTexture != null)
+                    itemTexture.Draw(x, y, width, height, opacity);
                 return true;
             }
             catch
