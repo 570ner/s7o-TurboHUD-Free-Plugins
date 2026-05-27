@@ -497,38 +497,17 @@ namespace Turbo.Plugins.s7o
         {
             try
             {
-                if (Hud.Game == null)
-                    return false;
-
-                if (Hud.Game.Monsters != null &&
-                    Hud.Game.Monsters.Any(m => IsRiftGuardianDeadLike(m)))
-                {
-                    return true;
-                }
-
                 uint step = GetGreaterRiftQuestStepId();
 
-                // LightningMOD-style guardian-dead / reward steps.
+                // Native Greater Rift guardian-dead / reward steps.
+                // Do not freeze timers from dead boss-like monsters, since stale or spawned
+                // boss-priority actors can remain visible while the actual guardian is alive.
                 return step == 5 || step == 10 || step == 34 || step == 46;
             }
             catch
             {
                 return false;
             }
-        }
-
-        private bool IsRiftGuardianDeadLike(IMonster m)
-        {
-            if (m == null || m.IsAlive || m.SnoMonster == null)
-                return false;
-
-            if (m.Rarity == ActorRarity.Boss)
-                return true;
-
-            if (m.SnoMonster.Priority == MonsterPriority.boss)
-                return true;
-
-            return false;
         }
 
         private bool HasNewGreaterRiftStartedWhileSummaryActive()
