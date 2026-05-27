@@ -55,6 +55,7 @@ namespace Turbo.Plugins.s7o
         public float EliteMinimapCircleOutlineWidth { get; set; }
         public int EliteMinimapCircleOutlineAlpha { get; set; }
         public bool ShowLayeredEliteMinimapOverlay { get; set; }
+        public bool SuppressDefaultEliteMinimapCirclesWhenLayeredOverlay { get; set; }
         public float EliteMinimapOverlayRadius { get; set; }
         public float EliteMinionMinimapOverlayRadius { get; set; }
         public float JuggernautMinimapOverlayRadius { get; set; }
@@ -208,6 +209,7 @@ namespace Turbo.Plugins.s7o
             EliteMinimapCircleOutlineWidth = 2.5f;
             EliteMinimapCircleOutlineAlpha = 240;
             ShowLayeredEliteMinimapOverlay = true;
+            SuppressDefaultEliteMinimapCirclesWhenLayeredOverlay = true;
             EliteMinimapOverlayRadius = 7.0f;
             EliteMinionMinimapOverlayRadius = 7.0f;
             JuggernautMinimapOverlayRadius = 7.0f;
@@ -408,10 +410,20 @@ namespace Turbo.Plugins.s7o
                     if (plugin == null)
                         return;
 
-                    adjusted += ConfigureMapShapeDecorators(plugin.EliteChampionDecorator, eliteRadius, true);
-                    adjusted += ConfigureMapShapeDecorators(plugin.EliteLeaderDecorator, eliteRadius, true);
-                    adjusted += ConfigureMapShapeDecorators(plugin.EliteUniqueDecorator, eliteRadius, true);
-                    adjusted += ConfigureMapShapeDecorators(plugin.EliteMinionDecorator, minionRadius, true);
+                    if (SuppressDefaultEliteMinimapCirclesWhenLayeredOverlay && ShowLayeredEliteMinimapOverlay)
+                    {
+                        adjusted += SetMapShapeDecoratorsEnabled(plugin.EliteChampionDecorator, false);
+                        adjusted += SetMapShapeDecoratorsEnabled(plugin.EliteLeaderDecorator, false);
+                        adjusted += SetMapShapeDecoratorsEnabled(plugin.EliteUniqueDecorator, false);
+                        adjusted += SetMapShapeDecoratorsEnabled(plugin.EliteMinionDecorator, false);
+                    }
+                    else
+                    {
+                        adjusted += ConfigureMapShapeDecorators(plugin.EliteChampionDecorator, eliteRadius, true);
+                        adjusted += ConfigureMapShapeDecorators(plugin.EliteLeaderDecorator, eliteRadius, true);
+                        adjusted += ConfigureMapShapeDecorators(plugin.EliteUniqueDecorator, eliteRadius, true);
+                        adjusted += ConfigureMapShapeDecorators(plugin.EliteMinionDecorator, minionRadius, true);
+                    }
 
                     if (ShrinkBossAndKeywardenMinimapCircles)
                     {
@@ -426,6 +438,31 @@ namespace Turbo.Plugins.s7o
             catch
             {
             }
+        }
+
+        private int SetMapShapeDecoratorsEnabled(WorldDecoratorCollection collection, bool enabled)
+        {
+            if (collection == null)
+                return 0;
+
+            int changed = 0;
+
+            try
+            {
+                foreach (var decorator in collection.GetDecorators<MapShapeDecorator>())
+                {
+                    if (decorator == null)
+                        continue;
+
+                    decorator.Enabled = enabled;
+                    changed++;
+                }
+            }
+            catch
+            {
+            }
+
+            return changed;
         }
 
         private int ConfigureMapShapeDecorators(WorldDecoratorCollection collection, float targetRadius, bool outline)
@@ -587,6 +624,9 @@ namespace Turbo.Plugins.s7o
         private bool IsExcludedFromEliteMinimapOverlay(IMonster monster)
         {
             if (monster == null)
+                return true;
+
+            if (HideIllusions && monster.Illusion)
                 return true;
 
             if (IsOrlashCloneOrBreathMinion(monster))
