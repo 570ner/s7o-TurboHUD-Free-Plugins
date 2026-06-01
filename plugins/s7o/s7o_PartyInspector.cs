@@ -41,10 +41,31 @@ namespace Turbo.Plugins.s7o
         public bool ShowAlwaysOnEquippedLegendaryGems { get; set; }
         public bool ShowGemUpgradesNearPortraits { get; set; }
         public bool ShowNemesisBracersNearPortraits { get; set; }
+        public bool ShowArchonStacksNearSkillBars { get; set; }
+        public float ArchonStackIndicatorXOffset { get; set; }
+        public float ArchonStackIndicatorYOffset { get; set; }
+        public float ArchonStackFadeStartSeconds { get; set; }
 
         // Compact portrait cleanup options. These affect only the small portrait bars.
         public bool ShowCompactSkillKeys { get; set; }
         public bool ShowCompactRuneLetters { get; set; }
+
+        // Portrait-hover stat table replacement/cover layer.
+        // Plugin-only workaround for the native TurboHUD portrait hover info: draw our own table
+        // when the cursor is over any in-game player portrait.
+        public bool ShowPortraitHoverStats { get; set; }
+        public bool PortraitHoverStatsCoverNativeInfo { get; set; }
+        public bool PortraitHoverStatsShowAllPlayers { get; set; }
+        public bool PortraitHoverStatsUseLastKnownStats { get; set; }
+        public float PortraitHoverStatsX { get; set; }
+        public float PortraitHoverStatsY { get; set; }
+        public float PortraitHoverStatsCellHeight { get; set; }
+        public float PortraitHoverStatsPaddingX { get; set; }
+        public float PortraitHoverStatsCoverPaddingX { get; set; }
+        public float PortraitHoverStatsCoverPaddingY { get; set; }
+        public float PortraitHoverStatsNameColumnWidth { get; set; }
+        public float PortraitHoverStatsStatColumnWidth { get; set; }
+        public float PortraitHoverStatsSoloColumnWidth { get; set; }
 
         // F12 expanded inspector sections.
         public bool ShowExpandedSkills { get; set; }
@@ -121,6 +142,12 @@ namespace Turbo.Plugins.s7o
         private IFont _selfGemFont;
         private IFont _otherGemFont;
 
+        private IFont _portraitHoverHeaderFont;
+        private IFont _portraitHoverValueFont;
+        private IFont _archonCurrentStackFont;
+        private IFont _archonLingeringStackFont;
+        private IFont _archonStackOutlineFont;
+
         private IBrush _panelBrush;
         private IBrush _rowBrush;
         private IBrush _borderBrush;
@@ -136,9 +163,33 @@ namespace Turbo.Plugins.s7o
         private IBrush _archonSkillOverlayBrush;
         private IBrush _nemesisIconBorderBrush;
 
+        private IBrush _portraitHoverBackBrush;
+        private IBrush _portraitHoverHeaderBrush;
+        private IBrush _portraitHoverCellBrush;
+        private IBrush _portraitHoverBorderBrush;
+
+        private readonly Dictionary<string, PortraitHoverPlayerStatsSnapshot> _portraitHoverStatsCache =
+            new Dictionary<string, PortraitHoverPlayerStatsSnapshot>();
+
+        // FreeHUD can temporarily expose empty remote-player build/stat objects when
+        // a party member is in another world instance. These caches preserve the last
+        // valid live data we have seen for that account/hero, without inventing data.
+        private readonly Dictionary<string, List<LegendaryGemDisplayInfo>> _legendaryGemInfoCache =
+            new Dictionary<string, List<LegendaryGemDisplayInfo>>();
+
+        private readonly Dictionary<string, List<ISnoPower>> _passivePowerCache =
+            new Dictionary<string, List<ISnoPower>>();
+
+        private readonly Dictionary<string, List<ISnoItem>> _cubeItemCache =
+            new Dictionary<string, List<ISnoItem>>();
+
         public s7o_PartyInspector()
         {
             Enabled = true;
+
+            // Draw late so the plugin-only replacement table has the best chance to cover
+            // native portrait hover info without editing default XML or executable resources.
+            Order = 999999;
 
             // F12 expanded panel.
             ShowPanel = false;
@@ -150,9 +201,38 @@ namespace Turbo.Plugins.s7o
             ShowAlwaysOnEquippedLegendaryGems = false;
             ShowGemUpgradesNearPortraits = true;
             ShowNemesisBracersNearPortraits = true;
+            ShowArchonStacksNearSkillBars = true;
+
+            // Archon stack readout: anchored below the portrait buff/CoE area instead of
+            // to the right of the skillbar, so it is less likely to collide with HP lists.
+            ArchonStackIndicatorXOffset = 16.0f;
+            ArchonStackIndicatorYOffset = 0.0f;
+            ArchonStackFadeStartSeconds = 5.0f;
 
             ShowCompactSkillKeys = false;
             ShowCompactRuneLetters = false;
+
+            ShowPortraitHoverStats = true;
+            PortraitHoverStatsCoverNativeInfo = true;
+            // Hovering any portrait should replace the whole native party stat table,
+            // not just the single hovered player row.
+            PortraitHoverStatsShowAllPlayers = true;
+            // FreeHUD can return zeroed stat objects for remote party members in another
+            // town/world instance. Keep the last valid snapshot and use it instead of
+            // overwriting a row with false 0s.
+            PortraitHoverStatsUseLastKnownStats = true;
+            // 0 = auto-center horizontally; otherwise absolute screen X.
+            PortraitHoverStatsX = 0.0f;
+            // Slightly lower than RC4, while the multi-row cover now hides the native table.
+            PortraitHoverStatsY = 35.0f;
+            // Taller rows plus a larger cover pad hide native overlap more reliably.
+            PortraitHoverStatsCellHeight = 26.0f;
+            PortraitHoverStatsPaddingX = 5.0f;
+            PortraitHoverStatsCoverPaddingX = 4.0f;
+            PortraitHoverStatsCoverPaddingY = 10.0f;
+            PortraitHoverStatsNameColumnWidth = 112.0f;
+            PortraitHoverStatsStatColumnWidth = 62.0f;
+            PortraitHoverStatsSoloColumnWidth = 60.0f;
 
             // Portrait counters are the default reminder style.
             ShowGemUpgradeReminder = false;
@@ -241,8 +321,21 @@ namespace Turbo.Plugins.s7o
             _portraitSmallFont= Hud.Render.CreateFont("tahoma",  6.5f, 255, 255, 255, 220, true,  false, 150, 0, 0, 0, true);
             _statsFont        = Hud.Render.CreateFont("tahoma",  7.5f, 240, 190, 230, 255, false, false, 160, 0, 0, 0, true);
 
+            _portraitHoverHeaderFont = Hud.Render.CreateFont("tahoma", 7.0f, 255, 255, 255, 255, true, false, 180, 0, 0, 0, true);
+            _portraitHoverValueFont  = Hud.Render.CreateFont("tahoma", 7.5f, 255, 235, 235, 235, true, false, 180, 0, 0, 0, true);
+
             _compactCooldownFont = Hud.Render.CreateFont(
                 "tahoma", CompactCooldownFontSize, 255, 255, 255, 255, true, false, 220, 0, 0, 0, true);
+
+            float archonStackFontSize = CompactCooldownFontSize + 1.5f;
+            _archonCurrentStackFont = Hud.Render.CreateFont(
+                "tahoma", archonStackFontSize, 255, 190, 80, 255, true, false, 255, 0, 0, 0, true);
+
+            _archonLingeringStackFont = Hud.Render.CreateFont(
+                "tahoma", archonStackFontSize, 255, 255, 55, 55, true, false, 255, 0, 0, 0, true);
+
+            _archonStackOutlineFont = Hud.Render.CreateFont(
+                "tahoma", archonStackFontSize, 255, 0, 0, 0, true, false, false);
 
             // Self gem-upgrade counter: bold yellow, slightly larger for visibility.
             _selfGemFont = Hud.Render.CreateFont(
@@ -283,6 +376,11 @@ namespace Turbo.Plugins.s7o
             _cubeItemBackBrush   = Hud.Render.CreateBrush(200,  18,  10,   5, 0);
             _archonSkillOverlayBrush = Hud.Render.CreateBrush(125, 0, 0, 0, 0);
             _nemesisIconBorderBrush = Hud.Render.CreateBrush(255, 0, 0, 0, 1.25f);
+
+            _portraitHoverBackBrush   = Hud.Render.CreateBrush(245, 0, 0, 0, 0);
+            _portraitHoverHeaderBrush = Hud.Render.CreateBrush(230, 18, 18, 18, 0);
+            _portraitHoverCellBrush   = Hud.Render.CreateBrush(215, 6, 6, 6, 0);
+            _portraitHoverBorderBrush = Hud.Render.CreateBrush(235, 145, 145, 145, 1.0f);
 
             // Thick black outlines — 2.5px gives strong contrast against the colourful icons.
             _skillBorderBrush    = Hud.Render.CreateBrush(255,   0,   0,   0, 2.5f);
@@ -352,6 +450,12 @@ namespace Turbo.Plugins.s7o
             // Portrait Gem Ups counters are the primary reminder style.
             if (ShowGemUpgradeReminder && IsGemUpgradeContextActive())
                 DrawGemUpgradeReminder();
+
+            var portraitPlayers = GetPartyPlayers();
+            UpdatePortraitHoverStatsCache(portraitPlayers);
+
+            if (ShowPortraitHoverStats)
+                DrawPortraitHoverStatsIfNeeded(portraitPlayers);
         }
 
         // -----------------------------------------------------------------------
@@ -605,9 +709,15 @@ namespace Turbo.Plugins.s7o
                 x += size + layout.Gap;
             }
 
-            double archonSeconds;
-            if (drawnSkills > 0 && TryGetActiveArchonSeconds(player, out archonSeconds))
-                DrawArchonSkillbarOverlay(layout, drawnSkills, archonSeconds);
+            if (drawnSkills > 0)
+            {
+                double archonSeconds;
+                if (TryGetActiveArchonSeconds(player, out archonSeconds))
+                    DrawArchonSkillbarOverlay(layout, drawnSkills, archonSeconds);
+
+                if (ShowArchonStacksNearSkillBars)
+                    DrawArchonStackIndicator(player, layout, drawnSkills);
+            }
         }
 
         private ISnoPower GetSkillPower(IPlayerSkill skill)
@@ -824,8 +934,8 @@ namespace Turbo.Plugins.s7o
                 return;
 
             string text = seconds > 0.0d
-                ? "A:" + Math.Ceiling(seconds).ToString("F0", CultureInfo.InvariantCulture) + "s"
-                : "Archon";
+                ? "ARCHON: " + Math.Ceiling(seconds).ToString("F0", CultureInfo.InvariantCulture)
+                : "ARCHON";
 
             var textLayout = font.GetTextLayout(text);
             float x = layout.X + ((width - textLayout.Metrics.Width) * 0.5f);
@@ -841,6 +951,180 @@ namespace Turbo.Plugins.s7o
             }
 
             font.DrawText(textLayout, x, y);
+        }
+
+        private void DrawArchonStackIndicator(IPlayer player, PortraitBarLayout layout, int drawnSkills)
+        {
+            if (drawnSkills <= 0)
+                return;
+
+            List<ArchonStackDisplayInfo> stacks;
+            if (!TryGetArchonStackInfo(player, out stacks) || stacks == null || stacks.Count <= 0)
+                return;
+
+            float skillWidth = (drawnSkills * layout.IconSize) + ((drawnSkills - 1) * layout.Gap);
+            if (skillWidth <= 0.0f)
+                return;
+
+            float x = layout.X + ArchonStackIndicatorXOffset;
+            float y = layout.Y + (layout.IconSize * 3.0f) + ArchonStackIndicatorYOffset;
+            float gap = Math.Max(6.0f, layout.Gap + 6.0f);
+
+            foreach (var stack in stacks)
+            {
+                if (stack == null || stack.Count <= 0)
+                    continue;
+
+                IFont font = stack.IsLingering
+                    ? (_archonLingeringStackFont ?? _compactCooldownFont ?? _cooldownFont ?? _smallFont)
+                    : (_archonCurrentStackFont ?? _compactCooldownFont ?? _cooldownFont ?? _smallFont);
+
+                if (font == null)
+                    continue;
+
+                string text = stack.Count.ToString(CultureInfo.InvariantCulture);
+                var textLayout = font.GetTextLayout(text);
+                float opacity = GetArchonStackOpacity(stack.TimeLeftSeconds);
+
+                DrawArchonStackText(font, text, textLayout, x, y, opacity);
+
+                x += textLayout.Metrics.Width + gap;
+            }
+        }
+
+        private void DrawArchonStackText(IFont font, string text, SharpDX.DirectWrite.TextLayout textLayout, float x, float y, float opacity)
+        {
+            if (font == null || textLayout == null || string.IsNullOrEmpty(text))
+                return;
+
+            IFont outlineFont = _archonStackOutlineFont;
+            float oldTextOpacity = font.Opacity;
+            float oldOutlineOpacity = outlineFont != null ? outlineFont.Opacity : 1.0f;
+
+            try
+            {
+                if (outlineFont != null)
+                {
+                    outlineFont.Opacity = opacity;
+                    var outlineLayout = outlineFont.GetTextLayout(text);
+
+                    outlineFont.DrawText(outlineLayout, x - 2.0f, y);
+                    outlineFont.DrawText(outlineLayout, x + 2.0f, y);
+                    outlineFont.DrawText(outlineLayout, x, y - 2.0f);
+                    outlineFont.DrawText(outlineLayout, x, y + 2.0f);
+                    outlineFont.DrawText(outlineLayout, x - 1.5f, y - 1.5f);
+                    outlineFont.DrawText(outlineLayout, x + 1.5f, y - 1.5f);
+                    outlineFont.DrawText(outlineLayout, x - 1.5f, y + 1.5f);
+                    outlineFont.DrawText(outlineLayout, x + 1.5f, y + 1.5f);
+                }
+
+                font.Opacity = opacity;
+                font.DrawText(textLayout, x, y);
+            }
+            finally
+            {
+                font.Opacity = oldTextOpacity;
+                if (outlineFont != null)
+                    outlineFont.Opacity = oldOutlineOpacity;
+            }
+        }
+
+        private bool TryGetArchonStackInfo(IPlayer player, out List<ArchonStackDisplayInfo> stacks)
+        {
+            stacks = null;
+
+            if (player == null || player.Powers == null)
+                return false;
+
+            IBuff buff = null;
+            try
+            {
+                buff = player.Powers.GetBuff(Hud.Sno.SnoPowers.Wizard_Archon.Sno);
+            }
+            catch
+            {
+                buff = null;
+            }
+
+            if (buff == null || buff.IconCounts == null || buff.IconCounts.Length <= 0)
+                return false;
+
+            var result = new List<ArchonStackDisplayInfo>(2);
+
+            // Index 5 is the retained/lingering Archon stack icon observed during double-stack windows.
+            // Index 2 is the current active Archon form stack icon.
+            AddArchonStackInfo(buff, 5, true, result, true);
+            AddArchonStackInfo(buff, 2, false, result, true);
+
+            if (result.Count <= 0)
+            {
+                for (int i = 0; i < buff.IconCounts.Length && result.Count < 2; i++)
+                {
+                    if (i == 2 || i == 5)
+                        continue;
+
+                    AddArchonStackInfo(buff, i, false, result, false);
+                }
+            }
+
+            if (result.Count <= 0)
+                return false;
+
+            stacks = result;
+            return true;
+        }
+
+        private void AddArchonStackInfo(IBuff buff, int iconIndex, bool isLingering, List<ArchonStackDisplayInfo> stacks, bool allowSingleStack)
+        {
+            if (buff == null || buff.IconCounts == null || stacks == null || iconIndex < 0 || iconIndex >= buff.IconCounts.Length)
+                return;
+
+            int count = buff.IconCounts[iconIndex];
+            if (count <= 0)
+                return;
+
+            if (!allowSingleStack && count <= 1)
+                return;
+
+            double timeLeft = 0.0d;
+            try
+            {
+                if (buff.TimeLeftSeconds != null && iconIndex < buff.TimeLeftSeconds.Length)
+                    timeLeft = buff.TimeLeftSeconds[iconIndex];
+            }
+            catch
+            {
+                timeLeft = 0.0d;
+            }
+
+            stacks.Add(new ArchonStackDisplayInfo
+            {
+                Count = count,
+                TimeLeftSeconds = timeLeft,
+                IsLingering = isLingering
+            });
+        }
+
+        private float GetArchonStackOpacity(double secondsLeft)
+        {
+            const double minimumOpacity = 0.50d;
+
+            if (secondsLeft <= 0.0d)
+                return (float)minimumOpacity;
+
+            double fadeStart = Math.Max(1.0d, ArchonStackFadeStartSeconds);
+            if (secondsLeft >= fadeStart)
+                return 1.0f;
+
+            double ratio = Math.Max(0.0d, Math.Min(1.0d, secondsLeft / fadeStart));
+            return (float)(minimumOpacity + (ratio * (1.0d - minimumOpacity)));
+        }
+
+        private sealed class ArchonStackDisplayInfo
+        {
+            public int Count;
+            public double TimeLeftSeconds;
+            public bool IsLingering;
         }
 
         // -----------------------------------------------------------------------
@@ -1070,31 +1354,40 @@ namespace Turbo.Plugins.s7o
         {
             List<ISnoPower> result = new List<ISnoPower>();
 
-            if (player == null || player.Powers == null)
+            if (player == null)
                 return result;
 
-            try
+            if (player.Powers != null)
             {
-                if (player.Powers.PassiveSlots != null)
-                    result.AddRange(player.Powers.PassiveSlots.Where(p => p != null));
-            }
-            catch
-            {
+                try
+                {
+                    if (player.Powers.PassiveSlots != null)
+                        result.AddRange(player.Powers.PassiveSlots.Where(p => p != null));
+                }
+                catch
+                {
+                }
+
+                if (result.Count == 0)
+                {
+                    try
+                    {
+                        if (player.Powers.UsedPassives != null)
+                            result.AddRange(player.Powers.UsedPassives.Where(p => p != null));
+                    }
+                    catch
+                    {
+                    }
+                }
             }
 
             if (result.Count > 0)
+            {
+                CachePassivePowers(player, result);
                 return result;
-
-            try
-            {
-                if (player.Powers.UsedPassives != null)
-                    result.AddRange(player.Powers.UsedPassives.Where(p => p != null));
-            }
-            catch
-            {
             }
 
-            return result;
+            return GetCachedPassivePowers(player);
         }
 
         private void DrawExpandedPortraitPassives(
@@ -1137,7 +1430,13 @@ namespace Turbo.Plugins.s7o
             try { item = player.CubeSnoItem4; } catch { item = null; }
             if (item != null) result.Add(item);
 
-            return result;
+            if (result.Count > 0)
+            {
+                CacheCubeItems(player, result);
+                return result;
+            }
+
+            return GetCachedCubeItems(player);
         }
 
         private void DrawExpandedPortraitCubeItems(
@@ -1175,6 +1474,26 @@ namespace Turbo.Plugins.s7o
         }
 
         private IEnumerable<LegendaryGemDisplayInfo> GetLegendaryGemDisplayInfos(IPlayer player)
+        {
+            List<LegendaryGemDisplayInfo> result = new List<LegendaryGemDisplayInfo>();
+
+            if (player == null)
+                return result;
+
+            if (player.IsMe)
+                return GetSelfEquippedLegendaryGemDisplayInfos();
+
+            result = ReadCurrentRemoteLegendaryGemDisplayInfos(player);
+            if (result != null && result.Count > 0)
+            {
+                CacheLegendaryGemDisplayInfos(player, result);
+                return result;
+            }
+
+            return GetCachedLegendaryGemDisplayInfos(player);
+        }
+
+        private List<LegendaryGemDisplayInfo> ReadCurrentRemoteLegendaryGemDisplayInfos(IPlayer player)
         {
             List<LegendaryGemDisplayInfo> result = new List<LegendaryGemDisplayInfo>();
 
@@ -1219,6 +1538,158 @@ namespace Turbo.Plugins.s7o
             return result;
         }
 
+        private List<LegendaryGemDisplayInfo> GetSelfEquippedLegendaryGemDisplayInfos()
+        {
+            List<LegendaryGemDisplayInfo> result = new List<LegendaryGemDisplayInfo>();
+
+            try
+            {
+                if (Hud == null || Hud.Game == null || Hud.Game.Items == null)
+                    return result;
+
+                HashSet<uint> seen = new HashSet<uint>();
+
+                foreach (var item in Hud.Game.Items)
+                {
+                    if (item == null || !IsLocalPlayerEquippedItemLocation(item.Location) || item.ItemsInSocket == null)
+                        continue;
+
+                    foreach (var socketed in item.ItemsInSocket)
+                    {
+                        if (!IsSocketedLegendaryGem(socketed) || socketed.SnoItem == null)
+                            continue;
+
+                        uint sno = 0;
+                        try { sno = socketed.SnoItem.Sno; } catch { sno = 0; }
+
+                        if (sno != 0)
+                        {
+                            if (seen.Contains(sno))
+                                continue;
+
+                            seen.Add(sno);
+                        }
+
+                        result.Add(new LegendaryGemDisplayInfo()
+                        {
+                            Name        = GetLocalLegendaryGemDisplayName(socketed),
+                            ShortName   = GetLocalLegendaryGemShortName(socketed),
+                            SnoItem     = socketed.SnoItem,
+                            Primary     = null,
+                            Secondary   = null,
+                            DisplayBuff = null,
+                        });
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            return result;
+        }
+
+        private bool IsLocalPlayerEquippedItemLocation(ItemLocation location)
+        {
+            return
+                location == ItemLocation.Head ||
+                location == ItemLocation.Torso ||
+                location == ItemLocation.RightHand ||
+                location == ItemLocation.LeftHand ||
+                location == ItemLocation.Hands ||
+                location == ItemLocation.Waist ||
+                location == ItemLocation.Feet ||
+                location == ItemLocation.Shoulders ||
+                location == ItemLocation.Legs ||
+                location == ItemLocation.Bracers ||
+                location == ItemLocation.LeftRing ||
+                location == ItemLocation.RightRing ||
+                location == ItemLocation.Neck;
+        }
+
+        private bool IsSocketedLegendaryGem(IItem item)
+        {
+            if (item == null || item.SnoItem == null)
+                return false;
+
+            try
+            {
+                return item.Quality == ItemQuality.Legendary && item.JewelRank > -1;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private string GetLocalLegendaryGemDisplayName(IItem item)
+        {
+            if (item == null)
+                return "Legendary Gem";
+
+            try
+            {
+                if (item.SnoItem != null && !string.IsNullOrEmpty(item.SnoItem.NameEnglish))
+                    return item.SnoItem.NameEnglish;
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                if (!string.IsNullOrEmpty(item.FullNameEnglish))
+                    return item.FullNameEnglish;
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                if (item.SnoItem != null && !string.IsNullOrEmpty(item.SnoItem.NameLocalized))
+                    return item.SnoItem.NameLocalized;
+            }
+            catch
+            {
+            }
+
+            return "Legendary Gem";
+        }
+
+        private string GetLocalLegendaryGemShortName(IItem item)
+        {
+            string name = GetLocalLegendaryGemDisplayName(item);
+
+            if (string.IsNullOrEmpty(name)) return "Gem";
+            if (name.IndexOf("Powerful", StringComparison.OrdinalIgnoreCase) >= 0) return "BotP";
+            if (name.IndexOf("Stricken", StringComparison.OrdinalIgnoreCase) >= 0) return "Str";
+            if (name.IndexOf("Trapped", StringComparison.OrdinalIgnoreCase) >= 0) return "BotT";
+            if (name.IndexOf("Hoarder", StringComparison.OrdinalIgnoreCase) >= 0) return "Boon";
+            if (name.IndexOf("Boyarsky", StringComparison.OrdinalIgnoreCase) >= 0) return "Boy";
+            if (name.IndexOf("Enforcer", StringComparison.OrdinalIgnoreCase) >= 0) return "Enf";
+            if (name.IndexOf("Esoteric", StringComparison.OrdinalIgnoreCase) >= 0) return "Eso";
+            if (name.IndexOf("Ease", StringComparison.OrdinalIgnoreCase) >= 0) return "Ease";
+            if (name.IndexOf("Toxin", StringComparison.OrdinalIgnoreCase) >= 0) return "Tox";
+            if (name.IndexOf("Gogok", StringComparison.OrdinalIgnoreCase) >= 0) return "Gog";
+            if (name.IndexOf("Iceblink", StringComparison.OrdinalIgnoreCase) >= 0) return "Ice";
+            if (name.IndexOf("Invigorating", StringComparison.OrdinalIgnoreCase) >= 0) return "Inv";
+            if (name.IndexOf("Dreams", StringComparison.OrdinalIgnoreCase) >= 0) return "LoD";
+            if (name.IndexOf("Mirinae", StringComparison.OrdinalIgnoreCase) >= 0) return "Mir";
+            if (name.IndexOf("Wildebeest", StringComparison.OrdinalIgnoreCase) >= 0) return "MWG";
+            if (name.IndexOf("Moratorium", StringComparison.OrdinalIgnoreCase) >= 0) return "Mor";
+            if (name.IndexOf("Mutilation", StringComparison.OrdinalIgnoreCase) >= 0) return "Mut";
+            if (name.IndexOf("Pain Enhancer", StringComparison.OrdinalIgnoreCase) >= 0) return "Pain";
+            if (name.IndexOf("Soul Shard", StringComparison.OrdinalIgnoreCase) >= 0) return "RSS";
+            if (name.IndexOf("Simplicity", StringComparison.OrdinalIgnoreCase) >= 0) return "Simp";
+            if (name.IndexOf("Taeguk", StringComparison.OrdinalIgnoreCase) >= 0) return "Tae";
+            if (name.IndexOf("Atonement", StringComparison.OrdinalIgnoreCase) >= 0) return "WoA";
+            if (name.IndexOf("Wreath", StringComparison.OrdinalIgnoreCase) >= 0) return "WoL";
+            if (name.IndexOf("Zei", StringComparison.OrdinalIgnoreCase) >= 0) return "Zei";
+
+            return "Gem";
+        }
+
         private void AddLegendaryGemDisplay(
             List<LegendaryGemDisplayInfo> result,
             string name,
@@ -1245,6 +1716,119 @@ namespace Turbo.Plugins.s7o
             });
         }
 
+        private void CacheLegendaryGemDisplayInfos(IPlayer player, List<LegendaryGemDisplayInfo> gems)
+        {
+            if (player == null || gems == null || gems.Count == 0)
+                return;
+
+            var snapshot = CloneLegendaryGemDisplayInfos(gems);
+            foreach (var key in GetPortraitHoverPlayerCacheKeys(player))
+                _legendaryGemInfoCache[key] = CloneLegendaryGemDisplayInfos(snapshot);
+        }
+
+        private List<LegendaryGemDisplayInfo> GetCachedLegendaryGemDisplayInfos(IPlayer player)
+        {
+            List<LegendaryGemDisplayInfo> empty = new List<LegendaryGemDisplayInfo>();
+
+            if (player == null)
+                return empty;
+
+            foreach (var key in GetPortraitHoverPlayerCacheKeys(player))
+            {
+                List<LegendaryGemDisplayInfo> cached;
+                if (!string.IsNullOrEmpty(key) && _legendaryGemInfoCache.TryGetValue(key, out cached) && cached != null && cached.Count > 0)
+                    return CloneLegendaryGemDisplayInfos(cached);
+            }
+
+            return empty;
+        }
+
+        private List<LegendaryGemDisplayInfo> CloneLegendaryGemDisplayInfos(IEnumerable<LegendaryGemDisplayInfo> source)
+        {
+            List<LegendaryGemDisplayInfo> result = new List<LegendaryGemDisplayInfo>();
+
+            if (source == null)
+                return result;
+
+            foreach (var gem in source)
+            {
+                if (gem == null)
+                    continue;
+
+                result.Add(new LegendaryGemDisplayInfo
+                {
+                    Name = gem.Name,
+                    ShortName = gem.ShortName,
+                    SnoItem = gem.SnoItem,
+                    Primary = gem.Primary,
+                    Secondary = gem.Secondary,
+                    DisplayBuff = gem.DisplayBuff
+                });
+            }
+
+            return result;
+        }
+
+        private void CachePassivePowers(IPlayer player, List<ISnoPower> powers)
+        {
+            if (player == null || powers == null || powers.Count == 0)
+                return;
+
+            List<ISnoPower> snapshot = powers.Where(p => p != null).ToList();
+            if (snapshot.Count == 0)
+                return;
+
+            foreach (var key in GetPortraitHoverPlayerCacheKeys(player))
+                _passivePowerCache[key] = snapshot.ToList();
+        }
+
+        private List<ISnoPower> GetCachedPassivePowers(IPlayer player)
+        {
+            List<ISnoPower> empty = new List<ISnoPower>();
+
+            if (player == null)
+                return empty;
+
+            foreach (var key in GetPortraitHoverPlayerCacheKeys(player))
+            {
+                List<ISnoPower> cached;
+                if (!string.IsNullOrEmpty(key) && _passivePowerCache.TryGetValue(key, out cached) && cached != null && cached.Count > 0)
+                    return cached.Where(p => p != null).ToList();
+            }
+
+            return empty;
+        }
+
+        private void CacheCubeItems(IPlayer player, List<ISnoItem> items)
+        {
+            if (player == null || items == null || items.Count == 0)
+                return;
+
+            List<ISnoItem> snapshot = items.Where(i => i != null).ToList();
+            if (snapshot.Count == 0)
+                return;
+
+            foreach (var key in GetPortraitHoverPlayerCacheKeys(player))
+                _cubeItemCache[key] = snapshot.ToList();
+        }
+
+        private List<ISnoItem> GetCachedCubeItems(IPlayer player)
+        {
+            List<ISnoItem> empty = new List<ISnoItem>();
+
+            if (player == null)
+                return empty;
+
+            foreach (var key in GetPortraitHoverPlayerCacheKeys(player))
+            {
+                List<ISnoItem> cached;
+                if (!string.IsNullOrEmpty(key) && _cubeItemCache.TryGetValue(key, out cached) && cached != null && cached.Count > 0)
+                    return cached.Where(i => i != null).ToList();
+            }
+
+            return empty;
+        }
+
         private IBuff GetPreferredLegendaryGemBuff(IBuff primary, IBuff secondary)
         {
             if (LegendaryGemBuffLooksUsable(primary))
@@ -1261,9 +1845,9 @@ namespace Turbo.Plugins.s7o
             if (buff == null || buff.SnoPower == null)
                 return false;
 
-            // UsedLegendaryGems exposes gems actually equipped by the player.
-            // Passive gems may not expose Active/IconCounts reliably, so we
-            // accept any buff that has a valid SnoPower.
+            // For remote party players, UsedLegendaryGems is the best available
+            // equipment signal. Passive gems may not expose Active/IconCounts
+            // reliably, so accept any buff that has a valid SnoPower.
             return true;
         }
 
@@ -1479,6 +2063,740 @@ namespace Turbo.Plugins.s7o
                 var lineLayout = _warningFont.GetTextLayout(lines[i]);
                 _warningFont.DrawText(lineLayout, x, y + i * lineHeight);
             }
+        }
+
+        // -----------------------------------------------------------------------
+        // Portrait-hover stat table replacement
+        // -----------------------------------------------------------------------
+
+        private class PortraitHoverStatCell
+        {
+            public string Header;
+            public string Value;
+            public float Width;
+        }
+
+        private class PortraitHoverPlayerStatsSnapshot
+        {
+            public string Name;
+            public string Ehp;
+            public string Dps;
+            public string Aps;
+            public string Chc;
+            public string Chd;
+            public string Cdr;
+            public string Rcr;
+            public string Ad;
+            public string Solo;
+            public bool HasUsableCoreStats;
+            public int LastSeenTick;
+        }
+
+        private void DrawPortraitHoverStatsIfNeeded(List<IPlayer> players)
+        {
+            if (!ShowPortraitHoverStats)
+                return;
+
+            if (players == null || players.Count == 0)
+                return;
+
+            IPlayer hoveredPlayer;
+            if (!TryGetHoveredPortraitPlayer(players, out hoveredPlayer))
+                return;
+
+            if (PortraitHoverStatsShowAllPlayers)
+                DrawPortraitHoverStatsTable(players);
+            else
+                DrawPortraitHoverStatsTable(new List<IPlayer> { hoveredPlayer });
+        }
+
+        private bool TryGetHoveredPortraitPlayer(List<IPlayer> players, out IPlayer hoveredPlayer)
+        {
+            hoveredPlayer = null;
+
+            try
+            {
+                if (players == null)
+                    return false;
+
+                foreach (var player in players)
+                {
+                    if (player == null || !player.IsInGame)
+                        continue;
+
+                    IUiElement portrait = player.PortraitUiElement;
+                    if (portrait == null)
+                        continue;
+
+                    try
+                    {
+                        if (!portrait.Visible && portrait.ReplacementWhenNotVisible != null)
+                            portrait = portrait.ReplacementWhenNotVisible;
+                    }
+                    catch
+                    {
+                    }
+
+                    if (portrait == null)
+                        continue;
+
+                    var rect = portrait.Rectangle;
+                    if (rect.Width <= 0.0f || rect.Height <= 0.0f)
+                        continue;
+
+                    if (Hud.Window.CursorInsideRect(rect.X, rect.Y, rect.Width, rect.Height))
+                    {
+                        hoveredPlayer = player;
+                        return true;
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            return false;
+        }
+
+        private void DrawPortraitHoverStatsTable(List<IPlayer> players)
+        {
+            if (players == null || players.Count == 0)
+                return;
+
+            var rows = new List<List<PortraitHoverStatCell>>();
+            foreach (var player in players)
+            {
+                if (player == null || !player.IsInGame)
+                    continue;
+
+                var row = BuildPortraitHoverStatCells(player);
+                if (row != null && row.Count > 0)
+                    rows.Add(row);
+            }
+
+            if (rows.Count == 0)
+                return;
+
+            var headerCells = BuildPortraitHoverHeaderCells();
+            if (headerCells == null || headerCells.Count == 0)
+                return;
+
+            float rowHeight = Math.Max(14.0f, PortraitHoverStatsCellHeight);
+            float tableWidth = 0.0f;
+            foreach (var cell in headerCells)
+            {
+                if (cell != null)
+                    tableWidth += Math.Max(20.0f, cell.Width);
+            }
+
+            // Header row + one row for every actual in-game party member. This intentionally
+            // covers the native FreeHUD all-player hover table when any portrait is hovered.
+            float tableHeight = rowHeight * (rows.Count + 1);
+            float x = PortraitHoverStatsX;
+            float y = PortraitHoverStatsY;
+
+            if (x <= 0.0f)
+                x = (Hud.Window.Size.Width - tableWidth) * 0.5f;
+
+            // Keep table inside the game window when users tune the offsets.
+            if (x < 0.0f)
+                x = 0.0f;
+            if (x + tableWidth > Hud.Window.Size.Width)
+                x = Math.Max(0.0f, Hud.Window.Size.Width - tableWidth);
+            if (y < 0.0f)
+                y = 0.0f;
+
+            // Opaque cover rectangle. This is the plugin-only workaround for native portrait info.
+            // It now uses the full party-table height, not a single hovered-player row.
+            if (PortraitHoverStatsCoverNativeInfo && _portraitHoverBackBrush != null)
+            {
+                float coverPadX = Math.Max(0.0f, PortraitHoverStatsCoverPaddingX);
+                float coverPadY = Math.Max(0.0f, PortraitHoverStatsCoverPaddingY);
+                _portraitHoverBackBrush.DrawRectangle(
+                    x - coverPadX,
+                    y - coverPadY,
+                    tableWidth + coverPadX * 2.0f,
+                    tableHeight + coverPadY * 2.0f);
+            }
+
+            DrawPortraitHoverStatsRow(headerCells, x, y, rowHeight, true);
+
+            for (int rowIndex = 0; rowIndex < rows.Count; rowIndex++)
+            {
+                DrawPortraitHoverStatsRow(
+                    rows[rowIndex],
+                    x,
+                    y + rowHeight * (rowIndex + 1),
+                    rowHeight,
+                    false);
+            }
+        }
+
+        private void DrawPortraitHoverStatsRow(List<PortraitHoverStatCell> cells, float x, float y, float rowHeight, bool header)
+        {
+            if (cells == null || cells.Count == 0)
+                return;
+
+            float cellX = x;
+            foreach (var cell in cells)
+            {
+                if (cell == null)
+                    continue;
+
+                float width = Math.Max(20.0f, cell.Width);
+
+                if (header)
+                {
+                    if (_portraitHoverHeaderBrush != null)
+                        _portraitHoverHeaderBrush.DrawRectangle(cellX, y, width, rowHeight);
+                }
+                else
+                {
+                    if (_portraitHoverCellBrush != null)
+                        _portraitHoverCellBrush.DrawRectangle(cellX, y, width, rowHeight);
+                }
+
+                if (_portraitHoverBorderBrush != null)
+                    _portraitHoverBorderBrush.DrawRectangle(cellX, y, width, rowHeight);
+
+                DrawPortraitHoverCellText(
+                    header ? cell.Header : cell.Value,
+                    header ? _portraitHoverHeaderFont : _portraitHoverValueFont,
+                    cellX,
+                    y,
+                    width,
+                    rowHeight,
+                    true);
+
+                cellX += width;
+            }
+        }
+
+        private List<PortraitHoverStatCell> BuildPortraitHoverHeaderCells()
+        {
+            var cells = new List<PortraitHoverStatCell>();
+
+            float nameWidth = Math.Max(60.0f, PortraitHoverStatsNameColumnWidth);
+            float statWidth = Math.Max(34.0f, PortraitHoverStatsStatColumnWidth);
+            float soloWidth = Math.Max(34.0f, PortraitHoverStatsSoloColumnWidth);
+
+            cells.Add(new PortraitHoverStatCell { Header = "PLAYER", Value = "PLAYER", Width = nameWidth });
+            cells.Add(new PortraitHoverStatCell { Header = "EHP", Value = "EHP", Width = statWidth });
+            cells.Add(new PortraitHoverStatCell { Header = "DPS", Value = "DPS", Width = statWidth });
+            cells.Add(new PortraitHoverStatCell { Header = "APS", Value = "APS", Width = statWidth });
+            cells.Add(new PortraitHoverStatCell { Header = "CHC", Value = "CHC", Width = statWidth });
+            cells.Add(new PortraitHoverStatCell { Header = "CHD", Value = "CHD", Width = statWidth });
+            cells.Add(new PortraitHoverStatCell { Header = "CDR", Value = "CDR", Width = statWidth });
+            cells.Add(new PortraitHoverStatCell { Header = "RCR", Value = "RCR", Width = statWidth });
+            cells.Add(new PortraitHoverStatCell { Header = "AD", Value = "AD", Width = statWidth });
+            cells.Add(new PortraitHoverStatCell { Header = "SOLO", Value = "SOLO", Width = soloWidth });
+
+            return cells;
+        }
+
+        private List<PortraitHoverStatCell> BuildPortraitHoverStatCells(IPlayer player)
+        {
+            var snapshot = GetPortraitHoverPlayerStats(player);
+            var cells = new List<PortraitHoverStatCell>();
+
+            float nameWidth = Math.Max(60.0f, PortraitHoverStatsNameColumnWidth);
+            float statWidth = Math.Max(34.0f, PortraitHoverStatsStatColumnWidth);
+            float soloWidth = Math.Max(34.0f, PortraitHoverStatsSoloColumnWidth);
+
+            cells.Add(new PortraitHoverStatCell { Header = "PLAYER", Value = snapshot.Name, Width = nameWidth });
+            cells.Add(new PortraitHoverStatCell { Header = "EHP", Value = snapshot.Ehp, Width = statWidth });
+            cells.Add(new PortraitHoverStatCell { Header = "DPS", Value = snapshot.Dps, Width = statWidth });
+            cells.Add(new PortraitHoverStatCell { Header = "APS", Value = snapshot.Aps, Width = statWidth });
+            cells.Add(new PortraitHoverStatCell { Header = "CHC", Value = snapshot.Chc, Width = statWidth });
+            cells.Add(new PortraitHoverStatCell { Header = "CHD", Value = snapshot.Chd, Width = statWidth });
+            cells.Add(new PortraitHoverStatCell { Header = "CDR", Value = snapshot.Cdr, Width = statWidth });
+            cells.Add(new PortraitHoverStatCell { Header = "RCR", Value = snapshot.Rcr, Width = statWidth });
+            cells.Add(new PortraitHoverStatCell { Header = "AD", Value = snapshot.Ad, Width = statWidth });
+            cells.Add(new PortraitHoverStatCell { Header = "SOLO", Value = snapshot.Solo, Width = soloWidth });
+
+            return cells;
+        }
+
+        private void UpdatePortraitHoverStatsCache(List<IPlayer> players)
+        {
+            if (!PortraitHoverStatsUseLastKnownStats || players == null)
+                return;
+
+            try
+            {
+                foreach (var player in players)
+                {
+                    if (player == null || !player.IsInGame)
+                        continue;
+
+                    var snapshot = ReadCurrentPortraitHoverPlayerStats(player);
+                    if (snapshot == null || !snapshot.HasUsableCoreStats)
+                        continue;
+
+                    CachePortraitHoverPlayerStats(player, snapshot);
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        private PortraitHoverPlayerStatsSnapshot GetPortraitHoverPlayerStats(IPlayer player)
+        {
+            var current = ReadCurrentPortraitHoverPlayerStats(player);
+            if (current == null)
+                return CreateEmptyPortraitHoverPlayerStats(player);
+
+            if (!PortraitHoverStatsUseLastKnownStats || current.HasUsableCoreStats)
+                return current;
+
+            try
+            {
+                PortraitHoverPlayerStatsSnapshot cached;
+                if (TryGetCachedPortraitHoverPlayerStats(player, out cached) && cached != null)
+                {
+                    // Keep live identity/solo data when available, but preserve cached combat
+                    // stat columns if FreeHUD exposes false zeroes for a player in another world.
+                    var merged = ClonePortraitHoverPlayerStatsSnapshot(cached);
+                    merged.Name = !string.IsNullOrEmpty(current.Name) && current.Name != "?" ? current.Name : merged.Name;
+                    merged.Solo = !string.IsNullOrEmpty(current.Solo) && current.Solo != "-" ? current.Solo : merged.Solo;
+                    return merged;
+                }
+            }
+            catch
+            {
+            }
+
+            // Do not display misleading live zeroes for remote players whose stat block is
+            // currently unavailable. Show blanks until FreeHUD exposes valid data or until
+            // the player has a cached snapshot from this session.
+            var empty = CreateEmptyPortraitHoverPlayerStats(player);
+            empty.Name = !string.IsNullOrEmpty(current.Name) && current.Name != "?" ? current.Name : empty.Name;
+            empty.Solo = !string.IsNullOrEmpty(current.Solo) && current.Solo != "-" ? current.Solo : empty.Solo;
+            return empty;
+        }
+
+        private PortraitHoverPlayerStatsSnapshot ReadCurrentPortraitHoverPlayerStats(IPlayer player)
+        {
+            var snapshot = CreateEmptyPortraitHoverPlayerStats(player);
+
+            if (player == null)
+                return snapshot;
+
+            snapshot.Ehp = GetPlayerEhpText(player);
+            snapshot.Dps = GetPlayerDpsText(player);
+            snapshot.Aps = GetPlayerApsText(player);
+            snapshot.Chc = GetPlayerChcText(player);
+            snapshot.Chd = GetPlayerChdText(player);
+            snapshot.Cdr = GetPlayerCdrText(player);
+            snapshot.Rcr = GetPlayerRcrText(player);
+            snapshot.Ad = GetPlayerAreaDamageText(player);
+            snapshot.Solo = GetPlayerSoloText(player);
+            snapshot.HasUsableCoreStats = HasUsablePortraitHoverCoreStats(player);
+
+            try
+            {
+                if (Hud != null && Hud.Game != null)
+                    snapshot.LastSeenTick = Hud.Game.CurrentGameTick;
+            }
+            catch
+            {
+            }
+
+            return snapshot;
+        }
+
+        private PortraitHoverPlayerStatsSnapshot CreateEmptyPortraitHoverPlayerStats(IPlayer player)
+        {
+            return new PortraitHoverPlayerStatsSnapshot
+            {
+                Name = GetPortraitHoverPlayerName(player),
+                Ehp = "-",
+                Dps = "-",
+                Aps = "-",
+                Chc = "-",
+                Chd = "-",
+                Cdr = "-",
+                Rcr = "-",
+                Ad = "-",
+                Solo = GetPlayerSoloText(player),
+                HasUsableCoreStats = false,
+                LastSeenTick = 0
+            };
+        }
+
+        private bool HasUsablePortraitHoverCoreStats(IPlayer player)
+        {
+            try
+            {
+                if (player == null || player.Defense == null || player.Offense == null)
+                    return false;
+
+                // These three are never legitimately all zero for an in-game level-70 player.
+                // When another player is in a different town/world instance, FreeHUD may still
+                // expose the IPlayer row but temporarily zero the calculated stat objects.
+                return player.Defense.EhpCur > 1.0f &&
+                    player.Offense.SheetDps > 1.0f &&
+                    player.Offense.AttackSpeed > 0.1f;
+            }
+            catch
+            {
+            }
+
+            return false;
+        }
+
+        private void CachePortraitHoverPlayerStats(IPlayer player, PortraitHoverPlayerStatsSnapshot snapshot)
+        {
+            if (player == null || snapshot == null)
+                return;
+
+            foreach (var key in GetPortraitHoverPlayerCacheKeys(player))
+                _portraitHoverStatsCache[key] = ClonePortraitHoverPlayerStatsSnapshot(snapshot);
+        }
+
+        private bool TryGetCachedPortraitHoverPlayerStats(IPlayer player, out PortraitHoverPlayerStatsSnapshot snapshot)
+        {
+            snapshot = null;
+
+            if (player == null)
+                return false;
+
+            foreach (var key in GetPortraitHoverPlayerCacheKeys(player))
+            {
+                if (string.IsNullOrEmpty(key))
+                    continue;
+
+                if (_portraitHoverStatsCache.TryGetValue(key, out snapshot) && snapshot != null)
+                    return true;
+            }
+
+            return false;
+        }
+
+        private PortraitHoverPlayerStatsSnapshot ClonePortraitHoverPlayerStatsSnapshot(PortraitHoverPlayerStatsSnapshot source)
+        {
+            if (source == null)
+                return null;
+
+            return new PortraitHoverPlayerStatsSnapshot
+            {
+                Name = source.Name,
+                Ehp = source.Ehp,
+                Dps = source.Dps,
+                Aps = source.Aps,
+                Chc = source.Chc,
+                Chd = source.Chd,
+                Cdr = source.Cdr,
+                Rcr = source.Rcr,
+                Ad = source.Ad,
+                Solo = source.Solo,
+                HasUsableCoreStats = source.HasUsableCoreStats,
+                LastSeenTick = source.LastSeenTick
+            };
+        }
+
+        private string GetPortraitHoverPlayerCacheKey(IPlayer player)
+        {
+            foreach (var key in GetPortraitHoverPlayerCacheKeys(player))
+                return key;
+
+            return null;
+        }
+
+        private IEnumerable<string> GetPortraitHoverPlayerCacheKeys(IPlayer player)
+        {
+            List<string> keys = new List<string>();
+
+            if (player == null)
+                return keys;
+
+            try
+            {
+                if (player.HeroId != 0)
+                    AddPortraitHoverCacheKey(keys, "hero:" + player.HeroId.ToString(CultureInfo.InvariantCulture));
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                if (!string.IsNullOrEmpty(player.BattleTagAbovePortrait))
+                {
+                    string raw = player.BattleTagAbovePortrait.Trim();
+                    AddPortraitHoverCacheKey(keys, "bt:" + NormalizePortraitHoverCacheText(raw));
+
+                    string account = ExtractPortraitAccountName(raw);
+                    if (!string.IsNullOrEmpty(account))
+                        AddPortraitHoverCacheKey(keys, "acct:" + NormalizePortraitHoverCacheText(account));
+                }
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                if (!string.IsNullOrEmpty(player.HeroName))
+                    AddPortraitHoverCacheKey(keys, "heroname:" + NormalizePortraitHoverCacheText(player.HeroName));
+            }
+            catch
+            {
+            }
+
+            // Last-resort session fallback. This can help while FreeHUD is still
+            // hydrating remote profile data, but stronger hero/account keys above win first.
+            try
+            {
+                AddPortraitHoverCacheKey(keys, "idx:" + player.Index.ToString(CultureInfo.InvariantCulture));
+            }
+            catch
+            {
+            }
+
+            return keys;
+        }
+
+        private void AddPortraitHoverCacheKey(List<string> keys, string key)
+        {
+            if (keys == null || string.IsNullOrEmpty(key))
+                return;
+
+            if (!keys.Contains(key))
+                keys.Add(key);
+        }
+
+        private string NormalizePortraitHoverCacheText(string text)
+        {
+            if (string.IsNullOrEmpty(text))
+                return string.Empty;
+
+            return text.Trim().ToLowerInvariant();
+        }
+
+        private string ExtractPortraitAccountName(string name)
+        {
+            if (string.IsNullOrEmpty(name))
+                return string.Empty;
+
+            string result = name.Trim();
+
+            int clanEnd = result.LastIndexOf('>');
+            if (clanEnd >= 0 && clanEnd + 1 < result.Length)
+                result = result.Substring(clanEnd + 1).Trim();
+
+            int hashIndex = result.IndexOf('#');
+            if (hashIndex > 0)
+                result = result.Substring(0, hashIndex).Trim();
+
+            return result;
+        }
+
+        private void DrawPortraitHoverCellText(string text, IFont font, float x, float y, float width, float height, bool center)
+        {
+            if (string.IsNullOrEmpty(text) || font == null)
+                return;
+
+            try
+            {
+                var layout = font.GetTextLayout(text);
+                float padding = Math.Max(0.0f, PortraitHoverStatsPaddingX);
+                float textX = center
+                    ? x + (width - layout.Metrics.Width) * 0.5f
+                    : x + padding;
+                float textY = y + (height - layout.Metrics.Height) * 0.5f;
+
+                if (textX < x + 1.0f)
+                    textX = x + 1.0f;
+
+                font.DrawText(layout, textX, textY);
+            }
+            catch
+            {
+            }
+        }
+
+        private string GetPortraitHoverPlayerName(IPlayer player)
+        {
+            if (player == null)
+                return "?";
+
+            // Use the account/BattleTag name for the hover stats table, not the hero name.
+            // FreeHUD exposes this as the portrait BattleTag string, sometimes with clan and
+            // #discriminator text. For compact stat rows we show the account-name portion first.
+            try
+            {
+                if (!string.IsNullOrEmpty(player.BattleTagAbovePortrait))
+                {
+                    string name = ExtractPortraitAccountName(player.BattleTagAbovePortrait);
+
+                    if (!string.IsNullOrEmpty(name))
+                        return name;
+                }
+            }
+            catch
+            {
+            }
+
+            // Fallback only. This should be used when FreeHUD has not populated the portrait
+            // BattleTag/account string yet.
+            try
+            {
+                if (!string.IsNullOrEmpty(player.HeroName))
+                    return player.HeroName;
+            }
+            catch
+            {
+            }
+
+            return "?";
+        }
+
+        private string GetPlayerEhpText(IPlayer player)
+        {
+            try
+            {
+                if (player != null && player.Defense != null)
+                    return ValueToString(player.Defense.EhpCur, ValueFormat.ShortNumber);
+            }
+            catch
+            {
+            }
+
+            return "-";
+        }
+
+        private string GetPlayerDpsText(IPlayer player)
+        {
+            try
+            {
+                if (player != null && player.Offense != null)
+                {
+                    // Match TurboHUD's practical "elite DPS" value, but keep the header as DPS.
+                    // This is sheet DPS with the highest elemental bonus and elite damage bonus applied.
+                    double sheetDps = player.Offense.SheetDps;
+                    double elementalMultiplier = 1.0 + Math.Max(0.0, player.Offense.HighestElementalDamageBonus);
+                    double eliteMultiplier = 1.0 + Math.Max(0.0, player.Offense.BonusToElites);
+
+                    return ValueToString(sheetDps * elementalMultiplier * eliteMultiplier, ValueFormat.ShortNumber);
+                }
+            }
+            catch
+            {
+            }
+
+            return "-";
+        }
+
+        private string GetPlayerApsText(IPlayer player)
+        {
+            try
+            {
+                if (player != null && player.Offense != null)
+                    return player.Offense.AttackSpeed.ToString("F2", CultureInfo.InvariantCulture) + "/s";
+            }
+            catch
+            {
+            }
+
+            return "-";
+        }
+
+        private string GetPlayerChcText(IPlayer player)
+        {
+            try
+            {
+                if (player != null && player.Offense != null)
+                    return FormatPercentNoScaling(player.Offense.CriticalHitChance, 1);
+            }
+            catch
+            {
+            }
+
+            return "-";
+        }
+
+        private string GetPlayerChdText(IPlayer player)
+        {
+            try
+            {
+                if (player != null && player.Offense != null)
+                    return FormatPercentNoScaling(player.Offense.CritDamage, 0);
+            }
+            catch
+            {
+            }
+
+            return "-";
+        }
+
+        private string GetPlayerCdrText(IPlayer player)
+        {
+            try
+            {
+                if (player != null && player.Stats != null)
+                    return FormatPercent(player.Stats.CooldownReduction);
+            }
+            catch
+            {
+            }
+
+            return "-";
+        }
+
+        private string GetPlayerRcrText(IPlayer player)
+        {
+            try
+            {
+                if (player != null && player.Stats != null)
+                    return FormatPercent(player.Stats.ResourceCostReduction);
+            }
+            catch
+            {
+            }
+
+            return "-";
+        }
+
+        private string GetPlayerAreaDamageText(IPlayer player)
+        {
+            try
+            {
+                if (player != null && player.Offense != null)
+                    return FormatPercentNoScaling(player.Offense.AreaDamageBonus, 0);
+            }
+            catch
+            {
+            }
+
+            return "-";
+        }
+
+        private string GetPlayerSoloText(IPlayer player)
+        {
+            try
+            {
+                if (player == null)
+                    return "-";
+
+                // Account-wide highest solo clear across any class.
+                // Do not use HighestHeroSoloRiftLevel here; that is current-hero/class scoped.
+                int solo = player.HighestSoloRiftLevel;
+
+                return solo > 0 ? solo.ToString(CultureInfo.InvariantCulture) + " LV" : "-";
+            }
+            catch
+            {
+            }
+
+            return "-";
+        }
+
+        private string FormatPercentNoScaling(float value, int decimals)
+        {
+            string format = decimals <= 0 ? "F0" : "F" + decimals.ToString(CultureInfo.InvariantCulture);
+            return value.ToString(format, CultureInfo.InvariantCulture) + "%";
         }
 
         // -----------------------------------------------------------------------
