@@ -14,7 +14,7 @@ namespace Turbo.Plugins.s7o
     /*
         ZB AutoSnap (clean)
         - Keeps the v1 one-shot cast feel: one SPACE edge -> one snap -> one spear
-        - Local leaders first, then forward in-lane elites, then local minions, high-value trash, and density trash
+        - Local elite leaders first, then forward in-lane elite leaders, then high-value trash and density trash; elite minions are treated as trash bodies only
         - Uses native validity filters: illusion, knockback immunity, elite affixes, doors / obstacles / elite walls
         - No cursor restore, hold-repeat, tracked-elite pre-refine, or continuous-input arbitration
     */
@@ -51,12 +51,23 @@ namespace Turbo.Plugins.s7o
         public float CursorWorldRadiusFallbackYards { get; set; } = 45f;
         public float CursorWorldConeDegrees { get; set; } = 95f;
 
-        public float ForwardEliteScanMaxYards { get; set; } = 85f;
-        public float ForwardEliteConeDegrees { get; set; } = 35f;
+        public float ForwardEliteScanMaxYards { get; set; } = 125f;
+        public float ForwardEliteCommittedMaxYards { get; set; } = 140f;
+        public float PreferredVisibleEliteMaxYards { get; set; } = 85f;
+        public float ForwardEliteConeDegrees { get; set; } = 50f;
 
         public float HitboxRadiusPx { get; set; } = 65f;
         public int MaxCandidates { get; set; } = 10;
         public float TrashClusterRadiusYards { get; set; } = 12f;
+
+        // Trash-only pulls stay conservative, but a strong straight-line density lane is often safer
+        // than snapping sideways to a circular clump. This only runs after elite leader targets fail.
+        public bool EnableLinearTrashDensityPull { get; set; } = true;
+        public float LinearTrashLaneHalfWidthYards { get; set; } = 6.25f;
+        public float LinearTrashMaxYards { get; set; } = 90f;
+        public float LinearTrashMaxAngleDegrees { get; set; } = 28f;
+        public int LinearTrashMinBodies { get; set; } = 4;
+        public int LinearTrashPreferWithinBodies { get; set; } = 2;
 
         // Actual Ancient Spear input hold time.
         // 45ms is long enough to register one press, but far below the range where a second skill use should occur.
@@ -65,7 +76,8 @@ namespace Turbo.Plugins.s7o
         // Optional tiny shift pre-hold for left/right skill fallback.
         public int ShiftPreHoldMs { get; set; } = 4;
 
-        public bool IncludeEliteMinions { get; set; } = true;
+        // Deprecated: elite minions are intentionally not priority targets; they are treated like trash density bodies.
+        public bool IncludeEliteMinions { get; set; } = false;
         public bool IgnoreJuggernaut { get; set; } = true;
         public bool IgnoreShieldingWhenActive { get; set; } = true;
         public bool IgnoreIllusions { get; set; } = true;
@@ -121,12 +133,37 @@ namespace Turbo.Plugins.s7o
         // Elite course correction is a small aim assist for near-miss spear casts.
         // It only corrects within the player's current spear direction, so it should not snap sideways.
         public bool EnableEliteCourseCorrection { get; set; } = true;
-        public float EliteCourseCorrectScreenRadiusPx { get; set; } = 155f;
-        public float EliteCourseCorrectWorldRadiusYards { get; set; } = 18f;
-        public float EliteCourseCorrectLaneHalfWidthYards { get; set; } = 8.5f;
-        public float EliteCourseCorrectMaxAngleDegrees { get; set; } = 42f;
-        public int EliteCourseCorrectCacheMaxTicks { get; set; } = 3;
+        public float EliteCourseCorrectScreenRadiusPx { get; set; } = 260f;
+        public float EliteCourseCorrectWorldRadiusYards { get; set; } = 28f;
+        public float EliteCourseCorrectLaneHalfWidthYards { get; set; } = 18f;
+        public float EliteCourseCorrectMaxAngleDegrees { get; set; } = 58f;
+        public int EliteCourseCorrectCacheMaxTicks { get; set; } = 1;
         public float EliteCourseCorrectCacheCursorMaxPx { get; set; } = 24f;
+
+        // Visible elites close to the cursor are treated as committed targets before normal ray scoring.
+        // This is the main autosnap guarantee: obvious elite near-misses should not fly past the elite.
+        public bool EnableCommittedVisibleEliteSnap { get; set; } = true;
+        public float CommittedEliteScreenRadiusPx { get; set; } = 210f;
+        public float CommittedEliteFarScreenRadiusPx { get; set; } = 360f;
+        public float CommittedEliteFarStartYards { get; set; } = 30f;
+        public float CommittedEliteWorldRadiusYards { get; set; } = 30f;
+        public float CommittedEliteLaneYards { get; set; } = 24f;
+        public float CommittedEliteSoftSafetyGrace { get; set; } = 12f;
+
+        // Lean blocker awareness. These are hard evidence sources only; no large flow/heatmap system.
+        public bool IncludePylonsAsPullBlockers { get; set; } = true;
+        public bool IncludeWallerAsPullBlockers { get; set; } = true;
+        public bool IncludeProjectileBlockingActors { get; set; } = true;
+        public bool EnableSpearImpactMemory { get; set; } = true;
+        public int SpearImpactProbeWindowMs { get; set; } = 850;
+        public int SpearImpactMemoryMs { get; set; } = 7500;
+        public float SpearImpactUnsafeRadiusYards { get; set; } = 5.0f;
+        public float SpearImpactMinShortfallYards { get; set; } = 8.0f;
+        public float SpearImpactUnsafePenaltyWeight { get; set; } = 20f;
+
+        // If there is no meaningful multi-elite line-up, aim closer to the elite core to avoid edge misses.
+        public bool EnableSingleEliteCoreBias { get; set; } = true;
+        public float SingleEliteCoreBiasSafetyGrace { get; set; } = 4.0f;
 
         // Small delay after moving the cursor before tapping spear. This gives the game one brief moment
         // to sample the corrected cursor position before the skill key is pressed.
@@ -142,7 +179,7 @@ namespace Turbo.Plugins.s7o
 
         private const float SimpleLaneHalfWidthYards = 5.25f;
         private const float SimpleClampAimDistanceYards = 48f;
-        private const float SimpleMaxClampAimDistanceYards = 56f;
+        private const float SimpleMaxClampAimDistanceYards = 72f;
         private const float SimpleDirectAimDistanceYards = 32f;
         private const float SimpleDirectAimScreenMarginPx = 96f;
         private const float SimpleManualCommitCursorYards = 7f;
@@ -153,8 +190,8 @@ namespace Turbo.Plugins.s7o
         private const float SimpleCursorDistanceWeight = 0.85f;
         private const float SimpleFarPreferenceWeight = 0.60f;
         private const float SimpleSafetyPenaltyWeight = 2.90f;
-        private const float SimpleExtraEliteLineBonus = 10f;
-        private const float SimpleLineCountLaneWidthYards = 4.5f;
+        private const float SimpleExtraEliteLineBonus = 28f;
+        private const float SimpleLineCountLaneWidthYards = 5.75f;
         private const float SimplePathRejectThreshold = 18f;
         private const float SimpleFarEliteBandYards = 18f;
 
@@ -196,6 +233,48 @@ namespace Turbo.Plugins.s7o
         private float _courseCorrectCacheAimY;
         private IWorldCoordinate _courseCorrectCacheMarkerWorld;
         private uint _courseCorrectCacheTargetAcdId;
+
+        private SpearImpactProbe _spearImpactProbe;
+        private readonly List<UnsafeImpactSample> _unsafeImpactSamples = new List<UnsafeImpactSample>(12);
+
+        private struct SpearImpactProbe
+        {
+            public bool Active;
+            public int CastTick;
+            public int ExpireTick;
+            public float FromX;
+            public float FromY;
+            public float ToX;
+            public float ToY;
+            public float DirX;
+            public float DirY;
+            public float Distance;
+            public uint TargetAcdId;
+        }
+
+        private struct UnsafeImpactSample
+        {
+            public float X;
+            public float Y;
+            public int ExpireTick;
+        }
+
+        private struct EliteCourseCandidate
+        {
+            public IMonster Monster;
+            public float Score;
+            public float ScreenX;
+            public float ScreenY;
+            public IWorldCoordinate MarkerWorld;
+            public uint TargetAcdId;
+        }
+
+        private sealed class BlockerCircle
+        {
+            public float X;
+            public float Y;
+            public float Radius;
+        }
 
         private GroundCircleDecorator _circleGreen;
         private GroundCircleDecorator _dotGreen;
@@ -296,6 +375,8 @@ namespace Turbo.Plugins.s7o
                 }
 
                 UpdateEliteCourseCorrectionCache(tick);
+                UpdateSpearImpactProbe(tick);
+                PruneUnsafeImpactSamples(tick);
 
                 if (!hotkeyDown)
                 {
@@ -375,6 +456,8 @@ namespace Turbo.Plugins.s7o
                 int settleMs = ClampInt(SpearPreCastSettleMs, 0, 35);
                 if (settleMs > 0)
                     Thread.Sleep(settleMs);
+
+                BeginSpearImpactProbe(tick, me.FloorCoordinate, finalMarkerWorld, finalMarkerTargetAcdId);
 
                 TapSpear();
 
@@ -466,7 +549,6 @@ namespace Turbo.Plugins.s7o
             failed = false;
 
             var leaders = new List<IMonster>(16);
-            var minions = new List<IMonster>(24);
             var highTrash = new List<IMonster>(24);
             var trash = new List<IMonster>(48);
 
@@ -500,7 +582,7 @@ namespace Turbo.Plugins.s7o
                     }
                 }
 
-                if (m.IsElite)
+                if (m.IsElite && !IsEliteMinion(m))
                 {
                     if (dCursor < nearestEliteDist)
                     {
@@ -514,8 +596,6 @@ namespace Turbo.Plugins.s7o
 
                     if (IsLeaderElite(m))
                         leaders.Add(m);
-                    else if (IncludeEliteMinions && IsEliteMinion(m))
-                        minions.Add(m);
                 }
                 else
                 {
@@ -533,17 +613,15 @@ namespace Turbo.Plugins.s7o
                 failed = true;
 
             leaders = leaders.OrderBy(e => e.FloorCoordinate.XYDistanceTo(cursorWorld)).Take(MaxCandidates).ToList();
-            minions = minions.OrderBy(e => e.FloorCoordinate.XYDistanceTo(cursorWorld)).Take(MaxCandidates).ToList();
             highTrash = highTrash.OrderByDescending(GetHighValueTrashScore).ThenBy(t => t.FloorCoordinate.XYDistanceTo(cursorWorld)).Take(MaxCandidates).ToList();
             trash = trash.OrderByDescending(GetTrashDensityScore).ThenBy(t => t.FloorCoordinate.XYDistanceTo(cursorWorld)).Take(MaxCandidates).ToList();
 
             uint primaryLeaderId;
-            uint primaryMinionId;
 
             if (leaders.Count > 0)
             {
-                if (ComputeLocalOverlapAimPoint(leaders, minions, highTrash, trash, true, false, false, mePos, baseCursorX, baseCursorY,
-                    out aimX, out aimY, out primaryLeaderId, out primaryMinionId))
+                if (ComputeLocalOverlapAimPoint(leaders, highTrash, trash, true, false, mePos, baseCursorX, baseCursorY,
+                    out aimX, out aimY, out primaryLeaderId))
                 {
                     if (primaryLeaderId != 0)
                     {
@@ -563,30 +641,19 @@ namespace Turbo.Plugins.s7o
             if (deferLowerTiersToForward && HasAnyForwardEliteCandidate(mePos, useCone, vx, vy))
                 return LocalAimResult.ForwardPreferred;
 
-            if (minions.Count > 0)
+            if (EnableLinearTrashDensityPull && (highTrash.Count > 0 || trash.Count > 0))
             {
-                if (ComputeLocalOverlapAimPoint(leaders, minions, highTrash, trash, false, true, false, mePos, baseCursorX, baseCursorY,
-                    out aimX, out aimY, out primaryLeaderId, out primaryMinionId))
+                if (TryLinearTrashDensityAim(mePos, cursorWorld, useCone, vx, vy, cosTh, highTrash, trash, baseCursorX, baseCursorY,
+                    out aimX, out aimY, out markerWorld))
                 {
-                    if (primaryMinionId != 0)
-                    {
-                        for (int i = 0; i < minions.Count; i++)
-                            if (minions[i].AcdId == primaryMinionId)
-                            {
-                                markerWorld = minions[i].FloorCoordinate;
-                                return LocalAimResult.Chosen;
-                            }
-                    }
-
-                    markerWorld = minions[0].FloorCoordinate;
                     return LocalAimResult.Chosen;
                 }
             }
 
             if (highTrash.Count > 0)
             {
-                if (ComputeLocalOverlapAimPoint(leaders, minions, highTrash, trash, false, false, true, mePos, baseCursorX, baseCursorY,
-                    out aimX, out aimY, out primaryLeaderId, out primaryMinionId))
+                if (ComputeLocalOverlapAimPoint(leaders, highTrash, trash, false, true, mePos, baseCursorX, baseCursorY,
+                    out aimX, out aimY, out primaryLeaderId))
                 {
                     markerWorld = highTrash.OrderByDescending(GetHighValueTrashScore).ThenBy(t => t.FloorCoordinate.XYDistanceTo(cursorWorld)).First().FloorCoordinate;
                     return LocalAimResult.Chosen;
@@ -595,8 +662,8 @@ namespace Turbo.Plugins.s7o
 
             if (trash.Count > 0)
             {
-                if (ComputeLocalOverlapAimPoint(leaders, minions, highTrash, trash, false, false, false, mePos, baseCursorX, baseCursorY,
-                    out aimX, out aimY, out primaryLeaderId, out primaryMinionId))
+                if (ComputeLocalOverlapAimPoint(leaders, highTrash, trash, false, false, mePos, baseCursorX, baseCursorY,
+                    out aimX, out aimY, out primaryLeaderId))
                 {
                     markerWorld = trash.OrderByDescending(GetTrashDensityScore).ThenBy(t => t.FloorCoordinate.XYDistanceTo(cursorWorld)).First().FloorCoordinate;
                     return LocalAimResult.Chosen;
@@ -605,7 +672,7 @@ namespace Turbo.Plugins.s7o
 
             if (nearestEliteAny != null && nearestEliteHardInvalid)
             {
-                bool hasNearbyAlternative = HasNearbyValidEliteAlternative(nearestEliteAny, leaders, minions, NearbyAlternativeRadiusPx);
+                bool hasNearbyAlternative = HasNearbyValidEliteAlternative(nearestEliteAny, leaders, NearbyAlternativeRadiusPx);
                 if (!hasNearbyAlternative)
                 {
                     aimX = baseCursorX;
@@ -794,36 +861,39 @@ namespace Turbo.Plugins.s7o
                 vx /= vlen;
                 vy /= vlen;
 
-                float maxReach = ForwardEliteScanMaxYards;
+                float normalReach = ForwardEliteScanMaxYards;
                 if (MaxPlayerDistanceYards > 0)
-                    maxReach = Math.Min(maxReach, MaxPlayerDistanceYards);
-                if (maxReach <= 0f)
-                    maxReach = 90f;
+                    normalReach = Math.Min(normalReach, MaxPlayerDistanceYards);
+                if (normalReach <= 0f)
+                    normalReach = 90f;
+
+                float committedReach = Math.Max(normalReach, ForwardEliteCommittedMaxYards);
+                if (MaxPlayerDistanceYards > 0)
+                    committedReach = Math.Min(committedReach, MaxPlayerDistanceYards);
 
                 float maxAngle = EliteCourseCorrectMaxAngleDegrees;
                 if (maxAngle < 5f) maxAngle = 5f;
-                if (maxAngle > 70f) maxAngle = 70f;
+                if (maxAngle > 75f) maxAngle = 75f;
                 float angleCos = (float)Math.Cos(maxAngle * Math.PI / 180.0);
 
                 float screenRadius = EliteCourseCorrectScreenRadiusPx;
                 if (screenRadius < 0f) screenRadius = 0f;
-                if (screenRadius > 320f) screenRadius = 320f;
+                if (screenRadius > 420f) screenRadius = 420f;
 
                 float worldRadius = EliteCourseCorrectWorldRadiusYards;
                 if (worldRadius < 0f) worldRadius = 0f;
-                if (worldRadius > 45f) worldRadius = 45f;
+                if (worldRadius > 55f) worldRadius = 55f;
 
                 float laneWidth = EliteCourseCorrectLaneHalfWidthYards;
                 if (laneWidth < 0f) laneWidth = 0f;
-                if (laneWidth > 20f) laneWidth = 20f;
+                if (laneWidth > 32f) laneWidth = 32f;
 
                 var validElitesForLineScore = BuildEliteListForCourseCorrection();
                 var validLeaderElitesForLineScore = BuildEliteLeaderListForCourseCorrection();
 
-                IMonster best = null;
-                float bestScore = float.MaxValue;
-                float bestScreenX = cursorX;
-                float bestScreenY = cursorY;
+                EliteCourseCandidate bestCommitted = new EliteCourseCandidate { Score = float.MaxValue };
+                EliteCourseCandidate bestReliable = new EliteCourseCandidate { Score = float.MaxValue };
+                EliteCourseCandidate bestQuestionable = new EliteCourseCandidate { Score = float.MaxValue };
 
                 foreach (var m in Hud.Game.AliveMonsters)
                 {
@@ -835,61 +905,109 @@ namespace Turbo.Plugins.s7o
                     float distToMe = (float)Math.Sqrt(relX * relX + relY * relY);
                     if (distToMe <= 0.1f) continue;
                     if (MinPlayerDistanceYards > 0 && distToMe < MinPlayerDistanceYards) continue;
-                    if (maxReach > 0 && distToMe > maxReach) continue;
-
-                    float proj = relX * vx + relY * vy;
-                    if (proj <= 0.1f) continue;
-
-                    float dot = proj / Math.Max(0.001f, distToMe);
-                    if (dot < angleCos) continue;
-
-                    float lateral = Math.Abs(relX * vy - relY * vx);
-                    float worldDistToCursor = m.FloorCoordinate.XYDistanceTo(cursorWorld);
 
                     float sx;
                     float sy;
                     if (!TryGetScreen(m, out sx, out sy)) continue;
                     float screenDistToCursor = Dist(sx, sy, cursorX, cursorY);
-                    bool screenNear = IsWithinWindow(sx, sy) && screenRadius > 0f && screenDistToCursor <= screenRadius;
+                    bool visibleInWindow = IsWithinWindow(sx, sy);
+                    float committedScreenRadius = distToMe >= CommittedEliteFarStartYards
+                        ? CommittedEliteFarScreenRadiusPx
+                        : CommittedEliteScreenRadiusPx;
+                    if (committedScreenRadius < 60f) committedScreenRadius = 60f;
+                    if (committedScreenRadius > 460f) committedScreenRadius = 460f;
+
+                    bool screenCommitted = EnableCommittedVisibleEliteSnap && screenDistToCursor <= committedScreenRadius;
+                    if (distToMe > normalReach && (!screenCommitted || distToMe > committedReach)) continue;
+
+                    float proj = relX * vx + relY * vy;
+                    if (proj <= 0.1f) continue;
+
+                    float dot = proj / Math.Max(0.001f, distToMe);
+                    bool normalAngleOk = dot >= angleCos;
+                    bool generallyForward = dot >= 0.18f;
+                    if (!normalAngleOk && (!screenCommitted || !generallyForward)) continue;
+
+                    float lateral = Math.Abs(relX * vy - relY * vx);
+                    float worldDistToCursor = m.FloorCoordinate.XYDistanceTo(cursorWorld);
+
+                    bool screenNear = screenRadius > 0f && screenDistToCursor <= screenRadius && (visibleInWindow || screenCommitted);
                     bool worldNear = worldRadius > 0f && worldDistToCursor <= worldRadius;
                     bool laneNear = laneWidth > 0f && lateral <= laneWidth;
+                    bool committed = screenCommitted || (worldDistToCursor <= CommittedEliteWorldRadiusYards && lateral <= CommittedEliteLaneYards && generallyForward);
 
-                    if (!screenNear && !worldNear && !laneNear)
+                    if (!committed && !screenNear && !worldNear && !laneNear)
                         continue;
 
                     float safetyPenalty = Math.Max(0f, ComputeLineSafetyPenalty(mePos, m.FloorCoordinate));
-                    if (safetyPenalty >= SimplePathRejectThreshold)
+                    float hardPenalty = Math.Max(0f, ComputeHardBlockerPenalty(mePos, m.FloorCoordinate));
+                    if (hardPenalty >= SimplePathRejectThreshold)
+                        continue;
+                    if (!committed && safetyPenalty >= SimplePathRejectThreshold)
+                        continue;
+                    if (committed && safetyPenalty >= SimplePathRejectThreshold + CommittedEliteSoftSafetyGrace)
                         continue;
 
                     int lineHits = CountSimpleLineHits(IsLeaderElite(m) ? validLeaderElitesForLineScore : validElitesForLineScore, mePos, m, SimpleLineCountLaneWidthYards);
+                    bool reliableVisible = visibleInWindow && distToMe <= PreferredVisibleEliteMaxYards;
+                    bool questionable = !reliableVisible && (distToMe > PreferredVisibleEliteMaxYards || !visibleInWindow);
 
-                    float score = (lateral * 10.5f)
-                                + (worldDistToCursor * 3.5f)
-                                + (screenDistToCursor * 0.035f)
-                                + (safetyPenalty * 6.0f)
-                                - (lineHits * 12.0f);
+                    float score = (lateral * 8.0f)
+                                + (worldDistToCursor * 2.4f)
+                                + (screenDistToCursor * 0.018f)
+                                + (safetyPenalty * 4.0f)
+                                + (hardPenalty * 8.0f)
+                                - (lineHits * 42.0f);
 
-                    if (IsLeaderElite(m)) score -= 35f;
-                    else score -= 12f;
-                    if (screenNear) score -= 18f;
-                    if (worldNear) score -= 14f;
+                    if (IsLeaderElite(m)) score -= 65f;
+                    else score -= 24f;
+                    if (committed) score -= 260f;
+                    if (screenNear) score -= 45f;
+                    if (worldNear) score -= 28f;
+                    if (laneNear) score -= 18f;
+                    if (reliableVisible) score -= 55f;
+                    if (questionable && !committed) score += 145f;
+                    if (distToMe < SimpleNearPlayerPenaltyYards && !committed)
+                        score += 180f + ((SimpleNearPlayerPenaltyYards - distToMe) * 12f);
 
-                    if (score < bestScore)
+                    EliteCourseCandidate candidate = new EliteCourseCandidate
                     {
-                        bestScore = score;
-                        best = m;
-                        bestScreenX = sx;
-                        bestScreenY = sy;
+                        Monster = m,
+                        Score = score,
+                        ScreenX = sx,
+                        ScreenY = sy,
+                        MarkerWorld = m.FloorCoordinate,
+                        TargetAcdId = (uint)m.AcdId,
+                    };
+
+                    if (committed)
+                    {
+                        if (candidate.Score < bestCommitted.Score)
+                            bestCommitted = candidate;
+                    }
+                    else if (reliableVisible)
+                    {
+                        if (candidate.Score < bestReliable.Score)
+                            bestReliable = candidate;
+                    }
+                    else
+                    {
+                        if (candidate.Score < bestQuestionable.Score)
+                            bestQuestionable = candidate;
                     }
                 }
 
-                if (best == null)
+                EliteCourseCandidate best = bestCommitted.Monster != null
+                    ? bestCommitted
+                    : (bestReliable.Monster != null ? bestReliable : bestQuestionable);
+
+                if (best.Monster == null)
                     return false;
 
-                aimX = bestScreenX;
-                aimY = bestScreenY;
-                markerWorld = best.FloorCoordinate;
-                targetAcdId = (uint)best.AcdId;
+                aimX = best.ScreenX;
+                aimY = best.ScreenY;
+                markerWorld = best.MarkerWorld;
+                targetAcdId = best.TargetAcdId;
                 return true;
             }
             catch
@@ -1003,11 +1121,11 @@ namespace Turbo.Plugins.s7o
             float forwardConeCos = (float)Math.Cos(ForwardEliteConeDegrees * Math.PI / 180.0);
 
             var leaders = new List<IMonster>(16);
-            var minions = new List<IMonster>(24);
 
             foreach (var m in Hud.Game.AliveMonsters)
             {
                 if (m == null || !m.IsAlive || !m.IsElite) continue;
+                if (!IsLeaderElite(m)) continue;
                 if (IsEliteBlocked(m) || !IsEliteAllowed(m)) continue;
 
                 float distToMe = m.FloorCoordinate.XYDistanceTo(mePos);
@@ -1028,15 +1146,11 @@ namespace Turbo.Plugins.s7o
                     if (dot < forwardConeCos) continue;
                 }
 
-                if (IsLeaderElite(m))
-                    leaders.Add(m);
-                else if (IncludeEliteMinions && IsEliteMinion(m))
-                    minions.Add(m);
+                leaders.Add(m);
             }
 
             IMonster chosen;
-            if (TrySimplePickForwardElite(leaders, mePos, cursorWorld, vx, vy, intendedDist, out chosen) ||
-                TrySimplePickForwardElite(minions, mePos, cursorWorld, vx, vy, intendedDist, out chosen))
+            if (TrySimplePickForwardElite(leaders, mePos, cursorWorld, vx, vy, intendedDist, out chosen))
             {
                 return TrySimpleBuildLaneAimPoint(mePos, cursorWorld, cursorX, cursorY, chosen, out aimX, out aimY, out markerWorld);
             }
@@ -1314,42 +1428,35 @@ namespace Turbo.Plugins.s7o
 
         private bool ComputeLocalOverlapAimPoint(
             List<IMonster> leaders,
-            List<IMonster> minions,
             List<IMonster> highTrash,
             List<IMonster> trash,
             bool requireLeaderHit,
-            bool requireMinionHit,
             bool requireHighTrashHit,
             IWorldCoordinate mePos,
             float baseCursorX,
             float baseCursorY,
             out float aimX,
             out float aimY,
-            out uint primaryLeaderId,
-            out uint primaryMinionId)
+            out uint primaryLeaderId)
         {
             aimX = baseCursorX;
             aimY = baseCursorY;
             primaryLeaderId = 0;
-            primaryMinionId = 0;
 
             var leaderCenters = BuildScreenCenters(leaders);
-            var minionCenters = BuildScreenCenters(minions);
             var highTrashCenters = BuildScreenCenters(highTrash);
             var trashCenters = BuildScreenCenters(trash);
 
-            if (leaderCenters.Count == 0 && minionCenters.Count == 0 && highTrashCenters.Count == 0 && trashCenters.Count == 0)
+            if (leaderCenters.Count == 0 && highTrashCenters.Count == 0 && trashCenters.Count == 0)
                 return false;
 
             float curX = baseCursorX;
             float curY = baseCursorY;
             var manualWorld = GetScreenWorld(baseCursorX, baseCursorY);
 
-            var pts = BuildLocalCandidatePoints(leaderCenters, minionCenters, highTrashCenters, trashCenters, curX, curY);
+            var pts = BuildLocalCandidatePoints(leaderCenters, highTrashCenters, trashCenters, curX, curY);
 
             int bestLeaderHits = -1;
-            int bestEliteHits = -1;
-            int bestMinionHits = -1;
             int bestHighTrashHits = -1;
             int bestTrashHits = -1;
             float bestSafetyPenalty = float.MaxValue;
@@ -1358,24 +1465,20 @@ namespace Turbo.Plugins.s7o
             float bestX = curX;
             float bestY = curY;
             uint bestLeader = 0;
-            uint bestMinion = 0;
 
             foreach (var p in pts)
             {
                 int leaderHitCount;
-                int minionHitCount;
                 int highTrashHitCount;
                 int trashHitCount;
                 uint hitLeaderId;
-                uint hitMinionId;
 
-                CountHitsAtPoint(p.x, p.y, leaderCenters, minionCenters, highTrashCenters, trashCenters,
-                    out leaderHitCount, out minionHitCount, out highTrashHitCount, out trashHitCount, out hitLeaderId, out hitMinionId);
+                CountHitsAtPoint(p.x, p.y, leaderCenters, highTrashCenters, trashCenters,
+                    out leaderHitCount, out highTrashHitCount, out trashHitCount, out hitLeaderId);
 
                 if (requireLeaderHit && leaderHitCount <= 0) continue;
-                if (!requireLeaderHit && requireMinionHit && minionHitCount <= 0) continue;
-                if (!requireLeaderHit && !requireMinionHit && requireHighTrashHit && highTrashHitCount <= 0) continue;
-                if (!requireLeaderHit && !requireMinionHit && !requireHighTrashHit && leaderHitCount == 0 && minionHitCount == 0 && highTrashHitCount == 0 && trashHitCount == 0) continue;
+                if (!requireLeaderHit && requireHighTrashHit && highTrashHitCount <= 0) continue;
+                if (!requireLeaderHit && !requireHighTrashHit && leaderHitCount == 0 && highTrashHitCount == 0 && trashHitCount == 0) continue;
 
                 var aimWorld = GetScreenWorld(p.x, p.y);
                 if (!IsWithinMaxSnapAngle(mePos, manualWorld, aimWorld, MaxSnapAngleDegrees))
@@ -1386,24 +1489,19 @@ namespace Turbo.Plugins.s7o
 
                 float cursorDelta = Dist(p.x, p.y, curX, curY);
                 float straightPenalty = ComputeStraightPathPenalty(mePos, curX, curY, p.x, p.y);
-                int eliteBodies = leaderHitCount + minionHitCount;
 
                 bool better =
                     (leaderHitCount > bestLeaderHits) ||
-                    (leaderHitCount == bestLeaderHits && eliteBodies > bestEliteHits) ||
-                    (leaderHitCount == bestLeaderHits && eliteBodies == bestEliteHits && !severe && bestSafetyPenalty >= SimplePathRejectThreshold) ||
-                    (leaderHitCount == bestLeaderHits && eliteBodies == bestEliteHits && safetyPenalty < bestSafetyPenalty - 0.01f) ||
-                    (leaderHitCount == bestLeaderHits && eliteBodies == bestEliteHits && Math.Abs(safetyPenalty - bestSafetyPenalty) <= 0.01f && minionHitCount > bestMinionHits) ||
-                    (leaderHitCount == bestLeaderHits && eliteBodies == bestEliteHits && minionHitCount == bestMinionHits && highTrashHitCount > bestHighTrashHits) ||
-                    (leaderHitCount == bestLeaderHits && eliteBodies == bestEliteHits && minionHitCount == bestMinionHits && highTrashHitCount == bestHighTrashHits && trashHitCount > bestTrashHits) ||
-                    (leaderHitCount == bestLeaderHits && eliteBodies == bestEliteHits && minionHitCount == bestMinionHits && highTrashHitCount == bestHighTrashHits && trashHitCount == bestTrashHits && Math.Abs(safetyPenalty - bestSafetyPenalty) <= 0.01f && straightPenalty < bestStraightPenalty - 0.01f) ||
-                    (leaderHitCount == bestLeaderHits && eliteBodies == bestEliteHits && minionHitCount == bestMinionHits && highTrashHitCount == bestHighTrashHits && trashHitCount == bestTrashHits && Math.Abs(safetyPenalty - bestSafetyPenalty) <= 0.01f && Math.Abs(straightPenalty - bestStraightPenalty) <= 0.01f && cursorDelta < bestCursorDelta);
+                    (leaderHitCount == bestLeaderHits && !severe && bestSafetyPenalty >= SimplePathRejectThreshold) ||
+                    (leaderHitCount == bestLeaderHits && safetyPenalty < bestSafetyPenalty - 0.01f) ||
+                    (leaderHitCount == bestLeaderHits && Math.Abs(safetyPenalty - bestSafetyPenalty) <= 0.01f && highTrashHitCount > bestHighTrashHits) ||
+                    (leaderHitCount == bestLeaderHits && highTrashHitCount == bestHighTrashHits && trashHitCount > bestTrashHits) ||
+                    (leaderHitCount == bestLeaderHits && highTrashHitCount == bestHighTrashHits && trashHitCount == bestTrashHits && Math.Abs(safetyPenalty - bestSafetyPenalty) <= 0.01f && straightPenalty < bestStraightPenalty - 0.01f) ||
+                    (leaderHitCount == bestLeaderHits && highTrashHitCount == bestHighTrashHits && trashHitCount == bestTrashHits && Math.Abs(safetyPenalty - bestSafetyPenalty) <= 0.01f && Math.Abs(straightPenalty - bestStraightPenalty) <= 0.01f && cursorDelta < bestCursorDelta);
 
                 if (better)
                 {
                     bestLeaderHits = leaderHitCount;
-                    bestEliteHits = eliteBodies;
-                    bestMinionHits = minionHitCount;
                     bestHighTrashHits = highTrashHitCount;
                     bestTrashHits = trashHitCount;
                     bestSafetyPenalty = safetyPenalty;
@@ -1412,7 +1510,6 @@ namespace Turbo.Plugins.s7o
                     bestX = p.x;
                     bestY = p.y;
                     bestLeader = hitLeaderId;
-                    bestMinion = hitLeaderId != 0 ? 0u : hitMinionId;
                 }
             }
 
@@ -1428,22 +1525,6 @@ namespace Turbo.Plugins.s7o
                         aimX = leaderCenters[i].x;
                         aimY = leaderCenters[i].y;
                         primaryLeaderId = bestLeader;
-                        primaryMinionId = 0;
-                        return true;
-                    }
-                }
-            }
-
-            if (bestLeader == 0 && bestMinion != 0 && bestEliteHits <= 1)
-            {
-                for (int i = 0; i < minionCenters.Count; i++)
-                {
-                    if (minionCenters[i].m.AcdId == bestMinion)
-                    {
-                        aimX = minionCenters[i].x;
-                        aimY = minionCenters[i].y;
-                        primaryLeaderId = 0;
-                        primaryMinionId = bestMinion;
                         return true;
                     }
                 }
@@ -1452,7 +1533,6 @@ namespace Turbo.Plugins.s7o
             aimX = bestX;
             aimY = bestY;
             primaryLeaderId = bestLeader;
-            primaryMinionId = bestMinion;
             return true;
         }
 
@@ -1469,27 +1549,218 @@ namespace Turbo.Plugins.s7o
             return result;
         }
 
+        private bool TryLinearTrashDensityAim(
+            IWorldCoordinate mePos,
+            IWorldCoordinate cursorWorld,
+            bool useCone,
+            float vx,
+            float vy,
+            float cosTh,
+            List<IMonster> localHighTrash,
+            List<IMonster> localTrash,
+            float curX,
+            float curY,
+            out float aimX,
+            out float aimY,
+            out IWorldCoordinate markerWorld)
+        {
+            aimX = curX;
+            aimY = curY;
+            markerWorld = cursorWorld;
+
+            try
+            {
+                if (mePos == null || cursorWorld == null || Hud?.Game?.AliveMonsters == null)
+                    return false;
+
+                float maxReach = LinearTrashMaxYards;
+                if (maxReach <= 0f) maxReach = ForwardEliteScanMaxYards;
+                if (MaxPlayerDistanceYards > 0) maxReach = Math.Min(maxReach, MaxPlayerDistanceYards);
+
+                float laneWidth = LinearTrashLaneHalfWidthYards;
+                if (laneWidth < 2.5f) laneWidth = 2.5f;
+                if (laneWidth > 12f) laneWidth = 12f;
+
+                float maxAngle = LinearTrashMaxAngleDegrees;
+                if (maxAngle < 8f) maxAngle = 8f;
+                if (maxAngle > MaxSnapAngleDegrees) maxAngle = MaxSnapAngleDegrees;
+
+                int bestCircularBodies = EstimateBestCircularTrashBodies(localHighTrash, localTrash);
+                int minBodies = LinearTrashMinBodies < 2 ? 2 : LinearTrashMinBodies;
+                int preferWithin = LinearTrashPreferWithinBodies < 0 ? 0 : LinearTrashPreferWithinBodies;
+
+                IMonster best = null;
+                int bestBodies = 0;
+                float bestProgression = 0f;
+                float bestScore = float.MinValue;
+                float bestSafety = float.MaxValue;
+                float bestProj = 0f;
+
+                foreach (var m in Hud.Game.AliveMonsters)
+                {
+                    if (!IsPullableTrashAllowed(m)) continue;
+                    if (m.FloorCoordinate == null) continue;
+
+                    float relX = m.FloorCoordinate.X - mePos.X;
+                    float relY = m.FloorCoordinate.Y - mePos.Y;
+                    float distToMe = (float)Math.Sqrt(relX * relX + relY * relY);
+                    if (distToMe <= 0.1f) continue;
+                    if (MinPlayerDistanceYards > 0 && distToMe < MinPlayerDistanceYards) continue;
+                    if (maxReach > 0f && distToMe > maxReach) continue;
+
+                    float proj = relX * vx + relY * vy;
+                    if (proj <= 2.0f) continue;
+
+                    if (useCone)
+                    {
+                        float dot = proj / Math.Max(0.001f, distToMe);
+                        if (dot < cosTh) continue;
+                    }
+
+                    float lateral = Math.Abs(relX * vy - relY * vx);
+                    if (lateral > laneWidth * 1.85f) continue;
+
+                    if (!IsWithinMaxSnapAngle(mePos, cursorWorld, m.FloorCoordinate, maxAngle))
+                        continue;
+
+                    int bodies;
+                    float progression;
+                    CountLinearTrashDensity(mePos, m.FloorCoordinate, laneWidth, out bodies, out progression);
+                    if (bodies < minBodies) continue;
+
+                    // If a circular clump is much larger, let the existing circular solver handle it.
+                    // If the linear lane is close in body count, prefer the straight safer spear line.
+                    if (bestCircularBodies > 0 && bodies + preferWithin < bestCircularBodies)
+                        continue;
+
+                    float safety = Math.Max(0f, ComputeLineSafetyPenalty(mePos, m.FloorCoordinate));
+                    if (safety >= SimplePathRejectThreshold)
+                        continue;
+
+                    float cursorWorldDist = m.FloorCoordinate.XYDistanceTo(cursorWorld);
+                    float score = (bodies * 100.0f)
+                                  + (progression * 18.0f)
+                                  + (proj * 0.75f)
+                                  - (lateral * 7.0f)
+                                  - (cursorWorldDist * 1.15f)
+                                  - (safety * 18.0f);
+
+                    bool better =
+                        (score > bestScore + 0.01f) ||
+                        (Math.Abs(score - bestScore) <= 0.01f && bodies > bestBodies) ||
+                        (Math.Abs(score - bestScore) <= 0.01f && bodies == bestBodies && safety < bestSafety - 0.01f) ||
+                        (Math.Abs(score - bestScore) <= 0.01f && bodies == bestBodies && Math.Abs(safety - bestSafety) <= 0.01f && proj > bestProj);
+
+                    if (better)
+                    {
+                        best = m;
+                        bestBodies = bodies;
+                        bestProgression = progression;
+                        bestScore = score;
+                        bestSafety = safety;
+                        bestProj = proj;
+                    }
+                }
+
+                if (best == null)
+                    return false;
+
+                float sx;
+                float sy;
+                if (!TryGetScreen(best, out sx, out sy))
+                    return false;
+
+                aimX = sx;
+                aimY = sy;
+                markerWorld = best.FloorCoordinate;
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private int EstimateBestCircularTrashBodies(List<IMonster> localHighTrash, List<IMonster> localTrash)
+        {
+            int best = 0;
+            try
+            {
+                if (localHighTrash != null)
+                    foreach (var m in localHighTrash)
+                        if (m != null) best = Math.Max(best, GetTrashDensityScore(m));
+
+                if (localTrash != null)
+                    foreach (var m in localTrash)
+                        if (m != null) best = Math.Max(best, GetTrashDensityScore(m));
+            }
+            catch { }
+            return best;
+        }
+
+        private void CountLinearTrashDensity(IWorldCoordinate mePos, IWorldCoordinate anchor, float laneWidth, out int bodies, out float progression)
+        {
+            bodies = 0;
+            progression = 0f;
+
+            try
+            {
+                if (mePos == null || anchor == null || Hud?.Game?.AliveMonsters == null)
+                    return;
+
+                float ax = anchor.X - mePos.X;
+                float ay = anchor.Y - mePos.Y;
+                float alen = (float)Math.Sqrt(ax * ax + ay * ay);
+                if (alen <= 0.001f) return;
+
+                float nx = ax / alen;
+                float ny = ay / alen;
+
+                foreach (var m in Hud.Game.AliveMonsters)
+                {
+                    if (!IsPullableTrashAllowed(m)) continue;
+                    if (m.FloorCoordinate == null) continue;
+
+                    float rx = m.FloorCoordinate.X - mePos.X;
+                    float ry = m.FloorCoordinate.Y - mePos.Y;
+                    float proj = rx * nx + ry * ny;
+                    if (proj < 1.5f || proj > alen + 4f) continue;
+
+                    float lateral = Math.Abs(rx * ny - ry * nx);
+                    if (lateral > laneWidth) continue;
+
+                    bodies++;
+
+                    try
+                    {
+                        var sm = m.SnoMonster;
+                        if (sm != null && sm.RiftProgression > 0f)
+                            progression += sm.RiftProgression;
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+        }
+
         private List<(float x, float y)> BuildLocalCandidatePoints(
             List<(IMonster m, float x, float y)> leaders,
-            List<(IMonster m, float x, float y)> minions,
             List<(IMonster m, float x, float y)> highTrash,
             List<(IMonster m, float x, float y)> trash,
             float curX,
             float curY)
         {
-            var pts = new List<(float x, float y)>(96) { (curX, curY) };
+            var pts = new List<(float x, float y)>(80) { (curX, curY) };
 
             foreach (var c in leaders) pts.Add((c.x, c.y));
-            foreach (var c in minions) if (pts.Count < 40) pts.Add((c.x, c.y));
-            foreach (var c in highTrash) if (pts.Count < 52) pts.Add((c.x, c.y));
-            foreach (var c in trash) if (pts.Count < 64) pts.Add((c.x, c.y));
+            foreach (var c in highTrash) if (pts.Count < 44) pts.Add((c.x, c.y));
+            foreach (var c in trash) if (pts.Count < 60) pts.Add((c.x, c.y));
 
             float sx = 0f;
             float sy = 0f;
             int n = 0;
 
             foreach (var c in leaders) { sx += c.x; sy += c.y; n++; }
-            foreach (var c in minions) { sx += c.x; sy += c.y; n++; }
             foreach (var c in highTrash) { sx += c.x; sy += c.y; n++; }
             foreach (var c in trash) { sx += c.x; sy += c.y; n++; }
 
@@ -1500,13 +1771,6 @@ namespace Turbo.Plugins.s7o
                 for (int j = i + 1; j < leaders.Count; j++)
                     pts.Add(((leaders[i].x + leaders[j].x) * 0.5f, (leaders[i].y + leaders[j].y) * 0.5f));
 
-            if (leaders.Count == 0)
-            {
-                for (int i = 0; i < minions.Count; i++)
-                    for (int j = i + 1; j < minions.Count; j++)
-                        pts.Add(((minions[i].x + minions[j].x) * 0.5f, (minions[i].y + minions[j].y) * 0.5f));
-            }
-
             return pts;
         }
 
@@ -1514,25 +1778,19 @@ namespace Turbo.Plugins.s7o
             float x,
             float y,
             List<(IMonster m, float x, float y)> leaders,
-            List<(IMonster m, float x, float y)> minions,
             List<(IMonster m, float x, float y)> highTrash,
             List<(IMonster m, float x, float y)> trash,
             out int leaderHitCount,
-            out int minionHitCount,
             out int highTrashHitCount,
             out int trashHitCount,
-            out uint leaderId,
-            out uint minionId)
+            out uint leaderId)
         {
             leaderHitCount = 0;
-            minionHitCount = 0;
             highTrashHitCount = 0;
             trashHitCount = 0;
             leaderId = 0;
-            minionId = 0;
 
             float bestLeaderDist = float.MaxValue;
-            float bestMinionDist = float.MaxValue;
 
             foreach (var c in leaders)
             {
@@ -1544,20 +1802,6 @@ namespace Turbo.Plugins.s7o
                     {
                         bestLeaderDist = d;
                         leaderId = c.m.AcdId;
-                    }
-                }
-            }
-
-            foreach (var c in minions)
-            {
-                float d = Dist(x, y, c.x, c.y);
-                if (d <= HitboxRadiusPx)
-                {
-                    minionHitCount++;
-                    if (d < bestMinionDist)
-                    {
-                        bestMinionDist = d;
-                        minionId = c.m.AcdId;
                     }
                 }
             }
@@ -1632,7 +1876,7 @@ namespace Turbo.Plugins.s7o
         private bool IsEliteAllowed(IMonster m)
         {
             if (m == null) return false;
-            if (!IsLeaderElite(m) && !(IncludeEliteMinions && IsEliteMinion(m))) return false;
+            if (!IsLeaderElite(m)) return false;
             if (!m.IsAlive || m.Hidden || m.Invisible || m.Stealthed || m.Invulnerable || m.Untargetable) return false;
             if (IgnoreIllusions && m.Illusion) return false;
             if (IgnoreKnockbackImmune && IsNativeKnockbackImmune(m)) return false;
@@ -1642,7 +1886,8 @@ namespace Turbo.Plugins.s7o
 
         private bool IsPullableTrashAllowed(IMonster m)
         {
-            if (m == null || !m.IsAlive || m.IsElite) return false;
+            if (m == null || !m.IsAlive) return false;
+            if (m.IsElite && !IsEliteMinion(m)) return false;
             if (m.Hidden || m.Invisible || m.Stealthed || m.Invulnerable || m.Untargetable) return false;
             if (IgnoreIllusions && m.Illusion) return false;
             if (IgnoreKnockbackImmune && IsNativeKnockbackImmune(m)) return false;
@@ -1795,7 +2040,7 @@ namespace Turbo.Plugins.s7o
             return density;
         }
 
-        private bool HasNearbyValidEliteAlternative(IMonster nearestElite, List<IMonster> leaders, List<IMonster> minions, float maxScreenDistancePx)
+        private bool HasNearbyValidEliteAlternative(IMonster nearestElite, List<IMonster> leaders, float maxScreenDistancePx)
         {
             if (nearestElite == null || maxScreenDistancePx <= 0f) return false;
 
@@ -1804,15 +2049,6 @@ namespace Turbo.Plugins.s7o
             if (!TryGetScreen(nearestElite, out ex, out ey)) return false;
 
             foreach (var m in leaders)
-            {
-                if (m == null || ReferenceEquals(m, nearestElite)) continue;
-                float sx;
-                float sy;
-                if (!TryGetScreen(m, out sx, out sy)) continue;
-                if (Dist(ex, ey, sx, sy) <= maxScreenDistancePx) return true;
-            }
-
-            foreach (var m in minions)
             {
                 if (m == null || ReferenceEquals(m, nearestElite)) continue;
                 float sx;
@@ -1860,11 +2096,28 @@ namespace Turbo.Plugins.s7o
 
             float penalty = 0f;
             penalty += AccumulateBlockerPenalty(SafeGetGameEnumerable("Obstacles"), fromWorld, toWorld, ObstaclePenaltyWeight);
+            penalty += AccumulateBlockerPenalty(SafeGetSupplementalBlockerActors(), fromWorld, toWorld, ObstaclePenaltyWeight * 0.85f);
             penalty += AccumulateBlockerPenalty(SafeGetEliteWallEffects(), fromWorld, toWorld, EliteWallPenaltyWeight);
+            penalty += AccumulateBlockerPenalty(SafeGetWallerBlockers(), fromWorld, toWorld, EliteWallPenaltyWeight * 1.20f);
+            penalty += AccumulateBlockerPenalty(SafeGetPylonBlockers(), fromWorld, toWorld, EliteWallPenaltyWeight * 0.95f);
+            penalty += AccumulateBlockerPenalty(SafeGetProjectileBlockingActors(), fromWorld, toWorld, ObstaclePenaltyWeight * 1.10f);
+            penalty += AccumulateUnsafeImpactPenalty(fromWorld, toWorld, SpearImpactUnsafePenaltyWeight);
 
             float openingBonus = ComputeDoorCenterLaneBonus(fromWorld, toWorld) + ComputeCorridorCenterLaneBonus(fromWorld, toWorld);
             penalty -= Math.Min(5.5f, openingBonus);
 
+            return penalty < 0f ? 0f : penalty;
+        }
+
+        private float ComputeHardBlockerPenalty(IWorldCoordinate fromWorld, IWorldCoordinate toWorld)
+        {
+            if (!UseGeometrySafety || fromWorld == null || toWorld == null || Hud?.Game == null) return 0f;
+
+            float penalty = 0f;
+            penalty += AccumulateBlockerPenalty(SafeGetPylonBlockers(), fromWorld, toWorld, EliteWallPenaltyWeight * 1.15f);
+            penalty += AccumulateBlockerPenalty(SafeGetWallerBlockers(), fromWorld, toWorld, EliteWallPenaltyWeight * 1.35f);
+            penalty += AccumulateBlockerPenalty(SafeGetProjectileBlockingActors(), fromWorld, toWorld, ObstaclePenaltyWeight * 1.25f);
+            penalty += AccumulateUnsafeImpactPenalty(fromWorld, toWorld, SpearImpactUnsafePenaltyWeight * 1.15f);
             return penalty < 0f ? 0f : penalty;
         }
 
@@ -2058,6 +2311,114 @@ namespace Turbo.Plugins.s7o
             }
         }
 
+        private IEnumerable SafeGetSupplementalBlockerActors()
+        {
+            var list = new List<BlockerCircle>(32);
+            try
+            {
+                if (Hud?.Game?.Actors == null) return list;
+                foreach (var a in Hud.Game.Actors)
+                {
+                    if (a == null || a.FloorCoordinate == null) continue;
+                    if (a.CentralXyDistanceToMe > 145.0) continue;
+
+                    var g = a.GizmoType;
+                    if (g != GizmoType.BreakableDoor &&
+                        g != GizmoType.Gate &&
+                        g != GizmoType.DestroyableObject &&
+                        g != GizmoType.ReformingDestroyableObject)
+                        continue;
+
+                    if (a.IsDisabled || a.IsOperated) continue;
+                    list.Add(MakeBlockerCircle(a, Math.Max(1.4f, a.RadiusScaled * 1.15f)));
+                }
+            }
+            catch { }
+            return list;
+        }
+
+        private IEnumerable SafeGetPylonBlockers()
+        {
+            var list = new List<BlockerCircle>(8);
+            if (!IncludePylonsAsPullBlockers) return list;
+            try
+            {
+                if (Hud?.Game?.Shrines == null) return list;
+                foreach (var shrine in Hud.Game.Shrines)
+                {
+                    if (shrine == null || !shrine.IsPylon || shrine.FloorCoordinate == null) continue;
+                    // Pylons block pulls, but we often stand on/near them, so keep the radius restrained.
+                    list.Add(new BlockerCircle { X = shrine.FloorCoordinate.X, Y = shrine.FloorCoordinate.Y, Radius = 2.35f });
+                }
+            }
+            catch { }
+            return list;
+        }
+
+        private IEnumerable SafeGetWallerBlockers()
+        {
+            var list = new List<BlockerCircle>(24);
+            if (!IncludeWallerAsPullBlockers) return list;
+            try
+            {
+                if (Hud?.Game?.Actors == null) return list;
+                foreach (var a in Hud.Game.Actors)
+                {
+                    if (a == null || a.FloorCoordinate == null || a.SnoActor == null) continue;
+                    if (a.CentralXyDistanceToMe > 145.0) continue;
+
+                    uint sno = (uint)a.SnoActor.Sno;
+                    bool waller = sno == 226296u || sno == 226808u || sno == 445916u;
+                    if (!waller)
+                    {
+                        string code = a.SnoActor.Code ?? a.SnoActor.NameEnglish ?? a.SnoActor.NameLocalized;
+                        waller = !string.IsNullOrEmpty(code) && code.ToLowerInvariant().Contains("waller");
+                    }
+                    if (!waller) continue;
+
+                    var cc = a.CollisionCoordinate ?? a.FloorCoordinate;
+                    if (cc == null) continue;
+                    float radius = Math.Max(2.0f, a.RadiusScaled * 1.35f);
+                    if (sno == 226808u || sno == 226296u) radius = Math.Max(radius, 3.25f);
+                    list.Add(new BlockerCircle { X = cc.X, Y = cc.Y, Radius = radius });
+                }
+            }
+            catch { }
+            return list;
+        }
+
+        private IEnumerable SafeGetProjectileBlockingActors()
+        {
+            var list = new List<BlockerCircle>(32);
+            if (!IncludeProjectileBlockingActors) return list;
+            try
+            {
+                if (Hud?.Game?.Actors == null || Hud?.Sno?.Attributes?.Blocks_Projectiles == null) return list;
+                foreach (var a in Hud.Game.Actors)
+                {
+                    if (a == null || a.FloorCoordinate == null) continue;
+                    if (a.CentralXyDistanceToMe > 145.0) continue;
+                    int blocks = a.GetAttributeValueAsInt(Hud.Sno.Attributes.Blocks_Projectiles, 0, 0);
+                    if (blocks <= 0) continue;
+                    if (a.IsDisabled || a.IsOperated) continue;
+                    list.Add(MakeBlockerCircle(a, Math.Max(1.6f, a.RadiusScaled * 1.20f)));
+                }
+            }
+            catch { }
+            return list;
+        }
+
+        private BlockerCircle MakeBlockerCircle(IActor actor, float radius)
+        {
+            var cc = actor.CollisionCoordinate ?? actor.FloorCoordinate;
+            return new BlockerCircle
+            {
+                X = cc.X,
+                Y = cc.Y,
+                Radius = Math.Max(0.9f, radius),
+            };
+        }
+
         private IEnumerable SafeGetEliteWallEffects()
         {
             try
@@ -2103,6 +2464,15 @@ namespace Turbo.Plugins.s7o
 
             try
             {
+                var circle = o as BlockerCircle;
+                if (circle != null)
+                {
+                    ox = circle.X;
+                    oy = circle.Y;
+                    radius = Math.Max(radius, circle.Radius);
+                    return true;
+                }
+
                 var actor = o as IActor;
                 if (actor != null)
                 {
@@ -2131,6 +2501,198 @@ namespace Turbo.Plugins.s7o
             {
                 return false;
             }
+        }
+
+        // =========================
+        // MINIMAL SPEAR IMPACT MEMORY
+        // =========================
+
+        private void BeginSpearImpactProbe(int tick, IWorldCoordinate fromWorld, IWorldCoordinate targetWorld, uint targetAcdId)
+        {
+            try
+            {
+                _spearImpactProbe.Active = false;
+                if (!EnableSpearImpactMemory || fromWorld == null || targetWorld == null) return;
+
+                float dx = targetWorld.X - fromWorld.X;
+                float dy = targetWorld.Y - fromWorld.Y;
+                float dist = (float)Math.Sqrt(dx * dx + dy * dy);
+                if (dist < 18f) return;
+
+                int windowTicks = MsToTicks(SpearImpactProbeWindowMs);
+                _spearImpactProbe = new SpearImpactProbe
+                {
+                    Active = true,
+                    CastTick = tick,
+                    ExpireTick = tick + windowTicks,
+                    FromX = fromWorld.X,
+                    FromY = fromWorld.Y,
+                    ToX = targetWorld.X,
+                    ToY = targetWorld.Y,
+                    DirX = dx / dist,
+                    DirY = dy / dist,
+                    Distance = dist,
+                    TargetAcdId = targetAcdId,
+                };
+            }
+            catch
+            {
+                _spearImpactProbe.Active = false;
+            }
+        }
+
+        private void UpdateSpearImpactProbe(int tick)
+        {
+            try
+            {
+                if (!EnableSpearImpactMemory || !_spearImpactProbe.Active) return;
+                if (tick > _spearImpactProbe.ExpireTick)
+                {
+                    _spearImpactProbe.Active = false;
+                    return;
+                }
+
+                if (Hud?.Game?.Actors == null) return;
+
+                foreach (var actor in Hud.Game.Actors)
+                {
+                    if (actor == null || actor.FloorCoordinate == null || actor.SnoActor == null) continue;
+                    if (actor.CreatedAtInGameTick < _spearImpactProbe.CastTick - 2) continue;
+                    if (!IsStrongAncientSpearImpactActor(actor)) continue;
+
+                    float ix = actor.FloorCoordinate.X;
+                    float iy = actor.FloorCoordinate.Y;
+                    float rx = ix - _spearImpactProbe.FromX;
+                    float ry = iy - _spearImpactProbe.FromY;
+                    float proj = rx * _spearImpactProbe.DirX + ry * _spearImpactProbe.DirY;
+                    if (proj < 6f) continue;
+                    if (proj > _spearImpactProbe.Distance - SpearImpactMinShortfallYards) continue;
+
+                    float lateral = Math.Abs(rx * _spearImpactProbe.DirY - ry * _spearImpactProbe.DirX);
+                    if (lateral > 7.5f) continue;
+
+                    if (HasPullableMonsterNear(ix, iy, SpearImpactUnsafeRadiusYards + 2.0f))
+                        continue;
+
+                    AddUnsafeImpactSample(ix, iy, tick);
+                    _spearImpactProbe.Active = false;
+                    return;
+                }
+            }
+            catch
+            {
+                _spearImpactProbe.Active = false;
+            }
+        }
+
+        private bool IsStrongAncientSpearImpactActor(IActor actor)
+        {
+            try
+            {
+                uint sno = (uint)actor.SnoActor.Sno;
+                // Confirmed wall/collision visual from F11 debug: x1_Barbarian_AncientSpear_End_Explode = 365342.
+                return sno == 365342u || sno == 365789u || sno == 365534u;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private bool HasPullableMonsterNear(float x, float y, float yards)
+        {
+            try
+            {
+                if (Hud?.Game?.AliveMonsters == null) return false;
+                float r2 = yards * yards;
+                foreach (var m in Hud.Game.AliveMonsters)
+                {
+                    if (m == null || !m.IsAlive || m.FloorCoordinate == null) continue;
+                    if (m.IsElite ? !IsEliteAllowed(m) : !IsPullableTrashAllowed(m)) continue;
+                    float dx = m.FloorCoordinate.X - x;
+                    float dy = m.FloorCoordinate.Y - y;
+                    if ((dx * dx + dy * dy) <= r2) return true;
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        private void AddUnsafeImpactSample(float x, float y, int tick)
+        {
+            try
+            {
+                int expire = tick + MsToTicks(SpearImpactMemoryMs);
+                for (int i = _unsafeImpactSamples.Count - 1; i >= 0; --i)
+                {
+                    var s = _unsafeImpactSamples[i];
+                    float dx = s.X - x;
+                    float dy = s.Y - y;
+                    if ((dx * dx + dy * dy) <= 9.0f)
+                    {
+                        _unsafeImpactSamples[i] = new UnsafeImpactSample { X = x, Y = y, ExpireTick = expire };
+                        return;
+                    }
+                }
+
+                if (_unsafeImpactSamples.Count >= 12)
+                    _unsafeImpactSamples.RemoveAt(0);
+
+                _unsafeImpactSamples.Add(new UnsafeImpactSample { X = x, Y = y, ExpireTick = expire });
+            }
+            catch { }
+        }
+
+        private void PruneUnsafeImpactSamples(int tick)
+        {
+            try
+            {
+                for (int i = _unsafeImpactSamples.Count - 1; i >= 0; --i)
+                {
+                    if (_unsafeImpactSamples[i].ExpireTick < tick)
+                        _unsafeImpactSamples.RemoveAt(i);
+                }
+            }
+            catch { }
+        }
+
+        private float AccumulateUnsafeImpactPenalty(IWorldCoordinate fromWorld, IWorldCoordinate toWorld, float weight)
+        {
+            if (!EnableSpearImpactMemory || fromWorld == null || toWorld == null || _unsafeImpactSamples.Count == 0) return 0f;
+
+            float ax = fromWorld.X;
+            float ay = fromWorld.Y;
+            float bx = toWorld.X;
+            float by = toWorld.Y;
+            float dx = bx - ax;
+            float dy = by - ay;
+            float len2 = dx * dx + dy * dy;
+            if (len2 <= 0.001f) return 0f;
+
+            float penalty = 0f;
+            float safe = Math.Max(2.0f, SpearImpactUnsafeRadiusYards);
+            foreach (var sample in _unsafeImpactSamples)
+            {
+                float tproj = ((sample.X - ax) * dx + (sample.Y - ay) * dy) / len2;
+                if (tproj < 0.03f || tproj > 0.96f) continue;
+
+                float px = ax + tproj * dx;
+                float py = ay + tproj * dy;
+                float ddx = sample.X - px;
+                float ddy = sample.Y - py;
+                float dist = (float)Math.Sqrt(ddx * ddx + ddy * ddy);
+                if (dist >= safe) continue;
+
+                penalty += weight * (safe - dist) * (0.85f + tproj * 0.45f);
+            }
+            return penalty;
+        }
+
+        private int MsToTicks(int ms)
+        {
+            if (ms <= 0) return 1;
+            int ticks = (int)Math.Ceiling(ms / 16.0);
+            return ClampInt(ticks, 1, 600);
         }
 
         // =========================
@@ -2404,6 +2966,9 @@ namespace Turbo.Plugins.s7o
             _markerUntilTick = 0;
             _markerFailed = false;
             ClearEliteCourseCorrectionCache();
+            _spearImpactProbe.Active = false;
+            if (resetHotkeyState)
+                _unsafeImpactSamples.Clear();
 
             if (resetHotkeyState)
                 _spearKey = ActionKey.Unknown;
