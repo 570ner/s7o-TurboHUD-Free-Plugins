@@ -16,12 +16,52 @@ namespace Turbo.Plugins.s7o
     // elite purple-orb progression. Stricken is an estimator based on proc edges;
     // it is not a native exact per-monster stack read.
 
-    public class s7o_RiftInfo : BasePlugin, IInGameTopPainter, IAfterCollectHandler
+    public class s7o_RiftInfo : BasePlugin, IInGameTopPainter, IInGameWorldPainter, IAfterCollectHandler
     {
         // ── Display ──────────────────────────────────────────────────────
         public bool ShowNearbyRP { get; set; } = true;
         public bool ShowBossTimer { get; set; } = true;
         public bool ShowElapsedRiftTimer { get; set; } = true;
+
+        // ── Pylon party floor status ─────────────────────────────────────────
+        // Draws READY / MISSING above active Greater Rift pylons only.
+        // It checks actual in-game players only; no hardcoded 4-player assumption.
+        public bool ShowPylonPartyFloorStatus { get; set; } = true;
+
+        // Keep this feature Greater Rift-only. This avoids shrine/noise behavior in town, NR, bounties, etc.
+        public bool PylonPartyFloorStatusGreaterRiftOnly { get; set; } = true;
+
+        // Use active pylon actors and pylon markers. Both are filtered by IsPylon only.
+        public bool PylonPartyStatusUsePylonActors { get; set; } = true;
+        public bool PylonPartyStatusUsePylonMarkers { get; set; } = true;
+
+        // Draw range from local player to pylon. Set 0 or negative to disable range limiting.
+        public int PylonPartyStatusMaxDistanceYards { get; set; } = 180;
+
+        // Duplicate suppression between actor and marker entries for the same pylon.
+        public float PylonPartyStatusDuplicateDistanceYards { get; set; } = 3.0f;
+
+        // Vertical lift above the pylon in world coordinates.
+        public float PylonPartyStatusWorldOffsetZ { get; set; } = 8.0f;
+
+        // Screen-space adjustment after world-to-screen conversion.
+        // Positive moves text downward; negative moves text upward.
+        public float PylonPartyStatusScreenOffsetY { get; set; } = 8.0f;
+
+        // Manual outline radius in pixels. Larger = thicker black outline.
+        public int PylonPartyStatusOutlineRadiusPx { get; set; } = 2;
+
+        // Vertical gap between MISSING and each missing player name.
+        public float PylonPartyStatusLineGapPx { get; set; } = 1.0f;
+
+        // Draw the pylon status in the 2D top layer instead of the Ground world layer.
+        // This keeps READY / MISSING above normal world overlays.
+        public bool PylonPartyStatusDrawOnTopLayer { get; set; } = true;
+
+        // Use the AfterClip top-paint pass for pylon status text.
+        // This is intentionally later than normal BeforeClip HP-bar painters, so
+        // elite health bars and other top overlays do not cover READY / MISSING.
+        public bool PylonPartyStatusUseAfterClipTopLayer { get; set; } = true;
 
         // Completed-rift summary should survive town/loading flicker and clear only
         // after Urshi/reward state has disappeared for a short grace period.
@@ -176,6 +216,10 @@ namespace Turbo.Plugins.s7o
         private IFont StrickenSmallFont;
         private ITexture StrickenTexture;
 
+        private IFont PylonReadyFont;
+        private IFont PylonMissingFont;
+        private IFont PylonStatusOutlineFont;
+
         // ── Private state ────────────────────────────────────────────────
         private bool _bossActive = false;
         private int _bossStartTick = 0;
@@ -282,11 +326,29 @@ namespace Turbo.Plugins.s7o
             public uint LastDamageMainActor;
         }
 
+        private class PylonStatusTarget
+        {
+            public uint WorldId;
+            public IWorldCoordinate FloorCoordinate;
+            public string Name;
+        }
+
+        private class PylonPartyFloorStatus
+        {
+            public bool Ready;
+            public string Text;
+            public List<string> Lines;
+            public int PartyCount;
+        }
+
 
         public s7o_RiftInfo()
         {
             Enabled = true;
-            Order = 29500;
+            // Draw as late as FreeHUD allows. The pylon status itself is drawn
+            // in AfterClip by default so it can sit above HP-bar painters that
+            // run in the normal BeforeClip pass.
+            Order = int.MaxValue;
         }
 
         public override void Load(IController hud)
@@ -322,6 +384,53 @@ namespace Turbo.Plugins.s7o
             StrickenSmallFont = Hud.Render.CreateFont("tahoma", 7.0f, 255, 255, 230, 120, true, false, 180, 0, 0, 0, true);
 
             StrickenTexture = Hud.Texture.GetItemTexture(Hud.Sno.SnoItems.Unique_Gem_018_x1);
+
+            // Pylon party floor status.
+            // READY = green, MISSING = red, both with an extra manual black outline.
+            PylonReadyFont = Hud.Render.CreateFont(
+                "tahoma",
+                12.0f,
+                255,
+                60,
+                255,
+                60,
+                true,
+                false,
+                255,
+                0,
+                0,
+                0,
+                true);
+
+            PylonMissingFont = Hud.Render.CreateFont(
+                "tahoma",
+                12.0f,
+                255,
+                255,
+                60,
+                50,
+                true,
+                false,
+                255,
+                0,
+                0,
+                0,
+                true);
+
+            PylonStatusOutlineFont = Hud.Render.CreateFont(
+                "tahoma",
+                12.0f,
+                255,
+                0,
+                0,
+                0,
+                true,
+                false,
+                255,
+                0,
+                0,
+                0,
+                true);
         }
 
         // ── AfterCollect ─────────────────────────────────────────────────
@@ -862,9 +971,508 @@ namespace Turbo.Plugins.s7o
             // Freezing is handled only by IsGreaterRiftGuardianDead().
         }
 
+        // ── PaintWorld: Greater Rift pylon party floor status ─────────────────
+        public void PaintWorld(WorldLayer layer)
+        {
+            if (layer != WorldLayer.Ground)
+                return;
+
+            // Default is now top-layer drawing so HP bars and other world overlays
+            // cannot cover READY / MISSING. Keep this path as a compatibility
+            // fallback if someone explicitly disables top-layer pylon text.
+            if (PylonPartyStatusDrawOnTopLayer)
+                return;
+
+            PaintPylonPartyFloorStatusLayer();
+        }
+
+        private void PaintPylonPartyFloorStatusLayer()
+        {
+            if (!ShouldDrawPylonPartyFloorStatus())
+                return;
+
+            try
+            {
+                var pylons = GetActivePylonStatusTargets();
+
+                foreach (var pylon in pylons)
+                    DrawPylonPartyFloorStatus(pylon);
+            }
+            catch
+            {
+            }
+        }
+
+        private bool ShouldDrawPylonPartyFloorStatus()
+        {
+            if (!ShowPylonPartyFloorStatus)
+                return false;
+
+            if (Hud.Game == null || !Hud.Game.IsInGame || Hud.Game.Me == null)
+                return false;
+
+            if (Hud.Game.IsInTown)
+                return false;
+
+            if (PylonPartyFloorStatusGreaterRiftOnly)
+            {
+                bool inGreaterRift = false;
+
+                try
+                {
+                    inGreaterRift =
+                        Hud.Game.Me.InGreaterRift ||
+                        Hud.Game.SpecialArea == SpecialArea.GreaterRift;
+                }
+                catch
+                {
+                    inGreaterRift = false;
+                }
+
+                if (!inGreaterRift)
+                    return false;
+            }
+
+            return true;
+        }
+
+        private List<PylonStatusTarget> GetActivePylonStatusTargets()
+        {
+            var result = new List<PylonStatusTarget>();
+
+            if (Hud.Game == null || Hud.Game.Me == null)
+                return result;
+
+            if (PylonPartyStatusUsePylonActors)
+            {
+                try
+                {
+                    if (Hud.Game.Shrines != null)
+                    {
+                        foreach (var actor in Hud.Game.Shrines)
+                        {
+                            if (actor == null)
+                                continue;
+
+                            // PYLONS ONLY. Do not include normal shrines.
+                            if (!actor.IsPylon)
+                                continue;
+
+                            // Do not draw over used/disabled pylons.
+                            if (actor.IsDisabled || actor.IsOperated)
+                                continue;
+
+                            AddPylonStatusTargetIfValid(
+                                result,
+                                actor.WorldId,
+                                actor.FloorCoordinate,
+                                actor.SnoActor != null ? actor.SnoActor.NameLocalized : "Pylon");
+                        }
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            if (PylonPartyStatusUsePylonMarkers)
+            {
+                try
+                {
+                    if (Hud.Game.Markers != null)
+                    {
+                        foreach (var marker in Hud.Game.Markers)
+                        {
+                            if (marker == null)
+                                continue;
+
+                            // PYLONS ONLY. Do not include shrine/pool/well markers.
+                            if (!marker.IsPylon)
+                                continue;
+
+                            // Marker IsUsed should hide consumed pylons when available.
+                            if (marker.IsUsed)
+                                continue;
+
+                            // If there is a disabled/operated pylon actor at this marker,
+                            // skip the marker too. This avoids stale marker text after click.
+                            if (HasUsedOrDisabledPylonActorAt(marker.WorldId, marker.FloorCoordinate))
+                                continue;
+
+                            AddPylonStatusTargetIfValid(
+                                result,
+                                marker.WorldId,
+                                marker.FloorCoordinate,
+                                !string.IsNullOrEmpty(marker.Name) ? marker.Name : "Pylon");
+                        }
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            return result;
+        }
+
+        private void AddPylonStatusTargetIfValid(
+            List<PylonStatusTarget> result,
+            uint worldId,
+            IWorldCoordinate coordinate,
+            string name)
+        {
+            if (result == null)
+                return;
+
+            if (worldId == 0)
+                return;
+
+            if (coordinate == null || !coordinate.IsValid)
+                return;
+
+            try
+            {
+                if (PylonPartyStatusMaxDistanceYards > 0 &&
+                    Hud.Game != null &&
+                    Hud.Game.Me != null &&
+                    Hud.Game.Me.FloorCoordinate != null &&
+                    coordinate.XYDistanceTo(Hud.Game.Me.FloorCoordinate) > PylonPartyStatusMaxDistanceYards)
+                {
+                    return;
+                }
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                foreach (var existing in result)
+                {
+                    if (existing == null || existing.FloorCoordinate == null)
+                        continue;
+
+                    if (existing.WorldId != worldId)
+                        continue;
+
+                    if (existing.FloorCoordinate.XYDistanceTo(coordinate) <= PylonPartyStatusDuplicateDistanceYards)
+                        return;
+                }
+            }
+            catch
+            {
+            }
+
+            result.Add(new PylonStatusTarget
+            {
+                WorldId = worldId,
+                FloorCoordinate = coordinate,
+                Name = name
+            });
+        }
+
+        private bool HasUsedOrDisabledPylonActorAt(uint worldId, IWorldCoordinate coordinate)
+        {
+            if (worldId == 0 || coordinate == null)
+                return false;
+
+            try
+            {
+                if (Hud.Game == null || Hud.Game.Shrines == null)
+                    return false;
+
+                foreach (var actor in Hud.Game.Shrines)
+                {
+                    if (actor == null)
+                        continue;
+
+                    // PYLONS ONLY.
+                    if (!actor.IsPylon)
+                        continue;
+
+                    if (actor.WorldId != worldId)
+                        continue;
+
+                    if (actor.FloorCoordinate == null || !actor.FloorCoordinate.IsValid)
+                        continue;
+
+                    if (actor.FloorCoordinate.XYDistanceTo(coordinate) > PylonPartyStatusDuplicateDistanceYards)
+                        continue;
+
+                    if (actor.IsDisabled || actor.IsOperated)
+                        return true;
+                }
+            }
+            catch
+            {
+            }
+
+            return false;
+        }
+
+        private PylonPartyFloorStatus GetPylonPartyFloorStatus(uint pylonWorldId)
+        {
+            var status = new PylonPartyFloorStatus
+            {
+                Ready = false,
+                Text = "",
+                Lines = new List<string>(),
+                PartyCount = 0
+            };
+
+            if (pylonWorldId == 0)
+                return status;
+
+            var missingNames = new List<string>();
+
+            try
+            {
+                if (Hud.Game == null || Hud.Game.Players == null)
+                    return status;
+
+                foreach (var player in Hud.Game.Players)
+                {
+                    if (player == null)
+                        continue;
+
+                    if (!player.IsInGame)
+                        continue;
+
+                    status.PartyCount++;
+
+                    bool sameFloor = false;
+
+                    try
+                    {
+                        sameFloor = player.WorldId == pylonWorldId;
+                    }
+                    catch
+                    {
+                        sameFloor = false;
+                    }
+
+                    if (!sameFloor)
+                        missingNames.Add(GetPylonPartyPlayerName(player));
+                }
+            }
+            catch
+            {
+                return status;
+            }
+
+            if (status.PartyCount <= 0)
+                return status;
+
+            if (missingNames.Count == 0)
+            {
+                status.Ready = true;
+                status.Text = "READY";
+                status.Lines.Add("READY");
+            }
+            else
+            {
+                status.Ready = false;
+                status.Text = "MISSING:";
+                status.Lines.Add("MISSING:");
+
+                foreach (var missingName in missingNames)
+                    status.Lines.Add(missingName);
+            }
+
+            return status;
+        }
+
+        private string GetPylonPartyPlayerName(IPlayer player)
+        {
+            if (player == null)
+                return "?";
+
+            try
+            {
+                if (!string.IsNullOrEmpty(player.BattleTagAbovePortrait))
+                    return player.BattleTagAbovePortrait;
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                if (!string.IsNullOrEmpty(player.HeroName))
+                    return player.HeroName;
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                return "P" + (player.Index + 1).ToString(CultureInfo.InvariantCulture);
+            }
+            catch
+            {
+            }
+
+            return "?";
+        }
+
+        private void DrawPylonPartyFloorStatus(PylonStatusTarget pylon)
+        {
+            if (pylon == null || pylon.FloorCoordinate == null)
+                return;
+
+            try
+            {
+                if (!pylon.FloorCoordinate.IsValid)
+                    return;
+
+                // Draw only when the pylon is actually on screen.
+                // This prevents random off-screen text.
+                if (!pylon.FloorCoordinate.IsOnScreen(1))
+                    return;
+
+                var status = GetPylonPartyFloorStatus(pylon.WorldId);
+
+                if (status == null || status.Lines == null || status.Lines.Count == 0)
+                    return;
+
+                var coordinate = pylon.FloorCoordinate
+                    .Offset(0, 0, PylonPartyStatusWorldOffsetZ)
+                    .ToScreenCoordinate(true, true);
+
+                if (coordinate == null)
+                    return;
+
+                var font = status.Ready ? PylonReadyFont : PylonMissingFont;
+
+                DrawOutlinedCenteredTextLines(
+                    status.Lines,
+                    font,
+                    PylonStatusOutlineFont,
+                    coordinate.X,
+                    coordinate.Y + PylonPartyStatusScreenOffsetY,
+                    PylonPartyStatusOutlineRadiusPx,
+                    PylonPartyStatusLineGapPx);
+            }
+            catch
+            {
+            }
+        }
+
+
+        private void DrawOutlinedCenteredTextLines(
+            List<string> lines,
+            IFont textFont,
+            IFont outlineFont,
+            float centerX,
+            float topY,
+            int outlineRadiusPx,
+            float lineGapPx)
+        {
+            if (lines == null || lines.Count == 0 || textFont == null)
+                return;
+
+            try
+            {
+                float y = topY;
+
+                foreach (var rawLine in lines)
+                {
+                    if (string.IsNullOrEmpty(rawLine))
+                        continue;
+
+                    var textLayout = textFont.GetTextLayout(rawLine);
+                    float x = centerX - textLayout.Metrics.Width * 0.5f;
+
+                    if (outlineFont != null && outlineRadiusPx > 0)
+                    {
+                        var outlineLayout = outlineFont.GetTextLayout(rawLine);
+
+                        for (int ox = -outlineRadiusPx; ox <= outlineRadiusPx; ox++)
+                        {
+                            for (int oy = -outlineRadiusPx; oy <= outlineRadiusPx; oy++)
+                            {
+                                if (ox == 0 && oy == 0)
+                                    continue;
+
+                                // Draw a compact thick outline, not a huge square blob.
+                                if ((ox * ox) + (oy * oy) > outlineRadiusPx * outlineRadiusPx + 1)
+                                    continue;
+
+                                outlineFont.DrawText(outlineLayout, x + ox, y + oy);
+                            }
+                        }
+                    }
+
+                    textFont.DrawText(textLayout, x, y);
+                    y += textLayout.Metrics.Height + lineGapPx;
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        private void DrawOutlinedCenteredText(
+            string text,
+            IFont textFont,
+            IFont outlineFont,
+            float centerX,
+            float topY,
+            int outlineRadiusPx)
+        {
+            if (string.IsNullOrEmpty(text) || textFont == null)
+                return;
+
+            try
+            {
+                var textLayout = textFont.GetTextLayout(text);
+
+                float x = centerX - textLayout.Metrics.Width * 0.5f;
+                float y = topY;
+
+                if (outlineFont != null && outlineRadiusPx > 0)
+                {
+                    var outlineLayout = outlineFont.GetTextLayout(text);
+
+                    for (int ox = -outlineRadiusPx; ox <= outlineRadiusPx; ox++)
+                    {
+                        for (int oy = -outlineRadiusPx; oy <= outlineRadiusPx; oy++)
+                        {
+                            if (ox == 0 && oy == 0)
+                                continue;
+
+                            // Draw a compact thick outline, not a huge square blob.
+                            if ((ox * ox) + (oy * oy) > outlineRadiusPx * outlineRadiusPx + 1)
+                                continue;
+
+                            outlineFont.DrawText(outlineLayout, x + ox, y + oy);
+                        }
+                    }
+                }
+
+                textFont.DrawText(textLayout, x, y);
+            }
+            catch
+            {
+            }
+        }
+
         // ── PaintTopInGame ───────────────────────────────────────────────
         public void PaintTopInGame(ClipState clipState)
         {
+            // READY / MISSING is deliberately painted in AfterClip by default.
+            // Some HP-bar plugins are also top painters; drawing in BeforeClip can
+            // still leave the pylon text underneath them. AfterClip is the safer
+            // final overlay pass for this screen-space label.
+            if (clipState == ClipState.AfterClip)
+            {
+                if (PylonPartyStatusDrawOnTopLayer && PylonPartyStatusUseAfterClipTopLayer)
+                    PaintPylonPartyFloorStatusLayer();
+
+                return;
+            }
+
             if (clipState != ClipState.BeforeClip) return;
             if (Hud.Game == null || !Hud.Game.IsInGame || Hud.Game.Me == null) return;
 
@@ -873,7 +1481,12 @@ namespace Turbo.Plugins.s7o
             bool showCompletedGrSummary = _riftSummaryActive && _riftStartTick > 0;
 
             if (!inGR && !inNR && !showCompletedGrSummary)
+            {
+                if (PylonPartyStatusDrawOnTopLayer && !PylonPartyStatusUseAfterClipTopLayer)
+                    PaintPylonPartyFloorStatusLayer();
+
                 return;
+            }
 
             try
             {
@@ -912,6 +1525,10 @@ namespace Turbo.Plugins.s7o
             catch
             {
             }
+
+            // Fallback for users who explicitly disable AfterClip drawing.
+            if (PylonPartyStatusDrawOnTopLayer && !PylonPartyStatusUseAfterClipTopLayer)
+                PaintPylonPartyFloorStatusLayer();
         }
 
         private void DrawBarPercent(IUiElement bar)
