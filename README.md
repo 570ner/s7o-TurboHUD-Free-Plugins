@@ -1,16 +1,14 @@
 # s7o Plugins for TurboHUD Free (THF)
 
-This is a public-test release. It has been tested on the main features, but it is still the first shared version, so there may be some bugs.
-
 TurboHUD Free download link:
 https://turbohud.razorfish.dev/p/turbohud-free.html
 
-## Install
+## Install TurboHUD Free from the link above first.
 
-1. Extract the ZIP so the files are here:
+1. Extract the plugins .ZIP in the TurboHUD Free folder so the files are here:
 
 ../plugins/s7o/*.cs
-(example: C:\TurboHUD\plugins\s7o\plugin_name.cs)
+(example: C:\TurboHUD\plugins\s7o\plugin_names.cs)
 
 2. Start TurboHUD Free.
 
@@ -50,9 +48,8 @@ Use it to toggle plugins, change visual options, manage TTS alerts, set some hot
 
 ## Notes
 
-- This pack is for **TurboHUD Free**. It is not an official TurboHUD release.
-- This is a shared pet project. Use it, edit it, remove parts you do not need, or modify it for your own setup.
+- This plugin pack is compatible with **TurboHUD Free**.
+- This is a shared pet project. Use it, edit it, disable parts you do not need, or modify it for your own setup.
 - This was mostly done using AI to create these plugins or port some over from other THUD forks.
 - Some plugins were not created by me but borrowed or modified to work with the hud menu.
-- Please report any bugs if you find some.
-
+- If you find any bugs, please report them.
