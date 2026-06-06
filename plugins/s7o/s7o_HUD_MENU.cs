@@ -382,6 +382,17 @@ namespace Turbo.Plugins.s7o
             new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, int> _macroToggleFlashTicks = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         private s7o_AutoSkill _autoSkillPlugin = null;
+        private bool _autoSkillKeybindsExpanded = false;
+        private int _autoSkillKeybindCaptureSlot = -1;
+        private readonly ActionKey[] _autoSkillBindActions =
+        {
+            ActionKey.Skill1,
+            ActionKey.Skill2,
+            ActionKey.Skill3,
+            ActionKey.Skill4,
+            ActionKey.Heal
+        };
+        private readonly string[] _autoSkillBindSlotLabels = { "1", "2", "3", "4", "POT" };
           // pixel scroll offset inside MACROS detail pane
         private int _lastMacrosScrollUpTick   = int.MinValue;
         private int _lastMacrosScrollDownTick = int.MinValue;
@@ -1102,6 +1113,21 @@ namespace Turbo.Plugins.s7o
                 RequestPluginCacheRefresh();
                 _status = "PARTY INSPECTOR HOTKEY SET TO " + CaptureKeyLabel(_partyInspectorHotkey);
                 SaveSettings();
+                return;
+            }
+
+            if (_autoSkillKeybindCaptureSlot >= 0)
+            {
+                if (IsCaptureCancelKey(keyEvent.Key))
+                {
+                    _autoSkillKeybindCaptureSlot = -1;
+                    _status = "AUTOSKILL KEYBIND CAPTURE CANCELLED";
+                    return;
+                }
+
+                int slot = _autoSkillKeybindCaptureSlot;
+                _autoSkillKeybindCaptureSlot = -1;
+                ApplyAutoSkillKeybindFromCapturedKey(slot, keyEvent.Key);
                 return;
             }
 
@@ -2565,6 +2591,24 @@ namespace Turbo.Plugins.s7o
             if (action.StartsWith("tts:", StringComparison.OrdinalIgnoreCase))
             {
                 HandleTtsCustomMessageAction(action);
+                return;
+            }
+
+            if (action == "autoskill:keybinds:expand")
+            {
+                _autoSkillKeybindsExpanded = !_autoSkillKeybindsExpanded;
+                _autoSkillKeybindCaptureSlot = -1;
+                _status = _autoSkillKeybindsExpanded ? "AUTOSKILL KEYBINDS EXPANDED" : "AUTOSKILL KEYBINDS COLLAPSED";
+                SaveSettings();
+                return;
+            }
+
+            if (action.StartsWith("autoskill:keybind:", StringComparison.OrdinalIgnoreCase))
+            {
+                int slot;
+                if (int.TryParse(action.Substring("autoskill:keybind:".Length), NumberStyles.Integer, CultureInfo.InvariantCulture, out slot))
+                    BeginAutoSkillKeybindCapture(slot);
+
                 return;
             }
 
@@ -5816,6 +5860,195 @@ namespace Turbo.Plugins.s7o
             catch (Exception ex) { _status = "MACRO TOGGLE ERROR: " + ex.Message; }
         }
 
+        private void BeginAutoSkillKeybindCapture(int slot)
+        {
+            if (slot < 0 || _autoSkillBindActions == null || slot >= _autoSkillBindActions.Length)
+                return;
+
+            if (GetAutoSkillPlugin() == null)
+            {
+                _status = "AUTOSKILL PLUGIN NOT FOUND";
+                return;
+            }
+
+            ActionKey action = _autoSkillBindActions[slot];
+            if (action == ActionKey.LeftSkill || action == ActionKey.RightSkill)
+            {
+                _status = AutoSkillBindSlotName(slot) + " USES MOUSE CLICK";
+                return;
+            }
+
+            _autoSkillKeybindCaptureSlot = slot;
+            _status = "PRESS AUTOSKILL KEY FOR " + AutoSkillBindSlotName(slot);
+        }
+
+        private void ApplyAutoSkillKeybindFromCapturedKey(int slot, Key key)
+        {
+            if (slot < 0 || _autoSkillBindActions == null || slot >= _autoSkillBindActions.Length)
+                return;
+
+            var ask = GetAutoSkillPlugin();
+            if (ask == null)
+            {
+                _status = "AUTOSKILL PLUGIN NOT FOUND";
+                return;
+            }
+
+            ushort virtualKey;
+            if (!TryGetVirtualKeyFromDirectInputKey(key, out virtualKey))
+            {
+                _status = "UNSUPPORTED AUTOSKILL KEY";
+                return;
+            }
+
+            ActionKey action = _autoSkillBindActions[slot];
+            try
+            {
+                if (ask.SetCastVirtualKey(action, virtualKey))
+                {
+                    _status = "AUTOSKILL " + AutoSkillBindSlotName(slot) + " SET TO " + AutoSkillVirtualKeyLabel(virtualKey);
+                    SaveSettings();
+                    RequestPluginCacheRefresh();
+                }
+                else
+                {
+                    _status = "AUTOSKILL KEYBIND NOT SET";
+                }
+            }
+            catch (Exception ex)
+            {
+                _status = "AUTOSKILL KEYBIND ERROR: " + ex.Message;
+            }
+        }
+
+        private bool TryGetVirtualKeyFromDirectInputKey(Key key, out ushort virtualKey)
+        {
+            virtualKey = 0;
+
+            Keys winKey = KeyToWinKeys(key);
+            if (winKey == Keys.None)
+                return false;
+
+            int value = (int)winKey;
+            if (value <= 0 || value > ushort.MaxValue)
+                return false;
+
+            virtualKey = (ushort)value;
+            return true;
+        }
+
+        private string GetAutoSkillKeybindButtonLabel(int slot)
+        {
+            if (slot < 0 || _autoSkillBindActions == null || slot >= _autoSkillBindActions.Length)
+                return "?";
+
+            ActionKey action = _autoSkillBindActions[slot];
+            if (action == ActionKey.LeftSkill)
+                return "LMB";
+
+            if (action == ActionKey.RightSkill)
+                return "RMB";
+
+            var ask = GetAutoSkillPlugin();
+            ushort vk = 0;
+
+            try
+            {
+                if (ask != null)
+                    vk = ask.GetCastVirtualKey(action);
+            }
+            catch { }
+
+            if (vk == 0)
+                vk = AutoSkillDefaultVirtualKeyForSlot(slot);
+
+            return AutoSkillVirtualKeyLabel(vk);
+        }
+
+        private ushort AutoSkillDefaultVirtualKeyForSlot(int slot)
+        {
+            switch (slot)
+            {
+                case 0: return 0x31;
+                case 1: return 0x32;
+                case 2: return 0x33;
+                case 3: return 0x34;
+                case 4: return 0x51;
+                default: return 0;
+            }
+        }
+
+        private string AutoSkillBindSlotName(int slot)
+        {
+            if (_autoSkillBindSlotLabels != null && slot >= 0 && slot < _autoSkillBindSlotLabels.Length)
+                return _autoSkillBindSlotLabels[slot];
+
+            return "SLOT " + slot.ToString(CultureInfo.InvariantCulture);
+        }
+
+        private string AutoSkillVirtualKeyLabel(ushort virtualKey)
+        {
+            if (virtualKey == 0)
+                return "NONE";
+
+            Keys key = (Keys)virtualKey;
+
+            if (key >= Keys.D0 && key <= Keys.D9)
+                return ((int)key - (int)Keys.D0).ToString(CultureInfo.InvariantCulture);
+
+            if (key >= Keys.A && key <= Keys.Z)
+                return key.ToString();
+
+            if (key >= Keys.F1 && key <= Keys.F12)
+                return key.ToString();
+
+            switch (key)
+            {
+                case Keys.NumPad0: return "NUM0";
+                case Keys.NumPad1: return "NUM1";
+                case Keys.NumPad2: return "NUM2";
+                case Keys.NumPad3: return "NUM3";
+                case Keys.NumPad4: return "NUM4";
+                case Keys.NumPad5: return "NUM5";
+                case Keys.NumPad6: return "NUM6";
+                case Keys.NumPad7: return "NUM7";
+                case Keys.NumPad8: return "NUM8";
+                case Keys.NumPad9: return "NUM9";
+                case Keys.Multiply: return "NUM*";
+                case Keys.Divide: return "NUM/";
+                case Keys.Subtract: return "NUM-";
+                case Keys.Add: return "NUM+";
+                case Keys.Decimal: return "NUM.";
+                case Keys.Space: return "SPACE";
+                case Keys.Tab: return "TAB";
+                case Keys.Return: return "ENTER";
+                case Keys.Back: return "BACK";
+                case Keys.Insert: return "INS";
+                case Keys.Delete: return "DEL";
+                case Keys.Home: return "HOME";
+                case Keys.End: return "END";
+                case Keys.Up: return "UP";
+                case Keys.Down: return "DOWN";
+                case Keys.Left: return "LEFT";
+                case Keys.Right: return "RIGHT";
+                case Keys.OemOpenBrackets: return "[";
+                case Keys.OemCloseBrackets: return "]";
+                case Keys.OemMinus: return "-";
+                case Keys.Oemplus: return "=";
+                case Keys.Oemcomma: return ",";
+                case Keys.OemPeriod: return ".";
+                case Keys.OemQuestion: return "/";
+                case Keys.OemSemicolon: return ";";
+                case Keys.OemQuotes: return "'";
+                case Keys.Oemtilde: return "`";
+                case Keys.OemPipe: return "\\";
+                case Keys.ShiftKey: return "SHIFT";
+                case Keys.ControlKey: return "CTRL";
+                case Keys.Menu: return "ALT";
+                default: return CompactKeyName(key.ToString()).ToUpperInvariant();
+            }
+        }
+
         private void SetAutoGemSpecificScrollFromCursorY(float cursorY)
         {
             if (_autoGemSpecificScrollTrack.Height <= 0f || _autoGemSpecificMaxScroll <= 0)
@@ -7743,6 +7976,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             public bool   IsPlugin;      // true = plugin row (DH Strafe, Exit Archon)
             public bool   IsOpenGrMapSelector;
             public bool   IsOpenGrMapChild;
+            public bool   IsAutoSkillKeybindSelector;
+            public bool   IsAutoSkillKeybindChild;
             public RiftMapGroup RiftGroup;
             public RiftMapGroup RiftGroupRight;
             public string[] PluginTypeNames;
@@ -7820,6 +8055,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
         private const float MacroListSlotH = 84f;
         private const float OpenGrMapChildSlotH = 22f;
+        private const float AutoSkillKeybindChildSlotH = 58f;
         private const float MacroEntryH = 76f;
         private const float MacroHeaderH = 36f;
 
@@ -7827,6 +8063,9 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
         {
             if (item.IsCompactOpenGrMapRow)
                 return OpenGrMapChildSlotH;
+
+            if (item.Entry.IsAutoSkillKeybindChild)
+                return AutoSkillKeybindChildSlotH;
 
             return MacroListSlotH;
         }
@@ -7857,6 +8096,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 return;
             }
 
+            if (entry.IsAutoSkillKeybindChild)
+            {
+                DrawAutoSkillKeybindChildRow(slot, rowIdx);
+                return;
+            }
+
             const float starW  = 32f;
             const float stateW = 138f;
             const float hotkeyW = 86f;
@@ -7872,6 +8117,11 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 IPlugin plugin = GetRiftFishingPlugin();
                 installed = plugin != null;
                 enabled = _openGrMapsExpanded;
+            }
+            else if (entry.IsAutoSkillKeybindSelector)
+            {
+                installed = GetAutoSkillPlugin() != null;
+                enabled = _autoSkillKeybindsExpanded;
             }
             else if (entry.IsPlugin)
             {
@@ -7918,12 +8168,14 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             string stateLabel;
             if (entry.IsOpenGrMapSelector)
                 stateLabel = installed ? (_openGrMapsExpanded ? "-" : "+") : "NOT INSTALLED";
+            else if (entry.IsAutoSkillKeybindSelector)
+                stateLabel = installed ? (_autoSkillKeybindsExpanded ? "-" : "+") : "NOT INSTALLED";
             else if (entry.IsPlugin)
                 stateLabel = installed ? (enabled ? "ON" : "OFF") : "NOT INSTALLED";
             else
                 stateLabel = enabled ? "ON" : "OFF";
 
-            bool canToggle = entry.IsOpenGrMapSelector ? installed : (entry.IsPlugin ? installed : GetAutoSkillPlugin() != null);
+            bool canToggle = entry.IsOpenGrMapSelector ? installed : (entry.IsAutoSkillKeybindSelector ? installed : (entry.IsPlugin ? installed : GetAutoSkillPlugin() != null));
 
             int flashTk;
             _macroToggleFlashTicks.TryGetValue(entry.Code, out flashTk);
@@ -7948,6 +8200,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             {
                 if (entry.IsOpenGrMapSelector)
                     RegisterToggleHit("riftmaps:expand", stateR);
+                else if (entry.IsAutoSkillKeybindSelector)
+                    RegisterToggleHit("autoskill:keybinds:expand", stateR);
                 else if (entry.IsPlugin)
                     RegisterToggleHit(entry.PluginAction, stateR);
                 else
@@ -7986,6 +8240,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 .ToList();
 
             bool openGrFavorited = _macroFavorites.Contains("OpenGR_MapSelector");
+            bool autoSkillKeybindsFavorited = _macroFavorites.Contains("AutoSkill_Keybindings");
 
             if (favEntries.Count > 0)
             {
@@ -8025,6 +8280,22 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                             });
                         }
                     }
+
+                    if (entry.IsAutoSkillKeybindSelector && _autoSkillKeybindsExpanded)
+                    {
+                        items.Add(new MacroListItem
+                        {
+                            Kind = MacroListItemKind.Entry,
+                            Entry = new MacroEntry
+                            {
+                                Title = "AutoSkill Keybind Buttons",
+                                Description = string.Empty,
+                                Code = "AutoSkill_Keybindings_Row",
+                                IsAutoSkillKeybindChild = true
+                            },
+                            IsFavoriteDisplay = true
+                        });
+                    }
                 }
             }
 
@@ -8047,6 +8318,9 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                         continue;
 
                     if (entry.IsOpenGrMapChild && openGrFavorited)
+                        continue;
+
+                    if (entry.IsAutoSkillKeybindChild && autoSkillKeybindsFavorited)
                         continue;
 
                     items.Add(new MacroListItem
@@ -8115,6 +8389,39 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
         }
 
 
+        private void DrawAutoSkillKeybindChildRow(RectangleF r, int rowIdx)
+        {
+            (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
+
+            float pad = 8f;
+            float gap = 6f;
+            int count = _autoSkillBindActions == null ? 0 : _autoSkillBindActions.Length;
+            if (count <= 0)
+                return;
+
+            float cellW = Math.Max(36f, (r.Width - pad * 2f - gap * (count - 1)) / count);
+            float x = r.Left + pad;
+
+            for (int i = 0; i < count; i++)
+            {
+                RectangleF labelR = new RectangleF(x, r.Top + 5f, cellW, 14f);
+                RectangleF btnR = new RectangleF(x, r.Top + 24f, cellW, 25f);
+
+                DrawCenteredOutlinedTextExact(_fRowText, _fRowTextShadow, _autoSkillBindSlotLabels[i], labelR);
+
+                bool fixedMouse = _autoSkillBindActions[i] == ActionKey.LeftSkill || _autoSkillBindActions[i] == ActionKey.RightSkill;
+                bool capturing = _autoSkillKeybindCaptureSlot == i;
+                string label = capturing ? "..." : GetAutoSkillKeybindButtonLabel(i);
+
+                DrawGlossButton(btnR, FitButtonLabel(label, btnR.Width), capturing, false, true);
+
+                if (!fixedMouse)
+                    RegisterToggleHit("autoskill:keybind:" + i.ToString(CultureInfo.InvariantCulture), btnR);
+
+                x += cellW + gap;
+            }
+        }
+
         private void DrawToggleMacrosCategory(RectangleF detail)
         {
             // ── Build ordered entry list (favorites first) ────────────────────
@@ -8144,6 +8451,25 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                         RiftGroupRight = (i + 1 < RiftMapGroups.Length) ? RiftMapGroups[i + 1] : null
                     });
                 }
+            }
+
+            allEntries.Add(new MacroEntry
+            {
+                Title="AutoSkill Keybindings",
+                Description="Set the keyboard cast keys AutoSkill sends for skill slots and potion.",
+                Code="AutoSkill_Keybindings",
+                IsAutoSkillKeybindSelector=true
+            });
+
+            if (_autoSkillKeybindsExpanded)
+            {
+                allEntries.Add(new MacroEntry
+                {
+                    Title="AutoSkill Keybind Buttons",
+                    Description=string.Empty,
+                    Code="AutoSkill_Keybindings_Row",
+                    IsAutoSkillKeybindChild=true
+                });
             }
 
             int barbarianStart = allEntries.Count;
@@ -9392,6 +9718,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             {
                 LogDebug("Menu close requested; No-Click background bound, delaying menu hide until Shift+P close is issued.");
                 _capturingHotkey = false;
+                _autoSkillKeybindCaptureSlot = -1;
                 _draggingWindow = false;
                 _draggingDot = false;
                 _draggingScrollThumb = false;
@@ -9416,6 +9743,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             _visible = false;
             _capturingHotkey = false;
+            _autoSkillKeybindCaptureSlot = -1;
             _draggingWindow = false;
             _draggingDot = false;
             _draggingScrollThumb = false;
@@ -12469,9 +12797,51 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 case Key.D8: return Keys.D8;
                 case Key.D9: return Keys.D9;
                 case Key.D0: return Keys.D0;
+                case Key.NumberPad1: return Keys.NumPad1;
+                case Key.NumberPad2: return Keys.NumPad2;
+                case Key.NumberPad3: return Keys.NumPad3;
+                case Key.NumberPad4: return Keys.NumPad4;
+                case Key.NumberPad5: return Keys.NumPad5;
+                case Key.NumberPad6: return Keys.NumPad6;
+                case Key.NumberPad7: return Keys.NumPad7;
+                case Key.NumberPad8: return Keys.NumPad8;
+                case Key.NumberPad9: return Keys.NumPad9;
+                case Key.NumberPad0: return Keys.NumPad0;
+                case Key.NumberPadEnter: return Keys.Return;
                 case Key.Space: return Keys.Space;
+                case Key.Tab: return Keys.Tab;
+                case Key.Return: return Keys.Return;
+                case Key.Back: return Keys.Back;
+                case Key.Insert: return Keys.Insert;
+                case Key.Delete: return Keys.Delete;
+                case Key.Home: return Keys.Home;
+                case Key.End: return Keys.End;
+                case Key.Up: return Keys.Up;
+                case Key.Down: return Keys.Down;
+                case Key.Left: return Keys.Left;
+                case Key.Right: return Keys.Right;
+                case Key.Minus: return Keys.OemMinus;
+                case Key.Equals: return Keys.Oemplus;
                 case Key.LeftBracket: return Keys.OemOpenBrackets;
                 case Key.RightBracket: return Keys.OemCloseBrackets;
+                case Key.Semicolon: return Keys.OemSemicolon;
+                case Key.Apostrophe: return Keys.OemQuotes;
+                case Key.Grave: return Keys.Oemtilde;
+                case Key.Backslash: return Keys.OemPipe;
+                case Key.Comma: return Keys.Oemcomma;
+                case Key.Period: return Keys.OemPeriod;
+                case Key.Slash: return Keys.OemQuestion;
+                case Key.LeftShift:
+                case Key.RightShift: return Keys.ShiftKey;
+                case Key.LeftControl:
+                case Key.RightControl: return Keys.ControlKey;
+                case Key.LeftAlt:
+                case Key.RightAlt: return Keys.Menu;
+                case Key.Multiply: return Keys.Multiply;
+                case Key.Divide: return Keys.Divide;
+                case Key.Subtract: return Keys.Subtract;
+                case Key.Add: return Keys.Add;
+                case Key.Decimal: return Keys.Decimal;
                 case Key.F1: return Keys.F1;
                 case Key.F2: return Keys.F2;
                 case Key.F3: return Keys.F3;
@@ -12718,6 +13088,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     lines.Add("TTS_CUSTOM_" + i.ToString(CultureInfo.InvariantCulture) + "_HOTKEY=" + msg.Hotkey);
                     lines.Add("TTS_CUSTOM_" + i.ToString(CultureInfo.InvariantCulture) + "_TEXT=" + EncodeSettingText(msg.Text));
                 }
+
+                lines.Add("AUTOSKILL_KEYBINDS_EXPANDED=" + _autoSkillKeybindsExpanded.ToString(CultureInfo.InvariantCulture));
 
                 // AutoSnap
                 lines.Add("AUTOSNAP_EXPANDED=" + _autoSnapExpanded.ToString(CultureInfo.InvariantCulture));
@@ -13139,6 +13511,10 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     else if (key.StartsWith("TTS_CUSTOM_", StringComparison.OrdinalIgnoreCase))
                     {
                         TryLoadTtsCustomMessageSetting(key, val);
+                    }
+                    else if (key == "AUTOSKILL_KEYBINDS_EXPANDED")
+                    {
+                        _autoSkillKeybindsExpanded = ParseBool(val, _autoSkillKeybindsExpanded);
                     }
                     else if (key == "AUTOSNAP_EXPANDED")
                     {
