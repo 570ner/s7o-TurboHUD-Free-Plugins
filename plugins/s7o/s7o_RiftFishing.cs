@@ -52,36 +52,15 @@ namespace Turbo.Plugins.s7o
         public int GoodMapEscapeMaxAttempts { get; set; } = 5;
         public int GlobalInputMinIntervalMs { get; set; } = 25;
         public float PortalClickMaxDistance { get; set; } = 180.0f;
-        // Developer-only fortress diagnostics. Keep false for public release.
+        // Fortress return portals project slightly above the screen on Pandemonium Fortress.
+        // Keep this fortress-only native path enabled, but leave debug overlays/logging off for release.
         public bool EnableFortressFileDebug { get; set; } = false;
         public bool ShowFortressPortalDebug { get; set; } = false;
         public int FortressFileDebugIntervalMs { get; set; } = 250;
-        public bool EnableFortressMaskFallback { get; set; } = true;
-        // x1_fortress / Pandemonium Fortress portal projection is unreliable.
-        // Use deterministic mask points, but hover-confirm the portal before clicking.
-        public int FortressMaskFallbackDelayMs { get; set; } = 250;
-        public int FortressMaskFallbackRetryMs { get; set; } = 120;
-
-        // 0 = unlimited gated hover probes. These are not blind clicks.
-        public int FortressMaskFallbackMaxAttempts { get; set; } = 0;
-
-        public int FortressMaskHoverConfirmMs { get; set; } = 70;
-
-        // If hover-confirmed portal clicking fails for too long, use Town Portal as the final recovery.
-        // This keeps the bad-map close sequence from getting stuck forever.
-        public bool EnableFortressEmergencyTownPortalFallback { get; set; } = true;
-        public int FortressEmergencyTownPortalAfterMs { get; set; } = 1200;
-        public int FortressEmergencyTownPortalChannelMs { get; set; } = 6500;
-        public int FortressMinimumHoverProbesBeforeTownPortal { get; set; } = 2;
-
-        // Actor tag fallback is weaker than SelectedActor, but useful if SelectedActor is unreliable.
-        // Keep true by default because the probe points are restricted to the known portal mask regions.
-        public bool AllowFortressActorTagHoverFallback { get; set; } = true;
-        public float FortressLeftMaskXFraction { get; set; } = 0.285f;
-        public float FortressLeftMaskYFraction { get; set; } = 0.075f;
-        public float FortressRightMaskXFraction { get; set; } = 0.635f;
-        public float FortressRightMaskYFraction { get; set; } = 0.105f;
-        public float FortressSideSplitXFraction { get; set; } = 0.50f;
+        public bool EnableFortressNativeReturn { get; set; } = true;
+        public int FortressNativeRetryMs { get; set; } = 100;
+        public int FortressNativeHoverConfirmMs { get; set; } = 70;
+        public int FortressNativeCandidateLogLimit { get; set; } = 12;
         public float OrekInteractDistance { get; set; } = 18.0f;
         public float ObeliskInteractDistance { get; set; } = 18.0f;
 
@@ -138,6 +117,9 @@ namespace Turbo.Plugins.s7o
             374925, // g_Portal_ArchTall_Blue_WestMChurch
             396534  // g_Portal_Ladder_Blue_OffCenter_fortress3
         };
+
+        // The tall fortress arch often projects too high. Test downward offsets first, then a small upward check.
+        private static readonly int[] FortressNativeYOffsetPixels = new int[] { 0, 24, 48, 72, 96, 128, 160, 192, -24, -48 };
 
         public IFont HeaderFont { get; private set; }
         public IFont InfoFont { get; private set; }
@@ -227,19 +209,17 @@ namespace Turbo.Plugins.s7o
         private IWatch _actorClickWatch;
         private IWatch _portalClickWatch;
         private string _fortressDebugLine = string.Empty;
-        private int _fortressMaskClickAttempts;
-        private IWatch _fortressMaskClickWatch;
-        private IWatch _fortressMaskRetryWatch;
-        private IWatch _fortressMaskHoverWatch;
+        private int _fortressNativeProbeAttempts;
+        private IWatch _fortressNativeRetryWatch;
+        private IWatch _fortressNativeHoverWatch;
+        private bool _fortressNativeProbeActive;
+        private int _fortressNativeProbeX;
+        private int _fortressNativeProbeY;
+        private int _fortressNativeProbeRawX;
+        private int _fortressNativeProbeRawY;
+        private string _fortressNativeProbeLabel = string.Empty;
+        private string _fortressNativeCandidateSummary = string.Empty;
         private IWatch _fortressFileDebugWatch;
-        private string _lastFortressReadyReason = string.Empty;
-        private bool _fortressMaskProbeActive;
-        private bool _fortressMaskProbeRight;
-        private int _fortressMaskProbeX;
-        private int _fortressMaskProbeY;
-        private IWatch _fortressEmergencyTownPortalWatch;
-        private bool _fortressEmergencyTownPortalActive;
-        private int _fortressEmergencyTownPortalAttempts;
         private IWatch _goodMapWatch;
         private IWatch _goodMapAfterEscapeWatch;
         private IWatch _globalInputWatch;
@@ -369,11 +349,9 @@ namespace Turbo.Plugins.s7o
             _closeConfirmWatch = Hud.Time.CreateWatch();
             _actorClickWatch = Hud.Time.CreateWatch();
             _portalClickWatch = Hud.Time.CreateWatch();
-            _fortressMaskClickWatch = Hud.Time.CreateWatch();
-            _fortressMaskRetryWatch = Hud.Time.CreateWatch();
-            _fortressMaskHoverWatch = Hud.Time.CreateWatch();
+            _fortressNativeRetryWatch = Hud.Time.CreateWatch();
+            _fortressNativeHoverWatch = Hud.Time.CreateWatch();
             _fortressFileDebugWatch = Hud.Time.CreateWatch();
-            _fortressEmergencyTownPortalWatch = Hud.Time.CreateWatch();
             _goodMapWatch = Hud.Time.CreateWatch();
             _goodMapAfterEscapeWatch = Hud.Time.CreateWatch();
             _globalInputWatch = Hud.Time.CreateWatch();
@@ -988,7 +966,6 @@ namespace Turbo.Plugins.s7o
 
             _goodMapTtsSent = true;
         }
-
         private void BeginBadMapReset()
         {
             _badMapNeedsClose = true;
@@ -997,36 +974,29 @@ namespace Turbo.Plugins.s7o
             if (_closeConfirmWatch != null)
                 _closeConfirmWatch.Stop();
 
-            _fortressMaskClickAttempts = 0;
             _fortressDebugLine = string.Empty;
+            ResetFortressNativeProbeState();
 
-            if (_fortressMaskHoverWatch != null)
-                _fortressMaskHoverWatch.Stop();
+            if (_fortressNativeRetryWatch != null)
+                _fortressNativeRetryWatch.Stop();
 
-            _fortressMaskProbeActive = false;
-            _fortressMaskProbeRight = false;
-            _fortressMaskProbeX = 0;
-            _fortressMaskProbeY = 0;
-
-            _fortressEmergencyTownPortalActive = false;
-            _fortressEmergencyTownPortalAttempts = 0;
-
-            if (_fortressEmergencyTownPortalWatch != null)
-                _fortressEmergencyTownPortalWatch.Stop();
-
-            if (_fortressMaskClickWatch != null)
-                _fortressMaskClickWatch.Restart();
-
-            if (_fortressMaskRetryWatch != null)
-                _fortressMaskRetryWatch.Stop();
+            if (_fortressNativeHoverWatch != null)
+                _fortressNativeHoverWatch.Stop();
 
             if (_fortressFileDebugWatch != null)
                 _fortressFileDebugWatch.Restart();
 
-            _lastFortressReadyReason = string.Empty;
             LogFortressDebug("BeginBadMapReset", true);
 
             SetState(FishState.BadMapReturnToTown, "Bad map — returning to town");
+        }
+        private void ResetReturnPortalRuntimeState()
+        {
+            if (_fortressNativeRetryWatch != null) _fortressNativeRetryWatch.Stop();
+            if (_fortressNativeHoverWatch != null) _fortressNativeHoverWatch.Stop();
+            if (_fortressFileDebugWatch != null) _fortressFileDebugWatch.Stop();
+            _fortressDebugLine = string.Empty;
+            ResetFortressNativeProbeState();
         }
 
         private void RunBadMapReturnToTownState()
@@ -1037,26 +1007,9 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
-            if (IsInTown())
+            if (IsTownContext())
             {
-                if (_fortressMaskClickWatch != null) _fortressMaskClickWatch.Stop();
-                if (_fortressMaskRetryWatch != null) _fortressMaskRetryWatch.Stop();
-                if (_fortressMaskHoverWatch != null) _fortressMaskHoverWatch.Stop();
-                if (_fortressFileDebugWatch != null) _fortressFileDebugWatch.Stop();
-                _lastFortressReadyReason = string.Empty;
-                _fortressMaskClickAttempts = 0;
-                _fortressDebugLine = string.Empty;
-                _fortressMaskProbeActive = false;
-                _fortressMaskProbeRight = false;
-                _fortressMaskProbeX = 0;
-                _fortressMaskProbeY = 0;
-
-                _fortressEmergencyTownPortalActive = false;
-                _fortressEmergencyTownPortalAttempts = 0;
-
-                if (_fortressEmergencyTownPortalWatch != null)
-                    _fortressEmergencyTownPortalWatch.Stop();
-
+                ResetReturnPortalRuntimeState();
                 SetState(FishState.BadMapFindOrek, "Closing bad GR");
                 return;
             }
@@ -1084,7 +1037,7 @@ namespace Turbo.Plugins.s7o
 
         private void RunBadMapFindOrekState()
         {
-            if (!IsInTown())
+            if (!IsTownContext())
             {
                 SetState(FishState.BadMapReturnToTown, "Returning to town");
                 return;
@@ -1133,7 +1086,7 @@ namespace Turbo.Plugins.s7o
 
         private void RunBadMapCloseRiftState()
         {
-            if (!IsInTown())
+            if (!IsTownContext())
             {
                 SetState(FishState.BadMapReturnToTown, "Returning to town");
                 return;
@@ -1205,7 +1158,7 @@ namespace Turbo.Plugins.s7o
 
         private void RunBadMapFindObeliskState()
         {
-            if (!IsInTown())
+            if (!IsTownContext())
             {
                 SetState(FishState.BadMapReturnToTown, "Returning to town");
                 return;
@@ -1331,7 +1284,6 @@ namespace Turbo.Plugins.s7o
 
             _status = status ?? string.Empty;
         }
-
         private void StopTimersAndFlags()
         {
             _enteredRiftThisCycle = false;
@@ -1349,21 +1301,11 @@ namespace Turbo.Plugins.s7o
             if (_closeConfirmWatch != null) _closeConfirmWatch.Stop();
             if (_actorClickWatch != null) _actorClickWatch.Stop();
             if (_portalClickWatch != null) _portalClickWatch.Stop();
-            if (_fortressMaskClickWatch != null) _fortressMaskClickWatch.Stop();
-            if (_fortressMaskRetryWatch != null) _fortressMaskRetryWatch.Stop();
-            if (_fortressMaskHoverWatch != null) _fortressMaskHoverWatch.Stop();
+            if (_fortressNativeRetryWatch != null) _fortressNativeRetryWatch.Stop();
+            if (_fortressNativeHoverWatch != null) _fortressNativeHoverWatch.Stop();
             if (_fortressFileDebugWatch != null) _fortressFileDebugWatch.Stop();
-            _lastFortressReadyReason = string.Empty;
-            _fortressMaskClickAttempts = 0;
             _fortressDebugLine = string.Empty;
-            _fortressMaskProbeActive = false;
-            _fortressMaskProbeRight = false;
-            _fortressMaskProbeX = 0;
-            _fortressMaskProbeY = 0;
-            _fortressEmergencyTownPortalActive = false;
-            _fortressEmergencyTownPortalAttempts = 0;
-            if (_fortressEmergencyTownPortalWatch != null)
-                _fortressEmergencyTownPortalWatch.Stop();
+            ResetFortressNativeProbeState();
             if (_goodMapWatch != null) _goodMapWatch.Stop();
             if (_goodMapAfterEscapeWatch != null) _goodMapAfterEscapeWatch.Stop();
             if (_globalInputWatch != null) _globalInputWatch.Stop();
@@ -1695,11 +1637,27 @@ namespace Turbo.Plugins.s7o
             try { return Hud.Game.Me != null && Hud.Game.Me.Materials.GreaterRiftKeystone > 0; }
             catch { return true; }
         }
-
         private bool IsInTown()
         {
             try { return Hud.Game != null && Hud.Game.IsInTown; }
             catch { return false; }
+        }
+
+        private bool IsTownContext()
+        {
+            if (IsInTown())
+                return true;
+
+            string scene = GetCurrentSceneCode();
+            return IsKnownTownScene(scene);
+        }
+
+        private bool IsKnownTownScene(string scene)
+        {
+            if (string.IsNullOrEmpty(scene))
+                return false;
+
+            return scene.StartsWith("px_trout_tristram", StringComparison.OrdinalIgnoreCase);
         }
 
         private bool IsInGreaterRift()
@@ -2174,7 +2132,11 @@ namespace Turbo.Plugins.s7o
                     phase + "\r\n" +
                     GetFortressSceneDebugText() + "\r\n" +
                     portalText + " " + meText + " " + clickText +
-                    " attempts=" + _fortressMaskClickAttempts.ToString();
+                    " nativeAttempts=" + _fortressNativeProbeAttempts.ToString() +
+                    " nativeActive=" + _fortressNativeProbeActive.ToString() +
+                    " nativeLabel=" + _fortressNativeProbeLabel +
+                    " nativeRaw=(" + _fortressNativeProbeRawX.ToString() + "," + _fortressNativeProbeRawY.ToString() + ")\r\n" +
+                    _fortressNativeCandidateSummary;
             }
             catch
             {
@@ -2201,94 +2163,6 @@ namespace Turbo.Plugins.s7o
             {
             }
         }
-
-        private bool FortressMaskFallbackReady()
-        {
-            _lastFortressReadyReason = "ready";
-
-            if (!EnableFortressMaskFallback)
-            {
-                _lastFortressReadyReason = "disabled";
-                return false;
-            }
-
-            if (!IsCurrentFortressScene())
-            {
-                _lastFortressReadyReason = "not x1_fortress scene=" + GetCurrentSceneCode();
-                return false;
-            }
-
-            if (_fortressMaskClickWatch == null)
-            {
-                _lastFortressReadyReason = "click watch null";
-                return false;
-            }
-
-            if (!_fortressMaskClickWatch.IsRunning)
-            {
-                _lastFortressReadyReason = "click watch not running";
-                return false;
-            }
-
-            if (_fortressMaskClickWatch.ElapsedMilliseconds < FortressMaskFallbackDelayMs)
-            {
-                _lastFortressReadyReason =
-                    "delay " + _fortressMaskClickWatch.ElapsedMilliseconds.ToString() +
-                    "/" + FortressMaskFallbackDelayMs.ToString();
-                return false;
-            }
-
-            if (_fortressMaskProbeActive)
-            {
-                _lastFortressReadyReason = "probe active";
-                return true;
-            }
-
-            if (FortressMaskFallbackMaxAttempts > 0 &&
-                _fortressMaskClickAttempts >= FortressMaskFallbackMaxAttempts)
-            {
-                _lastFortressReadyReason =
-                    "max attempts " + _fortressMaskClickAttempts.ToString() +
-                    "/" + FortressMaskFallbackMaxAttempts.ToString();
-                return false;
-            }
-
-            if (_fortressMaskRetryWatch != null &&
-                _fortressMaskRetryWatch.IsRunning &&
-                _fortressMaskRetryWatch.ElapsedMilliseconds < FortressMaskFallbackRetryMs)
-            {
-                _lastFortressReadyReason =
-                    "retry " + _fortressMaskRetryWatch.ElapsedMilliseconds.ToString() +
-                    "/" + FortressMaskFallbackRetryMs.ToString();
-                return false;
-            }
-
-            return true;
-        }
-
-        private bool IsActorTagVisible()
-        {
-            try
-            {
-                if (uiActorTag != null && uiActorTag.Visible)
-                    return true;
-
-                if (uiActorTags != null)
-                {
-                    foreach (var tag in uiActorTags)
-                    {
-                        if (tag != null && tag.Visible)
-                            return true;
-                    }
-                }
-            }
-            catch
-            {
-            }
-
-            return false;
-        }
-
         private string GetVisibleActorTagsDebug()
         {
             try
@@ -2362,38 +2236,77 @@ namespace Turbo.Plugins.s7o
 
             return false;
         }
-
-        private bool IsFortressPortalHoverConfirmed()
+        private class FortressNativeCandidate
         {
-            // Strongest native confirmation: the HUD selected actor under the cursor is the portal.
-            if (IsSelectedPortalActor())
-                return true;
-
-            // Weaker fallback: native actor tag became visible while hovering the known fortress mask region.
-            // This is useful if SelectedActor is unreliable on this portal variant.
-            if (AllowFortressActorTagHoverFallback && IsActorTagVisible())
-                return true;
-
-            return false;
+            public string Label;
+            public int X;
+            public int Y;
+            public int RawX;
+            public int RawY;
+            public IWorldCoordinate WorldCoordinate;
+            public double Distance;
+            public int Order;
         }
 
-        private bool GetFortressMaskPoint(bool useRightMask, out int x, out int y)
+        private void ResetFortressNativeProbeState()
+        {
+            _fortressNativeProbeActive = false;
+            _fortressNativeProbeAttempts = 0;
+            _fortressNativeProbeX = 0;
+            _fortressNativeProbeY = 0;
+            _fortressNativeProbeRawX = 0;
+            _fortressNativeProbeRawY = 0;
+            _fortressNativeProbeLabel = string.Empty;
+            _fortressNativeCandidateSummary = string.Empty;
+        }
+
+        private bool IsFortressNativePortalHoverConfirmed()
+        {
+            // Fortress native return uses strict selected-actor confirmation before clicking.
+            return IsSelectedPortalActor();
+        }
+
+        private int ClampScreenX(int x)
+        {
+            int width = Hud.Window.Size.Width;
+            if (width <= 8)
+                return x;
+
+            if (x < 3) return 3;
+            if (x > width - 4) return width - 4;
+            return x;
+        }
+
+        private int ClampScreenY(int y)
+        {
+            int height = Hud.Window.Size.Height;
+            if (height <= 8)
+                return y;
+
+            if (y < 3) return 3;
+            if (y > height - 4) return height - 4;
+            return y;
+        }
+
+        private bool TryClampScreenPoint(float rawX, float rawY, out int x, out int y)
         {
             x = 0;
             y = 0;
 
             try
             {
-                int width = Hud.Window.Size.Width;
-                int height = Hud.Window.Size.Height;
+                if (Hud.Window == null || Hud.Window.Size.Width <= 8 || Hud.Window.Size.Height <= 8)
+                    return false;
 
-                float xFrac = useRightMask ? FortressRightMaskXFraction : FortressLeftMaskXFraction;
-                float yFrac = useRightMask ? FortressRightMaskYFraction : FortressLeftMaskYFraction;
+                if (float.IsNaN(rawX) || float.IsNaN(rawY) || float.IsInfinity(rawX) || float.IsInfinity(rawY))
+                    return false;
 
-                x = (int)Math.Round(width * xFrac);
-                y = (int)Math.Round(height * yFrac);
+                int rx = (int)Math.Round(rawX);
+                int ry = (int)Math.Round(rawY);
 
-                return IsInsideWindow(x, y);
+                x = ClampScreenX(rx);
+                y = ClampScreenY(ry);
+                return true;
             }
             catch
             {
@@ -2401,202 +2314,283 @@ namespace Turbo.Plugins.s7o
             }
         }
 
-        private bool TryGetFortressPortalSideFromScene(out bool useRightMask)
+        private void AddFortressNativeScreenCandidates(
+            List<FortressNativeCandidate> candidates,
+            HashSet<string> usedPoints,
+            string label,
+            IScreenCoordinate sc,
+            IWorldCoordinate worldCoordinate,
+            double distance)
         {
-            useRightMask = false;
-
-            string scene = GetCurrentSceneCode();
-            if (string.IsNullOrEmpty(scene))
-                return false;
-
-            // Debug data confirmed:
-            // x1_fortress_n_entrance_01 uses the left/top-left mask point.
-            if (scene.StartsWith("x1_fortress_n_entrance", StringComparison.OrdinalIgnoreCase))
-            {
-                useRightMask = false;
-                return true;
-            }
-
-            // Debug data confirmed:
-            // x1_fortress_w_entrance_01 uses the right/top-right mask point.
-            if (scene.StartsWith("x1_fortress_w_entrance", StringComparison.OrdinalIgnoreCase))
-            {
-                useRightMask = true;
-                return true;
-            }
-
-            return false;
-        }
-
-        private bool GetFortressPreferredMaskSide(out bool preferredRight)
-        {
-            preferredRight = false;
-
-            if (!IsCurrentFortressScene())
-                return false;
-
-            // Best signal: deterministic scene-code mapping.
-            // x1_fortress_n_entrance -> LEFT first.
-            // x1_fortress_w_entrance -> RIGHT first.
-            if (TryGetFortressPortalSideFromScene(out preferredRight))
-                return true;
-
-            int width = Hud.Window.Size.Width;
+            if (candidates == null || usedPoints == null || sc == null)
+                return;
 
             try
             {
-                var townPortal = Hud.Game.Portals
-                    .Where(p => p != null &&
-                                p.TargetArea != null &&
-                                p.TargetArea.IsTown)
-                    .OrderBy(p => p.CentralXyDistanceToMe)
-                    .FirstOrDefault();
+                int rawX = (int)Math.Round(sc.X);
+                int rawY = (int)Math.Round(sc.Y);
 
-                if (townPortal != null && townPortal.ScreenCoordinate != null)
+                foreach (int offsetY in FortressNativeYOffsetPixels)
                 {
-                    preferredRight = townPortal.ScreenCoordinate.X >= width * FortressSideSplitXFraction;
-                    return true;
-                }
-            }
-            catch
-            {
-            }
+                    int shiftedRawY = rawY + offsetY;
+                    int x;
+                    int y;
 
-            try
-            {
-                var portalActor = FindFortressBluePortalActor();
-                if (portalActor != null && portalActor.ScreenCoordinate != null)
-                {
-                    preferredRight = portalActor.ScreenCoordinate.X >= width * FortressSideSplitXFraction;
-                    return true;
-                }
-            }
-            catch
-            {
-            }
+                    if (!TryClampScreenPoint(rawX, shiftedRawY, out x, out y))
+                        continue;
 
-            return false;
-        }
+                    string key = x.ToString() + ":" + y.ToString();
+                    if (usedPoints.Contains(key))
+                        continue;
 
-        private bool GetFortressMaskSideForProbe()
-        {
-            bool preferredRight;
+                    usedPoints.Add(key);
 
-            if (!GetFortressPreferredMaskSide(out preferredRight))
-            {
-                // Unknown variant: start left, then alternate.
-                preferredRight = false;
-            }
+                    string offsetText = offsetY == 0
+                        ? string.Empty
+                        : (offsetY > 0 ? " y+" : " y") + offsetY.ToString();
 
-            // Use the current completed-probe count before incrementing:
-            // 0 = preferred, 1 = opposite, 2 = preferred, 3 = opposite.
-            if ((_fortressMaskClickAttempts % 2) == 1)
-                return !preferredRight;
-
-            return preferredRight;
-        }
-
-        private bool TryFortressEmergencyTownPortalFallback()
-        {
-            if (!EnableFortressEmergencyTownPortalFallback)
-                return false;
-
-            if (!IsCurrentFortressScene())
-                return false;
-
-            if (IsInTown())
-                return false;
-
-            if (_fortressMaskClickWatch == null || !_fortressMaskClickWatch.IsRunning)
-                return false;
-
-            if (_fortressMaskClickWatch.ElapsedMilliseconds < FortressEmergencyTownPortalAfterMs)
-                return false;
-
-            if (_fortressMaskClickAttempts < FortressMinimumHoverProbesBeforeTownPortal)
-                return false;
-
-            // If a Town Portal channel has started, do not move/click and interrupt it.
-            if (_fortressEmergencyTownPortalActive)
-            {
-                if (_fortressEmergencyTownPortalWatch != null &&
-                    _fortressEmergencyTownPortalWatch.IsRunning &&
-                    _fortressEmergencyTownPortalWatch.ElapsedMilliseconds < FortressEmergencyTownPortalChannelMs)
-                {
-                    _status = "Fortress town portal fallback";
-                    UpdateFortressPortalDebug("fortress town portal channeling");
-                    return true;
-                }
-
-                // Channel window elapsed and we are still not in town. Allow another fallback attempt.
-                _fortressEmergencyTownPortalActive = false;
-            }
-
-            if (!GlobalInputReady())
-                return false;
-
-            bool pressed = FreeHudInput.PressTownPortal();
-            if (pressed)
-            {
-                MarkGlobalInput();
-
-                _fortressEmergencyTownPortalActive = true;
-                _fortressEmergencyTownPortalAttempts++;
-
-                if (_fortressEmergencyTownPortalWatch != null)
-                    _fortressEmergencyTownPortalWatch.Restart();
-
-                _status = "Fortress town portal fallback";
-                UpdateFortressPortalDebug("fortress town portal fallback");
-                LogFortressDebug("fortress town portal fallback", true);
-
-                // Return true to tell the fortress fallback caller that recovery handling is active.
-                // The outer state should not attempt more portal clicks while this channel window is active.
-                return true;
-            }
-
-            return false;
-        }
-
-        private bool TryFortressMaskFallback()
-        {
-            // Fortress fallback is intentionally fortress-only.
-            // Normal maps must use the standard portal paths and should never surface fortress status text.
-            if (!IsCurrentFortressScene())
-                return false;
-
-            if (!FortressMaskFallbackReady())
-            {
-                _status = "Fortress not ready: " + _lastFortressReadyReason;
-                UpdateFortressPortalDebug("fortress not ready: " + _lastFortressReadyReason);
-                LogFortressDebug("FortressMaskFallbackReady=false");
-                return false;
-            }
-
-            try
-            {
-                // If emergency Town Portal recovery is active, do not move/click and interrupt it.
-                if (TryFortressEmergencyTownPortalFallback())
-                    return true;
-
-                // Phase 1: a probe is already active; wait briefly, then confirm before clicking.
-                if (_fortressMaskProbeActive)
-                {
-                    if (_fortressMaskHoverWatch != null &&
-                        _fortressMaskHoverWatch.IsRunning &&
-                        _fortressMaskHoverWatch.ElapsedMilliseconds < FortressMaskHoverConfirmMs)
+                    candidates.Add(new FortressNativeCandidate
                     {
-                        _status = _fortressMaskProbeRight
-                            ? "Fortress hover R"
-                            : "Fortress hover L";
+                        Label = label + offsetText,
+                        X = x,
+                        Y = y,
+                        RawX = rawX,
+                        RawY = shiftedRawY,
+                        WorldCoordinate = worldCoordinate,
+                        Distance = distance,
+                        Order = candidates.Count
+                    });
+                }
+            }
+            catch
+            {
+            }
+        }
 
-                        UpdateFortressPortalDebug(_status, _fortressMaskProbeX, _fortressMaskProbeY);
+        private void AddFortressNativeWorldCandidates(
+            List<FortressNativeCandidate> candidates,
+            HashSet<string> usedPoints,
+            string label,
+            IWorldCoordinate worldCoordinate,
+            double distance)
+        {
+            if (worldCoordinate == null || !worldCoordinate.IsValid)
+                return;
+
+            try
+            {
+                var sc = worldCoordinate.ToScreenCoordinate(false, true);
+                AddFortressNativeScreenCandidates(candidates, usedPoints, label, sc, worldCoordinate, distance);
+            }
+            catch
+            {
+            }
+        }
+
+        private bool IsFortressPortalMarkerCandidate(IMarker marker)
+        {
+            if (marker == null || marker.SnoActor == null)
+                return false;
+
+            try
+            {
+                int sno = (int)marker.SnoActor.Sno;
+                if (RiftExitPortalActorSnos.Contains(sno))
+                    return true;
+
+                string code = marker.SnoActor.Code;
+                if (string.IsNullOrEmpty(code))
+                    return false;
+
+                bool isPortal = code.IndexOf("Portal", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                code.IndexOf("g_Portal", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                code.IndexOf("g_portal", StringComparison.OrdinalIgnoreCase) >= 0;
+
+                if (!isPortal)
+                    return false;
+
+                if (code.IndexOf("TownPortal", StringComparison.OrdinalIgnoreCase) >= 0)
+                    return false;
+
+                return code.IndexOf("Blue", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       code.IndexOf("Orange", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private string GetMarkerCode(IMarker marker)
+        {
+            try
+            {
+                return marker != null && marker.SnoActor != null && marker.SnoActor.Code != null
+                    ? marker.SnoActor.Code
+                    : string.Empty;
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+
+        private int GetMarkerSno(IMarker marker)
+        {
+            try
+            {
+                return marker != null && marker.SnoActor != null
+                    ? (int)marker.SnoActor.Sno
+                    : 0;
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        private double DistanceFromMe(IWorldCoordinate coordinate)
+        {
+            try
+            {
+                if (Hud.Game.Me == null || Hud.Game.Me.FloorCoordinate == null || coordinate == null || !coordinate.IsValid)
+                    return 99999.0d;
+
+                return Hud.Game.Me.FloorCoordinate.XYDistanceTo(coordinate);
+            }
+            catch
+            {
+                return 99999.0d;
+            }
+        }
+
+        private List<FortressNativeCandidate> BuildFortressNativeCandidates()
+        {
+            var candidates = new List<FortressNativeCandidate>();
+            var usedPoints = new HashSet<string>();
+
+            try
+            {
+                foreach (var portal in Hud.Game.Portals
+                    .Where(p => p != null && p.TargetArea != null && p.TargetArea.IsTown)
+                    .Where(p => p.CentralXyDistanceToMe < PortalClickMaxDistance)
+                    .OrderBy(p => p.CentralXyDistanceToMe)
+                    .Take(4))
+                {
+                    string code = GetActorCode(portal);
+                    if (string.IsNullOrEmpty(code)) code = "portal";
+                    string prefix = "portal:" + code;
+                    double dist = portal.CentralXyDistanceToMe;
+
+                    AddFortressNativeScreenCandidates(candidates, usedPoints, prefix + ":screen", portal.ScreenCoordinate, portal.FloorCoordinate, dist);
+                    AddFortressNativeWorldCandidates(candidates, usedPoints, prefix + ":collision", portal.CollisionCoordinate, dist);
+                    AddFortressNativeWorldCandidates(candidates, usedPoints, prefix + ":floor", portal.FloorCoordinate, dist);
+                }
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                foreach (var actor in Hud.Game.Actors
+                    .Where(a => a != null && a.SnoActor != null && IsLikelyRiftExitPortalActor(a))
+                    .OrderBy(a => a.NormalizedXyDistanceToMe)
+                    .Take(8))
+                {
+                    string code = GetActorCode(actor);
+                    if (string.IsNullOrEmpty(code)) code = "actor";
+                    string prefix = "actor:" + code;
+                    double dist = actor.NormalizedXyDistanceToMe;
+
+                    AddFortressNativeScreenCandidates(candidates, usedPoints, prefix + ":screen", actor.ScreenCoordinate, actor.FloorCoordinate, dist);
+                    AddFortressNativeWorldCandidates(candidates, usedPoints, prefix + ":collision", actor.CollisionCoordinate, dist);
+                    AddFortressNativeWorldCandidates(candidates, usedPoints, prefix + ":floor", actor.FloorCoordinate, dist);
+                }
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                foreach (var marker in Hud.Game.Markers
+                    .Where(m => m != null && IsFortressPortalMarkerCandidate(m))
+                    .Take(8))
+                {
+                    string code = GetMarkerCode(marker);
+                    if (string.IsNullOrEmpty(code)) code = "marker";
+                    string prefix = "marker:" + code;
+                    double dist = DistanceFromMe(marker.FloorCoordinate);
+
+                    AddFortressNativeWorldCandidates(candidates, usedPoints, prefix + ":floor", marker.FloorCoordinate, dist);
+                }
+            }
+            catch
+            {
+            }
+
+            candidates = candidates
+                .OrderBy(c => c.Distance)
+                .ThenBy(c => c.Order)
+                .ToList();
+
+            _fortressNativeCandidateSummary = GetFortressNativeCandidateSummary(candidates);
+            return candidates;
+        }
+
+        private string GetFortressNativeCandidateSummary(List<FortressNativeCandidate> candidates)
+        {
+            try
+            {
+                if (candidates == null || candidates.Count == 0)
+                    return "nativeCandidates=none";
+
+                int limit = Math.Max(1, FortressNativeCandidateLogLimit);
+                var parts = new List<string>();
+
+                for (int i = 0; i < candidates.Count && i < limit; i++)
+                {
+                    var c = candidates[i];
+                    parts.Add(i.ToString() + ":" + c.Label +
+                              " raw=(" + c.RawX.ToString() + "," + c.RawY.ToString() + ")" +
+                              " click=(" + c.X.ToString() + "," + c.Y.ToString() + ")" +
+                              " dist=" + c.Distance.ToString("0.0"));
+                }
+
+                if (candidates.Count > limit)
+                    parts.Add("... +" + (candidates.Count - limit).ToString() + " more");
+
+                return "nativeCandidates=" + string.Join(" | ", parts.ToArray());
+            }
+            catch
+            {
+                return "nativeCandidates=err";
+            }
+        }
+
+        private bool TryFortressNativeReturn()
+        {
+            if (!EnableFortressNativeReturn)
+                return false;
+
+            if (!IsCurrentFortressScene() || IsTownContext())
+                return false;
+
+            try
+            {
+                if (_fortressNativeProbeActive)
+                {
+                    if (_fortressNativeHoverWatch != null &&
+                        _fortressNativeHoverWatch.IsRunning &&
+                        _fortressNativeHoverWatch.ElapsedMilliseconds < FortressNativeHoverConfirmMs)
+                    {
+                        _status = "Fortress native hover: " + _fortressNativeProbeLabel;
+                        UpdateFortressPortalDebug(_status, _fortressNativeProbeX, _fortressNativeProbeY);
                         return false;
                     }
 
-                    bool confirmed = IsFortressPortalHoverConfirmed();
-
-                    if (confirmed)
+                    if (IsFortressNativePortalHoverConfirmed())
                     {
                         if (!GlobalInputReady())
                             return false;
@@ -2605,119 +2599,107 @@ namespace Turbo.Plugins.s7o
                         if (clicked)
                         {
                             MarkGlobalInput();
-
-                            _fortressMaskClickAttempts++;
-
-                            if (_fortressMaskRetryWatch != null)
-                                _fortressMaskRetryWatch.Restart();
-
-                            _fortressMaskProbeActive = false;
-
-                            if (_fortressMaskHoverWatch != null)
-                                _fortressMaskHoverWatch.Stop();
-
-                            _status = _fortressMaskProbeRight
-                                ? "Fortress portal confirmed R"
-                                : "Fortress portal confirmed L";
-
-                            UpdateFortressPortalDebug(_status, _fortressMaskProbeX, _fortressMaskProbeY);
+                            _status = "Fortress native confirmed: " + _fortressNativeProbeLabel;
+                            UpdateFortressPortalDebug(_status, _fortressNativeProbeX, _fortressNativeProbeY);
                             LogFortressDebug(_status, true);
-
+                            ResetFortressNativeProbeState();
                             return true;
                         }
 
                         return false;
                     }
 
-                    // Hover did not confirm. Do not blind click.
-                    _fortressMaskClickAttempts++;
-
-                    if (_fortressMaskRetryWatch != null)
-                        _fortressMaskRetryWatch.Restart();
-
-                    _status = _fortressMaskProbeRight
-                        ? "Fortress hover miss R"
-                        : "Fortress hover miss L";
-
-                    UpdateFortressPortalDebug(_status, _fortressMaskProbeX, _fortressMaskProbeY);
+                    _fortressNativeProbeAttempts++;
+                    _status = "Fortress native miss: " + _fortressNativeProbeLabel;
+                    UpdateFortressPortalDebug(_status, _fortressNativeProbeX, _fortressNativeProbeY);
                     LogFortressDebug(_status, true);
 
-                    _fortressMaskProbeActive = false;
+                    _fortressNativeProbeActive = false;
+                    _fortressNativeProbeLabel = string.Empty;
 
-                    if (_fortressMaskHoverWatch != null)
-                        _fortressMaskHoverWatch.Stop();
+                    if (_fortressNativeHoverWatch != null)
+                        _fortressNativeHoverWatch.Stop();
 
-                    // After a miss, immediately allow the emergency path to start if enough time/probes elapsed.
-                    if (TryFortressEmergencyTownPortalFallback())
-                        return true;
+                    if (_fortressNativeRetryWatch != null)
+                        _fortressNativeRetryWatch.Restart();
 
                     return false;
                 }
 
-                // Phase 2: start a new hover probe. No click yet.
-                bool useRightMask = GetFortressMaskSideForProbe();
-
-                int x;
-                int y;
-
-                if (!GetFortressMaskPoint(useRightMask, out x, out y))
+                if (_fortressNativeRetryWatch != null &&
+                    _fortressNativeRetryWatch.IsRunning &&
+                    _fortressNativeRetryWatch.ElapsedMilliseconds < FortressNativeRetryMs)
                 {
-                    _status = "Fortress mask point invalid";
+                    return false;
+                }
+
+                var candidates = BuildFortressNativeCandidates();
+                if (candidates == null || candidates.Count == 0)
+                {
+                    _fortressNativeProbeAttempts++;
+                    _status = "Fortress native: no candidates";
                     UpdateFortressPortalDebug(_status);
                     LogFortressDebug(_status, true);
+
+                    if (_fortressNativeRetryWatch != null)
+                        _fortressNativeRetryWatch.Restart();
+
                     return false;
                 }
+
+                int index = _fortressNativeProbeAttempts % candidates.Count;
+                var candidate = candidates[index];
+
+                if (candidate == null)
+                    return false;
 
                 if (!GlobalInputReady())
                     return false;
 
-                bool moved = FreeHudInput.MoveMouse(x, y);
+                bool moved = FreeHudInput.MoveMouse(candidate.X, candidate.Y);
                 if (moved)
                 {
                     MarkGlobalInput();
 
-                    _fortressMaskProbeActive = true;
-                    _fortressMaskProbeRight = useRightMask;
-                    _fortressMaskProbeX = x;
-                    _fortressMaskProbeY = y;
+                    _fortressNativeProbeActive = true;
+                    _fortressNativeProbeX = candidate.X;
+                    _fortressNativeProbeY = candidate.Y;
+                    _fortressNativeProbeRawX = candidate.RawX;
+                    _fortressNativeProbeRawY = candidate.RawY;
+                    _fortressNativeProbeLabel = candidate.Label;
 
-                    if (_fortressMaskHoverWatch != null)
-                        _fortressMaskHoverWatch.Restart();
+                    if (_fortressNativeHoverWatch != null)
+                        _fortressNativeHoverWatch.Restart();
 
-                    _status = useRightMask
-                        ? "Fortress hover R"
-                        : "Fortress hover L";
-
-                    UpdateFortressPortalDebug(_status, x, y);
+                    _status = "Fortress native hover: " + candidate.Label;
+                    UpdateFortressPortalDebug(_status, candidate.X, candidate.Y);
                     LogFortressDebug(_status, true);
-
-                    return false;
                 }
             }
             catch
             {
-                _fortressMaskProbeActive = false;
-                UpdateFortressPortalDebug("fortress hover-confirm failed");
-                LogFortressDebug("fortress hover-confirm failed", true);
-                return false;
+                _status = "Fortress native exception";
+                _fortressNativeProbeActive = false;
+                UpdateFortressPortalDebug(_status);
+                LogFortressDebug(_status, true);
             }
 
             return false;
         }
-
         private bool ClickRiftExitPortal()
         {
             if (IsInTown())
                 return false;
 
             if (IsCurrentFortressScene())
-                LogFortressDebug("ClickRiftExitPortal start", true);
-
-            if (EnableFortressMaskFallback && IsCurrentFortressScene())
             {
-                // x1_fortress portal ScreenCoordinate is unreliable on tall blue arch variants.
-                // Use deterministic mask points with native hover confirmation instead of actor-projected clicks.
-                return TryFortressMaskFallback();
+                LogFortressDebug("ClickRiftExitPortal fortress");
+
+                if (EnableFortressNativeReturn && TryFortressNativeReturn())
+                    return true;
+
+                UpdateFortressPortalDebug("fortress native pending");
+                return false;
             }
 
             try
@@ -2864,12 +2846,8 @@ namespace Turbo.Plugins.s7o
             {
             }
 
-            UpdateFortressPortalDebug("normal portal click failed");
-            LogFortressDebug("normal portal click failed", true);
-
             return false;
         }
-
         private void LogFortressDebug(string phase, bool force = false)
         {
             if (!EnableFortressFileDebug)
@@ -2895,15 +2873,15 @@ namespace Turbo.Plugins.s7o
                     "state=" + _state.ToString() +
                     " status=" + _status +
                     " inTown=" + IsInTown().ToString() +
+                    " townContext=" + IsTownContext().ToString() +
                     " inGR=" + IsInGreaterRift().ToString() +
                     " specialArea=" + SafeSpecialAreaText() + "\r\n" +
                     "sceneCode=" + GetCurrentSceneCode() + "\r\n" +
                     GetFortressSceneDebugText() + "\r\n" +
-                    "readyReason=" + _lastFortressReadyReason +
-                    " attempts=" + _fortressMaskClickAttempts.ToString() +
-                    " probeActive=" + _fortressMaskProbeActive.ToString() +
-                    " probeRight=" + _fortressMaskProbeRight.ToString() +
-                    " probeXY=(" + _fortressMaskProbeX.ToString() + "," + _fortressMaskProbeY.ToString() + ")\r\n" +
+                    "nativeAttempts=" + _fortressNativeProbeAttempts.ToString() +
+                    " nativeActive=" + _fortressNativeProbeActive.ToString() +
+                    " nativeLabel=" + _fortressNativeProbeLabel +
+                    " nativeRaw=(" + _fortressNativeProbeRawX.ToString() + "," + _fortressNativeProbeRawY.ToString() + ")\r\n" +
                     "cursor=(" + Hud.Window.CursorX.ToString() + "," + Hud.Window.CursorY.ToString() + ")\r\n" +
                     "selected=" + GetSelectedActorDebug() + "\r\n" +
                     GetVisibleActorTagsDebug() + "\r\n" +
@@ -3284,7 +3262,6 @@ namespace Turbo.Plugins.s7o
             private const int SM_CYSCREEN = 1;
 
             private const ushort VK_ESCAPE = 0x1B;
-            private const ushort VK_T = 0x54;
 
             [StructLayout(LayoutKind.Sequential)]
             private struct INPUT
@@ -3385,11 +3362,6 @@ namespace Turbo.Plugins.s7o
             public static bool PressEscape()
             {
                 return SendKeyPress(VK_ESCAPE);
-            }
-
-            public static bool PressTownPortal()
-            {
-                return SendKeyPress(VK_T);
             }
 
             private static bool SendKeyPress(ushort vk)
