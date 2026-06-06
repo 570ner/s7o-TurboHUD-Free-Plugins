@@ -1722,7 +1722,7 @@ namespace Turbo.Plugins.s7o
                 return;
 
             var snapshot = CloneLegendaryGemDisplayInfos(gems);
-            foreach (var key in GetPortraitHoverPlayerCacheKeys(player))
+            foreach (var key in GetLegendaryGemCacheKeys(player))
                 _legendaryGemInfoCache[key] = CloneLegendaryGemDisplayInfos(snapshot);
         }
 
@@ -1733,7 +1733,7 @@ namespace Turbo.Plugins.s7o
             if (player == null)
                 return empty;
 
-            foreach (var key in GetPortraitHoverPlayerCacheKeys(player))
+            foreach (var key in GetLegendaryGemCacheKeys(player))
             {
                 List<LegendaryGemDisplayInfo> cached;
                 if (!string.IsNullOrEmpty(key) && _legendaryGemInfoCache.TryGetValue(key, out cached) && cached != null && cached.Count > 0)
@@ -1741,6 +1741,52 @@ namespace Turbo.Plugins.s7o
             }
 
             return empty;
+        }
+
+        private IEnumerable<string> GetLegendaryGemCacheKeys(IPlayer player)
+        {
+            List<string> keys = new List<string>();
+
+            if (player == null)
+                return keys;
+
+            try
+            {
+                if (player.HeroId != 0)
+                    AddPortraitHoverCacheKey(keys, "hero:" + player.HeroId.ToString(CultureInfo.InvariantCulture));
+            }
+            catch
+            {
+            }
+
+            string heroName = string.Empty;
+            try
+            {
+                if (!string.IsNullOrEmpty(player.HeroName))
+                    heroName = NormalizePortraitHoverCacheText(player.HeroName);
+            }
+            catch
+            {
+                heroName = string.Empty;
+            }
+
+            try
+            {
+                if (!string.IsNullOrEmpty(player.BattleTagAbovePortrait) && !string.IsNullOrEmpty(heroName))
+                {
+                    string raw = player.BattleTagAbovePortrait.Trim();
+                    AddPortraitHoverCacheKey(keys, "bthero:" + NormalizePortraitHoverCacheText(raw) + "|" + heroName);
+
+                    string account = ExtractPortraitAccountName(raw);
+                    if (!string.IsNullOrEmpty(account))
+                        AddPortraitHoverCacheKey(keys, "accthero:" + NormalizePortraitHoverCacheText(account) + "|" + heroName);
+                }
+            }
+            catch
+            {
+            }
+
+            return keys;
         }
 
         private List<LegendaryGemDisplayInfo> CloneLegendaryGemDisplayInfos(IEnumerable<LegendaryGemDisplayInfo> source)
@@ -1760,9 +1806,9 @@ namespace Turbo.Plugins.s7o
                     Name = gem.Name,
                     ShortName = gem.ShortName,
                     SnoItem = gem.SnoItem,
-                    Primary = gem.Primary,
-                    Secondary = gem.Secondary,
-                    DisplayBuff = gem.DisplayBuff
+                    Primary = null,
+                    Secondary = null,
+                    DisplayBuff = null
                 });
             }
 
@@ -1845,10 +1891,14 @@ namespace Turbo.Plugins.s7o
             if (buff == null || buff.SnoPower == null)
                 return false;
 
-            // For remote party players, UsedLegendaryGems is the best available
-            // equipment signal. Passive gems may not expose Active/IconCounts
-            // reliably, so accept any buff that has a valid SnoPower.
-            return true;
+            try
+            {
+                return buff.Active;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         // -----------------------------------------------------------------------
