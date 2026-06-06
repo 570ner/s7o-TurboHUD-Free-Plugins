@@ -390,7 +390,7 @@ namespace Turbo.Plugins.s7o
             if (Hud.Game.IsPaused) { reason = "paused"; return false; }
             if (Hud.Game.IsInTown && !allowTown) { reason = "in town"; return false; }
             if (Hud.Window == null || !Hud.Window.IsForeground) { reason = "window not foreground"; return false; }
-            if (Hud.Render == null || Hud.Render.MinimapUiElement == null || !Hud.Render.MinimapUiElement.Visible) { reason = "minimap hidden"; return false; }
+            if (Hud.Render == null || Hud.Render.MinimapUiElement == null || !IsUiVisible(Hud.Render.MinimapUiElement)) { reason = "minimap hidden"; return false; }
 
             var me = Hud.Game.Me;
             if (me.IsDead || me.IsDeadSafeCheck || me.Defense == null || me.Powers == null || me.Stats == null)
@@ -424,19 +424,15 @@ namespace Turbo.Plugins.s7o
         {
             try
             {
-                if (Hud == null || Hud.Game == null || Hud.Render == null)
+                if (Hud == null || Hud.Game == null)
                     return;
 
-                if (Hud.Render.ActMapUiElement != null && Hud.Render.ActMapUiElement.Visible)
+                var mapMode = Hud.Game.MapMode;
+
+                if (mapMode == MapMode.ActMap)
                     _lastActMapVisibleTick = now;
 
-                if (Hud.Render.WorldMapUiElement != null && Hud.Render.WorldMapUiElement.Visible)
-                    _lastWorldMapVisibleTick = now;
-
-                if (Hud.Game.MapMode == MapMode.ActMap)
-                    _lastActMapVisibleTick = now;
-
-                if (Hud.Game.MapMode == MapMode.Map || Hud.Game.MapMode == MapMode.PermaMap || Hud.Game.MapMode == MapMode.WaypointMap)
+                if (mapMode == MapMode.Map || mapMode == MapMode.PermaMap || mapMode == MapMode.WaypointMap)
                     _lastWorldMapVisibleTick = now;
             }
             catch
@@ -493,9 +489,13 @@ namespace Turbo.Plugins.s7o
 
         private bool IsUiVisible(IUiElement ui)
         {
+            if (ui == null)
+                return false;
+
             try
             {
-                return ui != null && ui.Visible;
+                ui.Refresh();
+                return ui.Visible;
             }
             catch
             {
@@ -1631,6 +1631,54 @@ namespace Turbo.Plugins.s7o
             _lastGlobalCastTick = now;
         }
 
+        public ushort GetCastVirtualKey(ActionKey actionKey)
+        {
+            switch (actionKey)
+            {
+                case ActionKey.Skill1: return Skill1VirtualKey;
+                case ActionKey.Skill2: return Skill2VirtualKey;
+                case ActionKey.Skill3: return Skill3VirtualKey;
+                case ActionKey.Skill4: return Skill4VirtualKey;
+                case ActionKey.Heal: return HealVirtualKey;
+                default: return 0;
+            }
+        }
+
+        public bool SetCastVirtualKey(ActionKey actionKey, ushort virtualKey)
+        {
+            if (virtualKey == 0)
+                return false;
+
+            switch (actionKey)
+            {
+                case ActionKey.Skill1:
+                    Skill1VirtualKey = virtualKey;
+                    break;
+
+                case ActionKey.Skill2:
+                    Skill2VirtualKey = virtualKey;
+                    break;
+
+                case ActionKey.Skill3:
+                    Skill3VirtualKey = virtualKey;
+                    break;
+
+                case ActionKey.Skill4:
+                    Skill4VirtualKey = virtualKey;
+                    break;
+
+                case ActionKey.Heal:
+                    HealVirtualKey = virtualKey;
+                    break;
+
+                default:
+                    return false;
+            }
+
+            SaveUserSettings();
+            return true;
+        }
+
         #endregion
 
         #region Input Layer
@@ -2007,7 +2055,7 @@ namespace Turbo.Plugins.s7o
                     string key = line.Substring(0, sep).Trim();
                     string value = line.Substring(sep + 1).Trim();
 
-                    TryApplyBoolSetting(key, value);
+                    TryApplySetting(key, value);
                 }
 
                 LogDebug("Loaded settings from " + readPath);
@@ -2046,6 +2094,11 @@ namespace Turbo.Plugins.s7o
                 sb.AppendLine("AllowBuffUpkeepInTown=" + AllowBuffUpkeepInTown.ToString(CultureInfo.InvariantCulture));
                 sb.AppendLine("BlockLeftSkillOnSelectedClickableActor=" + BlockLeftSkillOnSelectedClickableActor.ToString(CultureInfo.InvariantCulture));
                 sb.AppendLine("DebugLogging=" + DebugLogging.ToString(CultureInfo.InvariantCulture));
+                sb.AppendLine("Skill1VirtualKey=" + Skill1VirtualKey.ToString(CultureInfo.InvariantCulture));
+                sb.AppendLine("Skill2VirtualKey=" + Skill2VirtualKey.ToString(CultureInfo.InvariantCulture));
+                sb.AppendLine("Skill3VirtualKey=" + Skill3VirtualKey.ToString(CultureInfo.InvariantCulture));
+                sb.AppendLine("Skill4VirtualKey=" + Skill4VirtualKey.ToString(CultureInfo.InvariantCulture));
+                sb.AppendLine("HealVirtualKey=" + HealVirtualKey.ToString(CultureInfo.InvariantCulture));
 
                 for (int i = 0; i < _enabledSlots.Length; i++)
                     sb.AppendLine("Slot" + i.ToString(CultureInfo.InvariantCulture) + "=" + _enabledSlots[i].ToString(CultureInfo.InvariantCulture));
@@ -2078,6 +2131,81 @@ namespace Turbo.Plugins.s7o
             {
                 LogDebug("Save settings failed: " + ex.Message);
             }
+        }
+
+        private void TryApplySetting(string key, string value)
+        {
+            if (TryApplyVirtualKeySetting(key, value))
+                return;
+
+            TryApplyBoolSetting(key, value);
+        }
+
+        private bool TryApplyVirtualKeySetting(string key, string value)
+        {
+            ushort parsed;
+            if (!TryParseVirtualKey(value, out parsed))
+                return false;
+
+            if (StringEquals(key, "Skill1VirtualKey"))
+            {
+                Skill1VirtualKey = parsed;
+                return true;
+            }
+
+            if (StringEquals(key, "Skill2VirtualKey"))
+            {
+                Skill2VirtualKey = parsed;
+                return true;
+            }
+
+            if (StringEquals(key, "Skill3VirtualKey"))
+            {
+                Skill3VirtualKey = parsed;
+                return true;
+            }
+
+            if (StringEquals(key, "Skill4VirtualKey"))
+            {
+                Skill4VirtualKey = parsed;
+                return true;
+            }
+
+            if (StringEquals(key, "HealVirtualKey"))
+            {
+                HealVirtualKey = parsed;
+                return true;
+            }
+
+            return false;
+        }
+
+        private bool TryParseVirtualKey(string value, out ushort result)
+        {
+            result = 0;
+
+            if (string.IsNullOrWhiteSpace(value))
+                return false;
+
+            value = value.Trim();
+
+            int parsed;
+            if (value.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!int.TryParse(value.Substring(2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out parsed))
+                    return false;
+            }
+            else
+            {
+                if (!int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out parsed))
+                    return false;
+            }
+
+            if (parsed < 0 || parsed > ushort.MaxValue)
+                return false;
+
+            result = (ushort)parsed;
+            return true;
         }
 
         private void TryApplyBoolSetting(string key, string value)
