@@ -349,6 +349,41 @@ namespace Turbo.Plugins.s7o
         private bool _partyInspectorHotkeyCapture = false;
         private Key _partyInspectorHotkey = Key.F12;
 
+        // ── VISUAL / Tips Helper ─────────────────────────────────────────────────────
+        private bool _visTipsHelperEnabled = true;
+        private bool _visTipsHelperExpanded = false;
+        private bool _tipsPrimalEnabled = true;
+        private bool _tipsPrimalArrows = true;
+        private bool _tipsPrimalText = true;
+        private int _tipsPrimalTextColorIdx = 0;
+        private int _tipsPrimalTextTone = 5;
+        private float _tipsPrimalTextSize = 9.0f;
+        private int _tipsPrimalDurationSec = 5;
+        private bool _tipsAncientEnabled = true;
+        private bool _tipsAncientArrows = true;
+        private bool _tipsAncientText = true;
+        private int _tipsAncientTextColorIdx = 5;
+        private int _tipsAncientTextTone = 5;
+        private float _tipsAncientTextSize = 9.0f;
+        private int _tipsAncientDurationSec = 5;
+        private bool _tipsHealthGlobes = true;
+        private bool _tipsProgressOrbs = true;
+        private float _tipsHealthDotSize = 0.80f;
+        private float _tipsProgressDotSize = 1.05f;
+        private bool _tipsPlayerMarkers = true;
+        private bool _tipsPlayerMarkerHotkeyCapture = false;
+        private Key _tipsPlayerMarkerHotkey = Key.F7;
+        private int _tipsPlayer1ColorIdx = 5;
+        private int _tipsPlayer1Tone = 5;
+        private int _tipsPlayer2ColorIdx = 0;
+        private int _tipsPlayer2Tone = 5;
+        private int _tipsPlayer3ColorIdx = 3;
+        private int _tipsPlayer3Tone = 5;
+        private int _tipsPlayer4ColorIdx = 4;
+        private int _tipsPlayer4Tone = 5;
+        private float _tipsPlayerGroundSize = 30.0f;
+        private float _tipsPlayerMinimapDotSize = 7.0f;
+
         // ── HUD-controlled OpenGR map selector ───────────────────────────────────────
         // Default true + empty set means HUD MENU intentionally leaves all normal maps
         // unchecked. Orek's Dream remains hardcoded inside RiftFishing.
@@ -382,6 +417,7 @@ namespace Turbo.Plugins.s7o
             new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, int> _macroToggleFlashTicks = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         private s7o_AutoSkill _autoSkillPlugin = null;
+        private s7o_TipsHelper _tipsHelperPlugin = null;
         private bool _autoSkillKeybindsExpanded = false;
         private int _autoSkillKeybindCaptureSlot = -1;
         private readonly ActionKey[] _autoSkillBindActions =
@@ -810,6 +846,7 @@ namespace Turbo.Plugins.s7o
             // Public-test safety: never restore an open overlay/Profile session after HUD reload.
             _visible = false;
             _capturingHotkey = false;
+            _tipsPlayerMarkerHotkeyCapture = false;
             ClearProfileBackgroundState();
 
             RelocateLegacyRightCenterDotIfNeeded();
@@ -1094,6 +1131,23 @@ namespace Turbo.Plugins.s7o
                 RequestPluginCacheRefresh();
 
                 _status = "Z-BARB AUTOSNAP HOTKEY SET TO " + CaptureKeyLabel(_zbarbAutoSnapHotkey);
+                SaveSettings();
+                return;
+            }
+
+            if (_tipsPlayerMarkerHotkeyCapture)
+            {
+                if (IsCaptureCancelKey(keyEvent.Key))
+                {
+                    _tipsPlayerMarkerHotkeyCapture = false;
+                    _status = "PLAYER MARKER HOTKEY CAPTURE CANCELLED";
+                    return;
+                }
+
+                _tipsPlayerMarkerHotkey = keyEvent.Key;
+                _tipsPlayerMarkerHotkeyCapture = false;
+                ApplyTipsHelperSettingsToPlugin();
+                _status = "PLAYER MARKER HOTKEY SET TO " + CaptureKeyLabel(_tipsPlayerMarkerHotkey);
                 SaveSettings();
                 return;
             }
@@ -2557,6 +2611,7 @@ namespace Turbo.Plugins.s7o
                     _ttsAlertsScrollPx = 0;
                     _draggingTtsScrollThumb = false;
                     _autoSkillPlugin = null;
+                    _tipsHelperPlugin = null;
                     _status = "TOGGLES: " + ToggleCategoryLabel(_activeToggleCategory);
                     MarkRowsDirty();
                     RequestPluginCacheRefresh();
@@ -4142,11 +4197,79 @@ namespace Turbo.Plugins.s7o
             }
         }
 
+        private s7o_TipsHelper GetTipsHelperPlugin()
+        {
+            _tipsHelperPlugin = FindPluginByTypeName("s7o_TipsHelper") as s7o_TipsHelper;
+            return _tipsHelperPlugin;
+        }
+
+        private void ApplyTipsHelperSettingsToPlugin()
+        {
+            try
+            {
+                var tips = GetTipsHelperPlugin();
+                if (tips == null)
+                    return;
+
+                Color primalText = GetVisualPickerColorToned(_tipsPrimalTextColorIdx, _tipsPrimalTextTone);
+                Color ancientText = GetVisualPickerColorToned(_tipsAncientTextColorIdx, _tipsAncientTextTone);
+                Color p1 = GetVisualPickerColorToned(_tipsPlayer1ColorIdx, _tipsPlayer1Tone);
+                Color p2 = GetVisualPickerColorToned(_tipsPlayer2ColorIdx, _tipsPlayer2Tone);
+                Color p3 = GetVisualPickerColorToned(_tipsPlayer3ColorIdx, _tipsPlayer3Tone);
+                Color p4 = GetVisualPickerColorToned(_tipsPlayer4ColorIdx, _tipsPlayer4Tone);
+
+                tips.VisualHelpersEnabled = _visTipsHelperEnabled;
+
+                tips.ShowPrimalItems = _tipsPrimalEnabled;
+                tips.ShowPrimalItemArrows = _tipsPrimalArrows;
+                tips.ShowPrimalItemAlertText = _tipsPrimalText;
+                tips.PrimalTextColorR = primalText.R;
+                tips.PrimalTextColorG = primalText.G;
+                tips.PrimalTextColorB = primalText.B;
+                tips.PrimalAlertTextSize = _tipsPrimalTextSize;
+                tips.PrimalAlertTextHoldMs = ViClamp(_tipsPrimalDurationSec, 0, 10) * 1000;
+
+                tips.ShowAncientItems = _tipsAncientEnabled;
+                tips.ShowAncientItemArrows = _tipsAncientArrows;
+                tips.ShowAncientItemAlertText = _tipsAncientText;
+                tips.AncientTextColorR = ancientText.R;
+                tips.AncientTextColorG = ancientText.G;
+                tips.AncientTextColorB = ancientText.B;
+                tips.AncientAlertTextSize = _tipsAncientTextSize;
+                tips.AncientAlertTextHoldMs = ViClamp(_tipsAncientDurationSec, 0, 10) * 1000;
+
+                tips.ShowItemScreenEdgeArrows = _tipsPrimalArrows || _tipsAncientArrows;
+                tips.ShowItemAlertDirectionArrow = _tipsPrimalArrows || _tipsAncientArrows;
+                tips.ShowItemAlertText = _tipsPrimalText || _tipsAncientText;
+
+                tips.ShowHealthGlobeDots = _tipsHealthGlobes;
+                tips.ShowRiftProgressOrbDots = _tipsProgressOrbs;
+                tips.HealthGlobeDotRadius = _tipsHealthDotSize;
+                tips.RiftOrbDotRadius = _tipsProgressDotSize;
+
+                tips.ShowPlayerMarkers = _tipsPlayerMarkers;
+                tips.EnablePlayerMarkerHotkey = _tipsPlayerMarkers;
+                tips.SetPlayerMarkerHotkey(_tipsPlayerMarkerHotkey);
+                tips.Player1ColorR = p1.R; tips.Player1ColorG = p1.G; tips.Player1ColorB = p1.B;
+                tips.Player2ColorR = p2.R; tips.Player2ColorG = p2.G; tips.Player2ColorB = p2.B;
+                tips.Player3ColorR = p3.R; tips.Player3ColorG = p3.G; tips.Player3ColorB = p3.B;
+                tips.Player4ColorR = p4.R; tips.Player4ColorG = p4.G; tips.Player4ColorB = p4.B;
+
+                tips.PlayerCircleScreenRadiusX = _tipsPlayerGroundSize;
+                tips.PlayerCircleScreenRadiusY = Math.Max(4.0f, _tipsPlayerGroundSize * 0.283f);
+                tips.PlayerMinimapDotRadius = _tipsPlayerMinimapDotSize;
+            }
+            catch
+            {
+            }
+        }
+
                 private void ApplyHudMenuRuntimeControlledSettings(bool force)
         {
             ApplyMonsterVisualToggles();
             ApplyRiftFishingMapSettings();
             ApplyPartyInspectorHotkeyToPlugin();
+            ApplyTipsHelperSettingsToPlugin();
         }
 
 
@@ -5662,6 +5785,8 @@ namespace Turbo.Plugins.s7o
                 action.StartsWith("visual:thick:", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("visual:size:", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("visual:dot:", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("visual:seconds:", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("visual:tipstoggle:", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("visual:reset:partyinspector", StringComparison.OrdinalIgnoreCase);
         }
 
@@ -6815,12 +6940,19 @@ namespace Turbo.Plugins.s7o
                 if (!_visualFavorites.Remove(feature)) _visualFavorites.Add(feature);
                 SaveSettings(); return;
             }
-            if (cmd == "toggle") { ToggleVisualFeature(feature); SaveSettings(); return; }
+            if (cmd == "toggle") { ToggleVisualFeature(feature); ApplyTipsHelperSettingsToPlugin(); SaveSettings(); return; }
             if (cmd == "expand") { ToggleVisualExpanded(feature); SaveSettings(); return; }
+            if (cmd == "tipstoggle") { ToggleTipsHelperOption(feature); ApplyTipsHelperSettingsToPlugin(); SaveSettings(); return; }
             if (cmd == "hotkey" && feature == "partyinspector")
             {
                 _partyInspectorHotkeyCapture = true;
                 _status = "PRESS PARTY INSPECTOR HOTKEY";
+                return;
+            }
+            if (cmd == "hotkey" && feature == "tipsplayer")
+            {
+                _tipsPlayerMarkerHotkeyCapture = true;
+                _status = "PRESS PLAYER MARKER HOTKEY";
                 return;
             }
             if (cmd == "reset" && feature == "partyinspector")
@@ -6838,13 +6970,14 @@ namespace Turbo.Plugins.s7o
             {
                 int idx;
                 if (int.TryParse(p[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out idx))
-                { SetVisualColor(feature, idx); if (feature.StartsWith("menubutton", StringComparison.OrdinalIgnoreCase)) MarkLayoutDirty(); SaveSettings(); }
+                { SetVisualColor(feature, idx); if (feature.StartsWith("menubutton", StringComparison.OrdinalIgnoreCase)) MarkLayoutDirty(); ApplyTipsHelperSettingsToPlugin(); SaveSettings(); }
                 return;
             }
-if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd == "dot") && p.Length >= 4)
+if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd == "dot" || cmd == "seconds") && p.Length >= 4)
             {
                 int delta = p[3] == "-1" ? -1 : 1;
                 AdjustVisualValue(cmd, feature, delta);
+                ApplyTipsHelperSettingsToPlugin();
                 SaveSettings();
                 return;
             }
@@ -6852,6 +6985,14 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
         private void ToggleVisualFeature(string feature)
         {
+            if (feature == "tipshelper")
+            {
+                _visTipsHelperEnabled = !_visTipsHelperEnabled;
+                _visTipsHelperExpanded = _visTipsHelperEnabled;
+                _status = _visTipsHelperEnabled ? "VISUAL HELPERS ON" : "VISUAL HELPERS OFF";
+                return;
+            }
+
             if (feature == "dangeraffixes")
             {
                 _visDangerousAffixVisualsEnabled = !_visDangerousAffixVisualsEnabled;
@@ -6938,6 +7079,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
         private void ToggleVisualExpanded(string feature)
         {
+            if (feature == "tipshelper")
+            {
+                _visTipsHelperExpanded = !_visTipsHelperExpanded;
+                return;
+            }
+
             if (feature == "dangeraffixes")
             {
                 _visDangerousAffixVisualsExpanded = !_visDangerousAffixVisualsExpanded;
@@ -7005,6 +7152,23 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             }
         }
 
+
+        private void ToggleTipsHelperOption(string option)
+        {
+            switch ((option ?? string.Empty).ToLowerInvariant())
+            {
+                case "primal": _tipsPrimalEnabled = !_tipsPrimalEnabled; break;
+                case "primalarrows": _tipsPrimalArrows = !_tipsPrimalArrows; break;
+                case "primaltext": _tipsPrimalText = !_tipsPrimalText; break;
+                case "ancient": _tipsAncientEnabled = !_tipsAncientEnabled; break;
+                case "ancientarrows": _tipsAncientArrows = !_tipsAncientArrows; break;
+                case "ancienttext": _tipsAncientText = !_tipsAncientText; break;
+                case "healthglobes": _tipsHealthGlobes = !_tipsHealthGlobes; break;
+                case "progressorbs": _tipsProgressOrbs = !_tipsProgressOrbs; break;
+                case "playermarkers": _tipsPlayerMarkers = !_tipsPlayerMarkers; break;
+            }
+        }
+
         private void SetVisualColor(string f, int idx)
         {
             idx = ViClamp(idx, 0, 7);
@@ -7020,6 +7184,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 case "menubuttonopen":   _menuButtonOpenColorIdx   = idx; break;
                 case "minion":  _visMinionColorIdx         = idx; break;
                 case "siphon":  _visSiphonColorIdx         = idx; break;
+                case "tipsprimaltext": _tipsPrimalTextColorIdx = idx; break;
+                case "tipsancienttext": _tipsAncientTextColorIdx = idx; break;
+                case "tipsplayer1": _tipsPlayer1ColorIdx = idx; break;
+                case "tipsplayer2": _tipsPlayer2ColorIdx = idx; break;
+                case "tipsplayer3": _tipsPlayer3ColorIdx = idx; break;
+                case "tipsplayer4": _tipsPlayer4ColorIdx = idx; break;
             }
         }
 
@@ -7059,9 +7229,19 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     else if (f == "reticle") _visTargetReticleSize = ViClampF(_visTargetReticleSize + delta * 0.25f, 0.25f, 4f);
                     else if (f == "menubuttonclosed") { _menuButtonClosedSize = ViClampF(_menuButtonClosedSize + delta * 1f, 18f, 60f); _dotRect.Width = _menuButtonClosedSize; _dotRect.Height = _menuButtonClosedSize; MarkLayoutDirty(); }
                     else if (f == "menubuttonopen") { _menuButtonOpenSize = ViClampF(_menuButtonOpenSize + delta * 1f, 18f, 70f); MarkLayoutDirty(); }
+                    else if (f == "tipsprimaltext") _tipsPrimalTextSize = ViClampF(_tipsPrimalTextSize + delta * 1.0f, 6f, 24f);
+                    else if (f == "tipsancienttext") _tipsAncientTextSize = ViClampF(_tipsAncientTextSize + delta * 1.0f, 6f, 24f);
+                    else if (f == "tipshealthdot") _tipsHealthDotSize = ViClampF(_tipsHealthDotSize + delta * 0.10f, 0.30f, 3.0f);
+                    else if (f == "tipsprogressdot") _tipsProgressDotSize = ViClampF(_tipsProgressDotSize + delta * 0.10f, 0.30f, 3.5f);
+                    else if (f == "tipsplayerground") _tipsPlayerGroundSize = ViClampF(_tipsPlayerGroundSize + delta * 2.0f, 12f, 60f);
+                    else if (f == "tipsplayermapdot") _tipsPlayerMinimapDotSize = ViClampF(_tipsPlayerMinimapDotSize + delta * 0.5f, 3f, 14f);
                     break;
                 case "dot":
                     if (f == "siphon") _visSiphonDotSize = ViClampF(_visSiphonDotSize + delta * 0.25f, 1f, 10f);
+                    break;
+                case "seconds":
+                    if (f == "tipsprimalduration") _tipsPrimalDurationSec = ViClamp(_tipsPrimalDurationSec + delta, 0, 10);
+                    else if (f == "tipsancientduration") _tipsAncientDurationSec = ViClamp(_tipsAncientDurationSec + delta, 0, 10);
                     break;
             }
         }
@@ -7265,12 +7445,15 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
                 private static bool IsCustomVisualFeature(string feature)
         {
-            return feature == "dangeraffixes" || feature == "menubutton" || feature == "partyinspector";
+            return feature == "tipshelper" || feature == "dangeraffixes" || feature == "menubutton" || feature == "partyinspector";
         }
 
 
                 private int GetCustomVisualExpandedRowCount(string feature)
         {
+            if (feature == "tipshelper")
+                return 12;
+
             if (feature == "dangeraffixes")
                 return 25;
 
@@ -7573,8 +7756,198 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             RegisterToggleHit("visual:reset:partyinspector", resetR);
         }
 
+
+        private void DrawTipsTripleToggleRow(RectangleF r, int rowIdx, string title, string desc,
+            bool enabled, string enabledAction, bool arrows, string arrowsAction, bool text, string textAction)
+        {
+            (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
+
+            const float stateW = 82f;
+            const float pillW = 82f;
+            const float gap = 8f;
+
+            RectangleF enabledBtn = new RectangleF(r.Right - stateW - 8f, r.Top + 8f, stateW, r.Height - 16f);
+            RectangleF textBtn = new RectangleF(enabledBtn.Left - gap - pillW, r.Top + 8f, pillW, r.Height - 16f);
+            RectangleF arrowBtn = new RectangleF(textBtn.Left - gap - pillW, r.Top + 8f, pillW, r.Height - 16f);
+
+            float textX = r.Left + 14f;
+            float textW = Math.Max(30f, arrowBtn.Left - textX - 12f);
+            DrawOutlinedTextAt(_fRowTitle, _fRowTitleShadow, Trim(title, ApproxCharsForWidth(textW, 5.8f)), textX, r.Top + 7f);
+
+            string[] lines = WrapToggleDescription(desc, ApproxCharsForToggleDescription(textW), 2);
+            if (lines.Length > 0) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[0], textX, r.Top + 29f);
+            if (lines.Length > 1) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[1], textX, r.Top + 47f);
+
+            DrawGlossButton(arrowBtn, arrows ? "Arrows" : "No", arrows || IsVisualButtonFlashActive(arrowsAction), false, true);
+            DrawGlossButton(textBtn, text ? "Text" : "No", text || IsVisualButtonFlashActive(textAction), false, true);
+            DrawGlossButton(enabledBtn, enabled ? "ON" : "OFF", enabled || IsVisualButtonFlashActive(enabledAction), false, true);
+            RegisterToggleHit(arrowsAction, arrowBtn);
+            RegisterToggleHit(textAction, textBtn);
+            RegisterToggleHit(enabledAction, enabledBtn);
+        }
+
+        private void DrawTipsTextSettingsRow(RectangleF r, int rowIdx, string title, string colorFeature, int colorIdx, int tone,
+            string sizeFeature, float size, string durationFeature, int seconds)
+        {
+            (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
+
+            const float colorW = 172f;
+            const float stepW = 132f;
+            const float gap = 10f;
+            const float stepH = 30f;
+
+            float totalW = colorW + gap + stepW + gap + stepW;
+            float x = r.Left + Math.Max(51f, (r.Width - totalW) * 0.5f);
+            if (x + totalW > r.Right - 8f)
+                x = r.Right - totalW - 8f;
+
+            RectangleF labelR = new RectangleF(x, r.Top + 7f, colorW, 24f);
+            RectangleF colorR = new RectangleF(x, r.Top + 39f, colorW, 22f);
+            RectangleF sizeR = new RectangleF(colorR.Right + gap, r.Top + 34f, stepW, stepH);
+            RectangleF secR = new RectangleF(sizeR.Right + gap, r.Top + 34f, stepW, stepH);
+
+            DrawCenteredOutlinedTextExact(_fRowTitle, _fRowTitleShadow, title, labelR);
+            DrawVisualColorPickerInline(colorR, colorFeature, colorIdx, tone);
+            DrawVisualStepperWide(sizeR, "Size", FormatVisualFloat(size), "visual:size:" + sizeFeature + ":-1", "visual:size:" + sizeFeature + ":+1");
+            DrawVisualStepperWide(secR, "Time", seconds.ToString(CultureInfo.InvariantCulture) + "s", "visual:seconds:" + durationFeature + ":-1", "visual:seconds:" + durationFeature + ":+1");
+        }
+
+        private void DrawTipsToggleSizeRow(RectangleF r, int rowIdx, string title, string desc, bool enabled, string action, string sizeFeature, float size)
+        {
+            (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
+
+            const float btnW = 82f;
+            const float stepW = 136f;
+            const float gap = 10f;
+            RectangleF btnR = new RectangleF(r.Right - btnW - 8f, r.Top + 8f, btnW, r.Height - 16f);
+            RectangleF stepR = new RectangleF(btnR.Left - gap - stepW, r.Top + 23f, stepW, 30f);
+
+            float textX = r.Left + 14f;
+            float textW = Math.Max(30f, stepR.Left - textX - 24f);
+            DrawOutlinedTextAt(_fRowTitle, _fRowTitleShadow, Trim(title, ApproxCharsForWidth(textW, 5.8f)), textX, r.Top + 8f);
+
+            string[] lines = WrapToggleDescription(desc, ApproxCharsForToggleDescription(textW), 2);
+            if (lines.Length > 0) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[0], textX, r.Top + 30f);
+            if (lines.Length > 1) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[1], textX, r.Top + 48f);
+
+            DrawVisualStepperWide(stepR, "Size", FormatVisualFloat(size), "visual:size:" + sizeFeature + ":-1", "visual:size:" + sizeFeature + ":+1");
+            DrawGlossButton(btnR, enabled ? "ON" : "OFF", enabled || IsVisualButtonFlashActive(action), false, true);
+            RegisterToggleHit(action, btnR);
+        }
+
+        private void DrawTipsPlayerMarkerRow(RectangleF r, int rowIdx)
+        {
+            (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
+
+            const float btnW = 82f;
+            const float hotkeyW = 112f;
+            const float gap = 8f;
+
+            RectangleF btnR = new RectangleF(r.Right - btnW - 8f, r.Top + 8f, btnW, r.Height - 16f);
+            RectangleF hotkeyR = new RectangleF(btnR.Left - gap - hotkeyW, r.Top + 8f, hotkeyW, r.Height - 16f);
+
+            float textX = r.Left + 14f;
+            float textW = Math.Max(30f, hotkeyR.Left - textX - 12f);
+            DrawOutlinedTextAt(_fRowTitle, _fRowTitleShadow, "Player Markers", textX, r.Top + 7f);
+
+            string[] lines = WrapToggleDescription("Default F7: hover a party portrait and press the key to mark or unmark that player.", ApproxCharsForToggleDescription(textW), 2);
+            if (lines.Length > 0) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[0], textX, r.Top + 29f);
+            if (lines.Length > 1) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[1], textX, r.Top + 47f);
+
+            DrawGlossButton(hotkeyR, _tipsPlayerMarkerHotkeyCapture ? "PRESS..." : "Key " + CaptureKeyLabel(_tipsPlayerMarkerHotkey), _tipsPlayerMarkerHotkeyCapture, false, true);
+            RegisterToggleHit("visual:hotkey:tipsplayer", hotkeyR);
+
+            DrawGlossButton(btnR, _tipsPlayerMarkers ? "ON" : "OFF", _tipsPlayerMarkers || IsVisualButtonFlashActive("visual:tipstoggle:playermarkers"), false, true);
+            RegisterToggleHit("visual:tipstoggle:playermarkers", btnR);
+        }
+
+        private void DrawTipsSingleToggleRow(RectangleF r, int rowIdx, string title, string desc, bool enabled, string action)
+        {
+            DrawSingleToggleOptionRow(r, rowIdx, title, desc, enabled, action, string.Empty);
+        }
+
+        private void DrawTipsColorRow(RectangleF r, int rowIdx, string title, string feature, int colorIdx, int tone)
+        {
+            (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
+
+            RectangleF labelR = new RectangleF(r.Left + 14f, r.Top + 8f, 220f, 22f);
+            RectangleF colorR = new RectangleF(r.Left + 51f, r.Top + 39f, 190f, 22f);
+            DrawOutlinedTextAt(_fRowTitle, _fRowTitleShadow, title, labelR.Left, labelR.Top);
+            DrawVisualColorPickerInline(colorR, feature, colorIdx, tone);
+        }
+
+        private void DrawTipsPlayerSizeRow(RectangleF r, int rowIdx)
+        {
+            (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
+
+            const float stepW = 150f;
+            const float gap = 10f;
+            float totalW = stepW * 2f + gap;
+            float x = r.Right - totalW - 8f;
+            RectangleF groundR = new RectangleF(x, r.Top + 23f, stepW, 30f);
+            RectangleF mapR = new RectangleF(groundR.Right + gap, r.Top + 23f, stepW, 30f);
+            float textX = r.Left + 14f;
+            float textW = Math.Max(30f, groundR.Left - textX - 24f);
+
+            DrawOutlinedTextAt(_fRowTitle, _fRowTitleShadow, Trim("Player Marker Sizes", ApproxCharsForWidth(textW, 5.8f)), textX, r.Top + 8f);
+            string[] lines = WrapToggleDescription("Shared size for player foot ovals and minimap dots.", ApproxCharsForToggleDescription(textW), 2);
+            if (lines.Length > 0) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[0], textX, r.Top + 30f);
+            if (lines.Length > 1) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[1], textX, r.Top + 48f);
+            DrawVisualStepperWide(groundR, "Ground", FormatVisualFloat(_tipsPlayerGroundSize), "visual:size:tipsplayerground:-1", "visual:size:tipsplayerground:+1");
+            DrawVisualStepperWide(mapR, "Map Dot", FormatVisualFloat(_tipsPlayerMinimapDotSize), "visual:size:tipsplayermapdot:-1", "visual:size:tipsplayermapdot:+1");
+        }
+
+        private void DrawTipsHelperOptionsRow(RectangleF r, int rowIdx, int part)
+        {
+            switch (part)
+            {
+                case 0:
+                    DrawTipsTripleToggleRow(r, rowIdx, "Primal Alerts", "Drop text, edge arrows, and map markers.", _tipsPrimalEnabled, "visual:tipstoggle:primal", _tipsPrimalArrows, "visual:tipstoggle:primalarrows", _tipsPrimalText, "visual:tipstoggle:primaltext");
+                    return;
+                case 1:
+                    DrawTipsTextSettingsRow(r, rowIdx, "Primal Text", "tipsprimaltext", _tipsPrimalTextColorIdx, _tipsPrimalTextTone, "tipsprimaltext", _tipsPrimalTextSize, "tipsprimalduration", _tipsPrimalDurationSec);
+                    return;
+                case 2:
+                    DrawTipsTripleToggleRow(r, rowIdx, "Ancient Alerts", "Drop text, edge arrows, and map markers.", _tipsAncientEnabled, "visual:tipstoggle:ancient", _tipsAncientArrows, "visual:tipstoggle:ancientarrows", _tipsAncientText, "visual:tipstoggle:ancienttext");
+                    return;
+                case 3:
+                    DrawTipsTextSettingsRow(r, rowIdx, "Ancient Text", "tipsancienttext", _tipsAncientTextColorIdx, _tipsAncientTextTone, "tipsancienttext", _tipsAncientTextSize, "tipsancientduration", _tipsAncientDurationSec);
+                    return;
+                case 4:
+                    DrawTipsToggleSizeRow(r, rowIdx, "Health Globes", "Red dots on health globes so they stand out in fights.", _tipsHealthGlobes, "visual:tipstoggle:healthglobes", "tipshealthdot", _tipsHealthDotSize);
+                    return;
+                case 5:
+                    DrawTipsToggleSizeRow(r, rowIdx, "Progress Orbs", "Purple dots on Greater Rift progress orbs.", _tipsProgressOrbs, "visual:tipstoggle:progressorbs", "tipsprogressdot", _tipsProgressDotSize);
+                    return;
+                case 6:
+                    DrawTipsPlayerMarkerRow(r, rowIdx);
+                    return;
+                case 7:
+                    DrawTipsColorRow(r, rowIdx, "1st Player Color", "tipsplayer1", _tipsPlayer1ColorIdx, _tipsPlayer1Tone);
+                    return;
+                case 8:
+                    DrawTipsColorRow(r, rowIdx, "2nd Player Color", "tipsplayer2", _tipsPlayer2ColorIdx, _tipsPlayer2Tone);
+                    return;
+                case 9:
+                    DrawTipsColorRow(r, rowIdx, "3rd Player Color", "tipsplayer3", _tipsPlayer3ColorIdx, _tipsPlayer3Tone);
+                    return;
+                case 10:
+                    DrawTipsColorRow(r, rowIdx, "4th Player Color", "tipsplayer4", _tipsPlayer4ColorIdx, _tipsPlayer4Tone);
+                    return;
+                case 11:
+                    DrawTipsPlayerSizeRow(r, rowIdx);
+                    return;
+            }
+        }
+
         private void DrawCustomVisualOptionsRow(RectangleF r, string feature, int rowIdx, int part)
         {
+            if (feature == "tipshelper")
+            {
+                DrawTipsHelperOptionsRow(r, rowIdx, part);
+                return;
+            }
+
             if (feature == "partyinspector")
             {
                 DrawPartyInspectorHotkeyRow(r, rowIdx);
@@ -7713,6 +8086,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             string[] feats =
             {
+                "tipshelper",
                 "dangeraffixes",
                 "menubutton",
                 "partyinspector",
@@ -7728,6 +8102,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             string[] ftitles =
             {
+                "Visual Helpers",
                 "Elite/Dangerous Affix Visuals",
                 "Menu Button",
                 "Party Inspector",
@@ -7743,6 +8118,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             string[] fdescs =
             {
+                "Ancient/primal alerts, globe dots, and party markers.",
                 "Enable or disable elite affix/danger visual effects.",
                 "Show/hide and customize the HUD Menu open/close button.",
                 "Expanded party build inspector. Default hotkey: F12.",
@@ -7758,6 +8134,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             bool[] fenabled =
             {
+                _visTipsHelperEnabled,
                 _visDangerousAffixVisualsEnabled,
                 _showDot,
                 IsPartyInspectorEnabled(),
@@ -7773,6 +8150,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             bool[] fexpanded =
             {
+                _visTipsHelperExpanded,
                 _visDangerousAffixVisualsExpanded,
                 _visMenuButtonExpanded,
                 _visPartyInspectorExpanded,
@@ -7791,6 +8169,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 0,
                 0,
                 0,
+                0,
                 _visClickAnimColorIdx,
                 _visPlayerCircleColorIdx,
                 _visMouseCircleColorIdx,
@@ -7803,6 +8182,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             int[] ftone =
             {
+                0,
                 0,
                 0,
                 0,
@@ -9719,6 +10099,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 LogDebug("Menu close requested; No-Click background bound, delaying menu hide until Shift+P close is issued.");
                 _capturingHotkey = false;
                 _autoSkillKeybindCaptureSlot = -1;
+                _tipsPlayerMarkerHotkeyCapture = false;
                 _draggingWindow = false;
                 _draggingDot = false;
                 _draggingScrollThumb = false;
@@ -9744,6 +10125,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             _visible = false;
             _capturingHotkey = false;
             _autoSkillKeybindCaptureSlot = -1;
+            _tipsPlayerMarkerHotkeyCapture = false;
             _draggingWindow = false;
             _draggingDot = false;
             _draggingScrollThumb = false;
@@ -13034,6 +13416,39 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     _visSiphonColorIdx.ToString(CultureInfo.InvariantCulture) + "|" +
                     _visSiphonTone.ToString(CultureInfo.InvariantCulture) + "|0");
 
+                lines.Add("VIS_TIPS_HELPER=" +
+                    _visTipsHelperEnabled.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _visTipsHelperExpanded.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _tipsPrimalEnabled.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _tipsPrimalArrows.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _tipsPrimalText.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _tipsPrimalTextColorIdx.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _tipsPrimalTextTone.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _tipsPrimalTextSize.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _tipsPrimalDurationSec.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _tipsAncientEnabled.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _tipsAncientArrows.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _tipsAncientText.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _tipsAncientTextColorIdx.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _tipsAncientTextTone.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _tipsAncientTextSize.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _tipsAncientDurationSec.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _tipsHealthGlobes.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _tipsProgressOrbs.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _tipsHealthDotSize.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _tipsProgressDotSize.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _tipsPlayerMarkers.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _tipsPlayer1ColorIdx.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _tipsPlayer1Tone.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _tipsPlayer2ColorIdx.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _tipsPlayer2Tone.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _tipsPlayer3ColorIdx.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _tipsPlayer3Tone.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _tipsPlayer4ColorIdx.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _tipsPlayer4Tone.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _tipsPlayerGroundSize.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _tipsPlayerMinimapDotSize.ToString(CultureInfo.InvariantCulture));
+
                 lines.Add("VIS_DANGEROUS_AFFIX_VISUALS=" + _visDangerousAffixVisualsEnabled.ToString(CultureInfo.InvariantCulture));
                 lines.Add("VIS_DANGEROUS_AFFIX_VISUALS_EXPANDED=" + _visDangerousAffixVisualsExpanded.ToString(CultureInfo.InvariantCulture));
                 lines.Add("AFFIX_PLAGUED=" + _affixPlagued.ToString(CultureInfo.InvariantCulture));
@@ -13063,6 +13478,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 lines.Add("DANGEROUS_MONSTER_LABELS=" + _dangerousMonsterLabelsEnabled.ToString(CultureInfo.InvariantCulture));
                 lines.Add("VIS_PARTY_INSPECTOR_EXPANDED=" + _visPartyInspectorExpanded.ToString(CultureInfo.InvariantCulture));
                 lines.Add("PARTY_INSPECTOR_HOTKEY=" + _partyInspectorHotkey.ToString());
+                lines.Add("TIPS_PLAYER_MARKER_HOTKEY=" + _tipsPlayerMarkerHotkey.ToString());
 
                 lines.Add("OPEN_GR_MAP_OVERRIDE=" + _riftMapSelectionHasOverride.ToString(CultureInfo.InvariantCulture));
                 lines.Add("OPEN_GR_MAP_IDS=" + string.Join("|", _riftEnabledMapIds.OrderBy(v => v).Select(v => v.ToString(CultureInfo.InvariantCulture)).ToArray()));
@@ -13126,6 +13542,80 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             catch { }
         }
 
+
+        private void ParseTipsHelperVisualLine(string val)
+        {
+            string[] p = (val ?? string.Empty).Split('|');
+            if (p.Length < 31)
+                return;
+
+            _visTipsHelperEnabled = ParseBool(p[0], _visTipsHelperEnabled);
+            _visTipsHelperExpanded = ParseBool(p[1], _visTipsHelperExpanded);
+            _tipsPrimalEnabled = ParseBool(p[2], _tipsPrimalEnabled);
+            _tipsPrimalArrows = ParseBool(p[3], _tipsPrimalArrows);
+            _tipsPrimalText = ParseBool(p[4], _tipsPrimalText);
+            TryParseInt(p[5], ref _tipsPrimalTextColorIdx);
+            TryParseInt(p[6], ref _tipsPrimalTextTone);
+            TryParseFloat(p[7], ref _tipsPrimalTextSize);
+            TryParseInt(p[8], ref _tipsPrimalDurationSec);
+            _tipsAncientEnabled = ParseBool(p[9], _tipsAncientEnabled);
+            _tipsAncientArrows = ParseBool(p[10], _tipsAncientArrows);
+            _tipsAncientText = ParseBool(p[11], _tipsAncientText);
+            TryParseInt(p[12], ref _tipsAncientTextColorIdx);
+            TryParseInt(p[13], ref _tipsAncientTextTone);
+            TryParseFloat(p[14], ref _tipsAncientTextSize);
+            TryParseInt(p[15], ref _tipsAncientDurationSec);
+            _tipsHealthGlobes = ParseBool(p[16], _tipsHealthGlobes);
+            _tipsProgressOrbs = ParseBool(p[17], _tipsProgressOrbs);
+            TryParseFloat(p[18], ref _tipsHealthDotSize);
+            TryParseFloat(p[19], ref _tipsProgressDotSize);
+            _tipsPlayerMarkers = ParseBool(p[20], _tipsPlayerMarkers);
+            TryParseInt(p[21], ref _tipsPlayer1ColorIdx);
+            TryParseInt(p[22], ref _tipsPlayer1Tone);
+            TryParseInt(p[23], ref _tipsPlayer2ColorIdx);
+            TryParseInt(p[24], ref _tipsPlayer2Tone);
+            TryParseInt(p[25], ref _tipsPlayer3ColorIdx);
+            TryParseInt(p[26], ref _tipsPlayer3Tone);
+            TryParseInt(p[27], ref _tipsPlayer4ColorIdx);
+            TryParseInt(p[28], ref _tipsPlayer4Tone);
+            TryParseFloat(p[29], ref _tipsPlayerGroundSize);
+            TryParseFloat(p[30], ref _tipsPlayerMinimapDotSize);
+
+            _tipsPrimalTextColorIdx = ViClamp(_tipsPrimalTextColorIdx, 0, 7);
+            _tipsPrimalTextTone = ViClamp(_tipsPrimalTextTone, 0, 10);
+            _tipsPrimalTextSize = ViClampF(_tipsPrimalTextSize, 6f, 24f);
+            _tipsPrimalDurationSec = ViClamp(_tipsPrimalDurationSec, 0, 10);
+            _tipsAncientTextColorIdx = ViClamp(_tipsAncientTextColorIdx, 0, 7);
+            _tipsAncientTextTone = ViClamp(_tipsAncientTextTone, 0, 10);
+            _tipsAncientTextSize = ViClampF(_tipsAncientTextSize, 6f, 24f);
+            _tipsAncientDurationSec = ViClamp(_tipsAncientDurationSec, 0, 10);
+            _tipsHealthDotSize = ViClampF(_tipsHealthDotSize, 0.30f, 3.0f);
+            _tipsProgressDotSize = ViClampF(_tipsProgressDotSize, 0.30f, 3.5f);
+            _tipsPlayer1ColorIdx = ViClamp(_tipsPlayer1ColorIdx, 0, 7);
+            _tipsPlayer1Tone = ViClamp(_tipsPlayer1Tone, 0, 10);
+            _tipsPlayer2ColorIdx = ViClamp(_tipsPlayer2ColorIdx, 0, 7);
+            _tipsPlayer2Tone = ViClamp(_tipsPlayer2Tone, 0, 10);
+            _tipsPlayer3ColorIdx = ViClamp(_tipsPlayer3ColorIdx, 0, 7);
+            _tipsPlayer3Tone = ViClamp(_tipsPlayer3Tone, 0, 10);
+            _tipsPlayer4ColorIdx = ViClamp(_tipsPlayer4ColorIdx, 0, 7);
+            _tipsPlayer4Tone = ViClamp(_tipsPlayer4Tone, 0, 10);
+            _tipsPlayerGroundSize = ViClampF(_tipsPlayerGroundSize, 12f, 60f);
+            _tipsPlayerMinimapDotSize = ViClampF(_tipsPlayerMinimapDotSize, 3f, 14f);
+        }
+
+        private static void TryParseInt(string raw, ref int value)
+        {
+            int parsed;
+            if (int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out parsed))
+                value = parsed;
+        }
+
+        private static void TryParseFloat(string raw, ref float value)
+        {
+            float parsed;
+            if (float.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out parsed))
+                value = parsed;
+        }
         private void LoadSettings()
         {
             _loadedSettingsVersion = 0;
@@ -13303,6 +13793,10 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                             ref _visSiphonTone,
                             ref unused);
                     }
+                    else if (key == "VIS_TIPS_HELPER")
+                    {
+                        ParseTipsHelperVisualLine(val);
+                    }
                     else if (key == "VIS_DANGEROUS_AFFIX_VISUALS")
                     {
                         _visDangerousAffixVisualsEnabled = ParseBool(val, _visDangerousAffixVisualsEnabled);
@@ -13442,6 +13936,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                         Key k;
                         if (Enum.TryParse<Key>(val, true, out k) && k != Key.Unknown)
                             _partyInspectorHotkey = k;
+                    }
+                    else if (key == "TIPS_PLAYER_MARKER_HOTKEY")
+                    {
+                        Key k;
+                        if (Enum.TryParse<Key>(val, true, out k) && k != Key.Unknown)
+                            _tipsPlayerMarkerHotkey = k;
                     }
                     else if (key == "OPEN_GR_MAP_OVERRIDE")
                     {
