@@ -25,6 +25,7 @@ Use it to toggle plugins, change visual options, manage TTS alerts, set some hot
 | Plugin | What it does |
 |---|---|
 | **s7o_HUD_MENU** | Main F8 menu for plugin toggles, visuals, TTS, hotkeys, and QoL controls. |
+| **s7o_TipsHelper** | Visual helper for ancient/primal drops, health globes, progress orbs, and player markers. |
 | **s7o_RiftInfo** | Greater Rift info: timer/progress helpers, boss/push info, and Stricken-related target info. |
 | **s7o_RiftFishing** | Helps fish GR maps. Bad maps can be skipped/restarted, good maps can be announced and paused based on your map settings. |
 | **s7o_DangerousSkillOverlays** | Extra danger overlays for Boss/Rift Guardian attacks. |
@@ -53,3 +54,4 @@ Use it to toggle plugins, change visual options, manage TTS alerts, set some hot
 - This was mostly done using AI to create these plugins or port some over from other THUD forks.
 - Some plugins were not created by me but borrowed or modified to work with the hud menu.
 - If you find any bugs, please report them.
+
