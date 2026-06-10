@@ -2271,7 +2271,7 @@ namespace Turbo.Plugins.s7o
         public override void Load(IController hud) { base.Load(hud); Enabled = true; }
         public void Customize()
         {
-            var p = Hud.GetPlugin<s7o_KanaiCube>(); if (p == null) return; p.Enabled = true;
+            var p = Hud.GetPlugin<s7o_KanaiCube>(); if (p == null) return;
             // Do not assign ToggleKeyEvent here.
             // KanaiCubeHotkey is loaded from plugins\s7o\settings\s7o_KanaiCube.ini in Load(),
             // then ToggleKeyEvent is created from that saved/default key.
