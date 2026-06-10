@@ -27,6 +27,7 @@ namespace Turbo.Plugins.s7o
 
         public bool AnnounceMapName { get; set; } = true;
         public bool AllowPartyMode { get; set; } = false;
+        public bool ShowPartyModeBlockedMessage { get; set; } = false;
         public bool PauseOnGoodMap { get; set; } = true;
 
         public int PortalClickRetryMs { get; set; } = 80;
@@ -477,7 +478,7 @@ namespace Turbo.Plugins.s7o
 
             if (IsPartyRunBlocked())
             {
-                StopWithStatus("OpenGR stopped: party mode disabled");
+                StopWithStatus(GetPartyModeBlockedStatus());
                 return;
             }
 
@@ -517,7 +518,7 @@ namespace Turbo.Plugins.s7o
 
                 if (IsPartyRunBlocked())
                 {
-                    StopWithStatus("OpenGR stopped: party mode disabled");
+                    StopWithStatus(GetPartyModeBlockedStatus());
                     return;
                 }
 
@@ -1630,6 +1631,11 @@ namespace Turbo.Plugins.s7o
 
             try { return Hud.Game != null && Hud.Game.Players != null && Hud.Game.Players.Count() > 1; }
             catch { return false; }
+        }
+
+        private string GetPartyModeBlockedStatus()
+        {
+            return ShowPartyModeBlockedMessage ? "OpenGR stopped: party mode disabled" : string.Empty;
         }
 
         private bool HasKeyForNextRift()
