@@ -956,11 +956,13 @@ namespace Turbo.Plugins.s7o
 
             if (alive)
             {
-                _bossSeenThisRift = true;
-                _bossActive = true;
-
-                // Fallback only. Normal start is IsGreaterRiftGuardianPhase().
-                StartBossTimerIfNeeded(tick, "guardian-alive");
+                // Do not start the boss timer from broad boss-priority monster scans.
+                // The timer is started only by the native GR guardian phase signal above.
+                if (_bossStartTick > 0)
+                {
+                    _bossSeenThisRift = true;
+                    _bossActive = true;
+                }
 
                 return;
             }
