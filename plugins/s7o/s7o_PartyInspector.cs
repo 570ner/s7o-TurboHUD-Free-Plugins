@@ -66,6 +66,8 @@ namespace Turbo.Plugins.s7o
         public float PortraitHoverStatsNameColumnWidth { get; set; }
         public float PortraitHoverStatsStatColumnWidth { get; set; }
         public float PortraitHoverStatsSoloColumnWidth { get; set; }
+        public bool PortraitHoverStatsShowHardCc { get; set; }
+        public float PortraitHoverStatsCcColumnWidth { get; set; }
 
         // F12 expanded inspector sections.
         public bool ShowExpandedSkills { get; set; }
@@ -144,6 +146,7 @@ namespace Turbo.Plugins.s7o
 
         private IFont _portraitHoverHeaderFont;
         private IFont _portraitHoverValueFont;
+        private IFont _portraitHoverCcSmallFont;
         private IFont _archonCurrentStackFont;
         private IFont _archonLingeringStackFont;
         private IFont _archonStackOutlineFont;
@@ -170,6 +173,27 @@ namespace Turbo.Plugins.s7o
 
         private readonly Dictionary<string, PortraitHoverPlayerStatsSnapshot> _portraitHoverStatsCache =
             new Dictionary<string, PortraitHoverPlayerStatsSnapshot>();
+
+        private readonly Dictionary<string, GemUpgradeDisplayState> _gemUpgradeStateCache =
+            new Dictionary<string, GemUpgradeDisplayState>();
+
+        private bool _gemUpgradeRewardSessionActive;
+        private int _gemUpgradeCloseCandidateTick;
+        private const int GemUpgradeCloseGraceTicks = 90;
+
+        [Flags]
+        private enum HardCcFlags
+        {
+            None = 0,
+            Pull = 1,
+            Knockback = 2,
+            Stun = 4,
+            Freeze = 8,
+            Blind = 16,
+            Fear = 32,
+            Charm = 64,
+            Taunt = 128
+        }
 
         // FreeHUD can temporarily expose empty remote-player build/stat objects when
         // a party member is in another world instance. These caches preserve the last
@@ -233,6 +257,8 @@ namespace Turbo.Plugins.s7o
             PortraitHoverStatsNameColumnWidth = 112.0f;
             PortraitHoverStatsStatColumnWidth = 62.0f;
             PortraitHoverStatsSoloColumnWidth = 60.0f;
+            PortraitHoverStatsShowHardCc = true;
+            PortraitHoverStatsCcColumnWidth = 118.0f;
 
             // Portrait counters are the default reminder style.
             ShowGemUpgradeReminder = false;
@@ -323,6 +349,7 @@ namespace Turbo.Plugins.s7o
 
             _portraitHoverHeaderFont = Hud.Render.CreateFont("tahoma", 7.0f, 255, 255, 255, 255, true, false, 180, 0, 0, 0, true);
             _portraitHoverValueFont  = Hud.Render.CreateFont("tahoma", 7.5f, 255, 235, 235, 235, true, false, 180, 0, 0, 0, true);
+            _portraitHoverCcSmallFont = Hud.Render.CreateFont("tahoma", 6.0f, 255, 235, 235, 235, true, false, 180, 0, 0, 0, true);
 
             _compactCooldownFont = Hud.Render.CreateFont(
                 "tahoma", CompactCooldownFontSize, 255, 255, 255, 255, true, false, 220, 0, 0, 0, true);
@@ -424,15 +451,6 @@ namespace Turbo.Plugins.s7o
 
             if (!Hud.Game.IsInGame || Hud.Game.IsLoading)
                 return;
-
-            bool needsPortraitOverlay =
-                ShowAlwaysOnPartySkillBars ||
-                ShowGemUpgradesNearPortraits ||
-                ShowNemesisBracersNearPortraits ||
-                ShowPanel;
-
-            if (needsPortraitOverlay)
-                DrawPartyPortraitOverlay();
         }
 
         public void PaintTopInGame(ClipState clipState)
@@ -445,6 +463,15 @@ namespace Turbo.Plugins.s7o
 
             if (!Hud.Game.IsInGame || Hud.Game.IsLoading)
                 return;
+
+            bool needsPortraitOverlay =
+                ShowAlwaysOnPartySkillBars ||
+                ShowGemUpgradesNearPortraits ||
+                ShowNemesisBracersNearPortraits ||
+                ShowPanel;
+
+            if (needsPortraitOverlay)
+                DrawPartyPortraitOverlay();
 
             // Optional legacy top-center text reminder. Default is false.
             // Portrait Gem Ups counters are the primary reminder style.
@@ -486,16 +513,299 @@ namespace Turbo.Plugins.s7o
             if (ShowGemUpgradeCountsOnlyWhenUrshiVisible)
                 return IsUrshiVisible();
 
+            var players = GetPartyPlayers();
+
+            if (IsGreaterRiftInProgress())
+            {
+                ClearGemUpgradeDisplayStates();
+                return false;
+            }
+
+            bool hardClose = IsGemUpgradeRewardCloseCandidate();
+            if (hardClose && _gemUpgradeRewardSessionActive)
+            {
+                int tick = GetCurrentGameTickSafe();
+                if (_gemUpgradeCloseCandidateTick <= 0)
+                    _gemUpgradeCloseCandidateTick = tick;
+
+                if (tick <= 0 || tick - _gemUpgradeCloseCandidateTick >= GemUpgradeCloseGraceTicks)
+                {
+                    ClearGemUpgradeDisplayStates();
+                    return false;
+                }
+            }
+            else if (!hardClose)
+            {
+                _gemUpgradeCloseCandidateTick = 0;
+            }
+
+            bool activeSignal = IsGemUpgradeRewardSignalActive(players);
+            if (activeSignal)
+                _gemUpgradeRewardSessionActive = true;
+
+            if (!_gemUpgradeRewardSessionActive)
+                return false;
+
+            UpdateGemUpgradeDisplayStates(players);
+            return _gemUpgradeStateCache.Count > 0;
+        }
+
+        private bool IsGreaterRiftInProgress()
+        {
             try
             {
-                foreach (var player in GetPartyPlayers())
+                return Hud.Game != null &&
+                       Hud.Game.RiftPercentage > 0.0d &&
+                       Hud.Game.RiftPercentage < 100.0d &&
+                       !IsUrshiVisible() &&
+                       !IsGreaterRiftRewardQuestStep();
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private bool IsGemUpgradeRewardSignalActive(List<IPlayer> players)
+        {
+            if (IsUrshiVisible())
+                return true;
+
+            if (IsGreaterRiftRewardQuestStep())
+                return true;
+
+            try
+            {
+                if (players != null)
                 {
-                    if (GetGemUpgradesLeft(player) > 0)
-                        return true;
+                    foreach (var player in players)
+                    {
+                        if (HasTieredLootRewardAttribute(player))
+                            return true;
+                    }
                 }
             }
             catch
             {
+            }
+
+            return false;
+        }
+
+        private bool IsGemUpgradeRewardCloseCandidate()
+        {
+            try
+            {
+                return Hud.Game != null &&
+                       Hud.Game.IsInTown &&
+                       (Hud.Game.Me == null || !Hud.Game.Me.InGreaterRift) &&
+                       !IsUrshiVisible() &&
+                       !IsGreaterRiftRewardQuestStep() &&
+                       !IsGreaterRiftBarVisible();
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private bool IsGreaterRiftRewardQuestStep()
+        {
+            uint step = GetGreaterRiftQuestStepId(382695);
+            if (step == 5 || step == 10 || step == 34 || step == 46)
+                return true;
+
+            step = GetGreaterRiftQuestStepId(337492);
+            return step == 5 || step == 10 || step == 34 || step == 46;
+        }
+
+        private bool IsGreaterRiftBarVisible()
+        {
+            try
+            {
+                if (Hud.Render == null || Hud.Render.GreaterRiftBarUiElement == null)
+                    return false;
+
+                var rect = Hud.Render.GreaterRiftBarUiElement.Rectangle;
+                return Hud.Render.GreaterRiftBarUiElement.Visible &&
+                       rect.Width > 0.0f &&
+                       rect.Height > 0.0f;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private uint GetGreaterRiftQuestStepId(uint questSno)
+        {
+            try
+            {
+                if (Hud.Game == null || Hud.Game.Quests == null)
+                    return 0;
+
+                var quest = Hud.Game.Quests.FirstOrDefault(q =>
+                    q != null &&
+                    q.SnoQuest != null &&
+                    q.SnoQuest.Sno == questSno);
+
+                return quest != null ? quest.QuestStepId : 0;
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        private bool HasTieredLootRewardAttribute(IPlayer player)
+        {
+            if (player == null)
+                return false;
+
+            try
+            {
+                if (player.GetAttributeValueAsInt(Hud.Sno.Attributes.Tiered_Loot_Run_Reward_Choice_State, 2147483647, 0) > 0)
+                    return true;
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                if (player.GetAttributeValueAsInt(Hud.Sno.Attributes.Tiered_Loot_Run_Reward_Receives_Key, 2147483647, 0) > 0)
+                    return true;
+            }
+            catch
+            {
+            }
+
+            return false;
+        }
+
+        private void ClearGemUpgradeDisplayStates()
+        {
+            try
+            {
+                _gemUpgradeStateCache.Clear();
+                _gemUpgradeRewardSessionActive = false;
+                _gemUpgradeCloseCandidateTick = 0;
+            }
+            catch
+            {
+            }
+        }
+
+        private void UpdateGemUpgradeDisplayStates(List<IPlayer> players)
+        {
+            if (players == null)
+                return;
+
+            foreach (var player in players)
+            {
+                int left;
+                int total;
+                bool hasCount = TryReadGemUpgradeCounts(player, out left, out total);
+                bool rewardAttribute = HasTieredLootRewardAttribute(player);
+                bool existingState = HasGemUpgradeDisplayState(player);
+
+                if ((!hasCount || total <= 0) && !rewardAttribute && !existingState)
+                    continue;
+
+                var state = GetOrCreateGemUpgradeDisplayState(player);
+                if (state == null)
+                    continue;
+
+                if (hasCount && total > 0 && left > 0)
+                {
+                    state.Left = left;
+                    state.SawZero = false;
+                }
+                else if ((hasCount && (total > 0 || existingState)) || rewardAttribute)
+                {
+                    state.Left = 0;
+                    state.SawZero = true;
+                }
+
+                state.LastSeenTick = GetCurrentGameTickSafe();
+            }
+        }
+
+        private bool TryGetGemUpgradeDisplayLeft(IPlayer player, out int left)
+        {
+            left = 0;
+
+            if (player == null)
+                return false;
+
+            GemUpgradeDisplayState state;
+            if (TryGetGemUpgradeDisplayState(player, out state) && state != null)
+            {
+                left = Math.Max(0, state.Left);
+                return true;
+            }
+
+            int total;
+            return TryReadGemUpgradeCounts(player, out left, out total) && total > 0;
+        }
+
+        private bool HasGemUpgradeDisplayState(IPlayer player)
+        {
+            GemUpgradeDisplayState state;
+            return TryGetGemUpgradeDisplayState(player, out state) && state != null;
+        }
+
+        private int GetCurrentGameTickSafe()
+        {
+            try
+            {
+                return Hud != null && Hud.Game != null ? Hud.Game.CurrentGameTick : 0;
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        private GemUpgradeDisplayState GetOrCreateGemUpgradeDisplayState(IPlayer player)
+        {
+            if (player == null)
+                return null;
+
+            foreach (var key in GetPortraitHoverPlayerCacheKeys(player))
+            {
+                if (string.IsNullOrEmpty(key))
+                    continue;
+
+                GemUpgradeDisplayState state;
+                if (_gemUpgradeStateCache.TryGetValue(key, out state) && state != null)
+                    return state;
+            }
+
+            var created = new GemUpgradeDisplayState();
+            foreach (var key in GetPortraitHoverPlayerCacheKeys(player))
+            {
+                if (!string.IsNullOrEmpty(key))
+                    _gemUpgradeStateCache[key] = created;
+            }
+
+            return created;
+        }
+
+        private bool TryGetGemUpgradeDisplayState(IPlayer player, out GemUpgradeDisplayState state)
+        {
+            state = null;
+
+            if (player == null)
+                return false;
+
+            foreach (var key in GetPortraitHoverPlayerCacheKeys(player))
+            {
+                if (string.IsNullOrEmpty(key))
+                    continue;
+
+                if (_gemUpgradeStateCache.TryGetValue(key, out state) && state != null)
+                    return true;
             }
 
             return false;
@@ -522,8 +832,18 @@ namespace Turbo.Plugins.s7o
 
         private int GetGemUpgradesLeft(IPlayer player)
         {
+            int left;
+            int total;
+            return TryReadGemUpgradeCounts(player, out left, out total) ? left : 0;
+        }
+
+        private bool TryReadGemUpgradeCounts(IPlayer player, out int left, out int total)
+        {
+            left = 0;
+            total = 0;
+
             if (player == null)
-                return 0;
+                return false;
 
             try
             {
@@ -542,12 +862,16 @@ namespace Turbo.Plugins.s7o
                     2147483647,
                     0);
 
-                int left = bonus + max - used;
-                return left < 0 ? 0 : left;
+                total = Math.Max(0, bonus + max);
+                left = total - Math.Max(0, used);
+                if (left < 0)
+                    left = 0;
+
+                return true;
             }
             catch
             {
-                return 0;
+                return false;
             }
         }
 
@@ -2029,7 +2353,10 @@ namespace Turbo.Plugins.s7o
             if (player == null || player.PortraitUiElement == null)
                 return;
 
-            int left = GetGemUpgradesLeft(player);
+            int left;
+            if (!TryGetGemUpgradeDisplayLeft(player, out left))
+                return;
+
             if (left < 0)
                 left = 0;
 
@@ -2124,6 +2451,7 @@ namespace Turbo.Plugins.s7o
             public string Header;
             public string Value;
             public float Width;
+            public bool IsHardCc;
         }
 
         private class PortraitHoverPlayerStatsSnapshot
@@ -2138,7 +2466,15 @@ namespace Turbo.Plugins.s7o
             public string Rcr;
             public string Ad;
             public string Solo;
+            public string HardCc;
             public bool HasUsableCoreStats;
+            public int LastSeenTick;
+        }
+
+        private class GemUpgradeDisplayState
+        {
+            public int Left;
+            public bool SawZero;
             public int LastSeenTick;
         }
 
@@ -2309,14 +2645,27 @@ namespace Turbo.Plugins.s7o
                 if (_portraitHoverBorderBrush != null)
                     _portraitHoverBorderBrush.DrawRectangle(cellX, y, width, rowHeight);
 
-                DrawPortraitHoverCellText(
-                    header ? cell.Header : cell.Value,
-                    header ? _portraitHoverHeaderFont : _portraitHoverValueFont,
-                    cellX,
-                    y,
-                    width,
-                    rowHeight,
-                    true);
+                if (cell.IsHardCc)
+                {
+                    DrawPortraitHoverHardCcCellText(
+                        header ? cell.Header : cell.Value,
+                        header,
+                        cellX,
+                        y,
+                        width,
+                        rowHeight);
+                }
+                else
+                {
+                    DrawPortraitHoverCellText(
+                        header ? cell.Header : cell.Value,
+                        header ? _portraitHoverHeaderFont : _portraitHoverValueFont,
+                        cellX,
+                        y,
+                        width,
+                        rowHeight,
+                        true);
+                }
 
                 cellX += width;
             }
@@ -2329,6 +2678,7 @@ namespace Turbo.Plugins.s7o
             float nameWidth = Math.Max(60.0f, PortraitHoverStatsNameColumnWidth);
             float statWidth = Math.Max(34.0f, PortraitHoverStatsStatColumnWidth);
             float soloWidth = Math.Max(34.0f, PortraitHoverStatsSoloColumnWidth);
+            float ccWidth = Math.Max(86.0f, PortraitHoverStatsCcColumnWidth);
 
             cells.Add(new PortraitHoverStatCell { Header = "PLAYER", Value = "PLAYER", Width = nameWidth });
             cells.Add(new PortraitHoverStatCell { Header = "EHP", Value = "EHP", Width = statWidth });
@@ -2340,6 +2690,8 @@ namespace Turbo.Plugins.s7o
             cells.Add(new PortraitHoverStatCell { Header = "RCR", Value = "RCR", Width = statWidth });
             cells.Add(new PortraitHoverStatCell { Header = "AD", Value = "AD", Width = statWidth });
             cells.Add(new PortraitHoverStatCell { Header = "SOLO", Value = "SOLO", Width = soloWidth });
+            if (PortraitHoverStatsShowHardCc)
+                cells.Add(new PortraitHoverStatCell { Header = "CC", Value = "CC", Width = ccWidth, IsHardCc = true });
 
             return cells;
         }
@@ -2352,6 +2704,7 @@ namespace Turbo.Plugins.s7o
             float nameWidth = Math.Max(60.0f, PortraitHoverStatsNameColumnWidth);
             float statWidth = Math.Max(34.0f, PortraitHoverStatsStatColumnWidth);
             float soloWidth = Math.Max(34.0f, PortraitHoverStatsSoloColumnWidth);
+            float ccWidth = Math.Max(86.0f, PortraitHoverStatsCcColumnWidth);
 
             cells.Add(new PortraitHoverStatCell { Header = "PLAYER", Value = snapshot.Name, Width = nameWidth });
             cells.Add(new PortraitHoverStatCell { Header = "EHP", Value = snapshot.Ehp, Width = statWidth });
@@ -2363,6 +2716,8 @@ namespace Turbo.Plugins.s7o
             cells.Add(new PortraitHoverStatCell { Header = "RCR", Value = snapshot.Rcr, Width = statWidth });
             cells.Add(new PortraitHoverStatCell { Header = "AD", Value = snapshot.Ad, Width = statWidth });
             cells.Add(new PortraitHoverStatCell { Header = "SOLO", Value = snapshot.Solo, Width = soloWidth });
+            if (PortraitHoverStatsShowHardCc)
+                cells.Add(new PortraitHoverStatCell { Header = "CC", Value = snapshot.HardCc, Width = ccWidth, IsHardCc = true });
 
             return cells;
         }
@@ -2410,6 +2765,7 @@ namespace Turbo.Plugins.s7o
                     var merged = ClonePortraitHoverPlayerStatsSnapshot(cached);
                     merged.Name = !string.IsNullOrEmpty(current.Name) && current.Name != "?" ? current.Name : merged.Name;
                     merged.Solo = !string.IsNullOrEmpty(current.Solo) && current.Solo != "-" ? current.Solo : merged.Solo;
+                    merged.HardCc = !string.IsNullOrEmpty(current.HardCc) && current.HardCc != "-" ? current.HardCc : merged.HardCc;
                     return merged;
                 }
             }
@@ -2423,6 +2779,7 @@ namespace Turbo.Plugins.s7o
             var empty = CreateEmptyPortraitHoverPlayerStats(player);
             empty.Name = !string.IsNullOrEmpty(current.Name) && current.Name != "?" ? current.Name : empty.Name;
             empty.Solo = !string.IsNullOrEmpty(current.Solo) && current.Solo != "-" ? current.Solo : empty.Solo;
+            empty.HardCc = !string.IsNullOrEmpty(current.HardCc) && current.HardCc != "-" ? current.HardCc : empty.HardCc;
             return empty;
         }
 
@@ -2442,6 +2799,7 @@ namespace Turbo.Plugins.s7o
             snapshot.Rcr = GetPlayerRcrText(player);
             snapshot.Ad = GetPlayerAreaDamageText(player);
             snapshot.Solo = GetPlayerSoloText(player);
+            snapshot.HardCc = GetPlayerHardCcText(player);
             snapshot.HasUsableCoreStats = HasUsablePortraitHoverCoreStats(player);
 
             try
@@ -2470,6 +2828,7 @@ namespace Turbo.Plugins.s7o
                 Rcr = "-",
                 Ad = "-",
                 Solo = GetPlayerSoloText(player),
+                HardCc = "-",
                 HasUsableCoreStats = false,
                 LastSeenTick = 0
             };
@@ -2541,6 +2900,7 @@ namespace Turbo.Plugins.s7o
                 Rcr = source.Rcr,
                 Ad = source.Ad,
                 Solo = source.Solo,
+                HardCc = source.HardCc,
                 HasUsableCoreStats = source.HasUsableCoreStats,
                 LastSeenTick = source.LastSeenTick
             };
@@ -2641,6 +3001,99 @@ namespace Turbo.Plugins.s7o
                 result = result.Substring(0, hashIndex).Trim();
 
             return result;
+        }
+
+        private void DrawPortraitHoverHardCcCellText(string text, bool header, float x, float y, float width, float height)
+        {
+            if (string.IsNullOrEmpty(text))
+                return;
+
+            if (header)
+            {
+                DrawPortraitHoverCellText("CC", _portraitHoverHeaderFont, x, y, width, height, true);
+                return;
+            }
+
+            string value = text.Trim();
+            if (value == "-" || value.IndexOf(' ') < 0)
+            {
+                DrawPortraitHoverCellText(value, _portraitHoverValueFont, x, y, width, height, true);
+                return;
+            }
+
+            string[] parts = value.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length <= 3 && DoesPortraitHoverTextFit(value, _portraitHoverValueFont, width))
+            {
+                DrawPortraitHoverCellText(value, _portraitHoverValueFont, x, y, width, height, true);
+                return;
+            }
+
+            IFont smallFont = _portraitHoverCcSmallFont ?? _portraitHoverValueFont;
+            int split = GetBestPortraitHoverHardCcSplit(parts, smallFont);
+            string line1 = string.Join(" ", parts, 0, split);
+            string line2 = string.Join(" ", parts, split, parts.Length - split);
+
+            DrawPortraitHoverCellText(line1, smallFont, x, y + 0.5f, width, height * 0.5f, true);
+            DrawPortraitHoverCellText(line2, smallFont, x, y + height * 0.5f - 0.5f, width, height * 0.5f, true);
+        }
+
+        private bool DoesPortraitHoverTextFit(string text, IFont font, float width)
+        {
+            if (string.IsNullOrEmpty(text) || font == null)
+                return true;
+
+            try
+            {
+                float padding = Math.Max(2.0f, PortraitHoverStatsPaddingX * 2.0f);
+                return font.GetTextLayout(text).Metrics.Width <= Math.Max(4.0f, width - padding);
+            }
+            catch
+            {
+            }
+
+            return true;
+        }
+
+        private int GetBestPortraitHoverHardCcSplit(string[] parts, IFont font)
+        {
+            if (parts == null || parts.Length <= 1)
+                return 1;
+
+            int bestSplit = (parts.Length + 1) / 2;
+            float bestWidth = float.MaxValue;
+
+            for (int split = 1; split < parts.Length; split++)
+            {
+                string line1 = string.Join(" ", parts, 0, split);
+                string line2 = string.Join(" ", parts, split, parts.Length - split);
+                float width1 = GetPortraitHoverTextWidth(line1, font);
+                float width2 = GetPortraitHoverTextWidth(line2, font);
+                float widest = Math.Max(width1, width2);
+
+                if (widest < bestWidth)
+                {
+                    bestWidth = widest;
+                    bestSplit = split;
+                }
+            }
+
+            return bestSplit;
+        }
+
+        private float GetPortraitHoverTextWidth(string text, IFont font)
+        {
+            if (string.IsNullOrEmpty(text) || font == null)
+                return 0.0f;
+
+            try
+            {
+                return font.GetTextLayout(text).Metrics.Width;
+            }
+            catch
+            {
+            }
+
+            return text.Length * 5.0f;
         }
 
         private void DrawPortraitHoverCellText(string text, IFont font, float x, float y, float width, float height, bool center)
@@ -2841,6 +3294,535 @@ namespace Turbo.Plugins.s7o
             }
 
             return "-";
+        }
+
+        private string GetPlayerHardCcText(IPlayer player)
+        {
+            HardCcFlags flags = HardCcFlags.None;
+
+            CollectHardCcFromSkills(player, ref flags);
+            CollectHardCcFromProcAttributes(player, ref flags);
+            CollectHardCcFromLegendaryPowers(player, ref flags);
+
+            return FormatHardCcFlags(flags);
+        }
+
+        private void CollectHardCcFromSkills(IPlayer player, ref HardCcFlags flags)
+        {
+            if (player == null || player.Powers == null || player.Powers.SkillSlots == null)
+                return;
+
+            try
+            {
+                foreach (var skill in player.Powers.SkillSlots)
+                {
+                    ISnoPower power = GetSkillPower(skill);
+                    if (skill == null || power == null)
+                        continue;
+
+                    switch (power.Sno)
+                    {
+                        // Barbarian
+                        case 79242: // Barbarian_Bash
+                            if (RuneIs(skill, "Clobber"))
+                                flags |= HardCcFlags.Stun;
+                            else
+                                flags |= HardCcFlags.Knockback;
+                            AddCcForRune(skill, ref flags, HardCcFlags.Freeze, "Frostbite");
+                            break;
+
+                        case 78548: // Barbarian_Frenzy
+                            AddCcForRune(skill, ref flags, HardCcFlags.Stun, "Smite");
+                            break;
+
+                        case 377452: // Barbarian_WeaponThrow
+                            AddCcForRune(skill, ref flags, HardCcFlags.Stun, "Throwing Hammer");
+                            break;
+
+                        case 80028: // Barbarian_HammerOfTheAncients
+                            AddCcForRune(skill, ref flags, HardCcFlags.Stun, "Thunderstrike");
+                            break;
+
+                        case 97435: // Barbarian_FuriousCharge
+                            flags |= HardCcFlags.Knockback;
+                            AddCcForRune(skill, ref flags, HardCcFlags.Freeze, "Cold Rush");
+                            break;
+
+                        case 79446: // Barbarian_GroundStomp
+                            flags |= HardCcFlags.Stun;
+                            AddCcForRune(skill, ref flags, HardCcFlags.Pull, "Wrenching Smash");
+                            break;
+
+                        case 377453: // Barbarian_AncientSpear
+                            AddCcForRune(skill, ref flags, HardCcFlags.Pull, "Rage Flip");
+                            break;
+
+                        case 93409: // Barbarian_Leap
+                            AddCcForRune(skill, ref flags, HardCcFlags.Knockback, "Toppling Impact");
+                            AddCcForRune(skill, ref flags, HardCcFlags.Pull, "Call of Arreat");
+                            AddCcForRune(skill, ref flags, HardCcFlags.Stun, "Death from Above");
+                            break;
+
+                        case 79077: // Barbarian_ThreateningShout
+                            AddCcForRune(skill, ref flags, HardCcFlags.Fear, "Terrify");
+                            break;
+
+                        case 86989: // Barbarian_SeismicSlam
+                            AddCcForRune(skill, ref flags, HardCcFlags.Knockback, "Shattered Ground");
+                            break;
+
+                        case 98878: // Barbarian_Earthquake
+                            AddCcForRune(skill, ref flags, HardCcFlags.Freeze, "Chilling Earth");
+                            AddCcForRune(skill, ref flags, HardCcFlags.Pull, "Cave-In", "Cave In");
+                            break;
+
+                        case 353447: // Barbarian_Avalanche
+                            AddCcForRune(skill, ref flags, HardCcFlags.Freeze, "Glacier");
+                            break;
+
+                        // Crusader
+                        case 266627: // Crusader_Condemn
+                            AddCcForRune(skill, ref flags, HardCcFlags.Pull, "Vacuum");
+                            break;
+
+                        case 268530: // Crusader_ShieldGlare
+                            if (RuneIs(skill, "Uncertainty"))
+                                flags |= HardCcFlags.Charm;
+                            else
+                                flags |= HardCcFlags.Blind;
+                            break;
+
+                        case 239137: // Crusader_FallingSword
+                            AddCcForRune(skill, ref flags, HardCcFlags.Stun, "Part the Clouds");
+                            break;
+
+                        case 266951: // Crusader_BlessedShield
+                            AddCcForRune(skill, ref flags, HardCcFlags.Stun, "Staggering Shield");
+                            break;
+
+                        case 353492: // Crusader_ShieldBash
+                            if (RuneIs(skill, "One on One"))
+                                flags |= HardCcFlags.Stun | HardCcFlags.Knockback;
+                            break;
+
+                        case 239042: // Crusader_SweepAttack
+                            AddCcForRune(skill, ref flags, HardCcFlags.Stun, "Trip Attack");
+                            AddCcForRune(skill, ref flags, HardCcFlags.Pull, "Gathering Sweep");
+                            break;
+
+                        case 243853: // Crusader_SteedCharge
+                            AddCcForRune(skill, ref flags, HardCcFlags.Pull, "Draw and Quarter");
+                            break;
+
+                        case 290545: // Crusader_Provoke
+                            flags |= HardCcFlags.Taunt;
+                            AddCcForRune(skill, ref flags, HardCcFlags.Fear, "Flee Fool");
+                            break;
+
+                        // Demon Hunter
+                        case 77552: // DemonHunter_Bolas
+                            AddCcForRune(skill, ref flags, HardCcFlags.Stun, "Thunder Ball");
+                            AddCcForRune(skill, ref flags, HardCcFlags.Freeze, "Freezing Strike");
+                            break;
+
+                        case 86610: // DemonHunter_Grenades
+                            AddCcForRune(skill, ref flags, HardCcFlags.Stun, "Stun Grenade");
+                            break;
+
+                        case 77546: // DemonHunter_FanOfKnives
+                            AddCcForRune(skill, ref flags, HardCcFlags.Stun, "Fan of Daggers");
+                            break;
+
+                        case 130831: // DemonHunter_RainOfVengeance
+                            AddCcForRune(skill, ref flags, HardCcFlags.Knockback, "Stampede");
+                            AddCcForRune(skill, ref flags, HardCcFlags.Stun, "Flying Strike");
+                            break;
+
+                        case 111215: // DemonHunter_Vault
+                            if (RuneIs(skill, "Rattling Roll"))
+                                flags |= HardCcFlags.Stun | HardCcFlags.Knockback;
+                            break;
+
+                        case 129214: // DemonHunter_ClusterArrow
+                            AddCcForRune(skill, ref flags, HardCcFlags.Stun, "Dazzling Arrow");
+                            break;
+
+                        case 131366: // DemonHunter_Impale
+                            if (RuneIs(skill, "Impact"))
+                                flags |= HardCcFlags.Stun | HardCcFlags.Knockback;
+                            break;
+
+                        // Monk
+                        case 95940: // Monk_FistsOfThunder
+                            AddCcForRune(skill, ref flags, HardCcFlags.Knockback, "Thunderclap");
+                            AddCcForRune(skill, ref flags, HardCcFlags.Freeze, "Wind Blast");
+                            break;
+
+                        case 136954: // Monk_BlindingFlash
+                            if (RuneIs(skill, "Blinded and Confused"))
+                                flags |= HardCcFlags.Charm;
+                            else
+                                flags |= HardCcFlags.Blind;
+                            break;
+
+                        case 223473: // Monk_CycloneStrike
+                            flags |= HardCcFlags.Pull;
+                            AddCcForRune(skill, ref flags, HardCcFlags.Freeze, "Wall of Wind");
+                            break;
+
+                        case 96694: // Monk_SevenSidedStrike
+                            AddCcForRune(skill, ref flags, HardCcFlags.Stun, "Pandemonium");
+                            break;
+
+                        case 111676: // Monk_LashingTailKick
+                            flags |= HardCcFlags.Knockback;
+                            AddCcForRune(skill, ref flags, HardCcFlags.Stun, "Scorpion Sting");
+                            break;
+
+                        case 96311: // Monk_CripplingWave
+                            AddCcForRune(skill, ref flags, HardCcFlags.Freeze, "Tsunami");
+                            break;
+
+                        case 96033: // Monk_WaveOfLight
+                            AddCcForRune(skill, ref flags, HardCcFlags.Knockback, "Explosive Light");
+                            break;
+
+                        // Necromancer
+                        case 466857: // Necromancer_BoneArmor
+                            AddCcForRune(skill, ref flags, HardCcFlags.Stun, "Dislocation");
+                            break;
+
+                        case 462147: // Necromancer_BoneSpikes
+                            AddCcForRune(skill, ref flags, HardCcFlags.Stun, "Sudden Impact");
+                            break;
+
+                        case 451537: // Necromancer_CommandGolem
+                            AddCcForRune(skill, ref flags, HardCcFlags.Stun, "Bone Golem");
+                            AddCcForRune(skill, ref flags, HardCcFlags.Freeze, "Ice Golem");
+                            break;
+
+                        case 453801: // Necromancer_CommandSkeletons
+                            AddCcForRune(skill, ref flags, HardCcFlags.Freeze, "Freezing Grasp");
+                            break;
+
+                        case 465839: // Necromancer_LandOfTheDead
+                            AddCcForRune(skill, ref flags, HardCcFlags.Freeze, "Frozen Lands");
+                            break;
+
+                        // Witch Doctor
+                        case 30631: // WitchDoctor_Hex
+                            flags |= HardCcFlags.Charm;
+                            break;
+
+                        case 67668: // WitchDoctor_Horrify
+                            flags |= HardCcFlags.Fear;
+                            break;
+
+                        case 67600: // WitchDoctor_MassConfusion
+                            flags |= HardCcFlags.Charm;
+                            break;
+
+                        case 347265: // WitchDoctor_Piranhas
+                            AddCcForRune(skill, ref flags, HardCcFlags.Pull, "Piranhado");
+                            break;
+
+                        // Wizard
+                        case 243141: // Wizard_BlackHole
+                            flags |= HardCcFlags.Pull;
+                            break;
+
+                        case 30718: // Wizard_FrostNova
+                            if (skill.Rune != 2 && !RuneContains(skill, "Frozen Mist"))
+                                flags |= HardCcFlags.Freeze;
+                            break;
+
+                        case 30680: // Wizard_Blizzard
+                            AddCcForRune(skill, ref flags, HardCcFlags.Freeze, "Frozen Solid");
+                            break;
+
+                        case 1769: // Wizard_SlowTime
+                            AddCcForRune(skill, ref flags, HardCcFlags.Stun, "Point of No Return");
+                            break;
+
+                        case 30796: // Wizard_WaveOfForce
+                            AddCcForRune(skill, ref flags, HardCcFlags.Knockback, "Impactful Wave");
+                            break;
+
+                        case 93395: // Wizard_RayOfFrost
+                            AddCcForRune(skill, ref flags, HardCcFlags.Freeze, "Numb");
+                            break;
+
+                        case 69190: // Wizard_Meteor
+                            AddCcForRune(skill, ref flags, HardCcFlags.Freeze, "Comet");
+                            break;
+
+                        case 168344: // Wizard_Teleport
+                            AddCcForRune(skill, ref flags, HardCcFlags.Stun, "Calamity");
+                            break;
+
+                        case 30744: // Wizard_MagicMissile
+                            AddCcForRune(skill, ref flags, HardCcFlags.Freeze, "Glacial Spike");
+                            break;
+
+                        case 73223: // Wizard_IceArmor
+                            AddCcForRune(skill, ref flags, HardCcFlags.Freeze, "Ice Reflect");
+                            break;
+                    }
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        private void CollectHardCcFromProcAttributes(IPlayer player, ref HardCcFlags flags)
+        {
+            if (player == null)
+                return;
+
+            if (HasAnyHardCcProc(player,
+                Hud.Sno.Attributes.On_Hit_Fear_Proc_Chance,
+                Hud.Sno.Attributes.Weapon_On_Hit_Fear_Proc_Chance,
+                Hud.Sno.Attributes.Weapon_On_Hit_Fear_Proc_Chance_MainHand,
+                Hud.Sno.Attributes.Weapon_On_Hit_Fear_Proc_Chance_OffHand,
+                Hud.Sno.Attributes.Weapon_On_Hit_Fear_Proc_Chance_CurrentHand))
+                flags |= HardCcFlags.Fear;
+
+            if (HasAnyHardCcProc(player,
+                Hud.Sno.Attributes.On_Hit_Stun_Proc_Chance,
+                Hud.Sno.Attributes.Weapon_On_Hit_Stun_Proc_Chance,
+                Hud.Sno.Attributes.Weapon_On_Hit_Stun_Proc_Chance_MainHand,
+                Hud.Sno.Attributes.Weapon_On_Hit_Stun_Proc_Chance_OffHand,
+                Hud.Sno.Attributes.Weapon_On_Hit_Stun_Proc_Chance_CurrentHand))
+                flags |= HardCcFlags.Stun;
+
+            if (HasAnyHardCcProc(player,
+                Hud.Sno.Attributes.On_Hit_Blind_Proc_Chance,
+                Hud.Sno.Attributes.Weapon_On_Hit_Blind_Proc_Chance,
+                Hud.Sno.Attributes.Weapon_On_Hit_Blind_Proc_Chance_MainHand,
+                Hud.Sno.Attributes.Weapon_On_Hit_Blind_Proc_Chance_OffHand,
+                Hud.Sno.Attributes.Weapon_On_Hit_Blind_Proc_Chance_CurrentHand))
+                flags |= HardCcFlags.Blind;
+
+            if (HasAnyHardCcProc(player,
+                Hud.Sno.Attributes.On_Hit_Freeze_Proc_Chance,
+                Hud.Sno.Attributes.Weapon_On_Hit_Freeze_Proc_Chance,
+                Hud.Sno.Attributes.Weapon_On_Hit_Freeze_Proc_Chance_MainHand,
+                Hud.Sno.Attributes.Weapon_On_Hit_Freeze_Proc_Chance_OffHand,
+                Hud.Sno.Attributes.Weapon_On_Hit_Freeze_Proc_Chance_CurrentHand))
+                flags |= HardCcFlags.Freeze;
+
+            if (HasAnyHardCcProc(player,
+                Hud.Sno.Attributes.On_Hit_Knockback_Proc_Chance,
+                Hud.Sno.Attributes.Weapon_On_Hit_Knockback_Proc_Chance,
+                Hud.Sno.Attributes.Weapon_On_Hit_Knockback_Proc_Chance_MainHand,
+                Hud.Sno.Attributes.Weapon_On_Hit_Knockback_Proc_Chance_OffHand,
+                Hud.Sno.Attributes.Weapon_On_Hit_Knockback_Proc_Chance_CurrentHand))
+                flags |= HardCcFlags.Knockback;
+        }
+
+        private void CollectHardCcFromLegendaryPowers(IPlayer player, ref HardCcFlags flags)
+        {
+            if (player == null || player.Powers == null || player.Powers.UsedLegendaryPowers == null)
+                return;
+
+            try
+            {
+                if (IsBuffActive(player.Powers.UsedLegendaryPowers.AnessaziEdge))
+                    flags |= HardCcFlags.Stun;
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                if (IsBuffActive(player.Powers.UsedLegendaryPowers.CordOfTheSherma))
+                    flags |= HardCcFlags.Blind;
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                if (IsBuffActive(player.Powers.UsedLegendaryPowers.TheEssOfJohan))
+                    flags |= HardCcFlags.Pull;
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                if (IsBuffActive(player.Powers.UsedLegendaryPowers.MalothsFocus))
+                    flags |= HardCcFlags.Fear;
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                if (IsBuffActive(player.Powers.UsedLegendaryPowers.LeonineBowOfHashir) && HasUsedSkill(player, 77552))
+                    flags |= HardCcFlags.Pull;
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                if (IsBuffActive(player.Powers.UsedLegendaryPowers.Frostburn) && HasColdSkill(player))
+                    flags |= HardCcFlags.Freeze;
+            }
+            catch
+            {
+            }
+        }
+
+        private bool HasAnyHardCcProc(IPlayer player, params IAttribute[] attributes)
+        {
+            if (attributes == null)
+                return false;
+
+            foreach (var attribute in attributes)
+            {
+                if (HasHardCcProc(player, attribute))
+                    return true;
+            }
+
+            return false;
+        }
+
+        private bool HasHardCcProc(IPlayer player, IAttribute attribute)
+        {
+            try
+            {
+                return player != null &&
+                    attribute != null &&
+                    player.GetAttributeValue(attribute, 2147483647, 0.0d) > 0.000001d;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private bool IsBuffActive(IBuff buff)
+        {
+            try
+            {
+                return buff != null && buff.Active;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private bool RuneContains(IPlayerSkill skill, string text)
+        {
+            if (skill == null || string.IsNullOrEmpty(text))
+                return false;
+
+            try
+            {
+                return !string.IsNullOrEmpty(skill.RuneNameEnglish) &&
+                    skill.RuneNameEnglish.IndexOf(text, StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private bool RuneIs(IPlayerSkill skill, params string[] names)
+        {
+            if (names == null)
+                return false;
+
+            foreach (string name in names)
+            {
+                if (RuneContains(skill, name))
+                    return true;
+            }
+
+            return false;
+        }
+
+        private void AddCcForRune(IPlayerSkill skill, ref HardCcFlags flags, HardCcFlags cc, params string[] runeNames)
+        {
+            if (RuneIs(skill, runeNames))
+                flags |= cc;
+        }
+
+        private bool HasUsedSkill(IPlayer player, uint sno)
+        {
+            if (player == null || player.Powers == null || player.Powers.SkillSlots == null)
+                return false;
+
+            try
+            {
+                foreach (var skill in player.Powers.SkillSlots)
+                {
+                    ISnoPower power = GetSkillPower(skill);
+                    if (power != null && power.Sno == sno)
+                        return true;
+                }
+            }
+            catch
+            {
+            }
+
+            return false;
+        }
+
+        private bool HasColdSkill(IPlayer player)
+        {
+            if (player == null || player.Powers == null || player.Powers.SkillSlots == null)
+                return false;
+
+            try
+            {
+                foreach (var skill in player.Powers.SkillSlots)
+                {
+                    if (skill != null && skill.ElementalType == 3)
+                        return true;
+                }
+            }
+            catch
+            {
+            }
+
+            return false;
+        }
+
+        private string FormatHardCcFlags(HardCcFlags flags)
+        {
+            if (flags == HardCcFlags.None)
+                return "-";
+
+            List<string> parts = new List<string>();
+
+            if ((flags & HardCcFlags.Pull) != 0)
+                parts.Add("PULL");
+            if ((flags & HardCcFlags.Knockback) != 0)
+                parts.Add("KB");
+            if ((flags & HardCcFlags.Stun) != 0)
+                parts.Add("STN");
+            if ((flags & HardCcFlags.Freeze) != 0)
+                parts.Add("FRZ");
+            if ((flags & HardCcFlags.Blind) != 0)
+                parts.Add("BLD");
+            if ((flags & HardCcFlags.Fear) != 0)
+                parts.Add("FEAR");
+            if ((flags & HardCcFlags.Charm) != 0)
+                parts.Add("CHM");
+            if ((flags & HardCcFlags.Taunt) != 0)
+                parts.Add("TAUNT");
+
+            return string.Join(" ", parts.ToArray());
         }
 
         private string FormatPercentNoScaling(float value, int decimals)
