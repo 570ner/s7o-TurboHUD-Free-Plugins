@@ -59,6 +59,9 @@ namespace Turbo.Plugins.s7o
         public bool ShowFortressPortalDebug { get; set; } = false;
         public int FortressFileDebugIntervalMs { get; set; } = 250;
         public bool EnableFortressNativeReturn { get; set; } = true;
+        // Temple of the Firstborn can have the same tall-portal projection problem as Fortress.
+        // Keep this scene-scoped native path first; the strict normal click path remains untouched for other maps.
+        public bool EnableFirstbornTempleNativeReturn { get; set; } = true;
         public int FortressNativeRetryMs { get; set; } = 100;
         public int FortressNativeHoverConfirmMs { get; set; } = 70;
         public int FortressNativeCandidateLogLimit { get; set; } = 12;
@@ -1015,8 +1018,8 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
-            if (IsCurrentFortressScene())
-                LogFortressDebug("RunBadMapReturnToTownState");
+            if (IsCurrentScopedNativeReturnScene())
+                LogFortressDebug("RunBadMapReturnToTownState " + GetScopedNativeReturnLabel());
 
             if (PortalClickReady() && ClickRiftExitPortal())
             {
@@ -2017,6 +2020,54 @@ namespace Turbo.Plugins.s7o
                    scene.StartsWith("x1_fortress", StringComparison.OrdinalIgnoreCase);
         }
 
+        private bool IsCurrentFirstbornTempleScene()
+        {
+            string scene = GetCurrentSceneCode();
+            if (HasFirstbornTempleToken(scene))
+                return true;
+
+            string area = GetCurrentAreaCode();
+            return HasFirstbornTempleToken(area);
+        }
+
+        private bool HasFirstbornTempleToken(string code)
+        {
+            if (string.IsNullOrEmpty(code))
+                return false;
+
+            return code.IndexOf("p6_church", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   code.IndexOf("A2_p6_Church", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private string GetCurrentAreaCode()
+        {
+            try { return Hud.Game.Me?.SnoArea?.Code ?? string.Empty; }
+            catch { return string.Empty; }
+        }
+
+        private bool IsCurrentScopedNativeReturnScene()
+        {
+            return IsCurrentFortressScene() || IsCurrentFirstbornTempleScene();
+        }
+
+        private bool IsScopedNativeReturnEnabled()
+        {
+            if (IsCurrentFortressScene())
+                return EnableFortressNativeReturn;
+
+            if (IsCurrentFirstbornTempleScene())
+                return EnableFirstbornTempleNativeReturn;
+
+            return false;
+        }
+
+        private string GetScopedNativeReturnLabel()
+        {
+            return IsCurrentFirstbornTempleScene()
+                ? "Temple native"
+                : "Fortress native";
+        }
+
         private bool IsInsideWindow(int x, int y)
         {
             return x >= 0 &&
@@ -2055,7 +2106,7 @@ namespace Turbo.Plugins.s7o
 
         private IActor FindFortressBluePortalActor()
         {
-            if (!IsCurrentFortressScene())
+            if (!IsCurrentScopedNativeReturnScene())
                 return null;
 
             try
@@ -2090,8 +2141,12 @@ namespace Turbo.Plugins.s7o
 
             try
             {
-                if (!IsCurrentFortressScene())
+                // Keep the optional on-screen diagnostic Temple-only so it cannot be confused with Fortress debug output.
+                if (!IsCurrentFirstbornTempleScene())
+                {
+                    _fortressDebugLine = string.Empty;
                     return;
+                }
 
                 var portal = FindFortressBluePortalActor();
 
@@ -2154,6 +2209,13 @@ namespace Turbo.Plugins.s7o
         {
             if (!ShowFortressPortalDebug)
                 return;
+
+            // Optional yellow portal debug is intentionally Temple-only.
+            if (!IsCurrentFirstbornTempleScene())
+            {
+                _fortressDebugLine = string.Empty;
+                return;
+            }
 
             if (string.IsNullOrEmpty(_fortressDebugLine) || InfoFont == null)
                 return;
@@ -2577,11 +2639,13 @@ namespace Turbo.Plugins.s7o
 
         private bool TryFortressNativeReturn()
         {
-            if (!EnableFortressNativeReturn)
+            if (!IsCurrentScopedNativeReturnScene() || IsTownContext())
                 return false;
 
-            if (!IsCurrentFortressScene() || IsTownContext())
+            if (!IsScopedNativeReturnEnabled())
                 return false;
+
+            string nativeLabel = GetScopedNativeReturnLabel();
 
             try
             {
@@ -2591,7 +2655,7 @@ namespace Turbo.Plugins.s7o
                         _fortressNativeHoverWatch.IsRunning &&
                         _fortressNativeHoverWatch.ElapsedMilliseconds < FortressNativeHoverConfirmMs)
                     {
-                        _status = "Fortress native hover: " + _fortressNativeProbeLabel;
+                        _status = nativeLabel + " hover: " + _fortressNativeProbeLabel;
                         UpdateFortressPortalDebug(_status, _fortressNativeProbeX, _fortressNativeProbeY);
                         return false;
                     }
@@ -2605,7 +2669,7 @@ namespace Turbo.Plugins.s7o
                         if (clicked)
                         {
                             MarkGlobalInput();
-                            _status = "Fortress native confirmed: " + _fortressNativeProbeLabel;
+                            _status = nativeLabel + " confirmed: " + _fortressNativeProbeLabel;
                             UpdateFortressPortalDebug(_status, _fortressNativeProbeX, _fortressNativeProbeY);
                             LogFortressDebug(_status, true);
                             ResetFortressNativeProbeState();
@@ -2616,7 +2680,7 @@ namespace Turbo.Plugins.s7o
                     }
 
                     _fortressNativeProbeAttempts++;
-                    _status = "Fortress native miss: " + _fortressNativeProbeLabel;
+                    _status = nativeLabel + " miss: " + _fortressNativeProbeLabel;
                     UpdateFortressPortalDebug(_status, _fortressNativeProbeX, _fortressNativeProbeY);
                     LogFortressDebug(_status, true);
 
@@ -2643,7 +2707,7 @@ namespace Turbo.Plugins.s7o
                 if (candidates == null || candidates.Count == 0)
                 {
                     _fortressNativeProbeAttempts++;
-                    _status = "Fortress native: no candidates";
+                    _status = nativeLabel + ": no candidates";
                     UpdateFortressPortalDebug(_status);
                     LogFortressDebug(_status, true);
 
@@ -2677,14 +2741,14 @@ namespace Turbo.Plugins.s7o
                     if (_fortressNativeHoverWatch != null)
                         _fortressNativeHoverWatch.Restart();
 
-                    _status = "Fortress native hover: " + candidate.Label;
+                    _status = nativeLabel + " hover: " + candidate.Label;
                     UpdateFortressPortalDebug(_status, candidate.X, candidate.Y);
                     LogFortressDebug(_status, true);
                 }
             }
             catch
             {
-                _status = "Fortress native exception";
+                _status = nativeLabel + " exception";
                 _fortressNativeProbeActive = false;
                 UpdateFortressPortalDebug(_status);
                 LogFortressDebug(_status, true);
@@ -2697,14 +2761,15 @@ namespace Turbo.Plugins.s7o
             if (IsInTown())
                 return false;
 
-            if (IsCurrentFortressScene())
+            if (IsCurrentScopedNativeReturnScene() && IsScopedNativeReturnEnabled())
             {
-                LogFortressDebug("ClickRiftExitPortal fortress");
+                string nativeLabel = GetScopedNativeReturnLabel();
+                LogFortressDebug("ClickRiftExitPortal " + nativeLabel);
 
-                if (EnableFortressNativeReturn && TryFortressNativeReturn())
+                if (TryFortressNativeReturn())
                     return true;
 
-                UpdateFortressPortalDebug("fortress native pending");
+                UpdateFortressPortalDebug(nativeLabel + " pending");
                 return false;
             }
 
