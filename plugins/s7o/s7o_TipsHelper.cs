@@ -85,6 +85,7 @@ namespace Turbo.Plugins.s7o
         public bool ClampItemMinimapMarkers { get; set; } = true;
         public int ItemMarkerMaxAgeMs { get; set; } = 900000;
         public float ItemPickupCleanupDistance { get; set; } = 20.0f;
+        public int ItemTownMissingCleanupDelayMs { get; set; } = 350;
         public float ItemOffscreenRestoreMatchDistance { get; set; } = 6.0f;
 
         public float ItemScreenEdgeArrowRadius { get; set; } = 13.0f;
@@ -948,12 +949,26 @@ namespace Turbo.Plugins.s7o
                     marker.MissingNearPlayer = IsMarkerNearPlayer(marker, ItemPickupCleanupDistance);
                 }
 
-                if (marker.MissingNearPlayer || (ItemMarkerMaxAgeMs > 0 && now - marker.LastSeenMs > ItemMarkerMaxAgeMs))
+                if (ShouldRemoveMissingMarker(marker, now))
                     remove.Add(pair.Key);
             }
 
             foreach (var key in remove)
                 _items.Remove(key);
+        }
+
+        private bool ShouldRemoveMissingMarker(ItemMarker marker, long now)
+        {
+            if (marker == null)
+                return true;
+
+            if (marker.MissingNearPlayer)
+                return true;
+
+            if (Hud.Game.IsInTown && ItemTownMissingCleanupDelayMs >= 0 && marker.MissingSinceMs > 0 && now - marker.MissingSinceMs >= ItemTownMissingCleanupDelayMs)
+                return true;
+
+            return ItemMarkerMaxAgeMs > 0 && now - marker.LastSeenMs > ItemMarkerMaxAgeMs;
         }
 
         private bool IsMarkerNearPlayer(ItemMarker marker, float distance)
