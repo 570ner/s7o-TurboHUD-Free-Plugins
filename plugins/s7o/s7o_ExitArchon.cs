@@ -56,6 +56,11 @@ namespace Turbo.Plugins.s7o
         // One physical key press should only queue one cancel job.
         public int DebounceMs = 120;
 
+        // After a cancel click has been sent, ignore new hotkey repeats briefly.
+        // This prevents stale SkillOverrideActive/loose buff fallback from touching
+        // lingering Archon stack icons after the active form was already cancelled.
+        public int PostCancelHotkeyLockoutMs = 700;
+
         // Safety timeout for the cancel phase.
         public int CancelTimeoutMs = 1600;
 
@@ -91,6 +96,7 @@ namespace Turbo.Plugins.s7o
         private int _archonExitTick;
         private int _nextRestoreTick;
         private int _nextCancelAttemptTick;
+        private int _lastCancelClickTick;
         private int _cancelAttemptsMade;
         private int _restoreStep;
         private int _lastDebugTick;
@@ -202,6 +208,10 @@ namespace Turbo.Plugins.s7o
             int now = Environment.TickCount;
 
             if ((uint)(now - _lastHotkeyTick) < (uint)debounceMs)
+                return;
+
+            int postCancelLockoutMs = PostCancelHotkeyLockoutMs < 0 ? 0 : PostCancelHotkeyLockoutMs;
+            if (_lastCancelClickTick != 0 && (uint)(now - _lastCancelClickTick) < (uint)postCancelLockoutMs)
                 return;
 
             _lastHotkeyTick = now;
@@ -440,6 +450,7 @@ namespace Turbo.Plugins.s7o
                     clickSent = SendRightClick();
 
                 _cancelClickSent = true;
+                _lastCancelClickTick = now;
                 _cancelAttemptsMade++;
 
                 var rect = target.Rectangle;
@@ -481,7 +492,7 @@ namespace Turbo.Plugins.s7o
                     return true;
             }
 
-            if (UseLooseArchonBuffFallback)
+            if (UseLooseArchonBuffFallback && !_cancelClickSent)
             {
                 target = FindLooseArchonBuff();
                 useLeftClick = false;
