@@ -46,6 +46,12 @@ namespace Turbo.Plugins.s7o
         public int BuffCastDelayMaxMs = 700;
         public int BuffRecheckMs = 150;
 
+        public bool EnableFastMissingBuffRetry = true;
+        public int MissingBuffRetryMs = 100;
+        public int EntryBuffBurstWindowMs = 1200;
+        public int EntryBuffBurstGapMs = 20;
+        public int EntryBuffBurstGlobalDelayMs = 20;
+
         public int BuffRefreshJitterChangeMs = 5000;
         public int ToggleFlashMs = 150;
         public int SkillCacheRefreshMs = 250;
@@ -82,6 +88,8 @@ namespace Turbo.Plugins.s7o
         private int _nextBuffCheckTick;
         private int _nextConditionalProfileCheckTick;
         private int _lastGlobalCastTick;
+        private int _entryBuffBurstStartTick;
+        private bool _entryBuffBurstPending;
         private int _lastActMapVisibleTick;
         private int _lastWorldMapVisibleTick;
         private int _nextBlockedLogTick;
@@ -226,6 +234,8 @@ namespace Turbo.Plugins.s7o
             _nextBuffCheckTick = 0;
             _nextConditionalProfileCheckTick = 0;
             _lastConditionalProfileCastTickByCode.Clear();
+            _entryBuffBurstPending = true;
+            _entryBuffBurstStartTick = 0;
             _lastActMapVisibleTick = 0;
             _lastWorldMapVisibleTick = 0;
             _lastBlockedReason = null;
@@ -274,7 +284,8 @@ namespace Turbo.Plugins.s7o
                 string buffBlockedReason;
                 if (IsValidAutomationContext(AllowBuffUpkeepInTown, out buffBlockedReason))
                 {
-                    _nextBuffCheckTick = now + Math.Max(50, BuffRecheckMs);
+                    StartEntryBuffBurstIfNeeded(now);
+                    _nextBuffCheckTick = now + GetBuffCheckInterval(now);
 
                     if (TryRunAutomaticBuffUpkeep(now))
                         return;
@@ -754,6 +765,8 @@ namespace Turbo.Plugins.s7o
 
         private bool TryRunAutomaticBuffUpkeep(int now)
         {
+            bool burstActive = IsEntryBuffBurstActive(now);
+
             for (int i = 0; i < _buffProfiles.Count; i++)
             {
                 var profile = _buffProfiles[i];
@@ -764,13 +777,16 @@ namespace Turbo.Plugins.s7o
                 if (slot == null || slot.Skill == null)
                     continue;
 
-                if (!IsBuffMissingOrExpiring(slot.Skill, profile, now))
+                bool missing;
+                double remaining;
+                if (!IsBuffMissingOrExpiring(slot.Skill, profile, now, out missing, out remaining))
                     continue;
 
-                int delay = GetRandomizedDelay("buff_cast_" + profile.Sno.ToString(CultureInfo.InvariantCulture), profile.CastDelayMinMs, profile.CastDelayMaxMs, 1000);
+                int delay = GetBuffCastDelay(profile, missing);
+                int globalDelay = burstActive && missing ? Math.Max(0, EntryBuffBurstGlobalDelayMs) : GlobalCastDelayMs;
 
                 string reason;
-                if (!CanCastSkill(slot.Skill, slot.ActionKey, now, delay, out reason))
+                if (!CanCastSkill(slot.Skill, slot.ActionKey, now, delay, out reason, globalDelay))
                 {
                     LogDebugCastSkipThrottled("buff", slot.Skill, reason, now);
                     continue;
@@ -785,7 +801,11 @@ namespace Turbo.Plugins.s7o
                 if (DoAction(slot.ActionKey, UseForceStandstillForCasts))
                 {
                     MarkSkillCast(slot.Skill, now);
-                    LogDebug("Buff upkeep cast: " + profile.Code + ", remaining=" + GetRemainingBuffSeconds(slot.Skill, profile.IconIndex).ToString("0.0", CultureInfo.InvariantCulture));
+                    _nextBuffCheckTick = now + GetBuffCheckIntervalAfterCast(now, missing);
+                    LogDebug("Buff upkeep cast: " + profile.Code
+                        + ", missing=" + missing.ToString(CultureInfo.InvariantCulture)
+                        + ", burst=" + burstActive.ToString(CultureInfo.InvariantCulture)
+                        + ", remaining=" + remaining.ToString("0.0", CultureInfo.InvariantCulture));
                     return true;
                 }
             }
@@ -795,19 +815,74 @@ namespace Turbo.Plugins.s7o
 
         private bool IsBuffMissingOrExpiring(IPlayerSkill skill, AutoBuffProfile profile, int now)
         {
-            bool active;
+            bool missing;
             double remaining;
+            return IsBuffMissingOrExpiring(skill, profile, now, out missing, out remaining);
+        }
+
+        private bool IsBuffMissingOrExpiring(IPlayerSkill skill, AutoBuffProfile profile, int now, out bool missing, out double remaining)
+        {
+            missing = true;
+            remaining = 0;
+
+            bool active;
             if (!TryGetBuffRemainingSeconds(skill, profile.IconIndex, out active, out remaining))
                 return true;
 
             if (!active)
                 return true;
 
+            missing = false;
+
             if (double.IsPositiveInfinity(remaining) || remaining == double.MaxValue)
                 return false;
 
             int thresholdMs = GetRandomizedDelay("buff_refresh_" + profile.Sno.ToString(CultureInfo.InvariantCulture), profile.RefreshMinMs, profile.RefreshMaxMs, Math.Max(profile.RefreshMaxMs, BuffRefreshJitterChangeMs));
             return remaining <= thresholdMs / 1000.0d;
+        }
+
+        private int GetBuffCastDelay(AutoBuffProfile profile, bool missing)
+        {
+            if (EnableFastMissingBuffRetry && missing)
+                return Math.Max(0, MissingBuffRetryMs);
+
+            return GetRandomizedDelay("buff_cast_" + profile.Sno.ToString(CultureInfo.InvariantCulture), profile.CastDelayMinMs, profile.CastDelayMaxMs, 1000);
+        }
+
+        private int GetBuffCheckInterval(int now)
+        {
+            if (IsEntryBuffBurstActive(now))
+                return Math.Max(1, EntryBuffBurstGapMs);
+
+            return Math.Max(50, BuffRecheckMs);
+        }
+
+        private int GetBuffCheckIntervalAfterCast(int now, bool missing)
+        {
+            if (missing && IsEntryBuffBurstActive(now))
+                return Math.Max(1, EntryBuffBurstGapMs);
+
+            if (EnableFastMissingBuffRetry && missing)
+                return Math.Max(50, Math.Min(BuffRecheckMs, MissingBuffRetryMs));
+
+            return GetBuffCheckInterval(now);
+        }
+
+        private void StartEntryBuffBurstIfNeeded(int now)
+        {
+            if (!EnableFastMissingBuffRetry || !_entryBuffBurstPending)
+                return;
+
+            _entryBuffBurstPending = false;
+            _entryBuffBurstStartTick = now;
+            LogDebug("Entry buff burst started.");
+        }
+
+        private bool IsEntryBuffBurstActive(int now)
+        {
+            return EnableFastMissingBuffRetry
+                && _entryBuffBurstStartTick != 0
+                && (uint)(now - _entryBuffBurstStartTick) < (uint)Math.Max(0, EntryBuffBurstWindowMs);
         }
 
         private double GetRemainingBuffSeconds(IPlayerSkill skill, int iconIndex)
@@ -1412,7 +1487,7 @@ namespace Turbo.Plugins.s7o
 
         #region Cast Rules
 
-        private bool CanCastSkill(IPlayerSkill skill, ActionKey actionKey, int now, int minDelayMs, out string reason)
+        private bool CanCastSkill(IPlayerSkill skill, ActionKey actionKey, int now, int minDelayMs, out string reason, int globalDelayOverrideMs = -1)
         {
             reason = null;
 
@@ -1451,7 +1526,8 @@ namespace Turbo.Plugins.s7o
                 }
             }
 
-            if ((uint)(now - _lastGlobalCastTick) < (uint)Math.Max(0, GlobalCastDelayMs))
+            int globalDelayMs = globalDelayOverrideMs >= 0 ? globalDelayOverrideMs : GlobalCastDelayMs;
+            if ((uint)(now - _lastGlobalCastTick) < (uint)Math.Max(0, globalDelayMs))
             {
                 reason = "global delay";
                 return false;
