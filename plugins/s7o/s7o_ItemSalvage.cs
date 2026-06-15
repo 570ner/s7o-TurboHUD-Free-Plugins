@@ -82,6 +82,16 @@ namespace Turbo.Plugins.s7o
         // It must never send blind Enter, because blind Enter can open chat.
         public bool TurboImmediateLegendaryEnter = true;
 
+        // Turbo legendary confirmation stability. After a legendary click, wait briefly for
+        // the OK dialog before clicking another item; never send blind Enter.
+        public int TurboLegendaryConfirmWindowMs = 180;
+        public int TurboLegendaryConfirmPollMs = 10;
+        public int TurboPostConfirmSettleMs = 10;
+
+        // If a clicked item is still present, give Diablo III a short stale/pending cooldown
+        // before retrying it. This avoids hammering greyed items and preserves cleanup retries.
+        public int FailedItemRetryCooldownMs = 200;
+
         public bool EnableTurboFinalCleanup = true;
 
         // Run final validation cleanup for all speeds.
@@ -310,6 +320,7 @@ namespace Turbo.Plugins.s7o
         private readonly List<string> _turboClickedKeys = new List<string>();
         private readonly HashSet<string> _turboGoneKeys = new HashSet<string>();
         private readonly Dictionary<string, int> _turboItemClickAttempts = new Dictionary<string, int>();
+        private readonly Dictionary<string, int> _turboItemNextRetryTick = new Dictionary<string, int>();
         private readonly HashSet<string> _turboItemKeysSkippedForRun = new HashSet<string>();
         private int _turboRetryPass;
         private bool _turboFinalCleanupActive;
@@ -351,6 +362,7 @@ namespace Turbo.Plugins.s7o
             ConfirmIfNeeded,
             WaitForItemGone,
             TurboClickItem,
+            TurboAwaitLegendaryConfirm,
             TurboSettle,
             TurboFinalCleanupValidate,
             DisableAnvil,
@@ -718,6 +730,10 @@ namespace Turbo.Plugins.s7o
                     ProcessTurboClickItem(now);
                     return;
 
+                case State.TurboAwaitLegendaryConfirm:
+                    ProcessTurboAwaitLegendaryConfirm(now);
+                    return;
+
                 case State.TurboSettle:
                     ProcessTurboSettle(now);
                     return;
@@ -910,7 +926,12 @@ namespace Turbo.Plugins.s7o
             PressEnter();
             _lastConfirmTick = now;
 
-            LogDebug("Confirmation accepted with Enter. source=" + source + ", tick=" + now + ".");
+            LogDebug("Confirmation accepted with Enter. source="
+                + source
+                + ", tick="
+                + now
+                + (_lastItemClickTick > 0 ? ", clickToConfirm=" + (now - _lastItemClickTick) + "ms" : string.Empty)
+                + ".");
             return true;
         }
 
@@ -960,7 +981,32 @@ namespace Turbo.Plugins.s7o
                 _turboClickedKeys.Add(key);
 
                 if (TurboImmediateLegendaryEnter && item.IsLegendary)
-                    TryConfirmSalvageDialogWithEnter(now, "turbo post-click");
+                {
+                    _activeItemKey = key;
+                    _confirmStartTick = now;
+
+                    if (TryConfirmSalvageDialogWithEnter(now, "turbo post-click"))
+                    {
+                        _activeItemKey = null;
+                        ScheduleNextTurboStepAfterItem(now, Math.Max(GetActiveTurboClickDelay(), Math.Max(0, TurboPostConfirmSettleMs)));
+                        return;
+                    }
+
+                    if (DebugTurboTimings)
+                    {
+                        LogDebug("Awaiting legendary confirmation. item="
+                            + SafeItemName(item)
+                            + ", window="
+                            + Math.Max(0, TurboLegendaryConfirmWindowMs)
+                            + "ms, poll="
+                            + Math.Max(1, TurboLegendaryConfirmPollMs)
+                            + "ms.");
+                    }
+
+                    _state = State.TurboAwaitLegendaryConfirm;
+                    _nextStepTick = now + Math.Max(1, TurboLegendaryConfirmPollMs);
+                    return;
+                }
 
                 if (DebugTurboTimings)
                 {
@@ -980,15 +1026,67 @@ namespace Turbo.Plugins.s7o
                 }
             }
 
+            ScheduleNextTurboStepAfterItem(now, GetActiveTurboClickDelay());
+        }
+
+        private void ProcessTurboAwaitLegendaryConfirm(int now)
+        {
+            if (TryConfirmSalvageDialogWithEnter(now, "turbo legendary await"))
+            {
+                _activeItemKey = null;
+                ScheduleNextTurboStepAfterItem(now, Math.Max(GetActiveTurboClickDelay(), Math.Max(0, TurboPostConfirmSettleMs)));
+                return;
+            }
+
+            if (!string.IsNullOrEmpty(_activeItemKey) && !InventoryContainsKey(_activeItemKey))
+            {
+                if (!_turboGoneKeys.Contains(_activeItemKey))
+                {
+                    _turboGoneKeys.Add(_activeItemKey);
+                    _runGoneCount++;
+                    _lastGoneTick = now;
+                }
+
+                LogDebug("Legendary item gone while awaiting confirmation. clickToGone="
+                    + (now - _lastItemClickTick)
+                    + "ms.");
+
+                _activeItemKey = null;
+                ScheduleNextTurboStepAfterItem(now, Math.Max(GetActiveTurboClickDelay(), Math.Max(0, TurboPostConfirmSettleMs)));
+                return;
+            }
+
+            if ((uint)(now - _confirmStartTick) < (uint)Math.Max(0, TurboLegendaryConfirmWindowMs))
+            {
+                _state = State.TurboAwaitLegendaryConfirm;
+                _nextStepTick = now + Math.Max(1, TurboLegendaryConfirmPollMs);
+                return;
+            }
+
+            if (DebugTurboTimings)
+            {
+                LogDebug("Legendary confirmation did not appear within window. clickToWindow="
+                    + (now - _lastItemClickTick)
+                    + "ms, window="
+                    + Math.Max(0, TurboLegendaryConfirmWindowMs)
+                    + "ms.");
+            }
+
+            _activeItemKey = null;
+            ScheduleNextTurboStepAfterItem(now, GetActiveTurboClickDelay());
+        }
+
+        private void ScheduleNextTurboStepAfterItem(int now, int nextClickDelay)
+        {
             if (_pendingItemKeys.Count > 0)
             {
                 _state = State.TurboClickItem;
-                _nextStepTick = now + GetActiveTurboClickDelay();
+                _nextStepTick = now + Math.Max(0, nextClickDelay);
                 return;
             }
 
             _state = State.TurboSettle;
-            _nextStepTick = now + GetActiveTurboSettleDelay();
+            _nextStepTick = now + Math.Max(GetActiveTurboSettleDelay(), Math.Max(0, nextClickDelay));
         }
 
                 private void ProcessTurboSettle(int now)
@@ -1043,11 +1141,16 @@ namespace Turbo.Plugins.s7o
                 _turboRetryPass++;
                 _runRetryCount += remaining.Count;
 
+                foreach (string key in remaining)
+                    SetItemRetryCooldown(key, now, "turbo settle remaining");
+
                 _pendingItemKeys.Clear();
                 foreach (string key in remaining)
                     _pendingItemKeys.Enqueue(key);
 
                 _turboClickedKeys.Clear();
+
+                int retryDelay = Math.Max(Math.Max(0, TurboRetryBackoffDelayMs), GetMaxRetryCooldownDelay(remaining, now));
 
                 LogDebug("Turbo retry pass queued. remaining="
                     + remaining.Count
@@ -1055,15 +1158,20 @@ namespace Turbo.Plugins.s7o
                     + _turboRetryPass
                     + "/"
                     + GetActiveTurboMaxRetryPasses()
-                    + ".");
+                    + ", retryDelay="
+                    + retryDelay
+                    + "ms.");
 
                 _state = State.TurboClickItem;
-                _nextStepTick = now + Math.Max(0, TurboRetryBackoffDelayMs);
+                _nextStepTick = now + retryDelay;
                 return;
             }
 
             if (remaining.Count > 0)
             {
+                foreach (string key in remaining)
+                    SetItemRetryCooldown(key, now, "turbo retry limit before cleanup");
+
                 LogDebug("Turbo remaining items after retry limit before final cleanup. remaining="
                     + remaining.Count
                     + ".");
@@ -1198,6 +1306,7 @@ namespace Turbo.Plugins.s7o
             _turboClickedKeys.Clear();
             _turboGoneKeys.Clear();
             _turboItemClickAttempts.Clear();
+            _turboItemNextRetryTick.Clear();
             _turboItemKeysSkippedForRun.Clear();
             _turboRetryPass = 0;
             _turboFinalCleanupActive = false;
@@ -1254,7 +1363,15 @@ namespace Turbo.Plugins.s7o
                 + AnvilEnableReadyDelayMs
                 + "ms, maxTotalItemClicks="
                 + Math.Max(1, MaxTotalTurboClicksPerItem)
-                + ".");
+                + ", legendaryConfirmWindow="
+                + Math.Max(0, TurboLegendaryConfirmWindowMs)
+                + "ms, legendaryConfirmPoll="
+                + Math.Max(1, TurboLegendaryConfirmPollMs)
+                + "ms, postConfirmSettle="
+                + Math.Max(0, TurboPostConfirmSettleMs)
+                + "ms, failedItemCooldown="
+                + Math.Max(0, FailedItemRetryCooldownMs)
+                + "ms.");
         }
 
                 private void CancelRun(bool restoreCursor, bool logSummary)
@@ -1266,6 +1383,7 @@ namespace Turbo.Plugins.s7o
             _turboClickedKeys.Clear();
             _turboGoneKeys.Clear();
             _turboItemClickAttempts.Clear();
+            _turboItemNextRetryTick.Clear();
             _turboItemKeysSkippedForRun.Clear();
             _activeItemKey = null;
             _turboFinalCleanupActive = false;
@@ -2131,6 +2249,8 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
+            int now = Environment.TickCount;
+
             var items = inventoryItems
                 .Where(i => i != null)
                 .OrderBy(i => i.InventoryX)
@@ -2143,10 +2263,26 @@ namespace Turbo.Plugins.s7o
                 string reason = GetSalvageBlockReason(item);
                 if (reason == null)
                 {
-                    if (!string.IsNullOrEmpty(key) && !IsItemKeySkippedForThisRun(key))
+                    int cooldownMs;
+                    if (string.IsNullOrEmpty(key))
+                    {
+                        if (DebugLogging && DebugCandidateReasons)
+                            LogDebug("Candidate skipped: reason=empty item key, name=" + SafeItemName(item));
+                    }
+                    else if (IsItemKeySkippedForThisRun(key))
+                    {
+                        if (DebugLogging && DebugCandidateReasons)
+                            LogDebug("Candidate skipped: reason=attempt cap for this run, name=" + SafeItemName(item));
+                    }
+                    else if (IsItemRetryCoolingDown(key, now, out cooldownMs))
+                    {
+                        if (DebugLogging && DebugTurboTimings)
+                            LogDebug("Candidate delayed by retry cooldown. cooldownRemaining=" + cooldownMs + "ms, name=" + SafeItemName(item));
+                    }
+                    else
+                    {
                         _pendingItemKeys.Enqueue(key);
-                    else if (!string.IsNullOrEmpty(key) && DebugLogging && DebugCandidateReasons)
-                        LogDebug("Candidate skipped: reason=attempt cap for this run, name=" + SafeItemName(item));
+                    }
                 }
                 else if (DebugLogging && DebugCandidateReasons)
                 {
@@ -2189,6 +2325,71 @@ namespace Turbo.Plugins.s7o
             return !string.IsNullOrEmpty(key) && _turboItemKeysSkippedForRun.Contains(key);
         }
 
+        private int GetActiveMaxTotalTurboClicksPerItem()
+        {
+            int maxAttempts = Math.Max(1, MaxTotalTurboClicksPerItem);
+            if (_turboFinalCleanupActive)
+                maxAttempts += Math.Max(0, TurboFinalCleanupRetryPasses);
+
+            return maxAttempts;
+        }
+
+        private void SetItemRetryCooldown(string key, int now, string source)
+        {
+            if (string.IsNullOrEmpty(key)) return;
+
+            int cooldown = Math.Max(0, FailedItemRetryCooldownMs);
+            if (cooldown <= 0) return;
+
+            _turboItemNextRetryTick[key] = now + cooldown;
+
+            if (DebugTurboTimings)
+            {
+                LogDebug("Item retry cooldown set. source="
+                    + source
+                    + ", cooldown="
+                    + cooldown
+                    + "ms, key="
+                    + key
+                    + ".");
+            }
+        }
+
+        private bool IsItemRetryCoolingDown(string key, int now, out int cooldownRemainingMs)
+        {
+            cooldownRemainingMs = 0;
+            if (string.IsNullOrEmpty(key)) return false;
+
+            int nextTick;
+            if (!_turboItemNextRetryTick.TryGetValue(key, out nextTick))
+                return false;
+
+            int remaining = nextTick - now;
+            if (remaining <= 0)
+            {
+                _turboItemNextRetryTick.Remove(key);
+                return false;
+            }
+
+            cooldownRemainingMs = remaining;
+            return true;
+        }
+
+        private int GetMaxRetryCooldownDelay(IEnumerable<string> keys, int now)
+        {
+            if (keys == null) return 0;
+
+            int maxDelay = 0;
+            foreach (string key in keys)
+            {
+                int cooldownRemainingMs;
+                if (IsItemRetryCoolingDown(key, now, out cooldownRemainingMs) && cooldownRemainingMs > maxDelay)
+                    maxDelay = cooldownRemainingMs;
+            }
+
+            return maxDelay;
+        }
+
         private bool TryRegisterItemClickAttempt(string key, IItem item)
         {
             if (string.IsNullOrEmpty(key))
@@ -2197,7 +2398,7 @@ namespace Turbo.Plugins.s7o
             if (IsItemKeySkippedForThisRun(key))
                 return false;
 
-            int maxAttempts = Math.Max(1, MaxTotalTurboClicksPerItem);
+            int maxAttempts = GetActiveMaxTotalTurboClicksPerItem();
 
             int current;
             _turboItemClickAttempts.TryGetValue(key, out current);
@@ -2225,7 +2426,7 @@ namespace Turbo.Plugins.s7o
             LogDebug("Item marked skipped for this run after max click attempts. attempts="
                 + attempts
                 + "/"
-                + Math.Max(1, MaxTotalTurboClicksPerItem)
+                + GetActiveMaxTotalTurboClicksPerItem()
                 + ", item="
                 + SafeItemName(item)
                 + ".");
