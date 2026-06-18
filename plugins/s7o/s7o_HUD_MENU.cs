@@ -309,6 +309,10 @@ namespace Turbo.Plugins.s7o
         private int   _visSiphonColorIdx = 5;            private int   _visSiphonTone = 5;
         private float _visSiphonDotSize = 3.35f;
 
+        private bool  _visGuardianSentryEnabled = false; private bool  _visGuardianSentryExpanded = false;
+        private int   _visGuardianSentryColorIdx = 0;    private int   _visGuardianSentryTone = 10;
+        private float _visGuardianSentryThickness = 4.0f;
+        private const float VisualGuardianSentryYards = 16f;
         private const uint VisualSiphonDebuffSno = 453563u;
 
         // ── HUD-controlled default monster visual toggles ─────────────────────────────
@@ -800,6 +804,11 @@ namespace Turbo.Plugins.s7o
         private IBrush _visualPickerEdgeNormal;
         private readonly Dictionary<string, IBrush> _visualBrushCache =
             new Dictionary<string, IBrush>(StringComparer.Ordinal);
+        private GroundTimerDecorator _visGuardianSentryTimer;
+        private GroundLabelDecorator _visGuardianSentryLabel;
+        private IFont _visGuardianSentryFont;
+        private int _visGuardianSentryFontColorIdx = -1, _visGuardianSentryFontTone = -1;
+        private readonly Dictionary<IWorldDecorator, bool> _guardianSentryDefaultDecoratorStates = new Dictionary<IWorldDecorator, bool>();
 
         private IBrush _bDotHalo, _bDotFill, _bDotFillOpen, _bDotShadow, _bDotShadowOpen, _bDotRim, _bDotSpec, _bDotHot, _bEditDash, _bTextDimBg;
         private IBrush _bProfileMask;
@@ -6604,16 +6613,17 @@ namespace Turbo.Plugins.s7o
             return brush;
         }
 
-        private void DrawWorldEllipseOutlined(IWorldCoordinate world, float yards, Color color, float thickness, int alpha)
+        private void DrawWorldEllipseOutlined(IWorldCoordinate world, float yards, Color color, float thickness, int alpha, float outlineExtra = 2.2f)
         {
             if (world == null) return;
 
-            yards     = ViClampF(yards,     1f, 120f);
-            thickness = ViClampF(thickness, 0.5f, 12f);
+            yards        = ViClampF(yards,        1f, 120f);
+            thickness    = ViClampF(thickness,    0.5f, 12f);
+            outlineExtra = ViClampF(outlineExtra, 1.0f, 6.0f);
 
             try
             {
-                GetVisualBrush(Math.Min(240, alpha), 0, 0, 0, thickness + 2.2f)
+                GetVisualBrush(Math.Min(240, alpha), 0, 0, 0, thickness + outlineExtra)
                     .DrawWorldEllipse(yards, -1, world);
 
                 GetVisualBrush(alpha, color.R, color.G, color.B, thickness)
@@ -6660,9 +6670,13 @@ namespace Turbo.Plugins.s7o
 
         private void DrawVisualWorldOverlays()
         {
+            if (_visGuardianSentryEnabled || _guardianSentryDefaultDecoratorStates.Count != 0)
+                UpdateDefaultSentryTimerSuppression();
+
             if (!_visPlayerCircleEnabled &&
                 !_visMouseCircleEnabled &&
-                !_visMinionCirclesEnabled)
+                !_visMinionCirclesEnabled &&
+                !_visGuardianSentryEnabled)
             {
                 return;
             }
@@ -6698,6 +6712,116 @@ namespace Turbo.Plugins.s7o
                     if (m == null || !m.IsAlive || !m.IsElite || m.FloorCoordinate == null) continue;
                     if (m.Rarity == ActorRarity.Champion || m.Rarity == ActorRarity.Rare) continue;
                     DrawWorldEllipseOutlined(m.FloorCoordinate, 3.0f, mc, _visMinionThickness, 210);
+                }
+            }
+
+            DrawGuardianSentryCircles();
+        }
+
+        private void DrawGuardianSentryCircles()
+        {
+            if (!_visGuardianSentryEnabled || Hud.Game.Actors == null) return;
+            Color c = GetVisualPickerColorToned(_visGuardianSentryColorIdx, _visGuardianSentryTone);
+            EnsureGuardianSentryTimer(c);
+
+            foreach (var actor in Hud.Game.Actors)
+            {
+                if (actor == null || actor.SnoActor == null || actor.FloorCoordinate == null) continue;
+                if (actor.SnoActor.Sno != ActorSnoEnum._dh_sentry_addsshield) continue;
+
+                DrawWorldEllipseOutlined(actor.FloorCoordinate, VisualGuardianSentryYards, c, _visGuardianSentryThickness, 230, 3.6f);
+                PaintGuardianSentryTimer(actor);
+            }
+        }
+
+        private void PaintGuardianSentryTimer(IActor actor)
+        {
+            if (_visGuardianSentryTimer == null || _visGuardianSentryLabel == null || actor == null || actor.FloorCoordinate == null) return;
+            float seconds = GetGuardianSentryDurationSeconds(actor);
+            _visGuardianSentryTimer.CountDownFrom = seconds;
+            _visGuardianSentryLabel.CountDownFrom = seconds;
+            _visGuardianSentryTimer.Paint(actor, actor.FloorCoordinate, null);
+            _visGuardianSentryLabel.Paint(actor, actor.FloorCoordinate, null);
+        }
+
+        private void EnsureGuardianSentryTimer(Color c)
+        {
+            if (_visGuardianSentryTimer == null)
+                _visGuardianSentryTimer = new GroundTimerDecorator(Hud)
+                {
+                    Radius = 30f,
+                    CountDownFrom = 30f,
+                    StepCount = 5,
+                    BackgroundBrushEmpty = GetVisualBrush(55, 18, 20, 22, 0),
+                    BackgroundBrushFill = GetVisualBrush(95, 64, 64, 64, 0),
+                    BorderBrush = GetVisualBrush(115, 0, 0, 0, 1.4f),
+                };
+
+            if (_visGuardianSentryLabel == null)
+                _visGuardianSentryLabel = new GroundLabelDecorator(Hud)
+                {
+                    CenterBaseLine = true,
+                    ForceOnScreen = false,
+                    CountDownFrom = 30f,
+                };
+
+            if (_visGuardianSentryFont == null || _visGuardianSentryFontColorIdx != _visGuardianSentryColorIdx || _visGuardianSentryFontTone != _visGuardianSentryTone)
+            {
+                _visGuardianSentryFont = Hud.Render.CreateFont("tahoma", 9f, 185, c.R, c.G, c.B, true, false, 120, 0, 0, 0, true);
+                _visGuardianSentryFontColorIdx = _visGuardianSentryColorIdx;
+                _visGuardianSentryFontTone = _visGuardianSentryTone;
+            }
+            _visGuardianSentryLabel.TextFont = _visGuardianSentryFont;
+        }
+
+        private float GetGuardianSentryDurationSeconds(IActor sentry)
+        {
+            try
+            {
+                if (Hud.Game.Players != null)
+                {
+                    foreach (var player in Hud.Game.Players)
+                    {
+                        if (player == null || player.Powers == null || player.SummonerId != sentry.SummonerAcdDynamicId) continue;
+                        foreach (var passive in player.Powers.UsedPassives)
+                            if (passive != null && passive.Sno == 208610) return 60f;
+                        break;
+                    }
+                }
+            }
+            catch { }
+
+            return 30f;
+        }
+
+        private void UpdateDefaultSentryTimerSuppression()
+        {
+            try
+            {
+                var p = Hud.GetPlugin<PlayerSkillPlugin>();
+                if (p == null) return;
+                SetDefaultSentryTimerSuppressed(p.SentryDecorator, _visGuardianSentryEnabled);
+                SetDefaultSentryTimerSuppressed(p.SentryWithCustomEngineeringDecorator, _visGuardianSentryEnabled);
+                if (!_visGuardianSentryEnabled) _guardianSentryDefaultDecoratorStates.Clear();
+            }
+            catch { }
+        }
+
+        private void SetDefaultSentryTimerSuppressed(WorldDecoratorCollection collection, bool suppress)
+        {
+            if (collection == null || collection.Decorators == null) return;
+            foreach (var d in collection.Decorators)
+            {
+                if (!(d is GroundLabelDecorator) && !(d is GroundTimerDecorator)) continue;
+                if (suppress)
+                {
+                    if (!_guardianSentryDefaultDecoratorStates.ContainsKey(d)) _guardianSentryDefaultDecoratorStates[d] = d.Enabled;
+                    d.Enabled = false;
+                }
+                else
+                {
+                    bool old;
+                    if (_guardianSentryDefaultDecoratorStates.TryGetValue(d, out old)) d.Enabled = old;
                 }
             }
         }
@@ -7002,6 +7126,13 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 return;
             }
 
+            if (feature == "guardiansentry")
+            {
+                _visGuardianSentryEnabled = !_visGuardianSentryEnabled;
+                _visGuardianSentryExpanded = _visGuardianSentryEnabled;
+                return;
+            }
+
             if (feature == "partyinspector")
             {
                 TogglePluginByTypeName("PARTY INSPECTOR", "s7o_PartyInspector");
@@ -7088,6 +7219,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             if (feature == "dangeraffixes")
             {
                 _visDangerousAffixVisualsExpanded = !_visDangerousAffixVisualsExpanded;
+                return;
+            }
+
+            if (feature == "guardiansentry")
+            {
+                _visGuardianSentryExpanded = !_visGuardianSentryExpanded;
                 return;
             }
 
@@ -7184,6 +7321,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 case "menubuttonopen":   _menuButtonOpenColorIdx   = idx; break;
                 case "minion":  _visMinionColorIdx         = idx; break;
                 case "siphon":  _visSiphonColorIdx         = idx; break;
+                case "guardiansentry": _visGuardianSentryColorIdx = idx; break;
                 case "tipsprimaltext": _tipsPrimalTextColorIdx = idx; break;
                 case "tipsancienttext": _tipsAncientTextColorIdx = idx; break;
                 case "tipsplayer1": _tipsPlayer1ColorIdx = idx; break;
@@ -7210,6 +7348,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                         case "menubuttonopen":   _menuButtonOpenTone   = ViClamp(_menuButtonOpenTone   + delta, 0, 10); MarkLayoutDirty(); break;
                         case "minion":  _visMinionTone         = ViClamp(_visMinionTone         + delta, 0, 10); break;
                         case "siphon":  _visSiphonTone         = ViClamp(_visSiphonTone         + delta, 0, 10); break;
+                        case "guardiansentry": _visGuardianSentryTone = ViClamp(_visGuardianSentryTone + delta, 0, 10); break;
                     }
                     break;
                 case "yards":
@@ -7223,6 +7362,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     else if (f == "line") _visLineToTargetThickness = ViClampF(_visLineToTargetThickness + delta * 0.5f, 0.5f, 8f);
                     else if (f == "outline") _visReticleOutlineThickness = ViClampF(_visReticleOutlineThickness + delta * 0.5f, 0.5f, 8f);
                     else if (f == "minion") _visMinionThickness = ViClampF(_visMinionThickness + delta * 0.3f, 0.5f, 6f);
+                    else if (f == "guardiansentry") _visGuardianSentryThickness = ViClampF(_visGuardianSentryThickness + delta * 0.2f, 0.5f, 8f);
                     break;
                 case "size":
                     if (f == "click") _visClickAnimSize = ViClampF(_visClickAnimSize + delta * 0.5f, 0.5f, 4.0f);
@@ -8088,6 +8228,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             {
                 "tipshelper",
                 "dangeraffixes",
+                "guardiansentry",
                 "menubutton",
                 "partyinspector",
                 "click",
@@ -8104,6 +8245,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             {
                 "Visual Helpers",
                 "Elite/Dangerous Affix Visuals",
+                "Guardian Sentry Circle",
                 "Menu Button",
                 "Party Inspector",
                 "Click Animation",
@@ -8120,6 +8262,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             {
                 "Ancient/primal alerts, globe dots, and party markers.",
                 "Enable or disable elite affix/danger visual effects.",
+                "Draws Guardian Sentry turret circles.",
                 "Show/hide and customize the HUD Menu open/close button.",
                 "Expanded party build inspector. Default hotkey: F12.",
                 "Short color burst when clicking inside this HUD menu.",
@@ -8136,6 +8279,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             {
                 _visTipsHelperEnabled,
                 _visDangerousAffixVisualsEnabled,
+                _visGuardianSentryEnabled,
                 _showDot,
                 IsPartyInspectorEnabled(),
                 _visClickAnimEnabled,
@@ -8152,6 +8296,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             {
                 _visTipsHelperExpanded,
                 _visDangerousAffixVisualsExpanded,
+                _visGuardianSentryExpanded,
                 _visMenuButtonExpanded,
                 _visPartyInspectorExpanded,
                 _visClickAnimExpanded,
@@ -8168,6 +8313,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             {
                 0,
                 0,
+                _visGuardianSentryColorIdx,
                 0,
                 0,
                 _visClickAnimColorIdx,
@@ -8184,6 +8330,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             {
                 0,
                 0,
+                _visGuardianSentryTone,
                 0,
                 0,
                 _visClickAnimTone,
@@ -8279,7 +8426,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                                 else
                                 {
                                     bool hasYards = feature == "player" || feature == "mouse";
-                                    bool hasThick = feature == "player" || feature == "mouse" || feature == "line" || feature == "outline" || feature == "minion";
+                                    bool hasThick = feature == "player" || feature == "mouse" || feature == "line" || feature == "outline" || feature == "minion" || feature == "guardiansentry";
                                     bool hasSize = feature == "reticle";
                                     bool hasDot = feature == "siphon";
 
@@ -8294,6 +8441,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                                         feature == "line" ? _visLineToTargetThickness :
                                         feature == "outline" ? _visReticleOutlineThickness :
                                         feature == "minion" ? _visMinionThickness :
+                                        feature == "guardiansentry" ? _visGuardianSentryThickness :
                                         0f;
 
                                     float size = feature == "reticle" ? _visTargetReticleSize : 0f;
@@ -13409,6 +13557,13 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     _visMinionTone.ToString(CultureInfo.InvariantCulture) + "|" +
                     _visMinionThickness.ToString(CultureInfo.InvariantCulture));
 
+                lines.Add("VIS_GUARDIAN_SENTRY=" +
+                    _visGuardianSentryEnabled.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _visGuardianSentryExpanded.ToString(CultureInfo.InvariantCulture) + "|0|" +
+                    _visGuardianSentryColorIdx.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _visGuardianSentryTone.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _visGuardianSentryThickness.ToString(CultureInfo.InvariantCulture));
+
                 lines.Add("VIS_SIPHON=" +
                     _visSiphonEnabled.ToString(CultureInfo.InvariantCulture) + "|" +
                     _visSiphonExpanded.ToString(CultureInfo.InvariantCulture) + "|" +
@@ -13779,6 +13934,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                             ref _visMinionColorIdx,
                             ref _visMinionTone,
                             ref _visMinionThickness);
+                    }
+                    else if (key == "VIS_GUARDIAN_SENTRY")
+                    {
+                        float unused = 0f;
+                        ParseVisLine(val, out _visGuardianSentryEnabled, out _visGuardianSentryExpanded, ref unused, ref _visGuardianSentryColorIdx, ref _visGuardianSentryTone, ref _visGuardianSentryThickness);
+                        _visGuardianSentryThickness = ViClampF(_visGuardianSentryThickness, 0.5f, 8f);
                     }
                     else if (key == "VIS_SIPHON")
                     {
