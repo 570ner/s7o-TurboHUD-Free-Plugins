@@ -38,6 +38,7 @@ Use it to toggle plugins, change visual options, manage TTS alerts, set some hot
 | **s7o_TTS_EnablePlugin** | Small TTS helper/cleanup plugin. Leave it installed if using TTS alerts. |
 | **s7o_Auto_Gem_Upgrade** | Urshi gem upgrade helper with town portal timing. |
 | **s7o_ItemSalvage** | Salvage helper with item protections, repair/fallback handling, and speed settings. |
+| **s7o_KadalaHelper** | Kadala gambling helper. Hover a Kadala item and press F2 to mark/unmark it, then press F3 to spend shards on saved targets. |
 | **s7o_KanaiCube** | Kanai helper for common cube tasks like reforge, upgrade rare, and material conversion. |
 | **s7o_MysticEnchant** | Mystic reroll helper. Select the stat you want to roll, then press the hotkey (F3 by default). |
 | **s7o_DHStrafe** | Demon Hunter Strafe/primary helper. Defaults: (F3) start/stop, (F2) attack/move mode, (T) town portal sequence. |
@@ -45,7 +46,7 @@ Use it to toggle plugins, change visual options, manage TTS alerts, set some hot
 | **s7o_AutoSkill** | General skill automation helper for simple timed/conditional skill use. |
 | **s7o_ZB_AutoSnap** | AutoSnap helper mainly for support/zBarb-style gameplay. |
 | **s7o_DoorsMinimap** | Door indicators on the minimap. |
-| **s7o_InventoryMOD** | Extra inventory/material display and auto storage for stackables/primals/ancients. |
+| **s7o_InventoryMOD** | Extra inventory/material display, auto storage for stackables/primals/ancients, and merchant/shop helper for selling Gifts/Screams/gems. |
 
 ## Notes
 
