@@ -35,6 +35,7 @@ namespace Turbo.Plugins.s7o
         public bool ShowPlayerGroundCircles { get; set; } = true;
         public bool ShowPlayerMinimapDots { get; set; } = true;
         public bool ShowPlayerPortraitMarker { get; set; } = true;
+        public bool ShowValleyOfDeathCircle { get; set; } = false;
 
         public int HealthGlobeColorR { get; set; } = 255;
         public int HealthGlobeColorG { get; set; } = 25;
@@ -54,6 +55,9 @@ namespace Turbo.Plugins.s7o
         public int PrimalTextColorR { get; set; } = 255;
         public int PrimalTextColorG { get; set; } = 35;
         public int PrimalTextColorB { get; set; } = 35;
+        public int ValleyOfDeathColorR { get; set; } = 100;
+        public int ValleyOfDeathColorG { get; set; } = 57;
+        public int ValleyOfDeathColorB { get; set; } = 170;
 
         public int Player1ColorR { get; set; } = 185;
         public int Player1ColorG { get; set; } = 70;
@@ -143,6 +147,11 @@ namespace Turbo.Plugins.s7o
         public float PlayerPortraitOffsetY { get; set; } = 28.0f;
         public float PlayerPortraitArrowLength { get; set; } = 11.5f;
         public float PlayerPortraitArrowHeadSize { get; set; } = 5.2f;
+        public float ValleyOfDeathRadiusYards { get; set; } = 15.0f;
+        public float ValleyOfDeathTimerSeconds { get; set; } = 15.0f;
+        public float ValleyOfDeathLineThickness { get; set; } = 4.0f;
+        public int ValleyOfDeathAlpha { get; set; } = 230;
+        public int ValleyOfDeathOutlineAlpha { get; set; } = 230;
 
         public IBrush HealthGlobeBrush { get; private set; }
         public IBrush RiftOrbBrush { get; private set; }
@@ -185,7 +194,10 @@ namespace Turbo.Plugins.s7o
         public IBrush[] PlayerFillBrushes { get; private set; }
         public IBrush[] PlayerOutlineBrushes { get; private set; }
         public IBrush[] PlayerDotBrushes { get; private set; }
+        public IBrush ValleyOfDeathBrush { get; private set; }
+        public IBrush ValleyOfDeathOutlineBrush { get; private set; }
 
+        private const ActorSnoEnum ValleyOfDeathActorSno = ActorSnoEnum._dh_markedfordeath_proxyactor;
         private readonly Dictionary<string, ItemMarker> _items = new Dictionary<string, ItemMarker>();
         private readonly List<PlayerMark> _players = new List<PlayerMark>();
         private long _alertSequence;
@@ -193,6 +205,10 @@ namespace Turbo.Plugins.s7o
         private string _resourceSignature;
         private RotatingTriangleShapePainter _trianglePainter;
         private StandardPingRadiusTransformator _mapPulse;
+        private GroundTimerDecorator _valleyOfDeathTimer;
+        private GroundLabelDecorator _valleyOfDeathLabel;
+        private IFont _valleyOfDeathFont;
+        private string _valleyOfDeathFontSignature;
 
         private static readonly LabelRule[] ExactLabels =
         {
@@ -318,6 +334,7 @@ namespace Turbo.Plugins.s7o
                 PaintPickupDots();
                 PaintItemGroundCircles();
                 PaintPlayerGroundCircles();
+                PaintValleyOfDeathCircles();
             }
             else if (layer == WorldLayer.Map)
             {
@@ -342,7 +359,7 @@ namespace Turbo.Plugins.s7o
             foreach (var brush in Brushes(HealthGlobeBrush, RiftOrbBrush, AncientRingBrush, AncientRingOutlineBrush, PrimalRingBrush, PrimalRingOutlineBrush,
                 AncientMapBrush, AncientMapOutlineBrush, PrimalMapBrush, PrimalMapOutlineBrush, AncientScreenArrowBrush, AncientScreenArrowOutlineBrush,
                 PrimalScreenArrowBrush, PrimalScreenArrowOutlineBrush, AncientAlertArrowBrush, AncientAlertArrowOutlineBrush, AncientAlertArrowHighlightBrush,
-                PrimalAlertArrowBrush, PrimalAlertArrowOutlineBrush, PrimalAlertArrowHighlightBrush, PlayerCircleBlackBrush, PlayerDotOutlineBrush))
+                PrimalAlertArrowBrush, PrimalAlertArrowOutlineBrush, PrimalAlertArrowHighlightBrush, PlayerCircleBlackBrush, PlayerDotOutlineBrush, ValleyOfDeathBrush, ValleyOfDeathOutlineBrush))
                 yield return brush;
 
             foreach (var brush in Brushes(PlayerFillBrushes)) yield return brush;
@@ -414,6 +431,8 @@ namespace Turbo.Plugins.s7o
             PlayerFillBrushes = CreatePlayerBrushes(PlayerCircleFillAlpha, 0);
             PlayerOutlineBrushes = CreatePlayerBrushes(PlayerCircleOutlineAlpha, PlayerCircleOutlineWidth);
             PlayerDotBrushes = CreatePlayerBrushes(255, 0);
+            ValleyOfDeathOutlineBrush = Hud.Render.CreateBrush(C(ValleyOfDeathOutlineAlpha), 0, 0, 0, Math.Max(1.0f, ValleyOfDeathLineThickness + 3.6f));
+            ValleyOfDeathBrush = Hud.Render.CreateBrush(C(ValleyOfDeathAlpha), C(ValleyOfDeathColorR), C(ValleyOfDeathColorG), C(ValleyOfDeathColorB), Math.Max(0.5f, ValleyOfDeathLineThickness));
             _trianglePainter = new RotatingTriangleShapePainter(Hud);
             _mapPulse = new StandardPingRadiusTransformator(Hud, 333);
         }
@@ -425,6 +444,7 @@ namespace Turbo.Plugins.s7o
                 HealthGlobeColorR, HealthGlobeColorG, HealthGlobeColorB, RiftOrbColorR, RiftOrbColorG, RiftOrbColorB,
                 AncientColorR, AncientColorG, AncientColorB, PrimalColorR, PrimalColorG, PrimalColorB,
                 AncientTextColorR, AncientTextColorG, AncientTextColorB, PrimalTextColorR, PrimalTextColorG, PrimalTextColorB,
+                ValleyOfDeathColorR, ValleyOfDeathColorG, ValleyOfDeathColorB, C((int)(ValleyOfDeathLineThickness * 10)), ValleyOfDeathAlpha, ValleyOfDeathOutlineAlpha,
                 Player1ColorR, Player1ColorG, Player1ColorB, Player2ColorR, Player2ColorG, Player2ColorB,
                 Player3ColorR, Player3ColorG, Player3ColorB, Player4ColorR, Player4ColorG, Player4ColorB,
                 PlayerCircleFillAlpha, PlayerCircleOutlineAlpha, PlayerCircleBlackOutlineAlpha, C((int)(PlayerCircleOutlineWidth * 10)), C((int)(PlayerCircleBlackOutlineWidth * 10)),
@@ -532,6 +552,75 @@ namespace Turbo.Plugins.s7o
             if (outline != null)
                 outline.DrawEllipse(sc.X, sc.Y, rx, ry);
             brush.DrawEllipse(sc.X, sc.Y, rx, ry);
+        }
+
+        private void PaintValleyOfDeathCircles()
+        {
+            if (!ShowValleyOfDeathCircle || Hud.Game == null || Hud.Game.Actors == null || ValleyOfDeathBrush == null || ValleyOfDeathOutlineBrush == null)
+                return;
+
+            foreach (var actor in Hud.Game.Actors)
+            {
+                if (actor == null || actor.SnoActor == null || actor.FloorCoordinate == null) continue;
+                if (actor.SnoActor.Sno != ValleyOfDeathActorSno) continue;
+
+                float seconds = Math.Max(1.0f, ValleyOfDeathTimerSeconds);
+                if (Hud.Game.CurrentGameTick > actor.CreatedAtInGameTick + (int)Math.Round(seconds * 60.0f) + 30)
+                    continue;
+
+                ValleyOfDeathOutlineBrush.DrawWorldEllipse(Math.Max(1.0f, ValleyOfDeathRadiusYards), -1, actor.FloorCoordinate);
+                ValleyOfDeathBrush.DrawWorldEllipse(Math.Max(1.0f, ValleyOfDeathRadiusYards), -1, actor.FloorCoordinate);
+                PaintValleyOfDeathTimer(actor, seconds);
+            }
+        }
+
+        private void PaintValleyOfDeathTimer(IActor actor, float seconds)
+        {
+            if (actor == null || actor.FloorCoordinate == null)
+                return;
+
+            EnsureValleyOfDeathDecorators(seconds);
+            if (_valleyOfDeathTimer == null || _valleyOfDeathLabel == null)
+                return;
+
+            _valleyOfDeathTimer.CountDownFrom = seconds;
+            _valleyOfDeathLabel.CountDownFrom = seconds;
+            _valleyOfDeathTimer.Paint(actor, actor.FloorCoordinate, null);
+            _valleyOfDeathLabel.Paint(actor, actor.FloorCoordinate, null);
+        }
+
+        private void EnsureValleyOfDeathDecorators(float seconds)
+        {
+            if (_valleyOfDeathTimer == null)
+            {
+                _valleyOfDeathTimer = new GroundTimerDecorator(Hud)
+                {
+                    Radius = 30f,
+                    CountDownFrom = seconds,
+                    StepCount = 5,
+                    BackgroundBrushEmpty = Hud.Render.CreateBrush(55, 18, 20, 22, 0),
+                    BackgroundBrushFill = Hud.Render.CreateBrush(90, 64, 64, 64, 0),
+                    BorderBrush = Hud.Render.CreateBrush(120, 0, 0, 0, 1.4f),
+                };
+            }
+
+            if (_valleyOfDeathLabel == null)
+            {
+                _valleyOfDeathLabel = new GroundLabelDecorator(Hud)
+                {
+                    CenterBaseLine = true,
+                    ForceOnScreen = false,
+                    CountDownFrom = seconds,
+                };
+            }
+
+            string sig = C(ValleyOfDeathColorR).ToString() + ":" + C(ValleyOfDeathColorG).ToString() + ":" + C(ValleyOfDeathColorB).ToString();
+            if (_valleyOfDeathFont == null || _valleyOfDeathFontSignature != sig)
+            {
+                _valleyOfDeathFont = Hud.Render.CreateFont("tahoma", 9f, 185, C(ValleyOfDeathColorR), C(ValleyOfDeathColorG), C(ValleyOfDeathColorB), true, false, 120, 0, 0, 0, true);
+                _valleyOfDeathFontSignature = sig;
+            }
+            _valleyOfDeathLabel.TextFont = _valleyOfDeathFont;
         }
 
         private void PaintItemMinimapMarkers()
