@@ -7784,6 +7784,27 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             catch { return false; }
         }
 
+        private bool IsStashUiOpen()
+        {
+            try
+            {
+                var stash = Hud != null && Hud.Inventory != null ? Hud.Inventory.StashMainUiElement : null;
+                return stash != null && stash.Visible;
+            }
+            catch { return false; }
+        }
+
+        private bool CanSendConversationDialogSpace()
+        {
+            // Keep the existing dialog-skip behavior, but never synthesize Space
+            // while a text/storage context can own that key.  The stash guard
+            // fixes the storage-search leak when a rift-close dialog is stale
+            // or no longer accepts Space.
+            if (IsChatEntryOpen()) return false;
+            if (IsStashUiOpen()) return false;
+            return true;
+        }
+
         private bool TryCloseChatBeforeGemPaneAutomation(int remainingAttempts)
         {
             try
@@ -7937,6 +7958,12 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
 
                 if (sendDialogSpace && pendingAttempts > 0 && _conversationDialogMain != null && _conversationDialogMain.Visible)
                 {
+                    if (!CanSendConversationDialogSpace())
+                    {
+                        UpdateSharedDebugState("skip-conversation-space-text-or-storage-open", "conversation_dialog_main", pendingAttempts);
+                        return true;
+                    }
+
                     _lastConversationCloseTick = NowTick();
                     FreeHudInput.SendSpace();
                     MarkAutomationInputAction(ConversationCloseThrottleMs + 30);
@@ -7995,6 +8022,12 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
                         UpdateSharedDebugState("skip-conversation-chat-open-no-upgrades", "conversation_dialog_main", 0);
                     }
 
+                    return true;
+                }
+
+                if (!CanSendConversationDialogSpace())
+                {
+                    UpdateSharedDebugState("skip-conversation-space-text-or-storage-open", "conversation_dialog_main", -1);
                     return true;
                 }
 
