@@ -313,6 +313,13 @@ namespace Turbo.Plugins.s7o
         private int   _visGuardianSentryColorIdx = 0;    private int   _visGuardianSentryTone = 10;
         private float _visGuardianSentryThickness = 4.0f;
         private const float VisualGuardianSentryYards = 16f;
+
+        private bool  _visValleyOfDeathEnabled = false;  private bool  _visValleyOfDeathExpanded = false;
+        private int   _visValleyOfDeathColorIdx = 5;     private int   _visValleyOfDeathTone = 5;
+        private float _visValleyOfDeathThickness = 4.0f;
+        private const float VisualValleyOfDeathYards = 15f;
+        private const float VisualValleyOfDeathSeconds = 15f;
+
         private const uint VisualSiphonDebuffSno = 453563u;
 
         // ── HUD-controlled default monster visual toggles ─────────────────────────────
@@ -4267,6 +4274,15 @@ namespace Turbo.Plugins.s7o
                 tips.PlayerCircleScreenRadiusX = _tipsPlayerGroundSize;
                 tips.PlayerCircleScreenRadiusY = Math.Max(4.0f, _tipsPlayerGroundSize * 0.283f);
                 tips.PlayerMinimapDotRadius = _tipsPlayerMinimapDotSize;
+
+                Color valley = GetVisualPickerColorToned(_visValleyOfDeathColorIdx, _visValleyOfDeathTone);
+                tips.ShowValleyOfDeathCircle = _visValleyOfDeathEnabled;
+                tips.ValleyOfDeathColorR = valley.R;
+                tips.ValleyOfDeathColorG = valley.G;
+                tips.ValleyOfDeathColorB = valley.B;
+                tips.ValleyOfDeathLineThickness = _visValleyOfDeathThickness;
+                tips.ValleyOfDeathRadiusYards = VisualValleyOfDeathYards;
+                tips.ValleyOfDeathTimerSeconds = VisualValleyOfDeathSeconds;
             }
             catch
             {
@@ -7133,6 +7149,14 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 return;
             }
 
+            if (feature == "valleyofdeath")
+            {
+                _visValleyOfDeathEnabled = !_visValleyOfDeathEnabled;
+                _visValleyOfDeathExpanded = _visValleyOfDeathEnabled;
+                ApplyTipsHelperSettingsToPlugin();
+                return;
+            }
+
             if (feature == "partyinspector")
             {
                 TogglePluginByTypeName("PARTY INSPECTOR", "s7o_PartyInspector");
@@ -7225,6 +7249,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             if (feature == "guardiansentry")
             {
                 _visGuardianSentryExpanded = !_visGuardianSentryExpanded;
+                return;
+            }
+
+            if (feature == "valleyofdeath")
+            {
+                _visValleyOfDeathExpanded = !_visValleyOfDeathExpanded;
                 return;
             }
 
@@ -7322,6 +7352,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 case "minion":  _visMinionColorIdx         = idx; break;
                 case "siphon":  _visSiphonColorIdx         = idx; break;
                 case "guardiansentry": _visGuardianSentryColorIdx = idx; break;
+                case "valleyofdeath": _visValleyOfDeathColorIdx = idx; break;
                 case "tipsprimaltext": _tipsPrimalTextColorIdx = idx; break;
                 case "tipsancienttext": _tipsAncientTextColorIdx = idx; break;
                 case "tipsplayer1": _tipsPlayer1ColorIdx = idx; break;
@@ -7349,6 +7380,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                         case "minion":  _visMinionTone         = ViClamp(_visMinionTone         + delta, 0, 10); break;
                         case "siphon":  _visSiphonTone         = ViClamp(_visSiphonTone         + delta, 0, 10); break;
                         case "guardiansentry": _visGuardianSentryTone = ViClamp(_visGuardianSentryTone + delta, 0, 10); break;
+                        case "valleyofdeath": _visValleyOfDeathTone = ViClamp(_visValleyOfDeathTone + delta, 0, 10); break;
                     }
                     break;
                 case "yards":
@@ -7363,6 +7395,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     else if (f == "outline") _visReticleOutlineThickness = ViClampF(_visReticleOutlineThickness + delta * 0.5f, 0.5f, 8f);
                     else if (f == "minion") _visMinionThickness = ViClampF(_visMinionThickness + delta * 0.3f, 0.5f, 6f);
                     else if (f == "guardiansentry") _visGuardianSentryThickness = ViClampF(_visGuardianSentryThickness + delta * 0.2f, 0.5f, 8f);
+                    else if (f == "valleyofdeath") _visValleyOfDeathThickness = ViClampF(_visValleyOfDeathThickness + delta * 0.2f, 0.5f, 8f);
                     break;
                 case "size":
                     if (f == "click") _visClickAnimSize = ViClampF(_visClickAnimSize + delta * 0.5f, 0.5f, 4.0f);
@@ -8229,6 +8262,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 "tipshelper",
                 "dangeraffixes",
                 "guardiansentry",
+                "valleyofdeath",
                 "menubutton",
                 "partyinspector",
                 "click",
@@ -8246,6 +8280,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 "Visual Helpers",
                 "Elite/Dangerous Affix Visuals",
                 "Guardian Sentry Circle",
+                "Valley of Death Circle",
                 "Menu Button",
                 "Party Inspector",
                 "Click Animation",
@@ -8263,6 +8298,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 "Ancient/primal alerts, globe dots, and party markers.",
                 "Enable or disable elite affix/danger visual effects.",
                 "Draws Guardian Sentry turret circles.",
+                "Draws Marked for Death - Valley of Death ground circles.",
                 "Show/hide and customize the HUD Menu open/close button.",
                 "Expanded party build inspector. Default hotkey: F12.",
                 "Short color burst when clicking inside this HUD menu.",
@@ -8280,6 +8316,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 _visTipsHelperEnabled,
                 _visDangerousAffixVisualsEnabled,
                 _visGuardianSentryEnabled,
+                _visValleyOfDeathEnabled,
                 _showDot,
                 IsPartyInspectorEnabled(),
                 _visClickAnimEnabled,
@@ -8297,6 +8334,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 _visTipsHelperExpanded,
                 _visDangerousAffixVisualsExpanded,
                 _visGuardianSentryExpanded,
+                _visValleyOfDeathExpanded,
                 _visMenuButtonExpanded,
                 _visPartyInspectorExpanded,
                 _visClickAnimExpanded,
@@ -8314,6 +8352,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 0,
                 0,
                 _visGuardianSentryColorIdx,
+                _visValleyOfDeathColorIdx,
                 0,
                 0,
                 _visClickAnimColorIdx,
@@ -8331,6 +8370,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 0,
                 0,
                 _visGuardianSentryTone,
+                _visValleyOfDeathTone,
                 0,
                 0,
                 _visClickAnimTone,
@@ -8426,7 +8466,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                                 else
                                 {
                                     bool hasYards = feature == "player" || feature == "mouse";
-                                    bool hasThick = feature == "player" || feature == "mouse" || feature == "line" || feature == "outline" || feature == "minion" || feature == "guardiansentry";
+                                    bool hasThick = feature == "player" || feature == "mouse" || feature == "line" || feature == "outline" || feature == "minion" || feature == "guardiansentry" || feature == "valleyofdeath";
                                     bool hasSize = feature == "reticle";
                                     bool hasDot = feature == "siphon";
 
@@ -8442,6 +8482,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                                         feature == "outline" ? _visReticleOutlineThickness :
                                         feature == "minion" ? _visMinionThickness :
                                         feature == "guardiansentry" ? _visGuardianSentryThickness :
+                                        feature == "valleyofdeath" ? _visValleyOfDeathThickness :
                                         0f;
 
                                     float size = feature == "reticle" ? _visTargetReticleSize : 0f;
@@ -13564,6 +13605,13 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     _visGuardianSentryTone.ToString(CultureInfo.InvariantCulture) + "|" +
                     _visGuardianSentryThickness.ToString(CultureInfo.InvariantCulture));
 
+                lines.Add("VIS_VALLEY_OF_DEATH=" +
+                    _visValleyOfDeathEnabled.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _visValleyOfDeathExpanded.ToString(CultureInfo.InvariantCulture) + "|0|" +
+                    _visValleyOfDeathColorIdx.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _visValleyOfDeathTone.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _visValleyOfDeathThickness.ToString(CultureInfo.InvariantCulture));
+
                 lines.Add("VIS_SIPHON=" +
                     _visSiphonEnabled.ToString(CultureInfo.InvariantCulture) + "|" +
                     _visSiphonExpanded.ToString(CultureInfo.InvariantCulture) + "|" +
@@ -13940,6 +13988,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                         float unused = 0f;
                         ParseVisLine(val, out _visGuardianSentryEnabled, out _visGuardianSentryExpanded, ref unused, ref _visGuardianSentryColorIdx, ref _visGuardianSentryTone, ref _visGuardianSentryThickness);
                         _visGuardianSentryThickness = ViClampF(_visGuardianSentryThickness, 0.5f, 8f);
+                    }
+                    else if (key == "VIS_VALLEY_OF_DEATH")
+                    {
+                        float unused = 0f;
+                        ParseVisLine(val, out _visValleyOfDeathEnabled, out _visValleyOfDeathExpanded, ref unused, ref _visValleyOfDeathColorIdx, ref _visValleyOfDeathTone, ref _visValleyOfDeathThickness);
+                        _visValleyOfDeathThickness = ViClampF(_visValleyOfDeathThickness, 0.5f, 8f);
                     }
                     else if (key == "VIS_SIPHON")
                     {
