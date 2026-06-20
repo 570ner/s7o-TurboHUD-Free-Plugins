@@ -7,37 +7,18 @@ namespace Turbo.Plugins.s7o
     using System.IO;
     using System.Linq;
     using System.Runtime.InteropServices;
+    using System.Text;
     using System.Windows.Forms;
     using SharpDX.Direct2D1;
     using SharpDX.DirectInput;
     using Vector2 = SharpDX.Vector2;
     using Turbo.Plugins.Default;
 
-    // ============================================================
-    // s7o_InventoryMOD.cs  —  TurboHUD Free 1.4.3.0
-    //
-    // Lightweight storage management and inventory utility plugin.
-    //
-    // Current features:
-    //   • Adds an extra material row to the inventory panel.
-    //   • Adds a stash-open helper panel with a configurable hotkey,
-    //     item-type toggles, and preferred stash-tab selection.
-    //   • Stores enabled item groups in predictable passes:
-    //       stackables first, then primal/ancient equipment.
-    //   • Stackables include gems, Petrified Screams, and account-bound
-    //     Ramaladni's Gifts.
-    //   • Preferred item tab 0 = Auto. Manual tabs are capped to the
-    //     detected stash tab count when possible.
-    // ============================================================
-
     public class s7o_InventoryAdjustments : BasePlugin,
         IInGameTopPainter, IKeyEventHandler, IMouseClickHandler, IAfterCollectHandler
     {
-        // ── Material row settings ──────────────────────────────────────────
 
         public int ExistingMaterialRowCount { get; set; } = 3;
-
-        // ── Storage helper settings ────────────────────────────────────────
 
         public bool ShowStoragePanel { get; set; } = true;
         public Key StoreItemsHotkey { get; set; } = Key.F3;
@@ -46,18 +27,21 @@ namespace Turbo.Plugins.s7o
         public bool StorePrimals { get; set; } = true;
         public bool StoreAncients { get; set; } = false;
 
-        // 0 = Auto. 1-13 = manual starting tab, capped at runtime to
-        // detected unlocked tabs when FreeHUD exposes enough UI/data.
+        public bool SellGifts { get; set; } = true;
+        public bool SellScreams { get; set; } = true;
+        public bool SellGems { get; set; } = true;
+        public bool DropUnidentified { get; set; } = true;
+
+        public float MerchantDropXRatio { get; set; } = 0.50f;
+        public float MerchantDropYRatio { get; set; } = 0.56f;
+
         public int PreferredItemTab { get; set; } = 0;
 
         public int StoreItemsUiSettleDelayMs { get; set; } = 160;
         public int StoreItemsTabSwitchDelayMs { get; set; } = 100;
-        public int StoreItemsClickDelayMs { get; set; } = 15;
+        public int StoreItemsClickDelayMs { get; set; } = 30;
 
-        // Default D3 inventory key. Exposed so users who rebound inventory can edit it.
         public ushort InventoryVirtualKey { get; set; } = 0x49; // I
-
-        // ── Fonts / brushes ────────────────────────────────────────────────
 
         public IFont CountFont { get; set; }
         public IFont YellowFont { get; set; }
@@ -78,8 +62,6 @@ namespace Turbo.Plugins.s7o
         public IBrush ToggleOffBrush { get; set; }
         public IBrush ToggleOffBorderBrush { get; set; }
 
-        // ── Layout settings ────────────────────────────────────────────────
-
         public float PanelLeftOffset { get; set; } = 0.0f;
         public float PanelTopOffset { get; set; } = 26.0f;
         public float PanelRightClearance { get; set; } = 40.0f;
@@ -89,28 +71,36 @@ namespace Turbo.Plugins.s7o
         public float SmallButtonHeight { get; set; } = 20.0f;
         public float TabControlWidth { get; set; } = 134.0f;
 
-        // ── Constants ──────────────────────────────────────────────────────
-
         private const int MaxD3StashTabs = 13;
         private const int StashColumns = 7;
         private const int StashRowsPerTab = 10;
         private const uint PetrifiedScreamSno = 1051857800;
         private const uint RamaladniGiftSno = 1844495708;
         private const ushort VkEscape = 0x1B;
-        private const int StorageSettingsVersion = 3;
-
-        // ── Private fields ────────────────────────────────────────────────
+        private const int StorageSettingsVersion = 6;
+        private const int SpecialTooltipProbeInitialDelayMs = 30;
+        private const int SpecialTooltipProbePollMs = 30;
+        private const int SpecialTooltipProbeTimeoutMs = 300;
+        private const int TooltipCostPathCount = 13;
 
         private ISnoItem[] _infernalRow;
         private ITexture _rowBackground;
         private IKeyEvent _storeKeyEvent;
         private bool _capturingHotkey;
         private IUiElement _chatEditLine;
+        private IUiElement _shopMainPage;
+        private IUiElement _shopPanel;
+        private IUiElement _shopGoldText;
+        private IUiElement[] _tooltipCostElements;
 
         private RectangleF _hotkeyButtonRect;
         private RectangleF _stackablesRect;
         private RectangleF _primalsRect;
         private RectangleF _ancientsRect;
+        private RectangleF _sellGiftsRect;
+        private RectangleF _sellScreamsRect;
+        private RectangleF _sellGemsRect;
+        private RectangleF _dropUnidentifiedRect;
         private RectangleF _tabMinusRect;
         private RectangleF _tabValueRect;
         private RectangleF _tabPlusRect;
@@ -134,11 +124,16 @@ namespace Turbo.Plugins.s7o
         private int _statusUntilTick;
         private int _settingsVersion;
         private readonly List<StoreCandidate> _queue = new List<StoreCandidate>();
+        private readonly List<MerchantCandidate> _merchantQueue = new List<MerchantCandidate>();
+        private readonly Dictionary<string, SpecialTooltipDecision> _specialCostDecisionCache = new Dictionary<string, SpecialTooltipDecision>();
+        private RunMode _runMode = RunMode.None;
+        private MerchantStage _merchantStage = MerchantStage.Idle;
+        private int _currentMerchantQueueIndex;
+        private int _soldCount;
+        private int _droppedCount;
         private bool _geometryDrawFailed;
 
         private string _settingsPath;
-
-        // ── Init ──────────────────────────────────────────────────────────
 
         public s7o_InventoryAdjustments()
         {
@@ -189,9 +184,13 @@ namespace Turbo.Plugins.s7o
 
             _storeKeyEvent = Hud.Input.CreateKeyEvent(true, StoreItemsHotkey, false, false, false);
             _chatEditLine = RegisterUi("Root.NormalLayer.chatentry_dialog_backgroundScreen.chatentry_content.chat_editline", null);
+            _shopMainPage = RegisterUi("Root.NormalLayer.shop_dialog_mainPage", null);
+            _shopPanel = RegisterUi("Root.NormalLayer.shop_dialog_mainPage.panel", _shopMainPage);
+            _shopGoldText = RegisterUi("Root.NormalLayer.shop_dialog_mainPage.gold_text", _shopMainPage);
+            _tooltipCostElements = new IUiElement[TooltipCostPathCount];
+            for (int i = 0; i < _tooltipCostElements.Length; i++)
+                _tooltipCostElements[i] = RegisterUi("Root.TopLayer.item " + i.ToString(CultureInfo.InvariantCulture) + ".stack.frame_cost.cost", null);
         }
-
-        // ── Input handlers ─────────────────────────────────────────────────
 
         public void OnKeyEvent(IKeyEvent keyEvent)
         {
@@ -218,8 +217,10 @@ namespace Turbo.Plugins.s7o
             if (_storeKeyEvent == null || !_storeKeyEvent.Matches(keyEvent))
                 return;
 
-            // If stash is closed, do nothing and show nothing.
-            if (!IsStashVisible())
+            bool stashVisible = IsStashVisible();
+            bool merchantVisible = IsMerchantShopVisible();
+
+            if (!stashVisible && !merchantVisible)
                 return;
 
             if (_running)
@@ -228,7 +229,8 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
-            BeginStoreRun();
+            if (stashVisible) BeginStoreRun();
+            else BeginMerchantRun();
         }
 
         public bool MouseDown(MouseButtons button)
@@ -239,11 +241,22 @@ namespace Turbo.Plugins.s7o
             if (Hud == null || Hud.Window == null || !Hud.Window.IsForeground)
                 return false;
 
-            if (!ShowStoragePanel || !IsStashVisible())
+            bool stashVisible = IsStashVisible();
+            bool merchantVisible = IsMerchantShopVisible();
+
+            if (!ShowStoragePanel || (!stashVisible && !merchantVisible))
                 return false;
 
-            if (!UpdateStoragePanelLayout())
-                return false;
+            if (stashVisible)
+            {
+                if (!UpdateStoragePanelLayout())
+                    return false;
+            }
+            else
+            {
+                if (!UpdateMerchantPanelLayout())
+                    return false;
+            }
 
             int x = Hud.Window.CursorX;
             int y = Hud.Window.CursorY;
@@ -264,9 +277,43 @@ namespace Turbo.Plugins.s7o
             if (_running)
             {
                 if (PointInRect(_stackablesRect, x, y) || PointInRect(_primalsRect, x, y) || PointInRect(_ancientsRect, x, y)
+                    || PointInRect(_sellGiftsRect, x, y) || PointInRect(_sellScreamsRect, x, y) || PointInRect(_sellGemsRect, x, y) || PointInRect(_dropUnidentifiedRect, x, y)
                     || PointInRect(_tabMinusRect, x, y) || PointInRect(_tabPlusRect, x, y) || PointInRect(_tabValueRect, x, y))
                 {
                     ShowStatus("running", 900);
+                    return true;
+                }
+
+                return false;
+            }
+
+            if (merchantVisible)
+            {
+                if (PointInRect(_sellGiftsRect, x, y))
+                {
+                    SellGifts = !SellGifts;
+                    SaveSettings();
+                    return true;
+                }
+
+                if (PointInRect(_sellScreamsRect, x, y))
+                {
+                    SellScreams = !SellScreams;
+                    SaveSettings();
+                    return true;
+                }
+
+                if (PointInRect(_sellGemsRect, x, y))
+                {
+                    SellGems = !SellGems;
+                    SaveSettings();
+                    return true;
+                }
+
+                if (PointInRect(_dropUnidentifiedRect, x, y))
+                {
+                    DropUnidentified = !DropUnidentified;
+                    SaveSettings();
                     return true;
                 }
 
@@ -317,20 +364,20 @@ namespace Turbo.Plugins.s7o
             return false;
         }
 
-        // ── Runtime state machine ──────────────────────────────────────────
-
         public void AfterCollect()
         {
             if (!Enabled)
                 return;
 
-            if (_capturingHotkey && (!IsStashVisible() || Hud == null || Hud.Window == null || !Hud.Window.IsForeground))
+            if (_capturingHotkey && ((!IsStashVisible() && !IsMerchantShopVisible()) || Hud == null || Hud.Window == null || !Hud.Window.IsForeground))
                 _capturingHotkey = false;
 
             if (!_running)
                 return;
 
-            AdvanceStoreRun(Environment.TickCount);
+            int now = Environment.TickCount;
+            if (_runMode == RunMode.Merchant) AdvanceMerchantRun(now);
+            else AdvanceStoreRun(now);
         }
 
         private void BeginStoreRun()
@@ -342,10 +389,12 @@ namespace Turbo.Plugins.s7o
             }
 
             _queue.Clear();
+            _specialCostDecisionCache.Clear();
             _currentQueueIndex = 0;
             _storedCount = 0;
             _skippedCount = 0;
             _running = true;
+            _runMode = RunMode.Store;
             _stage = StoreStage.PrepareUi;
             _nextActionTick = Environment.TickCount;
             ShowStatus("storing items...", 1200);
@@ -407,12 +456,22 @@ namespace Turbo.Plugins.s7o
                             continue;
                         }
 
+                        if (_queue[_currentQueueIndex].RequiresTooltipProbe && !_queue[_currentQueueIndex].TooltipResolved)
+                        {
+                            _stage = StoreStage.ProbeTooltip;
+                            continue;
+                        }
+
                         if (EnsureTargetStashTab(_queue[_currentQueueIndex].TargetTabAbs, now))
                         {
                             _stage = StoreStage.ClickItem;
                             continue;
                         }
                         return;
+
+                    case StoreStage.ProbeTooltip:
+                        CompleteStoreTooltipProbe(now);
+                        continue;
 
                     case StoreStage.ClickItem:
                         if (_currentQueueIndex >= _queue.Count)
@@ -439,10 +498,14 @@ namespace Turbo.Plugins.s7o
         private void StopRun(string status)
         {
             _running = false;
+            _runMode = RunMode.None;
             _stage = StoreStage.Idle;
+            _merchantStage = MerchantStage.Idle;
             _nextActionTick = 0;
             _currentQueueIndex = 0;
+            _currentMerchantQueueIndex = 0;
             _queue.Clear();
+            _merchantQueue.Clear();
             ShowStatus(status, 1800);
         }
 
@@ -456,7 +519,613 @@ namespace Turbo.Plugins.s7o
             return (int)(now - tick) >= 0;
         }
 
-        // ── Candidate building ─────────────────────────────────────────────
+        private void BeginMerchantRun()
+        {
+            if (!SellGifts && !SellScreams && !SellGems)
+            {
+                ShowStatus("nothing selected", 1200);
+                return;
+            }
+
+            _merchantQueue.Clear();
+            _specialCostDecisionCache.Clear();
+            _currentMerchantQueueIndex = 0;
+            _soldCount = 0;
+            _droppedCount = 0;
+            _skippedCount = 0;
+            _running = true;
+            _runMode = RunMode.Merchant;
+            _merchantStage = MerchantStage.PrepareUi;
+            _nextActionTick = Environment.TickCount;
+            ShowStatus("selling/dropping...", 1200);
+        }
+
+        private void AdvanceMerchantRun(int now)
+        {
+            for (int step = 0; step < MaxStoreStateStepsPerCollect; step++)
+            {
+                if (!TickReached(now, _nextActionTick))
+                    return;
+
+                if (!IsMerchantShopVisible())
+                {
+                    StopRun("merchant closed");
+                    return;
+                }
+
+                if (Hud == null || Hud.Window == null || !Hud.Window.IsForeground)
+                    return;
+
+                if (_merchantStage != MerchantStage.Done)
+                {
+                    if (IsChatEntryOpen())
+                    {
+                        s7o_InventoryModInput.TapKey(VkEscape);
+                        Delay(now, StoreItemsUiSettleDelayMs);
+                        return;
+                    }
+
+                    if (!IsInventoryVisible())
+                    {
+                        s7o_InventoryModInput.TapKey(InventoryVirtualKey);
+                        Delay(now, StoreItemsUiSettleDelayMs);
+                        return;
+                    }
+                }
+
+                switch (_merchantStage)
+                {
+                    case MerchantStage.PrepareUi:
+                        _merchantStage = MerchantStage.BuildQueue;
+                        continue;
+
+                    case MerchantStage.BuildQueue:
+                        BuildMerchantQueue();
+                        if (_merchantQueue.Count <= 0)
+                        {
+                            StopRun(_skippedCount > 0 ? "nothing eligible" : "no items");
+                            return;
+                        }
+                        _merchantStage = MerchantStage.ClickItem;
+                        continue;
+
+                    case MerchantStage.ClickItem:
+                        if (_currentMerchantQueueIndex >= _merchantQueue.Count)
+                        {
+                            _merchantStage = MerchantStage.Done;
+                            continue;
+                        }
+
+                        ClickCurrentMerchantCandidate(now);
+                        continue;
+
+                    case MerchantStage.ProbeTooltip:
+                        CompleteMerchantTooltipProbe(now);
+                        continue;
+
+                    case MerchantStage.WaitAfterClick:
+                        _currentMerchantQueueIndex++;
+                        _merchantStage = MerchantStage.ClickItem;
+                        continue;
+
+                    case MerchantStage.Done:
+                        string result = "done";
+                        if (_soldCount > 0 || _droppedCount > 0)
+                            result = "sold " + _soldCount.ToString(CultureInfo.InvariantCulture) + ", dropped " + _droppedCount.ToString(CultureInfo.InvariantCulture);
+                        StopRun(result);
+                        return;
+                }
+            }
+        }
+
+        private void BuildMerchantQueue()
+        {
+            _merchantQueue.Clear();
+            _skippedCount = 0;
+
+            var inv = SafeInventoryItems();
+            if (inv.Count <= 0)
+                return;
+
+            var sorted = inv.OrderBy(i => i.InventoryY).ThenBy(i => i.InventoryX).ToList();
+            var plan = BuildStashPlan();
+            plan.AddTrustedInventorySpecialSeeds(sorted);
+
+            var sellQueue = new List<MerchantCandidate>();
+            var dropQueue = new List<MerchantCandidate>();
+            var probeQueue = new List<MerchantCandidate>();
+
+            foreach (var item in sorted)
+            {
+                MerchantKind kind;
+                bool drop;
+
+                if (TryClassifyMerchantCandidate(item, plan, out kind, out drop))
+                {
+                    var candidate = CreateMerchantCandidate(item, kind, drop);
+                    if (drop) dropQueue.Add(candidate);
+                    else sellQueue.Add(candidate);
+                    continue;
+                }
+
+                if (TryCreateMerchantTooltipProbe(item, out kind))
+                {
+                    var probe = CreateMerchantCandidate(item, kind, false);
+                    probe.RequiresTooltipProbe = true;
+                    probeQueue.Add(probe);
+                    continue;
+                }
+
+                if (IsSpecialStackableItem(item)) _skippedCount++;
+            }
+
+            _merchantQueue.AddRange(sellQueue);
+            _merchantQueue.AddRange(dropQueue);
+            _merchantQueue.AddRange(probeQueue);
+
+        }
+
+        private MerchantCandidate CreateMerchantCandidate(IItem item, MerchantKind kind, bool drop)
+        {
+            return new MerchantCandidate
+            {
+                ItemKey = item.ItemUniqueId ?? string.Empty,
+                Sno = item.SnoItem != null ? item.SnoItem.Sno : 0,
+                InventoryX = item.InventoryX,
+                InventoryY = item.InventoryY,
+                Seed = item.Seed,
+                SpecialStackable = IsSpecialStackableItem(item),
+                Kind = kind,
+                Drop = drop
+            };
+        }
+
+        private bool TryClassifyMerchantCandidate(IItem item, StashPlan plan, out MerchantKind kind, out bool drop)
+        {
+            kind = MerchantKind.None;
+            drop = false;
+            if (item == null || item.SnoItem == null) return false;
+            if (item.Location != ItemLocation.Inventory || item.IsInventoryLocked) return false;
+
+            uint sno = item.SnoItem.Sno;
+            if (sno == RamaladniGiftSno || sno == PetrifiedScreamSno)
+            {
+                if (sno == RamaladniGiftSno)
+                {
+                    if (!SellGifts) return false;
+                    kind = MerchantKind.Gift;
+                }
+                else
+                {
+                    if (!SellScreams) return false;
+                    kind = MerchantKind.Scream;
+                }
+
+                if (IsKnownSpecialStackSeed(item, plan))
+                    return true;
+
+                SpecialTooltipDecision cached;
+                if (TryGetCachedSpecialTooltipDecision(item, out cached))
+                {
+                    if (cached == SpecialTooltipDecision.Identified)
+                        return true;
+
+                    if (cached == SpecialTooltipDecision.Unidentified && DropUnidentified)
+                    {
+                        drop = true;
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+
+            if (SellGems && IsNormalGemItem(item))
+            {
+                kind = MerchantKind.Gem;
+                return true;
+            }
+
+            return false;
+        }
+
+        private bool TryCreateMerchantTooltipProbe(IItem item, out MerchantKind kind)
+        {
+            kind = MerchantKind.None;
+            if (!IsSpecialStackableItem(item)) return false;
+            if (item.Location != ItemLocation.Inventory || item.IsInventoryLocked) return false;
+
+            SpecialTooltipDecision cached;
+            if (TryGetCachedSpecialTooltipDecision(item, out cached))
+                return false;
+
+            uint sno = item.SnoItem.Sno;
+            if (sno == RamaladniGiftSno)
+            {
+                if (!SellGifts) return false;
+                kind = MerchantKind.Gift;
+                return true;
+            }
+
+            if (sno == PetrifiedScreamSno)
+            {
+                if (!SellScreams) return false;
+                kind = MerchantKind.Scream;
+                return true;
+            }
+
+            return false;
+        }
+
+        private bool TryGetCachedSpecialTooltipDecision(IItem item, out SpecialTooltipDecision decision)
+        {
+            decision = SpecialTooltipDecision.Unknown;
+            string key = GetSpecialTooltipCacheKey(item);
+            return !string.IsNullOrEmpty(key)
+                && _specialCostDecisionCache.TryGetValue(key, out decision)
+                && decision != SpecialTooltipDecision.Unknown;
+        }
+
+        private void CacheSpecialTooltipDecision(IItem item, SpecialTooltipDecision decision)
+        {
+            if (decision == SpecialTooltipDecision.Unknown) return;
+            string key = GetSpecialTooltipCacheKey(item);
+            if (!string.IsNullOrEmpty(key)) _specialCostDecisionCache[key] = decision;
+        }
+
+        private static string GetSpecialTooltipCacheKey(IItem item)
+        {
+            if (!IsSpecialStackableItem(item) || item.Seed == 0) return string.Empty;
+            return item.SnoItem.Sno.ToString(CultureInfo.InvariantCulture) + ":" + item.Seed.ToString(CultureInfo.InvariantCulture);
+        }
+
+        private static bool IsSpecialStackableSno(uint sno)
+        {
+            return sno == RamaladniGiftSno || sno == PetrifiedScreamSno;
+        }
+
+        private static bool IsSpecialStackableItem(IItem item)
+        {
+            return item != null && item.SnoItem != null && IsSpecialStackableSno(item.SnoItem.Sno);
+        }
+
+        private static bool IsKnownSpecialStackSource(IItem item)
+        {
+            if (!IsSpecialStackableItem(item)) return false;
+            if (item.Location != ItemLocation.Stash) return false;
+            if (item.IsInventoryLocked) return false;
+            if (item.Seed == 0) return false;
+            if (item.Quantity <= 0) return false;
+            if (!item.AccountBound || !item.BoundToMyAccount) return false;
+            return true;
+        }
+
+        private static bool IsKnownSpecialStackSeed(IItem item, StashPlan plan)
+        {
+            if (!IsSpecialStackableItem(item) || plan == null) return false;
+            if (item.Location != ItemLocation.Inventory) return false;
+            if (item.IsInventoryLocked) return false;
+            if (item.Seed == 0) return false;
+            if (!item.AccountBound || !item.BoundToMyAccount) return false;
+            return plan.HasKnownSpecialSeed(item.SnoItem.Sno, item.Seed);
+        }
+
+        private static bool HasSpecialStackableStorageBasics(IItem item)
+        {
+            if (!IsSpecialStackableItem(item)) return false;
+            if (item.Location != ItemLocation.Inventory || item.IsInventoryLocked) return false;
+            if (item.Seed == 0) return false;
+            return item.AccountBound && item.BoundToMyAccount;
+        }
+
+        private static bool IsSpecialStackableStorageSafe(IItem item, StashPlan plan)
+        {
+            return HasSpecialStackableStorageBasics(item)
+                && plan != null
+                && plan.HasKnownSpecialSeed(item.SnoItem.Sno, item.Seed);
+        }
+
+        private static bool SameInventorySlot(IItem item, int x, int y)
+        {
+            return item != null && item.InventoryX == x && item.InventoryY == y;
+        }
+
+        private static bool SameSeedWhenKnown(IItem item, int seed)
+        {
+            return item != null && (seed == 0 || item.Seed == seed);
+        }
+
+        private static bool ShouldContinueSpecialTooltipProbe(int now, int startedTick)
+        {
+            return startedTick != 0 && (int)(now - startedTick) < SpecialTooltipProbeTimeoutMs;
+        }
+
+        private SpecialTooltipDecision ReadSpecialTooltipDecision(IItem item)
+        {
+            if (!HoveredItemMatchesTarget(item))
+                return SpecialTooltipDecision.Unknown;
+
+            var costTexts = new List<string>();
+            if (_tooltipCostElements != null)
+            {
+                foreach (var element in _tooltipCostElements)
+                {
+                    string text = ReadUiText(element);
+                    if (!string.IsNullOrWhiteSpace(text))
+                        costTexts.Add(text.Trim());
+                }
+            }
+
+            var distinct = costTexts.Distinct().ToList();
+            if (distinct.Count != 1)
+                return SpecialTooltipDecision.Unknown;
+
+            string cost = distinct[0];
+            if (ContainsText(cost, "???"))
+                return SpecialTooltipDecision.Unidentified;
+
+            if (ContainsText(cost, "Sell Value") || ContainsText(cost, "icon:gold") || HasDigit(cost))
+                return SpecialTooltipDecision.Identified;
+
+            return SpecialTooltipDecision.Unknown;
+        }
+
+        private bool HoveredItemMatchesTarget(IItem target)
+        {
+            if (!IsSpecialStackableItem(target) || Hud == null || Hud.Inventory == null)
+                return false;
+
+            IItem hovered;
+            try { hovered = Hud.Inventory.HoveredItem; }
+            catch { hovered = null; }
+
+            if (!IsSpecialStackableItem(hovered))
+                return false;
+
+            if (target.AcdId != 0 && hovered.AcdId == target.AcdId)
+                return true;
+
+            return hovered.SnoItem.Sno == target.SnoItem.Sno
+                && hovered.InventoryX == target.InventoryX
+                && hovered.InventoryY == target.InventoryY
+                && (target.Seed == 0 || hovered.Seed == target.Seed);
+        }
+
+        private static bool ContainsText(string text, string value)
+        {
+            return !string.IsNullOrEmpty(text)
+                && !string.IsNullOrEmpty(value)
+                && text.IndexOf(value, StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static bool HasDigit(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return false;
+            for (int i = 0; i < text.Length; i++)
+                if (char.IsDigit(text[i])) return true;
+            return false;
+        }
+
+        private void ClickCurrentMerchantCandidate(int now)
+        {
+            if (_currentMerchantQueueIndex < 0 || _currentMerchantQueueIndex >= _merchantQueue.Count)
+            {
+                _merchantStage = MerchantStage.Done;
+                return;
+            }
+
+            var candidate = _merchantQueue[_currentMerchantQueueIndex];
+            var plan = BuildStashPlan();
+            plan.AddTrustedInventorySpecialSeeds(SafeInventoryItems());
+
+            var item = FindInventoryItemByMerchantCandidate(candidate, plan);
+            if (item == null)
+            {
+                _skippedCount++;
+                _merchantStage = MerchantStage.WaitAfterClick;
+                Delay(now, 0);
+                return;
+            }
+
+            RectangleF rect;
+            try { rect = Hud.Inventory.GetItemRect(item); }
+            catch { rect = RectangleF.Empty; }
+
+            if (rect.Width <= 0 || rect.Height <= 0)
+            {
+                _skippedCount++;
+                _merchantStage = MerchantStage.WaitAfterClick;
+                Delay(now, 0);
+                return;
+            }
+
+            if (candidate.RequiresTooltipProbe && !candidate.TooltipResolved)
+            {
+                SpecialTooltipDecision cached;
+                if (TryGetCachedSpecialTooltipDecision(item, out cached))
+                {
+                    ApplyMerchantProbeDecision(candidate, cached);
+                    _merchantStage = candidate.SkipAfterProbe ? MerchantStage.WaitAfterClick : MerchantStage.ClickItem;
+                    Delay(now, 0);
+                    return;
+                }
+
+                if (!s7o_InventoryModInput.MoveToRect(rect))
+                {
+                    _skippedCount++;
+                    _merchantStage = MerchantStage.WaitAfterClick;
+                    Delay(now, 0);
+                    return;
+                }
+
+                candidate.ProbeStartedTick = now;
+                _merchantStage = MerchantStage.ProbeTooltip;
+                Delay(now, SpecialTooltipProbeInitialDelayMs);
+                return;
+            }
+
+            if (candidate.SkipAfterProbe)
+            {
+                _skippedCount++;
+                _merchantStage = MerchantStage.WaitAfterClick;
+                Delay(now, 0);
+                return;
+            }
+
+            MerchantKind liveKind;
+            bool liveDrop;
+            if (candidate.TooltipResolved)
+            {
+                liveKind = candidate.Kind;
+                liveDrop = candidate.Drop;
+            }
+            else if (!TryClassifyMerchantCandidate(item, plan, out liveKind, out liveDrop) || liveKind != candidate.Kind || liveDrop != candidate.Drop)
+            {
+                _skippedCount++;
+                _merchantStage = MerchantStage.WaitAfterClick;
+                Delay(now, 0);
+                return;
+            }
+
+            bool ok;
+            if (liveDrop)
+            {
+                int dropX, dropY;
+                GetMerchantDropPoint(out dropX, out dropY);
+                ok = s7o_InventoryModInput.DragRectToPoint(rect, dropX, dropY);
+                if (ok) _droppedCount++;
+            }
+            else
+            {
+                ok = s7o_InventoryModInput.RightClickRect(rect);
+                if (ok) _soldCount++;
+            }
+
+            if (!ok) _skippedCount++;
+
+            _merchantStage = MerchantStage.WaitAfterClick;
+            Delay(now, StoreItemsClickDelayMs);
+            if (_soldCount > 0 || _droppedCount > 0)
+                ShowStatus("sold " + _soldCount.ToString(CultureInfo.InvariantCulture) + ", dropped " + _droppedCount.ToString(CultureInfo.InvariantCulture), 900);
+        }
+
+        private IItem FindInventoryItemByMerchantCandidate(MerchantCandidate candidate, StashPlan plan)
+        {
+            var items = SafeInventoryItems();
+            foreach (var item in items)
+            {
+                if (item == null || item.SnoItem == null)
+                    continue;
+
+                MerchantKind kind;
+                bool drop;
+
+                if (candidate.SpecialStackable)
+                {
+                    if (item.SnoItem.Sno != candidate.Sno) continue;
+                    if (!SameInventorySlot(item, candidate.InventoryX, candidate.InventoryY)) continue;
+                    if (!SameSeedWhenKnown(item, candidate.Seed)) continue;
+
+                    if (candidate.RequiresTooltipProbe || candidate.TooltipResolved)
+                        return item;
+
+                    if (!TryClassifyMerchantCandidate(item, plan, out kind, out drop)) continue;
+                    if (kind == candidate.Kind && drop == candidate.Drop)
+                        return item;
+
+                    continue;
+                }
+
+                if (!string.IsNullOrEmpty(candidate.ItemKey)
+                    && string.Equals(item.ItemUniqueId, candidate.ItemKey, StringComparison.Ordinal))
+                    return item;
+
+                if (candidate.Sno != 0 && item.SnoItem.Sno == candidate.Sno
+                    && TryClassifyMerchantCandidate(item, plan, out kind, out drop)
+                    && kind == candidate.Kind && drop == candidate.Drop)
+                    return item;
+            }
+
+            return null;
+        }
+
+        private void CompleteMerchantTooltipProbe(int now)
+        {
+            if (_currentMerchantQueueIndex < 0 || _currentMerchantQueueIndex >= _merchantQueue.Count)
+            {
+                _merchantStage = MerchantStage.Done;
+                return;
+            }
+
+            var candidate = _merchantQueue[_currentMerchantQueueIndex];
+            var item = FindInventoryItemByMerchantCandidate(candidate, BuildStashPlan());
+            if (item == null)
+            {
+                _skippedCount++;
+                _merchantStage = MerchantStage.WaitAfterClick;
+                Delay(now, 0);
+                return;
+            }
+
+            var decision = ReadSpecialTooltipDecision(item);
+            if (decision == SpecialTooltipDecision.Unknown && ShouldContinueSpecialTooltipProbe(now, candidate.ProbeStartedTick))
+            {
+                Delay(now, SpecialTooltipProbePollMs);
+                return;
+            }
+
+            CacheSpecialTooltipDecision(item, decision);
+            ApplyMerchantProbeDecision(candidate, decision);
+            if (candidate.SkipAfterProbe) _skippedCount++;
+
+            _merchantStage = candidate.SkipAfterProbe ? MerchantStage.WaitAfterClick : MerchantStage.ClickItem;
+            Delay(now, 0);
+        }
+
+        private void ApplyMerchantProbeDecision(MerchantCandidate candidate, SpecialTooltipDecision decision)
+        {
+            candidate.RequiresTooltipProbe = false;
+            candidate.TooltipResolved = decision != SpecialTooltipDecision.Unknown;
+
+            if (decision == SpecialTooltipDecision.Identified)
+            {
+                candidate.Drop = false;
+                candidate.SkipAfterProbe = false;
+                return;
+            }
+
+            if (decision == SpecialTooltipDecision.Unidentified && DropUnidentified)
+            {
+                candidate.Drop = true;
+                candidate.SkipAfterProbe = false;
+                return;
+            }
+
+            candidate.SkipAfterProbe = true;
+        }
+
+        private void GetMerchantDropPoint(out int x, out int y)
+        {
+            float w = 0.0f;
+            float h = 0.0f;
+            try
+            {
+                w = Hud != null && Hud.Window != null ? Hud.Window.Size.Width : 0.0f;
+                h = Hud != null && Hud.Window != null ? Hud.Window.Size.Height : 0.0f;
+            }
+            catch { }
+
+            if (w <= 0.0f || h <= 0.0f)
+            {
+                var inv = Hud != null && Hud.Inventory != null ? Hud.Inventory.InventoryMainUiElement : null;
+                var r = inv != null ? inv.Rectangle : RectangleF.Empty;
+                w = r.Width > 0 ? r.Left : 1280.0f;
+                h = r.Height > 0 ? r.Bottom : 720.0f;
+            }
+
+            x = (int)Math.Round(w * MerchantDropXRatio);
+            y = (int)Math.Round(h * MerchantDropYRatio);
+        }
 
         private void BuildStoreQueue()
         {
@@ -469,16 +1138,42 @@ namespace Turbo.Plugins.s7o
 
             var sorted = inv.OrderBy(i => i.InventoryY).ThenBy(i => i.InventoryX).ToList();
             var plan = BuildStashPlan();
+            plan.AddTrustedInventorySpecialSeeds(sorted);
             int preferredStartTabAbs = PreferredItemTab <= 0 ? 0 : PreferredItemTab - 1;
+            var probeQueue = new List<StoreCandidate>();
 
-            // Pass 1: stackables stay together and are stored before equipment.
-            // This avoids alternating gems/materials with ancient/primal items
-            // just because of current inventory slot order.
             if (StoreStackables)
             {
                 foreach (var item in sorted)
                 {
-                    if (!IsStoreStackable(item))
+                    if (IsSpecialStackableItem(item))
+                    {
+                        if (!HasSpecialStackableStorageBasics(item))
+                        {
+                            _skippedCount++;
+                            continue;
+                        }
+
+                        SpecialTooltipDecision cached;
+                        if (IsSpecialStackableStorageSafe(item, plan)
+                            || (TryGetCachedSpecialTooltipDecision(item, out cached) && cached == SpecialTooltipDecision.Identified))
+                        {
+                            int specialTargetTabAbs = ResolveSpecialStackableTargetTab(item, plan, true);
+                            TryQueueCandidate(item, StoreKind.Stackable, specialTargetTabAbs);
+                            continue;
+                        }
+
+                        if (TryGetCachedSpecialTooltipDecision(item, out cached) && cached == SpecialTooltipDecision.Unidentified)
+                        {
+                            _skippedCount++;
+                            continue;
+                        }
+
+                        probeQueue.Add(CreateStoreCandidate(item, StoreKind.Stackable, -1, true));
+                        continue;
+                    }
+
+                    if (!IsStoreStackable(item, plan))
                         continue;
 
                     int targetTabAbs = ResolveStackableTargetTab(item, plan);
@@ -486,8 +1181,6 @@ namespace Turbo.Plugins.s7o
                 }
             }
 
-            // Pass 2: primal/ancient equipment can share the same placement pass
-            // because both use the preferred item tab / Auto free-slot path.
             if (StorePrimals || StoreAncients)
             {
                 foreach (var item in sorted)
@@ -500,6 +1193,9 @@ namespace Turbo.Plugins.s7o
                     TryQueueCandidate(item, kind, targetTabAbs);
                 }
             }
+
+            _queue.AddRange(probeQueue);
+
         }
 
         private void TryQueueCandidate(IItem item, StoreKind kind, int targetTabAbs)
@@ -510,13 +1206,23 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
-            _queue.Add(new StoreCandidate
+            _queue.Add(CreateStoreCandidate(item, kind, targetTabAbs, false));
+        }
+
+        private StoreCandidate CreateStoreCandidate(IItem item, StoreKind kind, int targetTabAbs, bool requiresTooltipProbe)
+        {
+            return new StoreCandidate
             {
                 ItemKey = item.ItemUniqueId ?? string.Empty,
                 Sno = item.SnoItem != null ? item.SnoItem.Sno : 0,
+                InventoryX = item.InventoryX,
+                InventoryY = item.InventoryY,
+                Seed = item.Seed,
+                SpecialStackable = IsSpecialStackableItem(item),
                 TargetTabAbs = targetTabAbs,
-                Kind = kind
-            });
+                Kind = kind,
+                RequiresTooltipProbe = requiresTooltipProbe
+            };
         }
 
         private bool TryClassifyEquipmentCandidate(IItem item, out StoreKind kind)
@@ -562,16 +1268,18 @@ namespace Turbo.Plugins.s7o
 
         private bool IsStoreStackable(IItem item)
         {
+            return IsStoreStackable(item, null);
+        }
+
+        private bool IsStoreStackable(IItem item, StashPlan plan)
+        {
             if (item == null || item.SnoItem == null)
                 return false;
 
             uint sno = item.SnoItem.Sno;
 
-            if (sno == PetrifiedScreamSno)
-                return true;
-
-            if (sno == RamaladniGiftSno)
-                return !item.Unidentified && item.BoundToMyAccount;
+            if (IsSpecialStackableSno(sno))
+                return IsSpecialStackableStorageSafe(item, plan);
 
             return IsNormalGemItem(item);
         }
@@ -603,7 +1311,7 @@ namespace Turbo.Plugins.s7o
                 if (stashItem == null || stashItem.SnoItem == null)
                     continue;
 
-                if (sno == RamaladniGiftSno && !stashItem.BoundToMyAccount)
+                if (IsSpecialStackableSno(sno) && stashItem.Seed != item.Seed)
                     continue;
 
                 int tab = GetAbsoluteTab(stashItem);
@@ -616,22 +1324,70 @@ namespace Turbo.Plugins.s7o
 
         private int ResolveStackableTargetTab(IItem item, StashPlan plan)
         {
-            if (item == null || plan == null)
+            if (item == null || item.SnoItem == null || plan == null)
                 return -1;
 
-            // Exact stack always wins, regardless of the preferred item tab.
+            if (IsSpecialStackableSno(item.SnoItem.Sno))
+                return ResolveSpecialStackableTargetTab(item, plan, false);
+
             int exactStackTab = FindMatchingStackTab(item, plan);
             if (exactStackTab >= 0)
                 return exactStackTab;
 
-            // New gem/material stacks should stay with the existing stackable area when possible.
             int relatedStackableTab = FindAndReserveRelatedStackableTab(item, plan);
             if (relatedStackableTab >= 0)
                 return relatedStackableTab;
 
-            // Stackables do not use PreferredItemTab unless the matching stack is
-            // already there. If no related stackable tab has room, use Auto.
             return plan.FindAndReserveFreeTab(item, 0, true);
+        }
+
+        private int ResolveSpecialStackableTargetTab(IItem item, StashPlan plan, bool tooltipConfirmedIdentified)
+        {
+            if (plan == null) return -1;
+            if (tooltipConfirmedIdentified)
+            {
+                if (!HasSpecialStackableStorageBasics(item)) return -1;
+            }
+            else if (!IsSpecialStackableStorageSafe(item, plan))
+                return -1;
+
+            int firstMatchingTab = -1;
+            var checkedTabs = new List<int>();
+            int maxStack = Math.Max(1, item.SnoItem.StackSize);
+
+            List<IItem> matches;
+            if (plan.StacksBySno.TryGetValue(item.SnoItem.Sno, out matches) && matches != null)
+            {
+                foreach (var stashItem in matches)
+                {
+                    if (stashItem == null || stashItem.SnoItem == null || stashItem.Seed != item.Seed)
+                        continue;
+
+                    int tab = GetAbsoluteTab(stashItem);
+                    if (tab < 0 || tab >= plan.MaxTabs)
+                        continue;
+
+                    if (firstMatchingTab < 0)
+                        firstMatchingTab = tab;
+
+                    if (stashItem.Quantity > 0 && stashItem.Quantity < maxStack)
+                        return tab;
+
+                    if (!checkedTabs.Contains(tab))
+                        checkedTabs.Add(tab);
+                }
+            }
+
+            foreach (int tab in checkedTabs)
+                if (plan.TryReserveInTab(item, tab))
+                    return tab;
+
+            int relatedStackableTab = FindAndReserveRelatedStackableTab(item, plan);
+            if (relatedStackableTab >= 0)
+                return relatedStackableTab;
+
+            int startTab = firstMatchingTab >= 0 ? firstMatchingTab : 0;
+            return plan.FindAndReserveFreeTab(item, startTab, true);
         }
 
         private int FindAndReserveRelatedStackableTab(IItem item, StashPlan plan)
@@ -681,8 +1437,8 @@ namespace Turbo.Plugins.s7o
             if (item == null || item.SnoItem == null)
                 return false;
 
-            if (item.SnoItem.Sno == PetrifiedScreamSno || item.SnoItem.Sno == RamaladniGiftSno)
-                return true;
+            if (IsSpecialStackableSno(item.SnoItem.Sno))
+                return IsKnownSpecialStackSource(item);
 
             return IsNormalGemItem(item);
         }
@@ -698,15 +1454,78 @@ namespace Turbo.Plugins.s7o
             if (tab >= 0)
                 return tab;
 
-            // Manual preferred tab is only a starting preference for equipment.
-            // If it is full, fall back to Auto placement so the run can still finish.
             if (PreferredItemTab > 0)
                 return plan.FindAndReserveFreeTab(item, 0, true);
 
             return -1;
         }
 
-        // ── Click/deposit execution ────────────────────────────────────────
+        private void CompleteStoreTooltipProbe(int now)
+        {
+            if (_currentQueueIndex < 0 || _currentQueueIndex >= _queue.Count)
+            {
+                _stage = StoreStage.Done;
+                return;
+            }
+
+            var candidate = _queue[_currentQueueIndex];
+            var item = FindInventoryItemByCandidate(candidate);
+            if (item == null)
+            {
+                _skippedCount++;
+                _stage = StoreStage.WaitAfterClick;
+                Delay(now, 0);
+                return;
+            }
+
+            if (candidate.ProbeStartedTick == 0)
+            {
+                RectangleF rect;
+                try { rect = Hud.Inventory.GetItemRect(item); }
+                catch { rect = RectangleF.Empty; }
+
+                if (rect.Width <= 0 || rect.Height <= 0 || !s7o_InventoryModInput.MoveToRect(rect))
+                {
+                    _skippedCount++;
+                    _stage = StoreStage.WaitAfterClick;
+                    Delay(now, 0);
+                    return;
+                }
+
+                candidate.ProbeStartedTick = now;
+                Delay(now, SpecialTooltipProbeInitialDelayMs);
+                return;
+            }
+
+            var decision = ReadSpecialTooltipDecision(item);
+            if (decision == SpecialTooltipDecision.Unknown && ShouldContinueSpecialTooltipProbe(now, candidate.ProbeStartedTick))
+            {
+                Delay(now, SpecialTooltipProbePollMs);
+                return;
+            }
+
+            CacheSpecialTooltipDecision(item, decision);
+
+            if (decision == SpecialTooltipDecision.Identified)
+            {
+                var plan = BuildStashPlan();
+                plan.AddTrustedInventorySpecialSeeds(SafeInventoryItems());
+                int targetTabAbs = ResolveSpecialStackableTargetTab(item, plan, true);
+                if (targetTabAbs >= 0)
+                {
+                    candidate.TargetTabAbs = targetTabAbs;
+                    candidate.RequiresTooltipProbe = false;
+                    candidate.TooltipResolved = true;
+                    _stage = StoreStage.SelectTab;
+                    Delay(now, 0);
+                    return;
+                }
+            }
+
+            _skippedCount++;
+            _stage = StoreStage.WaitAfterClick;
+            Delay(now, 0);
+        }
 
         private void ClickCurrentCandidate(int now)
         {
@@ -719,6 +1538,14 @@ namespace Turbo.Plugins.s7o
             var candidate = _queue[_currentQueueIndex];
             var item = FindInventoryItemByCandidate(candidate);
             if (item == null)
+            {
+                _skippedCount++;
+                _stage = StoreStage.WaitAfterClick;
+                Delay(now, 0);
+                return;
+            }
+
+            if (candidate.SpecialStackable && (item.Seed != candidate.Seed || item.SnoItem == null || item.SnoItem.Sno != candidate.Sno))
             {
                 _skippedCount++;
                 _stage = StoreStage.WaitAfterClick;
@@ -760,6 +1587,17 @@ namespace Turbo.Plugins.s7o
             {
                 if (item == null || item.SnoItem == null)
                     continue;
+
+                if (candidate.SpecialStackable)
+                {
+                    if (item.SnoItem.Sno != candidate.Sno) continue;
+                    if (!SameInventorySlot(item, candidate.InventoryX, candidate.InventoryY)) continue;
+                    if (!SameSeedWhenKnown(item, candidate.Seed)) continue;
+                    if (candidate.Kind == StoreKind.Stackable)
+                        return item;
+
+                    continue;
+                }
 
                 if (!string.IsNullOrEmpty(candidate.ItemKey)
                     && string.Equals(item.ItemUniqueId, candidate.ItemKey, StringComparison.Ordinal))
@@ -850,17 +1688,22 @@ namespace Turbo.Plugins.s7o
             return s7o_InventoryModInput.LeftClickRect(rect);
         }
 
-        // ── IInGameTopPainter ─────────────────────────────────────────────
-
         public void PaintTopInGame(ClipState clipState)
         {
-            if (clipState != ClipState.Inventory) return;
             if (Hud.Game == null || Hud.Game.Me == null) return;
 
-            DrawMaterialRow();
+            if (clipState == ClipState.Inventory)
+            {
+                DrawMaterialRow();
 
-            if (ShowStoragePanel && IsStashVisible())
-                DrawStoragePanel();
+                if (ShowStoragePanel && IsStashVisible())
+                    DrawStoragePanel();
+
+                return;
+            }
+
+            if (clipState == ClipState.AfterClip && ShowStoragePanel && IsMerchantShopVisible())
+                DrawMerchantPanel();
         }
 
         private void DrawMaterialRow()
@@ -918,12 +1761,144 @@ namespace Turbo.Plugins.s7o
                 DrawCenteredText(SmallFont, new RectangleF(panel.X + 12.0f, _statusY, panel.Width - 24.0f, SmallButtonHeight), statusText);
         }
 
+        private void DrawMerchantPanel()
+        {
+            if (!UpdateMerchantPanelLayout())
+                return;
+
+            var panel = GetMerchantPanelRect();
+            if (PanelBackBrush != null) PanelBackBrush.DrawRectangle(panel);
+            if (PanelBorderBrush != null) PanelBorderBrush.DrawRectangle(panel);
+
+            DrawText(YellowFont, "Press", _headerPressX, _headerPressY);
+            DrawPillButton(_hotkeyButtonRect, _capturingHotkey ? "..." : StoreItemsHotkey.ToString(), _capturingHotkey);
+            DrawText(YellowFont, "to sell/drop", _headerTailX, _headerPressY);
+
+            DrawToggleButton(_sellGiftsRect, "Gifts", SellGifts);
+            DrawToggleButton(_sellScreamsRect, "Screams", SellScreams);
+            DrawToggleButton(_sellGemsRect, "Gems", SellGems);
+            DrawToggleButton(_dropUnidentifiedRect, "Drop unidentified", DropUnidentified);
+
+            string statusText = null;
+            if (!string.IsNullOrEmpty(_lastStatus) && !TickReached(Environment.TickCount, _statusUntilTick))
+                statusText = _lastStatus;
+            else if (_running && _runMode == RunMode.Merchant)
+                statusText = "selling/dropping...";
+
+            if (!string.IsNullOrEmpty(statusText))
+                DrawCenteredText(SmallFont, new RectangleF(panel.X + 12.0f, _statusY, panel.Width - 24.0f, SmallButtonHeight), statusText);
+        }
+
+        private bool UpdateMerchantPanelLayout()
+        {
+            _hotkeyButtonRect = RectangleF.Empty;
+            _stackablesRect = RectangleF.Empty;
+            _primalsRect = RectangleF.Empty;
+            _ancientsRect = RectangleF.Empty;
+            _sellGiftsRect = RectangleF.Empty;
+            _sellScreamsRect = RectangleF.Empty;
+            _sellGemsRect = RectangleF.Empty;
+            _dropUnidentifiedRect = RectangleF.Empty;
+            _tabMinusRect = RectangleF.Empty;
+            _tabValueRect = RectangleF.Empty;
+            _tabPlusRect = RectangleF.Empty;
+            _tabControlRect = RectangleF.Empty;
+            _headerPressX = _headerPressY = _headerTailX = 0.0f;
+            _tabLabelX = _tabLabelY = _statusY = 0.0f;
+
+            if (!IsMerchantShopVisible())
+                return false;
+
+            var panel = GetMerchantPanelRect();
+            if (panel.Width <= 0 || panel.Height <= 0)
+                return false;
+
+            float centerX = panel.X + panel.Width * 0.5f;
+
+            _headerPressY = panel.Y + 5.0f;
+            const float headerGap = 9.0f;
+            string hotkeyText = _capturingHotkey ? "..." : StoreItemsHotkey.ToString();
+            float pressW = MeasureTextWidth(YellowFont, "Press");
+            float tailW = MeasureTextWidth(YellowFont, "to sell/drop");
+            float hotkeyW = Math.Max(HotkeyButtonWidth, MeasureTextWidth(ButtonFont, hotkeyText) + 18.0f);
+            float headerTotalW = pressW + headerGap + hotkeyW + headerGap + tailW;
+            _headerPressX = centerX - headerTotalW * 0.5f;
+            _hotkeyButtonRect = new RectangleF(_headerPressX + pressW + headerGap, _headerPressY - 2.0f, hotkeyW, SmallButtonHeight);
+            _headerTailX = _hotkeyButtonRect.Right + headerGap;
+
+            float toggleY = panel.Y + 30.0f;
+            float gap = 18.0f;
+            float giftW = GetToggleWidth("Gifts");
+            float screamW = GetToggleWidth("Screams");
+            float gemW = GetToggleWidth("Gems");
+            float dropW = GetToggleWidth("Drop unidentified");
+            float totalW = giftW + gap + screamW + gap + gemW + gap + dropW;
+            float x = centerX - totalW * 0.5f;
+            _sellGiftsRect = new RectangleF(x, toggleY, giftW, SmallButtonHeight);
+            _sellScreamsRect = new RectangleF(_sellGiftsRect.Right + gap, toggleY, screamW, SmallButtonHeight);
+            _sellGemsRect = new RectangleF(_sellScreamsRect.Right + gap, toggleY, gemW, SmallButtonHeight);
+            _dropUnidentifiedRect = new RectangleF(_sellGemsRect.Right + gap, toggleY, dropW, SmallButtonHeight);
+
+            _statusY = panel.Y + 55.0f;
+            return true;
+        }
+
+        private RectangleF GetMerchantPanelRect()
+        {
+            RectangleF r;
+            if (!TryGetShopRect(out r))
+                return RectangleF.Empty;
+
+            float w = Math.Min(Math.Max(PanelWidth, 420.0f), Math.Max(330.0f, r.Width - Math.Max(0.0f, PanelRightClearance)));
+            float x = r.Left + (r.Width - w) * 0.5f;
+            float maxRight = r.Right - Math.Max(24.0f, PanelRightClearance);
+            if (x + w > maxRight) x = maxRight - w;
+            if (x < r.Left) x = r.Left;
+
+            float y = r.Top + PanelTopOffset;
+            float h = Math.Max(72.0f, PanelHeight - 14.0f);
+            return new RectangleF(x, y, w, h);
+        }
+
+        private bool TryGetShopRect(out RectangleF rect)
+        {
+            rect = RectangleF.Empty;
+
+            if (IsVisible(_shopPanel))
+            {
+                try
+                {
+                    rect = _shopPanel.Rectangle;
+                    if (rect.Width > 0 && rect.Height > 0)
+                        return true;
+                }
+                catch { }
+            }
+
+            if (IsVisible(_shopMainPage))
+            {
+                try
+                {
+                    rect = _shopMainPage.Rectangle;
+                    if (rect.Width > 0 && rect.Height > 0)
+                        return true;
+                }
+                catch { }
+            }
+
+            return false;
+        }
+
         private bool UpdateStoragePanelLayout()
         {
             _hotkeyButtonRect = RectangleF.Empty;
             _stackablesRect = RectangleF.Empty;
             _primalsRect = RectangleF.Empty;
             _ancientsRect = RectangleF.Empty;
+            _sellGiftsRect = RectangleF.Empty;
+            _sellScreamsRect = RectangleF.Empty;
+            _sellGemsRect = RectangleF.Empty;
+            _dropUnidentifiedRect = RectangleF.Empty;
             _tabMinusRect = RectangleF.Empty;
             _tabValueRect = RectangleF.Empty;
             _tabPlusRect = RectangleF.Empty;
@@ -944,7 +1919,6 @@ namespace Turbo.Plugins.s7o
 
             float centerX = panel.X + panel.Width * 0.5f;
 
-            // Header row: measured and centered so the F3 pill cannot overlap text.
             _headerPressY = panel.Y + 5.0f;
             const float headerGap = 9.0f;
             string hotkeyText = _capturingHotkey ? "..." : StoreItemsHotkey.ToString();
@@ -956,7 +1930,6 @@ namespace Turbo.Plugins.s7o
             _hotkeyButtonRect = new RectangleF(_headerPressX + pressW + headerGap, _headerPressY - 2.0f, hotkeyW, SmallButtonHeight);
             _headerTailX = _hotkeyButtonRect.Right + headerGap;
 
-            // Toggle row: tiny checkbox + readable label, centered as one group.
             float toggleY = panel.Y + 28.0f;
             float toggleGap = 34.0f;
             float stackW = GetToggleWidth("Stackables");
@@ -968,7 +1941,6 @@ namespace Turbo.Plugins.s7o
             _primalsRect = new RectangleF(_stackablesRect.Right + toggleGap, toggleY, primalW, SmallButtonHeight);
             _ancientsRect = new RectangleF(_primalsRect.Right + toggleGap, toggleY, ancientW, SmallButtonHeight);
 
-            // Preferred tab row: centered label + segmented pill.
             float tabY = panel.Y + 52.0f;
             float tabLabelW = MeasureTextWidth(SmallFont, "Preferred item tab:");
             float tabGap = 11.0f;
@@ -993,9 +1965,6 @@ namespace Turbo.Plugins.s7o
             if (r.Width <= 0 || r.Height <= 0)
                 return RectangleF.Empty;
 
-            // Center on the native stash panel itself, then clamp only enough to keep
-            // the close button clear. Centering inside a reduced/right-cleared area
-            // shifts the panel left, which makes it look visually off-center.
             float left = r.Left + Math.Max(0.0f, PanelLeftOffset);
             float w = Math.Min(PanelWidth, Math.Max(300.0f, r.Width - Math.Max(0.0f, PanelLeftOffset) - Math.Max(0.0f, PanelRightClearance)));
             float x = r.Left + (r.Width - w) * 0.5f + Math.Max(0.0f, PanelLeftOffset) * 0.5f;
@@ -1211,8 +2180,6 @@ namespace Turbo.Plugins.s7o
             return new RectangleF(rect.X + amount, rect.Y + amount, Math.Max(0.0f, rect.Width - amount * 2.0f), Math.Max(0.0f, rect.Height - amount * 2.0f));
         }
 
-        // ── Material row drawing ──────────────────────────────────────────
-
         private void DrawItemRow(ISnoItem[] items, float rowLeft, float rowTop, float rowWidth, float rowHeight)
         {
             if (_rowBackground != null)
@@ -1247,8 +2214,6 @@ namespace Turbo.Plugins.s7o
             }
         }
 
-        // ── UI/state helpers ──────────────────────────────────────────────
-
         private bool IsStashVisible()
         {
             return IsVisible(Hud != null && Hud.Inventory != null ? Hud.Inventory.StashMainUiElement : null);
@@ -1262,6 +2227,28 @@ namespace Turbo.Plugins.s7o
         private bool IsChatEntryOpen()
         {
             return IsVisible(_chatEditLine);
+        }
+
+        private bool IsMerchantShopVisible()
+        {
+            if (!IsVisible(_shopPanel) && !IsVisible(_shopMainPage))
+                return false;
+
+            string text = ReadUiText(_shopGoldText);
+            if (text.EndsWith("{icon:x1_shard}", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            return true;
+        }
+
+        private string ReadUiText(IUiElement element)
+        {
+            try
+            {
+                if (!IsVisible(element)) return string.Empty;
+                return element.ReadText(System.Text.Encoding.UTF8, true) ?? string.Empty;
+            }
+            catch { return string.Empty; }
         }
 
         private bool IsVisible(IUiElement element)
@@ -1287,8 +2274,6 @@ namespace Turbo.Plugins.s7o
         {
             return rect.Width > 0 && rect.Height > 0 && x >= rect.Left && x <= rect.Right && y >= rect.Top && y <= rect.Bottom;
         }
-
-        // ── Stash helpers ─────────────────────────────────────────────────
 
         private int GetAutomationMaxTabs()
         {
@@ -1322,10 +2307,6 @@ namespace Turbo.Plugins.s7o
                     }
                 }
 
-                // Do not raise the detected cap from stash tab UI placeholders.
-                // Some locked/missing tab buttons can still report as visible, which
-                // allowed selecting tab 10+ for accounts with fewer unlocked tabs.
-                // Item positions plus the currently selected tab are the safer cap.
             }
             catch { }
 
@@ -1388,17 +2369,14 @@ namespace Turbo.Plugins.s7o
             catch { return new List<IItem>(); }
         }
 
-        // ── Settings ──────────────────────────────────────────────────────
-
         private void ApplySettingsMigration()
         {
             if (_settingsVersion >= StorageSettingsVersion)
                 return;
 
-            // First storage-manager test build used slower defaults. If the
-            // user has not manually tuned them, migrate to the faster profile.
             if (StoreItemsTabSwitchDelayMs == 140) StoreItemsTabSwitchDelayMs = 100;
             if (StoreItemsClickDelayMs == 90) StoreItemsClickDelayMs = 30;
+            if (_settingsVersion < 6) SellGems = true;
             _settingsVersion = StorageSettingsVersion;
         }
 
@@ -1407,7 +2385,9 @@ namespace Turbo.Plugins.s7o
             PreferredItemTab = Math.Max(0, Math.Min(MaxD3StashTabs, PreferredItemTab));
             StoreItemsUiSettleDelayMs = Math.Max(0, Math.Min(3000, StoreItemsUiSettleDelayMs));
             StoreItemsTabSwitchDelayMs = Math.Max(0, Math.Min(3000, StoreItemsTabSwitchDelayMs));
-            StoreItemsClickDelayMs = Math.Max(0, Math.Min(3000, StoreItemsClickDelayMs));
+            StoreItemsClickDelayMs = Math.Max(30, Math.Min(3000, StoreItemsClickDelayMs));
+            MerchantDropXRatio = Math.Max(0.15f, Math.Min(0.85f, MerchantDropXRatio));
+            MerchantDropYRatio = Math.Max(0.20f, Math.Min(0.85f, MerchantDropYRatio));
         }
 
         private void LoadSettings()
@@ -1436,6 +2416,12 @@ namespace Turbo.Plugins.s7o
                     else if (key.Equals("StoreStackables", StringComparison.OrdinalIgnoreCase)) StoreStackables = ParseBool(value, StoreStackables);
                     else if (key.Equals("StorePrimals", StringComparison.OrdinalIgnoreCase)) StorePrimals = ParseBool(value, StorePrimals);
                     else if (key.Equals("StoreAncients", StringComparison.OrdinalIgnoreCase)) StoreAncients = ParseBool(value, StoreAncients);
+                    else if (key.Equals("SellGifts", StringComparison.OrdinalIgnoreCase)) SellGifts = ParseBool(value, SellGifts);
+                    else if (key.Equals("SellScreams", StringComparison.OrdinalIgnoreCase)) SellScreams = ParseBool(value, SellScreams);
+                    else if (key.Equals("SellGems", StringComparison.OrdinalIgnoreCase)) SellGems = ParseBool(value, SellGems);
+                    else if (key.Equals("DropUnidentified", StringComparison.OrdinalIgnoreCase)) DropUnidentified = ParseBool(value, DropUnidentified);
+                    else if (key.Equals("MerchantDropXRatio", StringComparison.OrdinalIgnoreCase)) MerchantDropXRatio = ParseFloat(value, MerchantDropXRatio);
+                    else if (key.Equals("MerchantDropYRatio", StringComparison.OrdinalIgnoreCase)) MerchantDropYRatio = ParseFloat(value, MerchantDropYRatio);
                     else if (key.Equals("PreferredItemTab", StringComparison.OrdinalIgnoreCase)) PreferredItemTab = ParseInt(value, PreferredItemTab);
                     else if (key.Equals("StoreItemsUiSettleDelayMs", StringComparison.OrdinalIgnoreCase)) StoreItemsUiSettleDelayMs = ParseInt(value, StoreItemsUiSettleDelayMs);
                     else if (key.Equals("StoreItemsTabSwitchDelayMs", StringComparison.OrdinalIgnoreCase)) StoreItemsTabSwitchDelayMs = ParseInt(value, StoreItemsTabSwitchDelayMs);
@@ -1460,6 +2446,12 @@ namespace Turbo.Plugins.s7o
                     "StoreStackables=" + StoreStackables + Environment.NewLine +
                     "StorePrimals=" + StorePrimals + Environment.NewLine +
                     "StoreAncients=" + StoreAncients + Environment.NewLine +
+                    "SellGifts=" + SellGifts + Environment.NewLine +
+                    "SellScreams=" + SellScreams + Environment.NewLine +
+                    "SellGems=" + SellGems + Environment.NewLine +
+                    "DropUnidentified=" + DropUnidentified + Environment.NewLine +
+                    "MerchantDropXRatio=" + MerchantDropXRatio.ToString(CultureInfo.InvariantCulture) + Environment.NewLine +
+                    "MerchantDropYRatio=" + MerchantDropYRatio.ToString(CultureInfo.InvariantCulture) + Environment.NewLine +
                     "PreferredItemTab=" + PreferredItemTab + Environment.NewLine +
                     "StoreItemsUiSettleDelayMs=" + StoreItemsUiSettleDelayMs + Environment.NewLine +
                     "StoreItemsTabSwitchDelayMs=" + StoreItemsTabSwitchDelayMs + Environment.NewLine +
@@ -1481,12 +2473,16 @@ namespace Turbo.Plugins.s7o
             return int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out parsed) ? parsed : fallback;
         }
 
+        private static float ParseFloat(string value, float fallback)
+        {
+            float parsed;
+            return float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out parsed) ? parsed : fallback;
+        }
+
         private static bool EqualsText(string a, string b)
         {
             return string.Equals(a ?? string.Empty, b ?? string.Empty, StringComparison.OrdinalIgnoreCase);
         }
-
-        // ── Material helpers ──────────────────────────────────────────────
 
         private long GetCount(ISnoItem item)
         {
@@ -1519,7 +2515,12 @@ namespace Turbo.Plugins.s7o
             catch { return null; }
         }
 
-        // ── Internal data types ───────────────────────────────────────────
+        private enum RunMode
+        {
+            None,
+            Store,
+            Merchant
+        }
 
         private enum StoreStage
         {
@@ -1527,6 +2528,7 @@ namespace Turbo.Plugins.s7o
             PrepareUi,
             BuildQueue,
             SelectTab,
+            ProbeTooltip,
             ClickItem,
             WaitAfterClick,
             Done
@@ -1540,18 +2542,68 @@ namespace Turbo.Plugins.s7o
             Ancient
         }
 
+        private enum MerchantStage
+        {
+            Idle,
+            PrepareUi,
+            BuildQueue,
+            ClickItem,
+            ProbeTooltip,
+            WaitAfterClick,
+            Done
+        }
+
+        private enum MerchantKind
+        {
+            None,
+            Gift,
+            Scream,
+            Gem
+        }
+
         private sealed class StoreCandidate
         {
             public string ItemKey;
             public uint Sno;
+            public int InventoryX;
+            public int InventoryY;
+            public int Seed;
+            public bool SpecialStackable;
             public int TargetTabAbs;
             public StoreKind Kind;
+            public bool RequiresTooltipProbe;
+            public bool TooltipResolved;
+            public int ProbeStartedTick;
+        }
+
+        private sealed class MerchantCandidate
+        {
+            public string ItemKey;
+            public uint Sno;
+            public int InventoryX;
+            public int InventoryY;
+            public int Seed;
+            public bool SpecialStackable;
+            public MerchantKind Kind;
+            public bool Drop;
+            public bool RequiresTooltipProbe;
+            public bool TooltipResolved;
+            public bool SkipAfterProbe;
+            public int ProbeStartedTick;
+        }
+
+        private enum SpecialTooltipDecision
+        {
+            Unknown,
+            Identified,
+            Unidentified
         }
 
         private sealed class StashPlan
         {
             public readonly int MaxTabs;
             public readonly Dictionary<uint, List<IItem>> StacksBySno = new Dictionary<uint, List<IItem>>();
+            public readonly Dictionary<uint, List<int>> KnownSpecialSeedsBySno = new Dictionary<uint, List<int>>();
             public readonly List<int> StackableTabs = new List<int>();
             public readonly List<int> NormalGemTabs = new List<int>();
             private readonly bool[,,] _occupied;
@@ -1575,6 +2627,9 @@ namespace Turbo.Plugins.s7o
 
                 list.Add(item);
 
+                if (IsKnownSpecialStackSource(item))
+                    AddKnownSpecialSeed(item.SnoItem.Sno, item.Seed);
+
                 int tab = GetAbsoluteTab(item);
                 if (tab >= 0 && tab < MaxTabs)
                 {
@@ -1582,6 +2637,73 @@ namespace Turbo.Plugins.s7o
                     if (IsNormalGemItem(item))
                         AddUniqueTab(NormalGemTabs, tab);
                 }
+            }
+
+            public void AddTrustedInventorySpecialSeeds(IEnumerable<IItem> items)
+            {
+                if (items == null) return;
+
+                var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+                foreach (var item in items)
+                {
+                    if (!IsSpecialStackableItem(item)) continue;
+                    if (item.Location != ItemLocation.Inventory) continue;
+                    if (item.IsInventoryLocked) continue;
+                    if (item.Seed == 0) continue;
+                    if (!item.AccountBound || !item.BoundToMyAccount) continue;
+
+                    string key = item.SnoItem.Sno.ToString(CultureInfo.InvariantCulture) + ":" + item.Seed.ToString(CultureInfo.InvariantCulture);
+                    int amount = (int)Math.Max(1L, item.Quantity);
+                    int current;
+                    counts.TryGetValue(key, out current);
+                    counts[key] = current + amount;
+                }
+
+                foreach (var pair in counts)
+                {
+                    if (pair.Value < 2) continue;
+                    int colon = pair.Key.IndexOf(':');
+                    if (colon <= 0) continue;
+
+                    uint sno;
+                    int seed;
+                    if (!uint.TryParse(pair.Key.Substring(0, colon), NumberStyles.Integer, CultureInfo.InvariantCulture, out sno)) continue;
+                    if (!int.TryParse(pair.Key.Substring(colon + 1), NumberStyles.Integer, CultureInfo.InvariantCulture, out seed)) continue;
+                    AddKnownSpecialSeed(sno, seed);
+                }
+            }
+
+            private void AddKnownSpecialSeed(uint sno, int seed)
+            {
+                if (sno == 0 || seed == 0) return;
+
+                List<int> seeds;
+                if (!KnownSpecialSeedsBySno.TryGetValue(sno, out seeds))
+                {
+                    seeds = new List<int>();
+                    KnownSpecialSeedsBySno[sno] = seeds;
+                }
+
+                if (!seeds.Contains(seed))
+                    seeds.Add(seed);
+            }
+
+            public bool HasKnownSpecialSeed(uint sno, int seed)
+            {
+                if (sno == 0 || seed == 0) return false;
+
+                List<int> seeds;
+                return KnownSpecialSeedsBySno.TryGetValue(sno, out seeds)
+                    && seeds != null
+                    && seeds.Contains(seed);
+            }
+
+            public bool HasAnyKnownSpecialSeed(uint sno)
+            {
+                List<int> seeds;
+                return KnownSpecialSeedsBySno.TryGetValue(sno, out seeds)
+                    && seeds != null
+                    && seeds.Count > 0;
             }
 
             private static void AddUniqueTab(List<int> tabs, int tab)
@@ -1704,15 +2826,83 @@ namespace Turbo.Plugins.s7o
 
         [DllImport("user32.dll")] private static extern bool SetCursorPos(int x, int y);
         [DllImport("user32.dll", SetLastError = true)] private static extern uint SendInput(uint inputCount, INPUT[] inputs, int inputSize);
+        [DllImport("user32.dll")] private static extern IntPtr FindWindow(string className, string windowText);
+        [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+        private const uint WmMouseMove = 0x0200;
+        private const uint WmLButtonDown = 0x0201;
+        private const uint WmLButtonUp = 0x0202;
+        private const uint WmRButtonDown = 0x0204;
+        private const uint WmRButtonUp = 0x0205;
 
         public static bool LeftClickRect(RectangleF rect)
         {
             return ClickRect(rect, MouseLeftDown, MouseLeftUp);
         }
 
+        public static bool MoveToRect(RectangleF rect)
+        {
+            if (rect.Width <= 0 || rect.Height <= 0) return false;
+            int x = (int)Math.Round(rect.X + rect.Width * 0.5f);
+            int y = (int)Math.Round(rect.Y + rect.Height * 0.5f);
+            return SetCursorPos(x, y);
+        }
+
         public static bool RightClickRect(RectangleF rect)
         {
+            if (rect.Width <= 0 || rect.Height <= 0) return false;
+
+            int x = (int)Math.Round(rect.X + rect.Width * 0.5f);
+            int y = (int)Math.Round(rect.Y + rect.Height * 0.5f);
+
+            var hwnd = FindWindow("D3 Main Window Class", null);
+            if (hwnd != IntPtr.Zero)
+            {
+                var param = MakeLParam(x, y);
+                SendMessage(hwnd, WmRButtonDown, (IntPtr)2, param);
+                SendMessage(hwnd, WmRButtonUp, IntPtr.Zero, param);
+                return true;
+            }
+
             return ClickRect(rect, MouseRightDown, MouseRightUp);
+        }
+
+        public static bool DragRectToPoint(RectangleF rect, int targetX, int targetY)
+        {
+            if (rect.Width <= 0 || rect.Height <= 0) return false;
+
+            int x = (int)Math.Round(rect.X + rect.Width * 0.5f);
+            int y = (int)Math.Round(rect.Y + rect.Height * 0.5f);
+
+            var hwnd = FindWindow("D3 Main Window Class", null);
+            if (hwnd != IntPtr.Zero)
+            {
+                var itemParam = MakeLParam(x, y);
+                var dropParam = MakeLParam(targetX, targetY);
+                SendMessage(hwnd, WmLButtonDown, (IntPtr)1, itemParam);
+                SendMessage(hwnd, WmMouseMove, (IntPtr)1, dropParam);
+                SendMessage(hwnd, WmLButtonUp, IntPtr.Zero, dropParam);
+                return true;
+            }
+
+            if (!SetCursorPos(x, y)) return false;
+
+            var down = new INPUT[1];
+            down[0].Type = InputMouse;
+            down[0].U.Mouse.Flags = MouseLeftDown;
+
+            var up = new INPUT[1];
+            up[0].Type = InputMouse;
+            up[0].U.Mouse.Flags = MouseLeftUp;
+
+            if (SendInput(1, down, Marshal.SizeOf(typeof(INPUT))) != 1) return false;
+            if (!SetCursorPos(targetX, targetY)) return false;
+            return SendInput(1, up, Marshal.SizeOf(typeof(INPUT))) == 1;
+        }
+
+        private static IntPtr MakeLParam(int x, int y)
+        {
+            return (IntPtr)((y << 16) | (x & 0xFFFF));
         }
 
         public static bool TapKey(ushort virtualKey)
