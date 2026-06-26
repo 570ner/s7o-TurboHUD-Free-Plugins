@@ -22,6 +22,14 @@ namespace Turbo.Plugins.s7o
 
         public bool ShowStoragePanel { get; set; } = true;
         public Key StoreItemsHotkey { get; set; } = Key.F3;
+        public bool EnableItemDropHotkeys { get; set; } = true;
+        public Key DropAllHotkey { get; set; } = Key.F2;
+        public Key DropFilteredHotkey { get; set; } = Key.F3;
+        public bool DropNonAccountBoundLegendaries { get; set; } = false;
+        public bool DropTrashItems { get; set; } = true;
+        public bool DropGifts { get; set; } = true;
+        public bool DropScreams { get; set; } = false;
+        public bool DropGems { get; set; } = false;
 
         public bool StoreStackables { get; set; } = true;
         public bool StorePrimals { get; set; } = true;
@@ -34,6 +42,8 @@ namespace Turbo.Plugins.s7o
 
         public float MerchantDropXRatio { get; set; } = 0.50f;
         public float MerchantDropYRatio { get; set; } = 0.56f;
+        public float DropAllXRatio { get; set; } = 0.50f;
+        public float DropAllYRatio { get; set; } = 0.56f;
 
         public int PreferredItemTab { get; set; } = 0;
 
@@ -77,15 +87,18 @@ namespace Turbo.Plugins.s7o
         private const uint PetrifiedScreamSno = 1051857800;
         private const uint RamaladniGiftSno = 1844495708;
         private const ushort VkEscape = 0x1B;
-        private const int StorageSettingsVersion = 6;
+        private const int StorageSettingsVersion = 8;
         private const int SpecialTooltipProbeInitialDelayMs = 30;
         private const int SpecialTooltipProbePollMs = 30;
         private const int SpecialTooltipProbeTimeoutMs = 300;
         private const int TooltipCostPathCount = 13;
+        private const int DropAllClickDelayMs = 45;
 
         private ISnoItem[] _infernalRow;
         private ITexture _rowBackground;
         private IKeyEvent _storeKeyEvent;
+        private IKeyEvent _dropAllKeyEvent;
+        private IKeyEvent _dropFilteredKeyEvent;
         private bool _capturingHotkey;
         private IUiElement _chatEditLine;
         private IUiElement _shopMainPage;
@@ -125,12 +138,17 @@ namespace Turbo.Plugins.s7o
         private int _settingsVersion;
         private readonly List<StoreCandidate> _queue = new List<StoreCandidate>();
         private readonly List<MerchantCandidate> _merchantQueue = new List<MerchantCandidate>();
+        private readonly List<DropCandidate> _dropAllQueue = new List<DropCandidate>();
         private readonly Dictionary<string, SpecialTooltipDecision> _specialCostDecisionCache = new Dictionary<string, SpecialTooltipDecision>();
         private RunMode _runMode = RunMode.None;
         private MerchantStage _merchantStage = MerchantStage.Idle;
         private int _currentMerchantQueueIndex;
         private int _soldCount;
         private int _droppedCount;
+        private int _dropAllCount;
+        private int _currentDropAllQueueIndex;
+        private DropAllStage _dropAllStage = DropAllStage.Idle;
+        private bool _dropAllRunUsesFilters;
         private bool _geometryDrawFailed;
 
         private string _settingsPath;
@@ -183,6 +201,9 @@ namespace Turbo.Plugins.s7o
             catch { _rowBackground = null; }
 
             _storeKeyEvent = Hud.Input.CreateKeyEvent(true, StoreItemsHotkey, false, false, false);
+            // Shift+F2 drops all; Shift+F3 drops only the configured filter categories. Both use the local FreeHUD-safe drag helper.
+            _dropAllKeyEvent = Hud.Input.CreateKeyEvent(true, DropAllHotkey, false, false, true);
+            _dropFilteredKeyEvent = Hud.Input.CreateKeyEvent(true, DropFilteredHotkey, false, false, true);
             _chatEditLine = RegisterUi("Root.NormalLayer.chatentry_dialog_backgroundScreen.chatentry_content.chat_editline", null);
             _shopMainPage = RegisterUi("Root.NormalLayer.shop_dialog_mainPage", null);
             _shopPanel = RegisterUi("Root.NormalLayer.shop_dialog_mainPage.panel", _shopMainPage);
@@ -211,6 +232,32 @@ namespace Turbo.Plugins.s7o
                 _capturingHotkey = false;
                 SaveSettings();
                 ShowStatus("hotkey: " + StoreItemsHotkey, 1200);
+                return;
+            }
+
+            bool dropAllPressed = EnableItemDropHotkeys && _dropAllKeyEvent != null && _dropAllKeyEvent.Matches(keyEvent);
+            bool dropFilteredPressed = EnableItemDropHotkeys && _dropFilteredKeyEvent != null && _dropFilteredKeyEvent.Matches(keyEvent);
+            if (dropAllPressed || dropFilteredPressed)
+            {
+                if (_running)
+                {
+                    StopRun("cancelled");
+                    return;
+                }
+
+                if (!IsInventoryVisible())
+                {
+                    ShowStatus("open inventory first", 1200);
+                    return;
+                }
+
+                if (IsStashVisible() || IsMerchantShopVisible())
+                {
+                    ShowStatus("close stash/shop first", 1200);
+                    return;
+                }
+
+                BeginDropAllRun(dropFilteredPressed);
                 return;
             }
 
@@ -377,6 +424,7 @@ namespace Turbo.Plugins.s7o
 
             int now = Environment.TickCount;
             if (_runMode == RunMode.Merchant) AdvanceMerchantRun(now);
+            else if (_runMode == RunMode.DropAll) AdvanceDropAllRun(now);
             else AdvanceStoreRun(now);
         }
 
@@ -501,11 +549,15 @@ namespace Turbo.Plugins.s7o
             _runMode = RunMode.None;
             _stage = StoreStage.Idle;
             _merchantStage = MerchantStage.Idle;
+            _dropAllStage = DropAllStage.Idle;
             _nextActionTick = 0;
             _currentQueueIndex = 0;
             _currentMerchantQueueIndex = 0;
+            _currentDropAllQueueIndex = 0;
             _queue.Clear();
             _merchantQueue.Clear();
+            _dropAllQueue.Clear();
+            _dropAllRunUsesFilters = false;
             ShowStatus(status, 1800);
         }
 
@@ -517,6 +569,265 @@ namespace Turbo.Plugins.s7o
         private static bool TickReached(int now, int tick)
         {
             return (int)(now - tick) >= 0;
+        }
+
+        public void ConfigureItemDropFeature(bool enabled, bool nonAccountBoundLegendaries, bool trash, bool gifts, bool screams, bool gems)
+        {
+            EnableItemDropHotkeys = enabled;
+            DropNonAccountBoundLegendaries = nonAccountBoundLegendaries;
+            DropTrashItems = trash;
+            DropGifts = gifts;
+            DropScreams = screams;
+            DropGems = gems;
+            ClampSettings();
+        }
+
+        public void ConfigureDropAllFeature(bool enabled, bool dropAll, bool nonAccountBoundLegendaries, bool trash, bool gifts, bool screams, bool gems)
+        {
+            ConfigureItemDropFeature(enabled, nonAccountBoundLegendaries, trash, gifts, screams, gems);
+        }
+
+        private void BeginDropAllRun(bool filteredOnly)
+        {
+            _dropAllQueue.Clear();
+            _currentDropAllQueueIndex = 0;
+            _dropAllCount = 0;
+            _skippedCount = 0;
+            _dropAllRunUsesFilters = filteredOnly;
+            _running = true;
+            _runMode = RunMode.DropAll;
+            _dropAllStage = DropAllStage.BuildQueue;
+            _nextActionTick = Environment.TickCount;
+            ShowStatus(filteredOnly ? "dropping filtered items..." : "dropping inventory...", 1200);
+        }
+
+        private void AdvanceDropAllRun(int now)
+        {
+            for (int step = 0; step < MaxStoreStateStepsPerCollect; step++)
+            {
+                if (!TickReached(now, _nextActionTick))
+                    return;
+
+                if (!IsInventoryVisible())
+                {
+                    StopRun("inventory closed");
+                    return;
+                }
+
+                if (IsStashVisible() || IsMerchantShopVisible())
+                {
+                    StopRun("blocked by stash/shop");
+                    return;
+                }
+
+                if (Hud == null || Hud.Window == null || !Hud.Window.IsForeground)
+                    return;
+
+                if (IsChatEntryOpen())
+                {
+                    s7o_InventoryModInput.TapKey(VkEscape);
+                    Delay(now, StoreItemsUiSettleDelayMs);
+                    return;
+                }
+
+                switch (_dropAllStage)
+                {
+                    case DropAllStage.BuildQueue:
+                        BuildDropAllQueue();
+                        if (_dropAllQueue.Count <= 0)
+                        {
+                            StopRun("no droppable items");
+                            return;
+                        }
+                        _dropAllStage = DropAllStage.DropItem;
+                        continue;
+
+                    case DropAllStage.DropItem:
+                        if (_currentDropAllQueueIndex >= _dropAllQueue.Count)
+                        {
+                            _dropAllStage = DropAllStage.Done;
+                            continue;
+                        }
+                        DropCurrentInventoryItem(now);
+                        continue;
+
+                    case DropAllStage.WaitAfterDrop:
+                        _currentDropAllQueueIndex++;
+                        _dropAllStage = DropAllStage.DropItem;
+                        continue;
+
+                    case DropAllStage.Done:
+                        StopRun(_dropAllCount > 0 ? ("dropped " + _dropAllCount.ToString(CultureInfo.InvariantCulture) + " item(s)") : "done");
+                        return;
+                }
+            }
+        }
+
+        private void BuildDropAllQueue()
+        {
+            _dropAllQueue.Clear();
+            _skippedCount = 0;
+
+            var inv = SafeInventoryItems();
+            if (inv.Count <= 0)
+                return;
+
+            foreach (var item in inv.Where(IsDropAllCandidate).OrderBy(i => i.InventoryY).ThenBy(i => i.InventoryX))
+            {
+                _dropAllQueue.Add(new DropCandidate
+                {
+                    ItemKey = item.ItemUniqueId ?? string.Empty,
+                    Sno = item.SnoItem != null ? item.SnoItem.Sno : 0,
+                    InventoryX = item.InventoryX,
+                    InventoryY = item.InventoryY,
+                    Seed = item.Seed
+                });
+            }
+        }
+
+        private bool IsDropAllCandidate(IItem item)
+        {
+            if (item == null || item.SnoItem == null)
+                return false;
+            if (item.Location != ItemLocation.Inventory || item.IsInventoryLocked)
+                return false;
+            if (item.SocketedInto != null)
+                return false;
+            if (item.SnoItem.ItemWidth <= 0 || item.SnoItem.ItemHeight <= 0)
+                return false;
+            return IsDropAllCategoryEnabled(item);
+        }
+
+        private bool IsDropAllCategoryEnabled(IItem item)
+        {
+            if (item == null || item.SnoItem == null)
+                return false;
+
+            if (!_dropAllRunUsesFilters)
+                return true;
+
+            uint sno = item.SnoItem.Sno;
+            if (DropGifts && sno == RamaladniGiftSno)
+                return true;
+            if (DropScreams && sno == PetrifiedScreamSno)
+                return true;
+            if (DropGems && IsNormalGemItem(item))
+                return true;
+            if (DropTrashItems && IsDropTrashItem(item))
+                return true;
+            if (DropNonAccountBoundLegendaries && IsUnboundLegendaryDrop(item))
+                return true;
+
+            return false;
+        }
+
+        private static bool IsDropTrashItem(IItem item)
+        {
+            if (item == null || item.SnoItem == null)
+                return false;
+            if (IsSpecialStackableItem(item) || IsNormalGemItem(item))
+                return false;
+            if (item.SnoItem.Kind != ItemKind.loot)
+                return false;
+            return item.IsNormal || item.IsMagic || item.IsRare;
+        }
+
+        private static bool IsUnboundLegendaryDrop(IItem item)
+        {
+            if (item == null || item.SnoItem == null)
+                return false;
+            if (IsSpecialStackableItem(item) || IsNormalGemItem(item))
+                return false;
+            if (item.SnoItem.Kind != ItemKind.loot)
+                return false;
+            if (item.AccountBound || item.BoundToMyAccount)
+                return false;
+
+            return item.IsLegendary || item.Quality == ItemQuality.Legendary;
+        }
+
+        private void DropCurrentInventoryItem(int now)
+        {
+            if (_currentDropAllQueueIndex < 0 || _currentDropAllQueueIndex >= _dropAllQueue.Count)
+            {
+                _dropAllStage = DropAllStage.Done;
+                return;
+            }
+
+            var item = FindInventoryItemByDropCandidate(_dropAllQueue[_currentDropAllQueueIndex]);
+            if (item == null)
+            {
+                _skippedCount++;
+                _dropAllStage = DropAllStage.WaitAfterDrop;
+                Delay(now, 0);
+                return;
+            }
+
+            RectangleF rect;
+            try { rect = Hud.Inventory.GetItemRect(item); }
+            catch { rect = RectangleF.Empty; }
+
+            if (rect.Width <= 0 || rect.Height <= 0)
+            {
+                _skippedCount++;
+                _dropAllStage = DropAllStage.WaitAfterDrop;
+                Delay(now, 0);
+                return;
+            }
+
+            int x, y;
+            GetDropAllPoint(out x, out y);
+            if (s7o_InventoryModInput.DragRectToPoint(rect, x, y))
+            {
+                _dropAllCount++;
+                if ((_dropAllCount % 5) == 0)
+                    ShowStatus("dropped " + _dropAllCount.ToString(CultureInfo.InvariantCulture), 900);
+            }
+            else
+            {
+                _skippedCount++;
+            }
+
+            _dropAllStage = DropAllStage.WaitAfterDrop;
+            Delay(now, DropAllClickDelayMs);
+        }
+
+        private IItem FindInventoryItemByDropCandidate(DropCandidate candidate)
+        {
+            foreach (var item in SafeInventoryItems())
+            {
+                if (!IsDropAllCandidate(item) || item.SnoItem == null)
+                    continue;
+                if (!string.IsNullOrEmpty(candidate.ItemKey)
+                    && string.Equals(item.ItemUniqueId, candidate.ItemKey, StringComparison.Ordinal))
+                    return item;
+                if (candidate.Sno != 0 && item.SnoItem.Sno == candidate.Sno
+                    && SameInventorySlot(item, candidate.InventoryX, candidate.InventoryY)
+                    && SameSeedWhenKnown(item, candidate.Seed))
+                    return item;
+            }
+            return null;
+        }
+
+        private void GetDropAllPoint(out int x, out int y)
+        {
+            float w = 0.0f;
+            float h = 0.0f;
+            try
+            {
+                w = Hud != null && Hud.Window != null ? Hud.Window.Size.Width : 0.0f;
+                h = Hud != null && Hud.Window != null ? Hud.Window.Size.Height : 0.0f;
+            }
+            catch { }
+
+            if (w <= 0.0f || h <= 0.0f)
+            {
+                w = 1280.0f;
+                h = 720.0f;
+            }
+
+            x = (int)Math.Round(w * DropAllXRatio);
+            y = (int)Math.Round(h * DropAllYRatio);
         }
 
         private void BeginMerchantRun()
@@ -2377,6 +2688,14 @@ namespace Turbo.Plugins.s7o
             if (StoreItemsTabSwitchDelayMs == 140) StoreItemsTabSwitchDelayMs = 100;
             if (StoreItemsClickDelayMs == 90) StoreItemsClickDelayMs = 30;
             if (_settingsVersion < 6) SellGems = true;
+            if (_settingsVersion < 8)
+            {
+                DropNonAccountBoundLegendaries = false;
+                DropTrashItems = true;
+                DropGifts = true;
+                DropScreams = false;
+                DropGems = false;
+            }
             _settingsVersion = StorageSettingsVersion;
         }
 
@@ -2413,6 +2732,17 @@ namespace Turbo.Plugins.s7o
                     {
                         try { StoreItemsHotkey = (Key)Enum.Parse(typeof(Key), value, true); } catch { }
                     }
+                    else if (key.Equals("EnableItemDropHotkeys", StringComparison.OrdinalIgnoreCase)) EnableItemDropHotkeys = ParseBool(value, EnableItemDropHotkeys);
+                    else if (key.Equals("EnableDropAllHotkey", StringComparison.OrdinalIgnoreCase)) EnableItemDropHotkeys = ParseBool(value, EnableItemDropHotkeys);
+                    else if (key.Equals("DropFilteredHotkey", StringComparison.OrdinalIgnoreCase))
+                    {
+                        try { DropFilteredHotkey = (Key)Enum.Parse(typeof(Key), value, true); } catch { }
+                    }
+                    else if (key.Equals("DropNonAccountBoundLegendaries", StringComparison.OrdinalIgnoreCase)) DropNonAccountBoundLegendaries = ParseBool(value, DropNonAccountBoundLegendaries);
+                    else if (key.Equals("DropTrashItems", StringComparison.OrdinalIgnoreCase)) DropTrashItems = ParseBool(value, DropTrashItems);
+                    else if (key.Equals("DropGifts", StringComparison.OrdinalIgnoreCase)) DropGifts = ParseBool(value, DropGifts);
+                    else if (key.Equals("DropScreams", StringComparison.OrdinalIgnoreCase)) DropScreams = ParseBool(value, DropScreams);
+                    else if (key.Equals("DropGems", StringComparison.OrdinalIgnoreCase)) DropGems = ParseBool(value, DropGems);
                     else if (key.Equals("StoreStackables", StringComparison.OrdinalIgnoreCase)) StoreStackables = ParseBool(value, StoreStackables);
                     else if (key.Equals("StorePrimals", StringComparison.OrdinalIgnoreCase)) StorePrimals = ParseBool(value, StorePrimals);
                     else if (key.Equals("StoreAncients", StringComparison.OrdinalIgnoreCase)) StoreAncients = ParseBool(value, StoreAncients);
@@ -2443,6 +2773,13 @@ namespace Turbo.Plugins.s7o
                 File.WriteAllText(_settingsPath,
                     "SettingsVersion=" + StorageSettingsVersion + Environment.NewLine +
                     "StoreItemsHotkey=" + StoreItemsHotkey + Environment.NewLine +
+                    "EnableItemDropHotkeys=" + EnableItemDropHotkeys + Environment.NewLine +
+                    "DropFilteredHotkey=" + DropFilteredHotkey + Environment.NewLine +
+                    "DropNonAccountBoundLegendaries=" + DropNonAccountBoundLegendaries + Environment.NewLine +
+                    "DropTrashItems=" + DropTrashItems + Environment.NewLine +
+                    "DropGifts=" + DropGifts + Environment.NewLine +
+                    "DropScreams=" + DropScreams + Environment.NewLine +
+                    "DropGems=" + DropGems + Environment.NewLine +
                     "StoreStackables=" + StoreStackables + Environment.NewLine +
                     "StorePrimals=" + StorePrimals + Environment.NewLine +
                     "StoreAncients=" + StoreAncients + Environment.NewLine +
@@ -2519,7 +2856,17 @@ namespace Turbo.Plugins.s7o
         {
             None,
             Store,
-            Merchant
+            Merchant,
+            DropAll
+        }
+
+        private enum DropAllStage
+        {
+            Idle,
+            BuildQueue,
+            DropItem,
+            WaitAfterDrop,
+            Done
         }
 
         private enum StoreStage
@@ -2559,6 +2906,15 @@ namespace Turbo.Plugins.s7o
             Gift,
             Scream,
             Gem
+        }
+
+        private sealed class DropCandidate
+        {
+            public string ItemKey;
+            public uint Sno;
+            public int InventoryX;
+            public int InventoryY;
+            public int Seed;
         }
 
         private sealed class StoreCandidate
