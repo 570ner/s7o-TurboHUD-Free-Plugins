@@ -16,12 +16,15 @@ namespace Turbo.Plugins.s7o
     // elite purple-orb progression. Stricken is an estimator based on proc edges;
     // it is not a native exact per-monster stack read.
 
-    public class s7o_RiftInfo : BasePlugin, IInGameTopPainter, IInGameWorldPainter, IAfterCollectHandler
+    public class s7o_RiftInfo : BasePlugin, IInGameTopPainter, IInGameWorldPainter, IAfterCollectHandler, ICustomizer
     {
         // ── Display ──────────────────────────────────────────────────────
         public bool ShowNearbyRP { get; set; } = true;
         public bool ShowBossTimer { get; set; } = true;
         public bool ShowElapsedRiftTimer { get; set; } = true;
+
+        // Disable the default FreeHUD GR percent text because the native grey game percent is already shown.
+        public bool DisableDefaultGreaterRiftPercentText { get; set; } = true;
 
         // ── Pylon party floor status ─────────────────────────────────────────
         // Draws READY / MISSING above active Greater Rift pylons only.
@@ -68,7 +71,7 @@ namespace Turbo.Plugins.s7o
         public int CompletedRiftTownClearGraceTicks { get; set; } = 180;
 
         // Timer row layout.
-        // Draw below the GR percent text so Boss/Elapsed cannot overlap the purple 100.0% label.
+        // Draw below the GR bar so Boss/Elapsed stays clear of the native progress text.
         public float RiftTimerBelowBarOffsetY { get; set; } = 2.0f;
         public float RiftTimerHorizontalPadding { get; set; } = 4.0f;
         public float RiftTimerMinGap { get; set; } = 12.0f;
@@ -193,7 +196,6 @@ namespace Turbo.Plugins.s7o
         public int DebugLogIntervalTicks { get; set; } = 120;
 
         // ── Fonts / textures ─────────────────────────────────────────────
-        public IFont BarPctFont { get; set; }
         public IFont RpFont { get; set; }
         public IFont TimeFont { get; set; }
         public IFont BossFont { get; set; }
@@ -351,11 +353,24 @@ namespace Turbo.Plugins.s7o
             Order = int.MaxValue;
         }
 
+        public void Customize()
+        {
+            if (!DisableDefaultGreaterRiftPercentText)
+                return;
+
+            try
+            {
+                var defaultRift = Hud.GetPlugin<RiftPlugin>();
+                if (defaultRift != null)
+                    defaultRift.GreaterRiftPercentEnabled = false;
+            }
+            catch { }
+        }
+
         public override void Load(IController hud)
         {
             base.Load(hud);
 
-            BarPctFont = Hud.Render.CreateFont("tahoma", 7.5f, 255, 200, 255, 200, true, false, 160, 0, 0, 0, true);
             RpFont = Hud.Render.CreateFont("tahoma", 9.0f, 255, 220, 230, 220, true, false, 165, 0, 0, 0, true);
             // Use the same orange theme for both rift timers.
             TimeFont = Hud.Render.CreateFont("tahoma", 7.5f, 255, 255, 160, 60, true, false, 160, 0, 0, 0, true);
@@ -1500,8 +1515,6 @@ namespace Turbo.Plugins.s7o
                     {
                         _lastGreaterRiftBarRect = bar.Rectangle;
 
-                        DrawBarPercent(bar);
-
                         if (ShowNearbyRP)
                             DrawRpPanel(bar);
                     }
@@ -1531,20 +1544,6 @@ namespace Turbo.Plugins.s7o
             // Fallback for users who explicitly disable AfterClip drawing.
             if (PylonPartyStatusDrawOnTopLayer && !PylonPartyStatusUseAfterClipTopLayer)
                 PaintPylonPartyFloorStatusLayer();
-        }
-
-        private void DrawBarPercent(IUiElement bar)
-        {
-            double pct = Hud.Game.RiftPercentage;
-            string text = pct.ToString("F1", CultureInfo.InvariantCulture) + "%";
-            var layout = BarPctFont.GetTextLayout(text);
-
-            float x = (float)(bar.Rectangle.Left + bar.Rectangle.Width / 100.0 * Math.Min(pct, 100.0))
-                      - layout.Metrics.Width * 0.5f;
-
-            float y = bar.Rectangle.Top - bar.Rectangle.Height * 0.7f - layout.Metrics.Height;
-
-            BarPctFont.DrawText(layout, x, y);
         }
 
         // ── Nearby RP panel ──────────────────────────────────────────────
