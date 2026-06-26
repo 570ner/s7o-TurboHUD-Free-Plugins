@@ -32,6 +32,7 @@ Use it to toggle plugins, change visual options, manage TTS alerts, set some hot
 | **s7o_EliteHealthBars** | Elite/Champion health bars and offscreen elite indicators. |
 | **s7o_Oculus_Triune** | Oculus/Triune circle visuals. |
 | **s7o_PartyInspector** | Party portrait info, skill/cooldown-style visuals, gem info, and expanded party inspection. Default expanded inspector hotkey: **F12**. |
+| **s7o_Pestilence_RGK** | Necromancer Pestilence/RGK helper for keeping Siphon Blood stacks and helping target elites/Rift Guardians. |
 | **s7o_PylonAlerts** | TTS alerts for pylons/shrines and related GR timing. |
 | **s7o_BannerSoundPlugin** | TTS/sound alert for banner drops. |
 | **s7o_TTS_Broadcast** | Type `.tts your message here` to speak a custom TTS message. |
