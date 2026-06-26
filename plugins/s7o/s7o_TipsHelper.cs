@@ -36,6 +36,43 @@ namespace Turbo.Plugins.s7o
         public bool ShowPlayerMinimapDots { get; set; } = true;
         public bool ShowPlayerPortraitMarker { get; set; } = true;
         public bool ShowValleyOfDeathCircle { get; set; } = false;
+        public bool ShowPylonProgressMarkers { get; set; } = true;
+        public bool ShowPoolTracker { get; set; } = true;
+        public bool ShowPoolPartyStatus { get; set; } = true;
+        public bool ShowVisitedWaypointMarkers { get; set; } = true;
+
+        public int PylonProgressMarkerMaxAgeMs { get; set; } = 7200000;
+        public float PylonProgressIconSize { get; set; } = 26.0f;
+        public float PylonProgressIconGapPx { get; set; } = 6.0f;
+        public float PoolStatusLineGapPx { get; set; } = 1.0f;
+        public float PoolTopTextYFrac { get; set; } = 0.115f;
+        public float PoolListOffsetXPx { get; set; } = 8.0f;
+        public float PoolListOffsetYPx { get; set; } = 4.0f;
+        public int PoolArrowLifetimeMs { get; set; } = 10000;
+        public int PoolArrowFadeMs { get; set; } = 700;
+        public int PoolArrowCycleMs { get; set; } = 700;
+        public float PoolDirectionArrowDistancePx { get; set; } = 190.0f;
+        public float PoolDirectionArrowLengthPx { get; set; } = 52.0f;
+        public float PoolDirectionArrowShaftWidthPx { get; set; } = 16.0f;
+        public float PoolDirectionArrowHeadLengthPx { get; set; } = 21.0f;
+        public float PoolDirectionArrowHeadWidthPx { get; set; } = 36.0f;
+        public float PoolDirectionArrowOutlinePx { get; set; } = 6.0f;
+        public float PoolDirectionArrowMotionPx { get; set; } = 3.0f;
+        public float PoolDirectionArrowMultiOffsetPx { get; set; } = 18.0f;
+        public int PoolArrowFlyToPoolMs { get; set; } = 200;
+        public int PoolArrowHoldNearPlayerMs { get; set; } = 0;
+        public float PoolArrowVisibleTargetOffsetPx { get; set; } = 18.0f;
+        public int PoolAreaTransitionSettleMs { get; set; } = 450;
+        public int PoolListTransitionFreezeMs { get; set; } = 2500;
+        public float PoolSpotMergeDistance { get; set; } = 18.0f;
+        public float PoolTakenByPlayerMaxDistance { get; set; } = 320.0f;
+        public float PoolVisibleConfirmMaxDistance { get; set; } = 120.0f;
+        public int PoolLocalAreaOverrideSettleMs { get; set; } = 650;
+        public int PoolWorldTransitionSettleMs { get; set; } = 1500;
+        public bool PoolUseAreaRectHints { get; set; } = true;
+        public bool PoolSuppressKnownFalseMarkerRects { get; set; } = true;
+        public float VisitedWaypointMarkerRadius { get; set; } = 5.0f;
+        public float VisitedWaypointMarkerOffsetXPx { get; set; } = 96.0f;
 
         public int HealthGlobeColorR { get; set; } = 255;
         public int HealthGlobeColorG { get; set; } = 25;
@@ -196,6 +233,20 @@ namespace Turbo.Plugins.s7o
         public IBrush[] PlayerDotBrushes { get; private set; }
         public IBrush ValleyOfDeathBrush { get; private set; }
         public IBrush ValleyOfDeathOutlineBrush { get; private set; }
+        public IBrush PylonProgressLineBrush { get; private set; }
+        public IBrush PylonProgressLineOutlineBrush { get; private set; }
+        public IBrush PoolGroundBrush { get; private set; }
+        public IBrush PoolGroundOutlineBrush { get; private set; }
+        public IBrush PoolArrowLightBrush { get; private set; }
+        public IBrush PoolArrowShadowBrush { get; private set; }
+        public IBrush VisitedWaypointBrush { get; private set; }
+        public IBrush VisitedWaypointOutlineBrush { get; private set; }
+        public IFont PylonProgressTextFont { get; private set; }
+        public IFont PoolLabelFont { get; private set; }
+        public IFont PoolReadyFont { get; private set; }
+        public IFont PoolMissingFont { get; private set; }
+        public IFont PoolOutlineFont { get; private set; }
+        public IFont VisitedWaypointFont { get; private set; }
 
         private const ActorSnoEnum ValleyOfDeathActorSno = ActorSnoEnum._dh_markedfordeath_proxyactor;
         private readonly Dictionary<string, ItemMarker> _items = new Dictionary<string, ItemMarker>();
@@ -209,6 +260,31 @@ namespace Turbo.Plugins.s7o
         private GroundLabelDecorator _valleyOfDeathLabel;
         private IFont _valleyOfDeathFont;
         private string _valleyOfDeathFontSignature;
+
+        // Pool/pylon/visited-map helpers are rebuilt from native FreeHUD data; marker-only pools are intentionally kept simple for range.
+        private readonly Dictionary<string, PylonProgressMark> _pylonProgressMarks = new Dictionary<string, PylonProgressMark>();
+        private readonly Dictionary<string, PoolSpot> _poolSpots = new Dictionary<string, PoolSpot>();
+        private readonly Dictionary<string, ConsumedPoolSpot> _consumedPoolSpots = new Dictionary<string, ConsumedPoolSpot>();
+        private readonly List<string> _poolListOrder = new List<string>();
+        private readonly List<string> _poolFrozenListOrder = new List<string>();
+        private readonly Dictionary<uint, long> _partyPoolBonusRemaining = new Dictionary<uint, long>();
+        private readonly Dictionary<string, VisitedArea> _visitedAreas = new Dictionary<string, VisitedArea>();
+        private readonly Dictionary<IUiElement, BountyAct> _actMapFallbackElements = new Dictionary<IUiElement, BountyAct>();
+        private double _lastRiftPercent = -1.0d;
+        private bool _lastGreaterRiftState;
+        private long _poolFirstSeenSequence;
+        private readonly Dictionary<string, PoolArrowAlert> _activePoolArrows = new Dictionary<string, PoolArrowAlert>();
+        private string _currentPoolAreaKey = string.Empty;
+        private string _pendingPoolAreaKey = string.Empty;
+        private long _pendingPoolAreaSinceMs;
+        private long _currentPoolAreaSinceMs;
+        private uint _poolLastPlayerWorldId;
+        private uint _poolLastPlayerWorldSno;
+        private long _poolWorldChangedSinceMs;
+        private long _poolListFrozenUntilMs;
+        private long _poolAreaVisitSequence;
+        private string _sessionServerIp = string.Empty;
+        private int _lastGameTickSeen = -1;
 
         private static readonly LabelRule[] ExactLabels =
         {
@@ -258,6 +334,7 @@ namespace Turbo.Plugins.s7o
             base.Load(hud);
             SetPlayerMarkerHotkey(PlayerMarkerHotkeyKey);
             RebuildResources(true);
+            RegisterVisitedWaypointActFallbackElements();
             ClearRuntime();
         }
 
@@ -282,17 +359,22 @@ namespace Turbo.Plugins.s7o
         public void OnNewArea(bool newGame, ISnoArea area)
         {
             ClearItems();
-            if (newGame)
+            if (newGame && IsNewGameSession())
+            {
                 _players.Clear();
+                ClearSessionTrackers();
+            }
         }
 
         public void AfterCollect()
         {
             if (!IsGameReady())
             {
-                ClearRuntime();
+                ClearItems();
                 return;
             }
+
+            UpdateGameSession(false);
 
             if (!VisualHelpersEnabled)
             {
@@ -303,6 +385,9 @@ namespace Turbo.Plugins.s7o
             RebuildResources(false);
             UpdateItemMarkers();
             PurgePlayerMarks();
+            UpdatePylonProgressMarkers();
+            UpdatePoolTracker();
+            UpdateVisitedAreas();
         }
 
         public void OnKeyEvent(IKeyEvent keyEvent)
@@ -345,10 +430,33 @@ namespace Turbo.Plugins.s7o
 
         public void PaintTopInGame(ClipState clipState)
         {
-            if (!IsGameReady() || !VisualHelpersEnabled || Hud.Render.UiHidden || clipState != ClipState.BeforeClip || IsFullMapOpen())
+            if (!IsGameReady() || !VisualHelpersEnabled || Hud.Render.UiHidden)
+                return;
+
+            if (clipState != ClipState.BeforeClip && clipState != ClipState.AfterClip)
                 return;
 
             RebuildResources(false);
+
+            if (IsFullMapOpen())
+            {
+                if (clipState == ClipState.AfterClip)
+                {
+                    UpdateVisitedAreas();
+                    PaintVisitedWaypointMarkers();
+                }
+                else
+                    PaintPoolTrackerTop();
+                return;
+            }
+
+            if (clipState != ClipState.BeforeClip)
+                return;
+
+            PaintPylonProgressMarkers();
+            PaintPoolTrackerTop();
+            PaintPoolWorldStatus();
+            PaintPoolDirectionArrows();
             PaintItemScreenEdgeArrows();
             PaintItemAlerts();
             PaintPlayerPortraitMarkers();
@@ -359,8 +467,11 @@ namespace Turbo.Plugins.s7o
             foreach (var brush in Brushes(HealthGlobeBrush, RiftOrbBrush, AncientRingBrush, AncientRingOutlineBrush, PrimalRingBrush, PrimalRingOutlineBrush,
                 AncientMapBrush, AncientMapOutlineBrush, PrimalMapBrush, PrimalMapOutlineBrush, AncientScreenArrowBrush, AncientScreenArrowOutlineBrush,
                 PrimalScreenArrowBrush, PrimalScreenArrowOutlineBrush, AncientAlertArrowBrush, AncientAlertArrowOutlineBrush, AncientAlertArrowHighlightBrush,
-                PrimalAlertArrowBrush, PrimalAlertArrowOutlineBrush, PrimalAlertArrowHighlightBrush, PlayerCircleBlackBrush, PlayerDotOutlineBrush, ValleyOfDeathBrush, ValleyOfDeathOutlineBrush))
+                PrimalAlertArrowBrush, PrimalAlertArrowOutlineBrush, PrimalAlertArrowHighlightBrush, PlayerCircleBlackBrush, PlayerDotOutlineBrush, ValleyOfDeathBrush, ValleyOfDeathOutlineBrush,
+                PylonProgressLineBrush, PylonProgressLineOutlineBrush, PoolGroundBrush, PoolGroundOutlineBrush, PoolArrowLightBrush, PoolArrowShadowBrush, VisitedWaypointBrush, VisitedWaypointOutlineBrush))
                 yield return brush;
+
+            foreach (var font in Fonts(new[] { PylonProgressTextFont, PoolLabelFont, PoolReadyFont, PoolMissingFont, PoolOutlineFont, VisitedWaypointFont })) yield return font;
 
             foreach (var brush in Brushes(PlayerFillBrushes)) yield return brush;
             foreach (var brush in Brushes(PlayerOutlineBrushes)) yield return brush;
@@ -433,6 +544,20 @@ namespace Turbo.Plugins.s7o
             PlayerDotBrushes = CreatePlayerBrushes(255, 0);
             ValleyOfDeathOutlineBrush = Hud.Render.CreateBrush(C(ValleyOfDeathOutlineAlpha), 0, 0, 0, Math.Max(1.0f, ValleyOfDeathLineThickness + 3.6f));
             ValleyOfDeathBrush = Hud.Render.CreateBrush(C(ValleyOfDeathAlpha), C(ValleyOfDeathColorR), C(ValleyOfDeathColorG), C(ValleyOfDeathColorB), Math.Max(0.5f, ValleyOfDeathLineThickness));
+            PylonProgressLineOutlineBrush = Hud.Render.CreateBrush(220, 0, 0, 0, 2.6f);
+            PylonProgressLineBrush = Hud.Render.CreateBrush(245, 255, 220, 70, 1.2f);
+            PoolGroundOutlineBrush = Hud.Render.CreateBrush(240, 0, 0, 0, 0);
+            PoolGroundBrush = Hud.Render.CreateBrush(235, 255, 230, 30, 0);
+            PoolArrowLightBrush = Hud.Render.CreateBrush(90, 255, 255, 255, 0);
+            PoolArrowShadowBrush = Hud.Render.CreateBrush(105, 95, 75, 0, 0);
+            VisitedWaypointOutlineBrush = Hud.Render.CreateBrush(230, 0, 0, 0, 4.2f);
+            VisitedWaypointBrush = Hud.Render.CreateBrush(245, 65, 225, 85, 2.2f);
+            PylonProgressTextFont = Hud.Render.CreateFont("tahoma", 6.8f, 255, 255, 230, 85, true, false, 255, 0, 0, 0, true);
+            PoolLabelFont = Hud.Render.CreateFont("tahoma", 8.5f, 255, 255, 230, 35, true, false, 255, 0, 0, 0, true);
+            PoolReadyFont = Hud.Render.CreateFont("tahoma", 8.8f, 255, 80, 255, 80, true, false, 255, 0, 0, 0, true);
+            PoolMissingFont = Hud.Render.CreateFont("tahoma", 8.8f, 255, 255, 70, 70, true, false, 255, 0, 0, 0, true);
+            PoolOutlineFont = Hud.Render.CreateFont("tahoma", 8.8f, 245, 0, 0, 0, true, false, false);
+            VisitedWaypointFont = Hud.Render.CreateFont("tahoma", 7.0f, 255, 210, 255, 210, true, false, 255, 0, 0, 0, true);
             _trianglePainter = new RotatingTriangleShapePainter(Hud);
             _mapPulse = new StandardPingRadiusTransformator(Hud, 333);
         }
@@ -490,6 +615,28 @@ namespace Turbo.Plugins.s7o
         {
             ClearItems();
             _players.Clear();
+            ClearSessionTrackers();
+        }
+
+        private void ClearSessionTrackers()
+        {
+            _pylonProgressMarks.Clear();
+            _poolSpots.Clear();
+            _consumedPoolSpots.Clear();
+            _poolListOrder.Clear();
+            _poolFrozenListOrder.Clear();
+            _partyPoolBonusRemaining.Clear();
+            _visitedAreas.Clear();
+            _activePoolArrows.Clear();
+            _poolFirstSeenSequence = 0;
+            _currentPoolAreaKey = string.Empty;
+            _pendingPoolAreaKey = string.Empty;
+            _pendingPoolAreaSinceMs = 0;
+            _currentPoolAreaSinceMs = 0;
+            _poolListFrozenUntilMs = 0;
+            _poolAreaVisitSequence = 0;
+            _lastRiftPercent = -1.0d;
+            _lastGreaterRiftState = false;
         }
 
         private void ClearItems()
@@ -497,6 +644,94 @@ namespace Turbo.Plugins.s7o
             _items.Clear();
             _alertSequence = 0;
             _latestAbovePlayerSequence = 0;
+        }
+
+
+        private void RegisterVisitedWaypointActFallbackElements()
+        {
+            _actMapFallbackElements.Clear();
+            try
+            {
+                AddActMapFallbackElement("Root.NormalLayer.WaypointMap_main.LayoutRoot.OverlayContainer.POI.entry 0.LayoutRoot.Town", BountyAct.A1);
+                AddActMapFallbackElement("Root.NormalLayer.WaypointMap_main.LayoutRoot.OverlayContainer.POI.entry 19.LayoutRoot.Town", BountyAct.A2);
+                AddActMapFallbackElement("Root.NormalLayer.WaypointMap_main.LayoutRoot.OverlayContainer.POI.entry 30.LayoutRoot.Town", BountyAct.A3);
+                AddActMapFallbackElement("Root.NormalLayer.WaypointMap_main.LayoutRoot.OverlayContainer.POI.entry 44.LayoutRoot.Town", BountyAct.A4);
+                AddActMapFallbackElement("Root.NormalLayer.WaypointMap_main.LayoutRoot.OverlayContainer.POI.entry 58.LayoutRoot.Town", BountyAct.A5);
+            }
+            catch { }
+        }
+
+        private void AddActMapFallbackElement(string path, BountyAct act)
+        {
+            try
+            {
+                var element = Hud.Render.RegisterUiElement(path, null, null);
+                if (element != null && !_actMapFallbackElements.ContainsKey(element))
+                    _actMapFallbackElements[element] = act;
+            }
+            catch { }
+        }
+
+        private bool IsNewGameSession()
+        {
+            try
+            {
+                var ip = GetCurrentServerIp();
+                var tick = Hud != null && Hud.Game != null ? Hud.Game.CurrentGameTick : -1;
+                if (!string.IsNullOrEmpty(ip))
+                {
+                    if (string.IsNullOrEmpty(_sessionServerIp))
+                    {
+                        _sessionServerIp = ip;
+                        _lastGameTickSeen = tick;
+                        return true;
+                    }
+
+                    if (!string.Equals(_sessionServerIp, ip, StringComparison.OrdinalIgnoreCase))
+                    {
+                        _sessionServerIp = ip;
+                        _lastGameTickSeen = tick;
+                        return true;
+                    }
+                }
+
+                if (_lastGameTickSeen > 0 && tick >= 0 && tick + 1000 < _lastGameTickSeen)
+                {
+                    _lastGameTickSeen = tick;
+                    return true;
+                }
+
+                if (tick >= 0)
+                    _lastGameTickSeen = Math.Max(_lastGameTickSeen, tick);
+            }
+            catch { }
+
+            return false;
+        }
+
+        private void UpdateGameSession(bool force)
+        {
+            try
+            {
+                var ip = GetCurrentServerIp();
+                var tick = Hud.Game.CurrentGameTick;
+
+                // Do not clear pool/waypoint session state from ordinary loading or area-transfer blips.
+                // OnNewArea(newGame:true) owns real session resets; this method only records the latest
+                // observed key/tick so same-game rejoin logic still has data without wiping map state.
+                if (!string.IsNullOrEmpty(ip) && string.IsNullOrEmpty(_sessionServerIp))
+                    _sessionServerIp = ip;
+
+                if (tick >= 0)
+                    _lastGameTickSeen = Math.Max(_lastGameTickSeen, tick);
+            }
+            catch { }
+        }
+
+        private string GetCurrentServerIp()
+        {
+            try { return Hud != null && Hud.Game != null ? (Hud.Game.ServerIpAddress ?? string.Empty) : string.Empty; }
+            catch { return string.Empty; }
         }
 
         private bool IsGameReady()
@@ -1640,6 +1875,2136 @@ namespace Turbo.Plugins.s7o
             foreach (var font in fonts) if (font != null) yield return font;
         }
 
+        private void UpdatePylonProgressMarkers()
+        {
+            if (!ShowPylonProgressMarkers)
+                return;
+
+            bool inGr = IsInGreaterRift();
+            var percent = SafeRiftPercent();
+            if (!inGr || percent < 0.0d || percent > 100.5d || (!_lastGreaterRiftState && _pylonProgressMarks.Count > 0))
+            {
+                _pylonProgressMarks.Clear();
+                _lastRiftPercent = percent;
+                _lastGreaterRiftState = inGr;
+                return;
+            }
+
+            if (_lastGreaterRiftState && _lastRiftPercent > 10.0d && percent + 1.0d < _lastRiftPercent)
+                _pylonProgressMarks.Clear();
+
+            _lastGreaterRiftState = inGr;
+            _lastRiftPercent = percent;
+            var now = Hud.Game.CurrentRealTimeMilliseconds;
+
+            bool sawMarkerPylon = false;
+            try
+            {
+                if (Hud.Game.Markers != null)
+                {
+                    foreach (var marker in Hud.Game.Markers)
+                    {
+                        if (marker == null || !marker.IsPylon || marker.IsUsed)
+                            continue;
+                        sawMarkerPylon = true;
+                        ActorSnoEnum markerSno = marker.SnoActor != null ? marker.SnoActor.Sno : 0;
+                        AddPylonProgressMark(BuildPylonKey(marker.Id, marker.WorldId, marker.FloorCoordinate), percent, GetPylonShortName(marker), markerSno, marker.Name, marker.TextureSno, marker.TextureFrameIndex, now);
+                    }
+                }
+            }
+            catch { }
+
+            if (!sawMarkerPylon)
+            {
+                try
+                {
+                    if (Hud.Game.Shrines != null)
+                    {
+                        foreach (var shrine in Hud.Game.Shrines)
+                        {
+                            if (shrine == null || !shrine.IsPylon || shrine.IsDisabled || shrine.IsOperated)
+                                continue;
+                            ActorSnoEnum shrineSno = shrine.SnoActor != null ? shrine.SnoActor.Sno : 0;
+                            string shrineTypeName = string.Empty;
+                            try { shrineTypeName = shrine.Type.ToString(); } catch { }
+                            AddPylonProgressMark(BuildWorldKey("pylon", shrine.WorldId, shrine.FloorCoordinate), percent, GetPylonShortName(shrine), shrineSno, shrineTypeName, 0, 0, now);
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            PurgePylonProgressMarks(now);
+        }
+
+        private void AddPylonProgressMark(string key, double percent, string label, ActorSnoEnum actorSno, string name, uint textureSno, int frameIndex, long now)
+        {
+            if (string.IsNullOrEmpty(key) || percent < 0.0d || percent > 100.5d)
+                return;
+
+            PylonProgressMark mark;
+            if (!_pylonProgressMarks.TryGetValue(key, out mark))
+            {
+                mark = FindExistingPylonProgressMark(label);
+                if (mark == null)
+                {
+                    mark = new PylonProgressMark { Key = key, Percent = Clamp((float)percent, 0.0f, 100.0f), Label = label ?? "PYL" };
+                    _pylonProgressMarks[key] = mark;
+                }
+            }
+
+            mark.LastSeenMs = now;
+
+            var buffIcon = GetPylonBuffIconTexture(actorSno, name);
+            if (buffIcon != null)
+            {
+                mark.Icon = buffIcon;
+                mark.UsesBuffIcon = true;
+                return;
+            }
+
+            if (textureSno != 0 && !mark.UsesBuffIcon)
+            {
+                mark.TextureSno = textureSno;
+                mark.TextureFrameIndex = frameIndex;
+                if (mark.Icon == null)
+                {
+                    try { mark.Icon = Hud.Texture.GetTexture(textureSno, frameIndex); } catch { mark.Icon = null; }
+                }
+            }
+        }
+
+        private PylonProgressMark FindExistingPylonProgressMark(string label)
+        {
+            if (string.IsNullOrEmpty(label) || string.Equals(label, "PYL", StringComparison.OrdinalIgnoreCase))
+                return null;
+
+            foreach (var mark in _pylonProgressMarks.Values)
+                if (string.Equals(mark.Label, label, StringComparison.OrdinalIgnoreCase))
+                    return mark;
+
+            return null;
+        }
+
+        private void PurgePylonProgressMarks(long now)
+        {
+            if (PylonProgressMarkerMaxAgeMs <= 0)
+                return;
+            var remove = _pylonProgressMarks.Values.Where(m => now - m.LastSeenMs > PylonProgressMarkerMaxAgeMs).Select(m => m.Key).ToList();
+            foreach (var key in remove)
+                _pylonProgressMarks.Remove(key);
+        }
+
+        private void PaintPylonProgressMarkers()
+        {
+            if (!ShowPylonProgressMarkers || _pylonProgressMarks.Count == 0 || PylonProgressLineBrush == null)
+                return;
+            if (!IsInGreaterRift())
+                return;
+
+            IUiElement bar = null;
+            try { bar = Hud.Render.GreaterRiftBarUiElement; } catch { bar = null; }
+            if (bar == null || !bar.Visible)
+                return;
+
+            var r = bar.Rectangle;
+            if (r.Width <= 0 || r.Height <= 0)
+                return;
+
+            var iconSize = Math.Max(14.0f, PylonProgressIconSize);
+            var gap = Math.Max(2.0f, PylonProgressIconGapPx);
+            var iconY = r.Y - iconSize - gap;
+            var lineTopY = iconY + iconSize;
+            var lineBottomY = r.Y;
+            foreach (var mark in _pylonProgressMarks.Values.OrderBy(m => m.Percent))
+            {
+                var x = r.X + (r.Width * Clamp(mark.Percent / 100.0f, 0.0f, 1.0f));
+                if (PylonProgressLineOutlineBrush != null)
+                    PylonProgressLineOutlineBrush.DrawLine(x, lineTopY, x, lineBottomY);
+                PylonProgressLineBrush.DrawLine(x, lineTopY, x, lineBottomY);
+
+                var iconX = x - iconSize * 0.5f;
+                if (mark.Icon != null)
+                {
+                    mark.Icon.Draw(iconX, iconY, iconSize, iconSize, 0.94f);
+                    if (mark.UsesBuffIcon && Hud.Texture.BuffFrameTexture != null)
+                        Hud.Texture.BuffFrameTexture.Draw(iconX, iconY, iconSize, iconSize, 0.82f);
+                }
+                else if (PylonProgressTextFont != null && !string.IsNullOrEmpty(mark.Label))
+                {
+                    var text = mark.Label;
+                    var layout = PylonProgressTextFont.GetTextLayout(text);
+                    DrawOutlinedText(text, x - layout.Metrics.Width * 0.5f, iconY + (iconSize - layout.Metrics.Height) * 0.5f, PylonProgressTextFont, PoolOutlineFont);
+                }
+            }
+        }
+
+        private void UpdatePoolTracker()
+        {
+            if (!ShowPoolTracker || IsInsideNephalemRiftArea())
+                return;
+
+            var now = Hud.Game.CurrentRealTimeMilliseconds;
+            UpdatePoolWorldTransitionState(now);
+            UpdatePoolAreaVisitState(now);
+            var suppressPoolRemoval = IsPoolListFrozen(now);
+            try
+            {
+                if (Hud.Game.Shrines != null)
+                {
+                    foreach (var shrine in Hud.Game.Shrines)
+                    {
+                        if (shrine == null || !shrine.IsPoolOfReflection)
+                            continue;
+
+                        if (shrine.IsDisabled || shrine.IsOperated)
+                        {
+                            RememberConsumedPoolAt(shrine.WorldId, shrine.FloorCoordinate, now);
+                            RemovePoolSpotAt(shrine.WorldId, shrine.FloorCoordinate);
+                            continue;
+                        }
+
+                        AddPoolSpot(BuildWorldKey("pool", shrine.WorldId, shrine.FloorCoordinate), shrine.WorldId, shrine.FloorCoordinate, now, "SHRINE", GetActorSceneArea(shrine));
+                    }
+                }
+            }
+            catch { }
+
+            try
+            {
+                if (Hud.Game.Markers != null)
+                {
+                    foreach (var marker in Hud.Game.Markers)
+                    {
+                        if (marker == null || !marker.IsPoolOfReflection)
+                            continue;
+
+                        if (marker.IsUsed)
+                        {
+                            RememberConsumedPoolAt(marker.WorldId, marker.FloorCoordinate, now);
+                            RemovePoolSpotAt(marker.WorldId, marker.FloorCoordinate);
+                            continue;
+                        }
+
+                        if (IsRememberedConsumedPoolAt(marker.WorldId, marker.FloorCoordinate))
+                        {
+                            RemovePoolSpotAt(marker.WorldId, marker.FloorCoordinate);
+                            continue;
+                        }
+
+                        if (IsKnownFalsePoolMarkerRect(marker.WorldId, marker.FloorCoordinate))
+                        {
+                            RemovePoolSpotAt(marker.WorldId, marker.FloorCoordinate);
+                            continue;
+                        }
+
+                        if (HasUsedOrDisabledPoolShrineAt(marker.WorldId, marker.FloorCoordinate))
+                            continue;
+
+                        AddPoolSpot(BuildPylonKey(marker.Id, marker.WorldId, marker.FloorCoordinate), marker.WorldId, marker.FloorCoordinate, now, "MARKER", null);
+                    }
+                }
+            }
+            catch { }
+
+            try
+            {
+                if (Hud.Game.Actors != null)
+                {
+                    foreach (var actor in Hud.Game.Actors)
+                    {
+                        if (!IsPoolActor(actor))
+                            continue;
+
+                        if (actor.IsDisabled || actor.IsOperated)
+                        {
+                            RememberConsumedPoolAt(actor.WorldId, actor.FloorCoordinate, now);
+                            RemovePoolSpotAt(actor.WorldId, actor.FloorCoordinate);
+                            continue;
+                        }
+
+                        AddPoolSpot(BuildWorldKey("poolactor", actor.WorldId, actor.FloorCoordinate), actor.WorldId, actor.FloorCoordinate, now, "ACTOR", GetActorSceneArea(actor));
+                    }
+                }
+            }
+            catch { }
+
+            UpdatePartyPoolConsumption();
+
+            if (!suppressPoolRemoval)
+                PurgePoolSpots(now);
+        }
+
+        private void UpdatePoolWorldTransitionState(long now)
+        {
+            try
+            {
+                if (Hud == null || Hud.Game == null || Hud.Game.Me == null)
+                    return;
+
+                var worldId = Hud.Game.Me.WorldId;
+                var worldSno = Hud.Game.Me.WorldSno;
+                if (worldId == 0 && worldSno == 0)
+                    return;
+
+                if (_poolLastPlayerWorldId == 0 && _poolLastPlayerWorldSno == 0)
+                {
+                    _poolLastPlayerWorldId = worldId;
+                    _poolLastPlayerWorldSno = worldSno;
+                    _poolWorldChangedSinceMs = now;
+                    return;
+                }
+
+                if (_poolLastPlayerWorldId == worldId && _poolLastPlayerWorldSno == worldSno)
+                    return;
+
+                _poolLastPlayerWorldId = worldId;
+                _poolLastPlayerWorldSno = worldSno;
+                _poolWorldChangedSinceMs = now;
+                _pendingPoolAreaKey = string.Empty;
+                _pendingPoolAreaSinceMs = 0;
+                FreezePoolListForAreaTransition(now);
+            }
+            catch { }
+        }
+
+        private bool IsLocalWorldTransitionSettled(long now)
+        {
+            var settleMs = Math.Max(0, PoolWorldTransitionSettleMs);
+            if (settleMs <= 0 || _poolWorldChangedSinceMs <= 0)
+                return true;
+
+            if (now - _poolWorldChangedSinceMs >= settleMs)
+                return true;
+
+            return IsLocalPlayerSnoAreaSameAsSceneArea();
+        }
+
+        private bool IsLocalPlayerSnoAreaSameAsSceneArea()
+        {
+            try
+            {
+                if (Hud == null || Hud.Game == null || Hud.Game.Me == null)
+                    return false;
+
+                var playerSnapshot = GetAreaSnapshot(Hud.Game.Me.SnoArea);
+                var sceneSnapshot = GetAreaSnapshot(GetActorSceneArea(Hud.Game.Me));
+                if (playerSnapshot == null || sceneSnapshot == null)
+                    return false;
+                if (playerSnapshot.AreaSno == 0 || sceneSnapshot.AreaSno == 0)
+                    return false;
+
+                return IsPoolAreaSnapshotSame(playerSnapshot, sceneSnapshot);
+            }
+            catch { return false; }
+        }
+
+        private void UpdatePoolAreaVisitState(long now)
+        {
+            if (!IsLocalWorldTransitionSettled(now))
+            {
+                FreezePoolListForAreaTransition(now);
+                return;
+            }
+
+            var key = GetCurrentPoolAreaKey();
+            if (string.IsNullOrEmpty(key))
+                return;
+
+            if (string.Equals(key, _currentPoolAreaKey, StringComparison.Ordinal))
+            {
+                if (_currentPoolAreaSinceMs <= 0)
+                    _currentPoolAreaSinceMs = now;
+                _pendingPoolAreaKey = string.Empty;
+                _pendingPoolAreaSinceMs = 0;
+                return;
+            }
+
+            var settleMs = Math.Max(0, PoolAreaTransitionSettleMs);
+            if (settleMs > 0)
+            {
+                if (!string.Equals(key, _pendingPoolAreaKey, StringComparison.Ordinal))
+                {
+                    FreezePoolListForAreaTransition(now);
+                    _pendingPoolAreaKey = key;
+                    _pendingPoolAreaSinceMs = now;
+                    return;
+                }
+
+                if (now - _pendingPoolAreaSinceMs < settleMs)
+                    return;
+            }
+
+            _currentPoolAreaKey = key;
+            _currentPoolAreaSinceMs = now;
+            _pendingPoolAreaKey = string.Empty;
+            _pendingPoolAreaSinceMs = 0;
+            _poolAreaVisitSequence++;
+            ResetPoolArrowVisibilityState();
+        }
+
+        private bool IsPoolListFrozen(long now)
+        {
+            return _poolListFrozenUntilMs > now;
+        }
+
+        private void FreezePoolListForAreaTransition(long now)
+        {
+            var freezeMs = Math.Max(0, PoolListTransitionFreezeMs);
+            if (freezeMs <= 0)
+                return;
+
+            var until = now + freezeMs;
+            if (_poolListFrozenUntilMs >= until && _poolFrozenListOrder.Count > 0)
+                return;
+
+            _poolFrozenListOrder.Clear();
+            foreach (var key in _poolListOrder)
+                if (!string.IsNullOrEmpty(key) && _poolSpots.ContainsKey(key))
+                    _poolFrozenListOrder.Add(key);
+            _poolListFrozenUntilMs = until;
+        }
+
+        private string GetCurrentPoolAreaKey()
+        {
+            try
+            {
+                if (Hud == null || Hud.Game == null || Hud.Game.Me == null)
+                    return string.Empty;
+
+                var area = Hud.Game.Me.SnoArea;
+                var areaSno = GetCanonicalPoolAreaSno(GetPrimaryAreaSno(area));
+                var hostSno = GetCanonicalPoolAreaSno(GetHostAreaSno(area));
+                return Hud.Game.Me.WorldId.ToString() + ":" + areaSno.ToString() + ":" + hostSno.ToString();
+            }
+            catch { return string.Empty; }
+        }
+
+        private float GetPoolMergeDistance()
+        {
+            return Math.Max(4.0f, Math.Min(40.0f, PoolSpotMergeDistance));
+        }
+
+        private bool IsPoolActor(IActor actor)
+        {
+            if (actor == null || actor.FloorCoordinate == null || !actor.FloorCoordinate.IsValid)
+                return false;
+            try { if (actor.GizmoType == GizmoType.PoolOfReflection) return true; } catch { }
+            try { if (actor.SnoActor != null && actor.SnoActor.Sno == ActorSnoEnum._poolofreflection) return true; } catch { }
+            return false;
+        }
+
+        private void AddPoolSpot(string key, uint worldId, IWorldCoordinate coordinate, long now, string source, ISnoArea sourceArea)
+        {
+            if (string.IsNullOrEmpty(key) || worldId == 0 || coordinate == null || !coordinate.IsValid)
+                return;
+
+            var markerOnly = string.Equals(source, "MARKER", StringComparison.OrdinalIgnoreCase);
+            if (markerOnly && IsKnownFalsePoolMarkerRect(worldId, coordinate))
+                return;
+
+            var visibleConfirm = IsPoolCoordinateVisibleInCurrentWorld(worldId, coordinate);
+            var localCloseConfirm = !markerOnly && IsPoolCoordinateNearLocalPlayer(worldId, coordinate);
+
+            var localCloseSnapshot = localCloseConfirm ? GetAreaSnapshot(GetLocalPlayerAreaForWorld(worldId)) : null;
+            var sourceSnapshot = !markerOnly ? GetAreaSnapshot(sourceArea) : null;
+            var hintSnapshot = PoolUseAreaRectHints ? GetPoolAreaRectHintSnapshot(worldId, coordinate) : null;
+            var visibleSnapshot = visibleConfirm ? GetAreaSnapshot(GetLocalPlayerAreaForWorld(worldId)) : null;
+            var fallbackSnapshot = GetAreaSnapshot(FindAreaForWorld(worldId, now));
+
+            PoolSpot spot;
+            if (!_poolSpots.TryGetValue(key, out spot))
+            {
+                foreach (var existing in _poolSpots.Values)
+                {
+                    if (existing == null || existing.FloorCoordinate == null || existing.WorldId != worldId)
+                        continue;
+
+                    if (existing.FloorCoordinate.XYDistanceTo(coordinate) <= GetPoolMergeDistance())
+                    {
+                        spot = existing;
+                        key = existing.Key;
+                        break;
+                    }
+                }
+            }
+
+            var created = false;
+            if (!_poolSpots.TryGetValue(key, out spot))
+            {
+                spot = new PoolSpot
+                {
+                    Key = key,
+                    FirstSeenMs = now,
+                    FirstSeenOrder = ++_poolFirstSeenSequence
+                };
+
+                _poolSpots[key] = spot;
+                created = true;
+
+                if (!_poolListOrder.Contains(key))
+                    _poolListOrder.Add(key);
+            }
+
+            bool confirmHasArea;
+            var snapshot = SelectPoolAreaSnapshot(markerOnly, now, localCloseSnapshot, sourceSnapshot, hintSnapshot, visibleSnapshot, fallbackSnapshot, out confirmHasArea);
+
+            spot.WorldId = worldId;
+            spot.FloorCoordinate = coordinate;
+            spot.LastSeenMs = now;
+
+            var hasResolvedArea = snapshot != null && snapshot.AreaSno != 0;
+            confirmHasArea = hasResolvedArea && confirmHasArea;
+
+            var sourceHasArea = sourceSnapshot != null && sourceSnapshot.AreaSno != 0;
+            var shouldConfirmLocation = !spot.LocationConfirmed && confirmHasArea;
+            var shouldRewriteFromSource = !spot.LocationConfirmed
+                && !markerOnly
+                && !confirmHasArea
+                && sourceHasArea
+                && IsPoolAreaSnapshotSame(snapshot, sourceSnapshot);
+            var shouldWriteInitialUncertainLocation = !spot.LocationConfirmed
+                && (created || string.IsNullOrEmpty(spot.Label) || shouldRewriteFromSource);
+
+            if (snapshot != null && (shouldConfirmLocation || shouldWriteInitialUncertainLocation))
+            {
+                if (snapshot.AreaSno != 0)
+                    spot.AreaSno = snapshot.AreaSno;
+
+                if (snapshot.HostAreaSno != 0)
+                    spot.HostAreaSno = snapshot.HostAreaSno;
+
+                if (snapshot.Act != BountyAct.None)
+                    spot.Act = snapshot.Act;
+
+                if (!string.IsNullOrEmpty(snapshot.AreaName))
+                    spot.AreaName = snapshot.AreaName;
+
+                if (shouldConfirmLocation)
+                    spot.LocationConfirmed = true;
+
+                spot.LabelUncertain = !spot.LocationConfirmed;
+
+                if (!IsPoolListFrozen(now) || string.IsNullOrEmpty(spot.Label) || shouldConfirmLocation)
+                    spot.Label = BuildPoolLocationLabel(source, spot, spot.LabelUncertain);
+            }
+
+            if (_poolAreaVisitSequence > 0
+                && string.IsNullOrEmpty(_pendingPoolAreaKey)
+                && spot.LastArrowAreaVisitSequence != _poolAreaVisitSequence
+                && !string.IsNullOrEmpty(spot.Label)
+                && IsPoolSpotInCurrentArea(spot)
+                && !IsPoolArrowUiSuppressed())
+            {
+                spot.LastArrowAreaVisitSequence = _poolAreaVisitSequence;
+                ActivatePoolArrow(spot, now);
+            }
+        }
+
+        private PoolAreaSnapshot SelectPoolAreaSnapshot(bool markerOnly, long now, PoolAreaSnapshot localCloseSnapshot, PoolAreaSnapshot sourceSnapshot, PoolAreaSnapshot hintSnapshot, PoolAreaSnapshot visibleSnapshot, PoolAreaSnapshot fallbackSnapshot, out bool confirmed)
+        {
+            confirmed = false;
+
+            if (hintSnapshot != null && hintSnapshot.AreaSno != 0)
+            {
+                confirmed = true;
+                return hintSnapshot;
+            }
+
+            if (!markerOnly)
+            {
+                var hasSource = sourceSnapshot != null && sourceSnapshot.AreaSno != 0;
+                var hasLocal = localCloseSnapshot != null && localCloseSnapshot.AreaSno != 0;
+
+                if (hasSource && hasLocal)
+                {
+                    if (IsPoolAreaSnapshotSame(sourceSnapshot, localCloseSnapshot))
+                    {
+                        confirmed = true;
+                        return sourceSnapshot;
+                    }
+
+                    if (IsLocalPoolAreaStable(now))
+                    {
+                        confirmed = true;
+                        return localCloseSnapshot;
+                    }
+
+                    return sourceSnapshot;
+                }
+
+                if (hasSource)
+                {
+                    confirmed = true;
+                    return sourceSnapshot;
+                }
+
+                if (hasLocal)
+                {
+                    confirmed = IsLocalPoolAreaStable(now);
+                    return localCloseSnapshot;
+                }
+            }
+
+            if (visibleSnapshot != null && visibleSnapshot.AreaSno != 0)
+            {
+                confirmed = IsLocalPoolAreaStable(now);
+                return visibleSnapshot;
+            }
+
+            if (fallbackSnapshot != null && fallbackSnapshot.AreaSno != 0 && IsLocalPoolAreaStable(now))
+                return fallbackSnapshot;
+
+            return null;
+        }
+
+        private bool IsPoolAreaSnapshotSame(PoolAreaSnapshot a, PoolAreaSnapshot b)
+        {
+            if (a == null || b == null)
+                return false;
+
+            var aArea = GetCanonicalPoolAreaSno(a.AreaSno);
+            var bArea = GetCanonicalPoolAreaSno(b.AreaSno);
+            if (aArea == 0 || bArea == 0 || aArea != bArea)
+                return false;
+
+            var aHost = GetCanonicalPoolAreaSno(a.HostAreaSno);
+            var bHost = GetCanonicalPoolAreaSno(b.HostAreaSno);
+            return aHost == 0 || bHost == 0 || aHost == bHost;
+        }
+
+        private bool IsLocalPoolAreaStable(long now)
+        {
+            if (!IsLocalWorldTransitionSettled(now))
+                return false;
+            if (!string.IsNullOrEmpty(_pendingPoolAreaKey))
+                return false;
+            if (string.IsNullOrEmpty(_currentPoolAreaKey) || _currentPoolAreaSinceMs <= 0)
+                return false;
+
+            var settleMs = Math.Max(0, PoolLocalAreaOverrideSettleMs);
+            return settleMs <= 0 || now - _currentPoolAreaSinceMs >= settleMs;
+        }
+
+        private PoolAreaSnapshot GetPoolAreaRectHintSnapshot(uint worldId, IWorldCoordinate coordinate)
+        {
+            if (coordinate == null || !coordinate.IsValid)
+                return null;
+
+            var worldSno = GetWorldSnoForWorld(worldId);
+            if (worldSno == 0)
+                return null;
+
+            var hint = FindPoolAreaRectHint(worldSno, coordinate);
+            if (hint == null)
+                return null;
+
+            return new PoolAreaSnapshot
+            {
+                AreaSno = GetCanonicalPoolAreaSno(hint.AreaSno),
+                HostAreaSno = GetCanonicalPoolAreaSno(hint.HostAreaSno),
+                Act = hint.Act,
+                AreaName = hint.AreaName
+            };
+        }
+
+        private PoolAreaSnapshot GetAreaSnapshot(ISnoArea area)
+        {
+            if (area == null || GetPrimaryAreaSno(area) == 0)
+                return null;
+
+            return new PoolAreaSnapshot
+            {
+                AreaSno = GetCanonicalPoolAreaSno(GetPrimaryAreaSno(area)),
+                HostAreaSno = GetCanonicalPoolAreaSno(GetHostAreaSno(area)),
+                Act = GetBountyActFromNumber(area.Act),
+                AreaName = GetAreaDisplayName(area)
+            };
+        }
+
+        private uint GetWorldSnoForWorld(uint worldId)
+        {
+            if (worldId == 0 || Hud == null || Hud.Game == null || Hud.Game.Me == null)
+                return 0;
+
+            try
+            {
+                if (Hud.Game.Me.WorldId == worldId)
+                    return Hud.Game.Me.WorldSno;
+            }
+            catch { }
+
+            return 0;
+        }
+
+        private PoolAreaRectHint FindPoolAreaRectHint(uint worldSno, IWorldCoordinate coordinate)
+        {
+            if (worldSno == 0 || coordinate == null || !PoolUseAreaRectHints)
+                return null;
+
+            var x = coordinate.X;
+            var y = coordinate.Y;
+            for (var i = 0; i < PoolAreaRectHints.Length; i++)
+            {
+                var hint = PoolAreaRectHints[i];
+                if (hint == null || hint.WorldSno != worldSno)
+                    continue;
+
+                if (x >= hint.MinX && x <= hint.MaxX && y >= hint.MinY && y <= hint.MaxY)
+                    return hint;
+            }
+
+            return null;
+        }
+
+        private bool IsKnownFalsePoolMarkerRect(uint worldId, IWorldCoordinate coordinate)
+        {
+            if (!PoolSuppressKnownFalseMarkerRects || worldId == 0 || coordinate == null || !coordinate.IsValid)
+                return false;
+
+            if (GetWorldSnoForWorld(worldId) != 70885u)
+                return false;
+
+            if (coordinate.X < 480.0f || coordinate.X > 720.0f || coordinate.Y < 3840.0f || coordinate.Y > 4080.0f)
+                return false;
+
+            try
+            {
+                if (Hud.Game.Me != null && Hud.Game.Me.WorldId == worldId)
+                {
+                    var me = Hud.Game.Me.FloorCoordinate;
+                    if (me != null && coordinate.XYDistanceTo(me) <= 1200.0f)
+                        return false;
+                }
+            }
+            catch { }
+
+            return true;
+        }
+
+        private bool IsPoolCoordinateNearLocalPlayer(uint worldId, IWorldCoordinate coordinate)
+        {
+            if (worldId == 0 || coordinate == null || Hud == null || Hud.Game == null || Hud.Game.Me == null)
+                return false;
+
+            try
+            {
+                if (Hud.Game.Me.WorldId != worldId)
+                    return false;
+
+                var me = Hud.Game.Me.FloorCoordinate;
+                if (me == null)
+                    return false;
+
+                var maxDistance = Math.Max(35.0f, PoolVisibleConfirmMaxDistance);
+                return coordinate.XYDistanceTo(me) <= maxDistance;
+            }
+            catch { return false; }
+        }
+
+        private bool IsPoolCoordinateVisibleInCurrentWorld(uint worldId, IWorldCoordinate coordinate)
+        {
+            if (worldId == 0 || coordinate == null || Hud == null || Hud.Game == null || Hud.Game.Me == null)
+                return false;
+
+            try
+            {
+                if (Hud.Game.Me.WorldId != worldId)
+                    return false;
+
+                if (IsFullMapOpen())
+                    return false;
+
+                if (!coordinate.IsOnScreen(1))
+                    return false;
+
+                var me = Hud.Game.Me.FloorCoordinate;
+                if (me != null)
+                {
+                    var maxDistance = Math.Max(35.0f, PoolVisibleConfirmMaxDistance);
+                    if (coordinate.XYDistanceTo(me) > maxDistance)
+                        return false;
+                }
+
+                return true;
+            }
+            catch { return false; }
+        }
+
+        private bool IsPoolArrowUiSuppressed()
+        {
+            try
+            {
+                if (Hud.Inventory == null)
+                    return false;
+                if (Hud.Inventory.InventoryMainUiElement != null && Hud.Inventory.InventoryMainUiElement.Visible)
+                    return true;
+                if (Hud.Inventory.StashMainUiElement != null && Hud.Inventory.StashMainUiElement.Visible)
+                    return true;
+                if (Hud.Inventory.HoveredItem != null)
+                    return true;
+                var main = Hud.Inventory.GetHoveredItemMainUiElement();
+                if (main != null && main.Visible)
+                    return true;
+                var top = Hud.Inventory.GetHoveredItemTopUiElement();
+                if (top != null && top.Visible)
+                    return true;
+            }
+            catch { }
+            return false;
+        }
+
+        private void RemovePoolArrow(string key)
+        {
+            if (string.IsNullOrEmpty(key))
+                return;
+
+            _activePoolArrows.Remove(key);
+        }
+
+        private void RemovePoolSpotAt(uint worldId, IWorldCoordinate coordinate)
+        {
+            if (worldId == 0 || coordinate == null)
+                return;
+
+            var remove = new List<string>();
+            foreach (var spot in _poolSpots.Values)
+            {
+                if (spot == null || spot.FloorCoordinate == null || spot.WorldId != worldId)
+                    continue;
+                if (spot.FloorCoordinate.XYDistanceTo(coordinate) <= GetPoolMergeDistance())
+                    remove.Add(spot.Key);
+            }
+
+            foreach (var key in remove)
+            {
+                _poolSpots.Remove(key);
+                _poolListOrder.Remove(key);
+                RemovePoolArrow(key);
+            }
+        }
+
+        private void RememberConsumedPoolAt(uint worldId, IWorldCoordinate coordinate, long now)
+        {
+            if (worldId == 0 || coordinate == null || !coordinate.IsValid)
+                return;
+
+            var key = BuildConsumedPoolKey(worldId, coordinate);
+            _consumedPoolSpots[key] = new ConsumedPoolSpot
+            {
+                WorldId = worldId,
+                X = coordinate.X,
+                Y = coordinate.Y
+            };
+        }
+
+        private bool IsRememberedConsumedPoolAt(uint worldId, IWorldCoordinate coordinate)
+        {
+            if (worldId == 0 || coordinate == null || !coordinate.IsValid || _consumedPoolSpots.Count == 0)
+                return false;
+
+            var key = BuildConsumedPoolKey(worldId, coordinate);
+            if (_consumedPoolSpots.ContainsKey(key))
+                return true;
+
+            var mergeDistance = GetPoolMergeDistance();
+            foreach (var spot in _consumedPoolSpots.Values)
+            {
+                if (spot == null || spot.WorldId != worldId)
+                    continue;
+
+                var dx = spot.X - coordinate.X;
+                var dy = spot.Y - coordinate.Y;
+                if ((dx * dx) + (dy * dy) <= mergeDistance * mergeDistance)
+                    return true;
+            }
+
+            return false;
+        }
+
+        private static string BuildConsumedPoolKey(uint worldId, IWorldCoordinate coordinate)
+        {
+            if (coordinate == null)
+                return worldId.ToString();
+
+            return worldId.ToString() + ":" + ((int)Math.Round(coordinate.X)).ToString() + ":" + ((int)Math.Round(coordinate.Y)).ToString();
+        }
+
+        private bool HasUsedOrDisabledPoolShrineAt(uint worldId, IWorldCoordinate coordinate)
+        {
+            if (worldId == 0 || coordinate == null || Hud.Game == null || Hud.Game.Shrines == null)
+                return false;
+
+            try
+            {
+                foreach (var shrine in Hud.Game.Shrines)
+                {
+                    if (shrine == null || !shrine.IsPoolOfReflection || shrine.WorldId != worldId || shrine.FloorCoordinate == null)
+                        continue;
+                    if (shrine.FloorCoordinate.XYDistanceTo(coordinate) > GetPoolMergeDistance())
+                        continue;
+                    if (shrine.IsDisabled || shrine.IsOperated)
+                    {
+                        RememberConsumedPoolAt(worldId, coordinate, Hud.Game.CurrentRealTimeMilliseconds);
+                        RemovePoolSpotAt(worldId, coordinate);
+                        return true;
+                    }
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        private void UpdatePartyPoolConsumption()
+        {
+            if (Hud.Game == null || Hud.Game.Players == null || _poolSpots.Count == 0)
+                return;
+
+            try
+            {
+                foreach (var player in Hud.Game.Players)
+                {
+                    if (player == null || !player.IsInGame)
+                        continue;
+
+                    var key = GetPlayerPoolKey(player);
+                    if (key == 0)
+                        continue;
+
+                    var current = player.BonusPoolRemaining;
+                    long previous;
+                    if (_partyPoolBonusRemaining.TryGetValue(key, out previous) && current > previous)
+                        RemovePoolSpotTakenBy(player);
+                    _partyPoolBonusRemaining[key] = current;
+                }
+            }
+            catch { }
+        }
+
+        private uint GetPlayerPoolKey(IPlayer player)
+        {
+            if (player == null)
+                return 0;
+            try { if (player.HeroId != 0) return player.HeroId; } catch { }
+            try { return (uint)(player.Index + 1); } catch { }
+            return 0;
+        }
+
+        private void RemovePoolSpotTakenBy(IPlayer player)
+        {
+            if (player == null || _poolSpots.Count == 0)
+                return;
+
+            IWorldCoordinate playerCoordinate = null;
+            try { playerCoordinate = player.FloorCoordinate; } catch { playerCoordinate = null; }
+            if (playerCoordinate == null || !playerCoordinate.IsValid)
+                return;
+
+            var playerWorldId = 0u;
+            try { playerWorldId = player.WorldId; } catch { playerWorldId = 0u; }
+            if (playerWorldId == 0)
+                return;
+
+            var maxDistance = Math.Max(80.0f, Math.Min(600.0f, PoolTakenByPlayerMaxDistance));
+            var remove = _poolSpots.Values
+                .Where(p => p != null
+                    && p.FloorCoordinate != null
+                    && p.WorldId == playerWorldId
+                    && p.FloorCoordinate.XYDistanceTo(playerCoordinate) <= maxDistance)
+                .OrderBy(p => p.FloorCoordinate.XYDistanceTo(playerCoordinate))
+                .FirstOrDefault();
+
+            if (remove != null && !string.IsNullOrEmpty(remove.Key))
+            {
+                RememberConsumedPoolAt(remove.WorldId, remove.FloorCoordinate, Hud.Game.CurrentRealTimeMilliseconds);
+                _poolSpots.Remove(remove.Key);
+                _poolListOrder.Remove(remove.Key);
+                RemovePoolArrow(remove.Key);
+            }
+        }
+
+        private void PurgePoolSpots(long now)
+        {
+            var remove = new List<string>();
+            foreach (var spot in _poolSpots.Values)
+            {
+                if (spot == null || spot.WorldId == 0 || spot.FloorCoordinate == null || !spot.FloorCoordinate.IsValid)
+                    remove.Add(spot != null ? spot.Key : null);
+            }
+            foreach (var key in remove)
+                if (!string.IsNullOrEmpty(key))
+                {
+                    _poolSpots.Remove(key);
+                    _poolListOrder.Remove(key);
+                    RemovePoolArrow(key);
+                }
+        }
+
+        private void PaintPoolTrackerTop()
+        {
+            if (!ShowPoolTracker || _poolSpots.Count == 0 || PoolLabelFont == null || IsInsideGreaterRiftArea())
+                return;
+
+            var spots = GetOrderedPoolSpotsForList().ToList();
+
+            if (spots.Count == 0)
+                return;
+
+            float rightX;
+            float y;
+            GetPoolListAnchor(out rightX, out y);
+
+            foreach (var spot in spots)
+            {
+                if (string.IsNullOrEmpty(spot.Label))
+                    continue;
+
+                y += DrawRightAlignedLine(spot.Label, rightX, y, PoolLabelFont, PoolOutlineFont, 2);
+            }
+        }
+
+        private IEnumerable<PoolSpot> GetOrderedPoolSpotsForList()
+        {
+            var now = Hud.Game.CurrentRealTimeMilliseconds;
+            var seen = new HashSet<string>();
+
+            if (IsPoolListFrozen(now) && _poolFrozenListOrder.Count > 0)
+            {
+                foreach (var key in _poolFrozenListOrder.ToList())
+                {
+                    PoolSpot spot;
+                    if (!string.IsNullOrEmpty(key)
+                        && _poolSpots.TryGetValue(key, out spot)
+                        && spot != null
+                        && spot.FloorCoordinate != null)
+                    {
+                        seen.Add(key);
+                        yield return spot;
+                    }
+                }
+
+                foreach (var key in _poolListOrder.ToList())
+                {
+                    if (string.IsNullOrEmpty(key) || seen.Contains(key))
+                        continue;
+
+                    PoolSpot spot;
+                    if (!_poolSpots.TryGetValue(key, out spot) || spot == null || spot.FloorCoordinate == null)
+                    {
+                        _poolListOrder.Remove(key);
+                        continue;
+                    }
+
+                    seen.Add(key);
+                    yield return spot;
+                }
+
+                foreach (var spot in _poolSpots.Values.OrderBy(p => p.FirstSeenOrder <= 0 ? long.MaxValue : p.FirstSeenOrder).ThenBy(p => p.FirstSeenMs))
+                {
+                    if (spot == null || spot.FloorCoordinate == null || string.IsNullOrEmpty(spot.Key) || seen.Contains(spot.Key))
+                        continue;
+
+                    _poolListOrder.Add(spot.Key);
+                    seen.Add(spot.Key);
+                    yield return spot;
+                }
+
+                yield break;
+            }
+
+            _poolFrozenListOrder.Clear();
+
+            foreach (var key in _poolListOrder.ToList())
+            {
+                PoolSpot spot;
+                if (string.IsNullOrEmpty(key) || !_poolSpots.TryGetValue(key, out spot) || spot == null || spot.FloorCoordinate == null)
+                {
+                    _poolListOrder.Remove(key);
+                    continue;
+                }
+
+                seen.Add(key);
+                yield return spot;
+            }
+
+            foreach (var spot in _poolSpots.Values.OrderBy(p => p.FirstSeenOrder <= 0 ? long.MaxValue : p.FirstSeenOrder).ThenBy(p => p.FirstSeenMs))
+            {
+                if (spot == null || spot.FloorCoordinate == null || string.IsNullOrEmpty(spot.Key) || seen.Contains(spot.Key))
+                    continue;
+
+                _poolListOrder.Add(spot.Key);
+                seen.Add(spot.Key);
+                yield return spot;
+            }
+        }
+
+        private void GetPoolListAnchor(out float rightX, out float y)
+        {
+            rightX = Hud.Window.Size.Width - (18.0f * Hud.Window.HeightUiRatio);
+            y = Hud.Window.Size.Height * Clamp(PoolTopTextYFrac, 0.02f, 0.35f);
+
+            try
+            {
+                var mini = Hud.Render.MinimapUiElement;
+                if (mini != null && mini.Visible)
+                {
+                    var rect = mini.Rectangle;
+                    rightX = rect.Left - (Math.Max(0.0f, PoolListOffsetXPx) * Hud.Window.HeightUiRatio);
+                    y = rect.Top + (Math.Max(0.0f, PoolListOffsetYPx) * Hud.Window.HeightUiRatio);
+                }
+            }
+            catch { }
+        }
+
+        private void PaintPoolWorldStatus()
+        {
+            if (!ShowPoolTracker || !ShowPoolPartyStatus || _poolSpots.Count == 0)
+                return;
+
+            foreach (var spot in _poolSpots.Values)
+            {
+                if (spot == null || spot.FloorCoordinate == null || !IsPoolSpotInCurrentArea(spot))
+                    continue;
+
+                try
+                {
+                    if (!spot.FloorCoordinate.IsOnScreen(1))
+                        continue;
+                }
+                catch { continue; }
+
+                var screen = spot.FloorCoordinate.ToScreenCoordinate(true, true);
+                if (screen == null || !IsFinite(screen.X) || !IsFinite(screen.Y))
+                    continue;
+
+                var status = GetWorldPartyStatus(spot.WorldId);
+                var font = status.Ready ? PoolReadyFont : PoolMissingFont;
+                var y = screen.Y - (34.0f * Hud.Window.HeightUiRatio);
+                foreach (var line in status.Lines)
+                    y += DrawCenteredLine(line, screen.X, y + PoolStatusLineGapPx, font, PoolOutlineFont, 2);
+            }
+        }
+
+        private void PaintPoolDirectionArrows()
+        {
+            if (IsInsideNephalemRiftArea())
+                return;
+
+            DrawActivePoolArrows();
+        }
+
+        private void ResetPoolArrowVisibilityState()
+        {
+            foreach (var arrow in _activePoolArrows.Values)
+            {
+                if (arrow == null)
+                    continue;
+
+                arrow.LastUx = 1.0f;
+                arrow.LastUy = 0.0f;
+                arrow.TargetWasVisible = false;
+                arrow.TargetVisibleSinceMs = 0;
+            }
+        }
+
+        private void CleanupPoolArrows(long now)
+        {
+            if (_activePoolArrows.Count == 0)
+                return;
+
+            var remove = new List<string>();
+            foreach (var kv in _activePoolArrows)
+            {
+                var arrow = kv.Value;
+                if (arrow == null || now > arrow.ExpireMs)
+                    remove.Add(kv.Key);
+            }
+
+            foreach (var key in remove)
+                _activePoolArrows.Remove(key);
+        }
+
+        private void ActivatePoolArrow(PoolSpot spot, long now)
+        {
+            if (spot == null || string.IsNullOrEmpty(spot.Key) || spot.FloorCoordinate == null || !spot.FloorCoordinate.IsValid)
+                return;
+
+            try
+            {
+                if (!IsPoolSpotInCurrentArea(spot))
+                    return;
+            }
+            catch { }
+
+            CleanupPoolArrows(now);
+
+            PoolArrowAlert arrow;
+            if (_activePoolArrows.TryGetValue(spot.Key, out arrow) && arrow != null && now <= arrow.ExpireMs)
+            {
+                arrow.X = spot.FloorCoordinate.X;
+                arrow.Y = spot.FloorCoordinate.Y;
+                arrow.Z = spot.FloorCoordinate.Z;
+                arrow.WorldId = spot.WorldId;
+                arrow.AreaSno = spot.AreaSno;
+                arrow.HostAreaSno = spot.HostAreaSno;
+                return;
+            }
+
+            _activePoolArrows[spot.Key] = new PoolArrowAlert
+            {
+                Key = spot.Key,
+                X = spot.FloorCoordinate.X,
+                Y = spot.FloorCoordinate.Y,
+                Z = spot.FloorCoordinate.Z,
+                WorldId = spot.WorldId,
+                AreaSno = spot.AreaSno,
+                HostAreaSno = spot.HostAreaSno,
+                StartMs = now,
+                ExpireMs = now + Math.Max(700, PoolArrowLifetimeMs),
+                LastUx = 1.0f,
+                LastUy = 0.0f,
+                TargetWasVisible = false,
+                TargetVisibleSinceMs = 0
+            };
+        }
+
+        private void DrawActivePoolArrows()
+        {
+            if (!ShowPoolTracker || _activePoolArrows.Count == 0 || PoolGroundBrush == null || PoolGroundOutlineBrush == null)
+                return;
+            if (Hud == null || Hud.Game == null || Hud.Game.Me == null)
+                return;
+
+            var now = Hud.Game.CurrentRealTimeMilliseconds;
+            CleanupPoolArrows(now);
+
+            if (_activePoolArrows.Count == 0)
+                return;
+
+            if (IsPoolArrowUiSuppressed())
+                return;
+
+            var arrows = _activePoolArrows.Values
+                .Where(a => a != null)
+                .OrderBy(a => a.StartMs)
+                .ThenBy(a => a.Key)
+                .ToList();
+
+            var ui = Hud.Window.HeightUiRatio;
+            var spacing = Math.Max(0.0f, PoolDirectionArrowMultiOffsetPx * ui);
+
+            for (var i = 0; i < arrows.Count; i++)
+            {
+                var laneOffsetPx = (i - ((arrows.Count - 1) * 0.5f)) * spacing;
+                DrawActivePoolArrow(arrows[i], now, laneOffsetPx);
+            }
+        }
+
+        private void DrawActivePoolArrow(PoolArrowAlert arrow, long now, float laneOffsetPx)
+        {
+            if (arrow == null)
+                return;
+
+            try
+            {
+                if (arrow.WorldId != 0 && arrow.WorldId != Hud.Game.Me.WorldId)
+                    return;
+
+                var me = Hud.Game.Me.FloorCoordinate;
+                if (me == null || !me.IsValid)
+                    return;
+
+                var area = Hud.Game.Me.SnoArea;
+                if (!IsPoolAreaMatch(arrow.AreaSno, arrow.HostAreaSno, area))
+                    return;
+
+                float dxWorld = arrow.X - me.X;
+                float dyWorld = arrow.Y - me.Y;
+                float distanceSq = dxWorld * dxWorld + dyWorld * dyWorld;
+                if (distanceSq < 4.0f)
+                    return;
+
+                float distance = (float)Math.Sqrt(distanceSq);
+                float nxWorld = dxWorld / distance;
+                float nyWorld = dyWorld / distance;
+
+                var screenMe = me.ToScreenCoordinate(true, true);
+                var screenStep = me.Offset(nxWorld * 10.0f, nyWorld * 10.0f, 0).ToScreenCoordinate(true, true);
+                if (screenMe == null || screenStep == null)
+                    return;
+
+                float ux = screenStep.X - screenMe.X;
+                float uy = screenStep.Y - screenMe.Y;
+                bool targetOnScreen = false;
+                float targetScreenX = 0.0f;
+                float targetScreenY = 0.0f;
+
+                try
+                {
+                    var targetCoordinate = me.Offset(dxWorld, dyWorld, arrow.Z - me.Z);
+                    if (targetCoordinate != null && targetCoordinate.IsValid && targetCoordinate.IsOnScreen(1))
+                    {
+                        var screenTarget = targetCoordinate.ToScreenCoordinate(true, true);
+                        if (screenTarget != null)
+                        {
+                            float sx = screenTarget.X - screenMe.X;
+                            float sy = screenTarget.Y - screenMe.Y;
+                            float sl = (float)Math.Sqrt(sx * sx + sy * sy);
+                            if (sl >= 0.01f)
+                            {
+                                ux = sx;
+                                uy = sy;
+                                targetScreenX = screenTarget.X;
+                                targetScreenY = screenTarget.Y;
+                                targetOnScreen = true;
+                            }
+                        }
+                    }
+                }
+                catch { }
+
+                float screenLen = (float)Math.Sqrt(ux * ux + uy * uy);
+                if (screenLen < 0.01f)
+                {
+                    ux = arrow.LastUx;
+                    uy = arrow.LastUy;
+                    screenLen = (float)Math.Sqrt(ux * ux + uy * uy);
+                    if (screenLen < 0.01f)
+                        return;
+                }
+
+                ux /= screenLen;
+                uy /= screenLen;
+                arrow.LastUx = ux;
+                arrow.LastUy = uy;
+
+                if (targetOnScreen != arrow.TargetWasVisible)
+                {
+                    arrow.TargetWasVisible = targetOnScreen;
+                    arrow.TargetVisibleSinceMs = targetOnScreen ? now : 0;
+                }
+
+                float px = -uy;
+                float py = ux;
+                float laneX = px * laneOffsetPx;
+                float laneY = py * laneOffsetPx;
+
+                float alpha = 1.0f;
+                var remainingMs = arrow.ExpireMs - now;
+                if (PoolArrowFadeMs > 0 && remainingMs < PoolArrowFadeMs)
+                    alpha = Math.Max(0.0f, Math.Min(1.0f, remainingMs / (float)PoolArrowFadeMs));
+
+                PoolGroundBrush.Opacity = alpha;
+                PoolGroundOutlineBrush.Opacity = alpha;
+                if (PoolArrowLightBrush != null) PoolArrowLightBrush.Opacity = alpha * 0.70f;
+                if (PoolArrowShadowBrush != null) PoolArrowShadowBrush.Opacity = alpha * 0.50f;
+
+                var cycle = Math.Max(150, PoolArrowCycleMs);
+                var t = ((now - arrow.StartMs) % cycle) / (float)cycle;
+                var pulse = (float)Math.Sin(t * Math.PI * 2.0) * Math.Max(0.0f, PoolDirectionArrowMotionPx);
+
+                float ui = Hud.Window.HeightUiRatio;
+                float length = Math.Max(28.0f, PoolDirectionArrowLengthPx * ui);
+                float shaftWidth = Math.Max(6.0f, PoolDirectionArrowShaftWidthPx * ui);
+                float headLength = Math.Max(10.0f, Math.Min(length - 8.0f, PoolDirectionArrowHeadLengthPx * ui));
+                float headWidth = Math.Max(shaftWidth + 12.0f, PoolDirectionArrowHeadWidthPx * ui);
+                float outline = Math.Max(0.0f, PoolDirectionArrowOutlinePx * ui);
+                float startDistance = Math.Max(70.0f, PoolDirectionArrowDistancePx * ui);
+
+                float playerBaseX = screenMe.X + ux * (startDistance + pulse);
+                float playerBaseY = screenMe.Y + uy * (startDistance + pulse);
+
+                float edgeX;
+                float edgeY;
+                GetScreenEdgePoint(screenMe.X, screenMe.Y, ux, uy, Math.Max(45.0f * ui, length + outline + 14.0f), out edgeX, out edgeY);
+                float edgeBaseX = edgeX - ux * (length + Math.Max(8.0f, PoolArrowVisibleTargetOffsetPx * ui) - pulse);
+                float edgeBaseY = edgeY - uy * (length + Math.Max(8.0f, PoolArrowVisibleTargetOffsetPx * ui) - pulse);
+
+                float targetBaseX = edgeBaseX;
+                float targetBaseY = edgeBaseY;
+                if (targetOnScreen)
+                {
+                    float targetOffset = Math.Max(0.0f, PoolArrowVisibleTargetOffsetPx * ui);
+                    float visibleBaseX = targetScreenX - ux * (length + targetOffset - pulse);
+                    float visibleBaseY = targetScreenY - uy * (length + targetOffset - pulse);
+
+                    if (arrow.TargetVisibleSinceMs > arrow.StartMs + PoolArrowHoldNearPlayerMs)
+                    {
+                        float visibleT = 1.0f;
+                        int visibleFlyMs = Math.Max(1, PoolArrowFlyToPoolMs);
+                        visibleT = Math.Max(0.0f, Math.Min(1.0f, (now - arrow.TargetVisibleSinceMs) / (float)visibleFlyMs));
+                        visibleT = visibleT * visibleT * (3.0f - 2.0f * visibleT);
+                        targetBaseX = edgeBaseX + (visibleBaseX - edgeBaseX) * visibleT;
+                        targetBaseY = edgeBaseY + (visibleBaseY - edgeBaseY) * visibleT;
+                    }
+                    else
+                    {
+                        targetBaseX = visibleBaseX;
+                        targetBaseY = visibleBaseY;
+                    }
+                }
+
+                float elapsed = Math.Max(0.0f, now - arrow.StartMs);
+                float holdMs = Math.Max(0, PoolArrowHoldNearPlayerMs);
+                float flyMs = Math.Max(1, PoolArrowFlyToPoolMs);
+                float flyT = elapsed <= holdMs ? 0.0f : Math.Max(0.0f, Math.Min(1.0f, (elapsed - holdMs) / flyMs));
+                flyT = flyT * flyT * (3.0f - 2.0f * flyT);
+
+                float baseX = playerBaseX + (targetBaseX - playerBaseX) * flyT + laneX;
+                float baseY = playerBaseY + (targetBaseY - playerBaseY) * flyT + laneY;
+
+                float outlineBaseX = baseX - ux * outline;
+                float outlineBaseY = baseY - uy * outline;
+
+                if (PoolArrowShadowBrush != null)
+                {
+                    PoolArrowShadowBrush.Opacity = alpha * 0.28f;
+                    DrawSinglePoolArrowGeometry(outlineBaseX + 4.0f, outlineBaseY + 5.0f, ux, uy, px, py,
+                        length + outline * 2.5f,
+                        shaftWidth + outline * 2.0f,
+                        headLength + outline * 2.2f,
+                        headWidth + outline * 2.4f,
+                        PoolArrowShadowBrush);
+                }
+
+                DrawSinglePoolArrowGeometry(outlineBaseX, outlineBaseY, ux, uy, px, py,
+                    length + outline * 2.5f,
+                    shaftWidth + outline * 2.0f,
+                    headLength + outline * 2.2f,
+                    headWidth + outline * 2.4f,
+                    PoolGroundOutlineBrush);
+
+                DrawSinglePoolArrowGeometry(baseX, baseY, ux, uy, px, py,
+                    length,
+                    shaftWidth,
+                    headLength,
+                    headWidth,
+                    PoolGroundBrush);
+
+                if (PoolArrowShadowBrush != null)
+                {
+                    PoolArrowShadowBrush.Opacity = alpha * 0.50f;
+                    DrawPoolArrowLowerBevelGeometry(baseX, baseY, ux, uy, px, py, length, shaftWidth, headLength, headWidth, PoolArrowShadowBrush);
+                }
+
+                if (PoolArrowLightBrush != null)
+                {
+                    PoolArrowLightBrush.Opacity = alpha * 0.70f;
+                    DrawPoolArrowHighlightGeometry(baseX, baseY, ux, uy, px, py, length, shaftWidth, headLength, headWidth, PoolArrowLightBrush);
+                }
+            }
+            catch { }
+        }
+
+        private void GetScreenEdgePoint(float fromX, float fromY, float ux, float uy, float margin, out float edgeX, out float edgeY)
+        {
+            var size = Hud.Window.Size;
+            var minX = margin;
+            var minY = margin;
+            var maxX = Math.Max(minX, size.Width - margin);
+            var maxY = Math.Max(minY, size.Height - margin);
+
+            var best = float.MaxValue;
+            if (Math.Abs(ux) > 0.0001f)
+            {
+                var t1 = (minX - fromX) / ux;
+                if (t1 > 0.0f) best = Math.Min(best, t1);
+                var t2 = (maxX - fromX) / ux;
+                if (t2 > 0.0f) best = Math.Min(best, t2);
+            }
+            if (Math.Abs(uy) > 0.0001f)
+            {
+                var t3 = (minY - fromY) / uy;
+                if (t3 > 0.0f) best = Math.Min(best, t3);
+                var t4 = (maxY - fromY) / uy;
+                if (t4 > 0.0f) best = Math.Min(best, t4);
+            }
+
+            if (best == float.MaxValue || float.IsNaN(best) || float.IsInfinity(best))
+                best = 260.0f * Hud.Window.HeightUiRatio;
+
+            edgeX = Clamp(fromX + ux * best, minX, maxX);
+            edgeY = Clamp(fromY + uy * best, minY, maxY);
+        }
+
+        private void DrawSinglePoolArrowGeometry(float baseX, float baseY, float ux, float uy, float px, float py, float length, float shaftWidth, float headLength, float headWidth, IBrush brush)
+        {
+            if (brush == null || length <= 0 || shaftWidth <= 0 || headLength <= 0 || headWidth <= 0)
+                return;
+
+            float shaftLength = Math.Max(4.0f, length - headLength);
+            float halfShaft = shaftWidth * 0.5f;
+            float halfHead = headWidth * 0.5f;
+
+            using (var geometry = Hud.Render.CreateGeometry())
+            {
+                using (var sink = geometry.Open())
+                {
+                    sink.BeginFigure(new Vector2(baseX - px * halfShaft, baseY - py * halfShaft), FigureBegin.Filled);
+                    sink.AddLine(new Vector2(baseX + ux * shaftLength - px * halfShaft, baseY + uy * shaftLength - py * halfShaft));
+                    sink.AddLine(new Vector2(baseX + ux * shaftLength - px * halfHead, baseY + uy * shaftLength - py * halfHead));
+                    sink.AddLine(new Vector2(baseX + ux * length, baseY + uy * length));
+                    sink.AddLine(new Vector2(baseX + ux * shaftLength + px * halfHead, baseY + uy * shaftLength + py * halfHead));
+                    sink.AddLine(new Vector2(baseX + ux * shaftLength + px * halfShaft, baseY + uy * shaftLength + py * halfShaft));
+                    sink.AddLine(new Vector2(baseX + px * halfShaft, baseY + py * halfShaft));
+                    sink.EndFigure(FigureEnd.Closed);
+                    sink.Close();
+                }
+
+                brush.DrawGeometry(geometry);
+            }
+        }
+
+        private void DrawPoolArrowLowerBevelGeometry(float baseX, float baseY, float ux, float uy, float px, float py, float length, float shaftWidth, float headLength, float headWidth, IBrush brush)
+        {
+            if (brush == null || length <= 0 || shaftWidth <= 0 || headLength <= 0 || headWidth <= 0)
+                return;
+
+            float shaftLength = Math.Max(4.0f, length - headLength);
+            float halfShaft = shaftWidth * 0.5f;
+            float halfHead = headWidth * 0.5f;
+            float bevel = Math.Max(4.0f, Math.Min(shaftWidth * 0.30f, 10.0f));
+            float inset = Math.Max(2.0f, shaftWidth * 0.10f);
+
+            using (var geometry = Hud.Render.CreateGeometry())
+            {
+                using (var sink = geometry.Open())
+                {
+                    sink.BeginFigure(new Vector2(baseX + px * (halfShaft - inset), baseY + py * (halfShaft - inset)), FigureBegin.Filled);
+                    sink.AddLine(new Vector2(baseX + ux * shaftLength + px * (halfShaft - inset), baseY + uy * shaftLength + py * (halfShaft - inset)));
+                    sink.AddLine(new Vector2(baseX + ux * shaftLength + px * (halfHead - inset), baseY + uy * shaftLength + py * (halfHead - inset)));
+                    sink.AddLine(new Vector2(baseX + ux * (length - Math.Max(8.0f, headLength * 0.18f)) + px * Math.Max(1.5f, bevel * 0.35f), baseY + uy * (length - Math.Max(8.0f, headLength * 0.18f)) + py * Math.Max(1.5f, bevel * 0.35f)));
+                    sink.AddLine(new Vector2(baseX + ux * shaftLength + px * Math.Max(halfShaft * 0.25f, halfHead - inset - bevel), baseY + uy * shaftLength + py * Math.Max(halfShaft * 0.25f, halfHead - inset - bevel)));
+                    sink.AddLine(new Vector2(baseX + ux * shaftLength + px * (halfShaft - inset - bevel), baseY + uy * shaftLength + py * (halfShaft - inset - bevel)));
+                    sink.AddLine(new Vector2(baseX + px * (halfShaft - inset - bevel), baseY + py * (halfShaft - inset - bevel)));
+                    sink.EndFigure(FigureEnd.Closed);
+                    sink.Close();
+                }
+
+                brush.DrawGeometry(geometry);
+            }
+        }
+
+        private void DrawPoolArrowHighlightGeometry(float baseX, float baseY, float ux, float uy, float px, float py, float length, float shaftWidth, float headLength, float headWidth, IBrush brush)
+        {
+            if (brush == null || length <= 0 || shaftWidth <= 0 || headLength <= 0 || headWidth <= 0)
+                return;
+
+            float shaftLength = Math.Max(4.0f, length - headLength);
+            float halfShaft = shaftWidth * 0.5f;
+            float halfHead = headWidth * 0.5f;
+            float yTop = -halfShaft + Math.Max(4.0f, shaftWidth * 0.22f);
+            float thickness = Math.Max(2.0f, Math.Min(4.0f, shaftWidth * 0.14f));
+            float start = Math.Max(6.0f, shaftWidth * 0.35f);
+            float end = Math.Max(start + 6.0f, shaftLength - Math.Max(3.0f, headLength * 0.12f));
+
+            using (var geometry = Hud.Render.CreateGeometry())
+            {
+                using (var sink = geometry.Open())
+                {
+                    var a = new Vector2(baseX + ux * start + px * yTop, baseY + uy * start + py * yTop);
+                    var b = new Vector2(baseX + ux * end + px * yTop, baseY + uy * end + py * yTop);
+                    var c = new Vector2(baseX + ux * end + px * (yTop + thickness), baseY + uy * end + py * (yTop + thickness));
+                    var d = new Vector2(baseX + ux * start + px * (yTop + thickness), baseY + uy * start + py * (yTop + thickness));
+                    sink.BeginFigure(a, FigureBegin.Filled);
+                    sink.AddLine(b);
+                    sink.AddLine(c);
+                    sink.AddLine(d);
+                    sink.EndFigure(FigureEnd.Closed);
+                    sink.Close();
+                }
+
+                brush.DrawGeometry(geometry);
+            }
+
+            float diagStartX = shaftLength + Math.Max(2.0f, headLength * 0.12f);
+            float diagEndX = length - Math.Max(8.0f, headLength * 0.16f);
+            float diagStartY = -halfHead + Math.Max(6.0f, headWidth * 0.18f);
+            float diagEndY = -Math.Max(2.0f, headWidth * 0.06f);
+
+            using (var geometry = Hud.Render.CreateGeometry())
+            {
+                using (var sink = geometry.Open())
+                {
+                    var a = new Vector2(baseX + ux * diagStartX + px * diagStartY, baseY + uy * diagStartX + py * diagStartY);
+                    var b = new Vector2(baseX + ux * diagEndX + px * diagEndY, baseY + uy * diagEndX + py * diagEndY);
+                    var c = new Vector2(baseX + ux * diagEndX + px * (diagEndY + thickness), baseY + uy * diagEndX + py * (diagEndY + thickness));
+                    var d = new Vector2(baseX + ux * diagStartX + px * (diagStartY + thickness), baseY + uy * diagStartX + py * (diagStartY + thickness));
+                    sink.BeginFigure(a, FigureBegin.Filled);
+                    sink.AddLine(b);
+                    sink.AddLine(c);
+                    sink.AddLine(d);
+                    sink.EndFigure(FigureEnd.Closed);
+                    sink.Close();
+                }
+
+                brush.DrawGeometry(geometry);
+            }
+        }
+
+        private bool IsPoolSpotInCurrentArea(PoolSpot spot)
+        {
+            if (spot == null || Hud.Game == null || Hud.Game.Me == null)
+                return false;
+            if (spot.WorldId != 0 && spot.WorldId != Hud.Game.Me.WorldId)
+                return false;
+            try { return IsPoolAreaMatch(spot, Hud.Game.Me.SnoArea); } catch { return true; }
+        }
+
+        private bool IsPoolAreaMatch(PoolSpot spot, ISnoArea area)
+        {
+            if (spot == null)
+                return false;
+            return IsPoolAreaMatch(spot.AreaSno, spot.HostAreaSno, area);
+        }
+
+        private bool IsPoolAreaMatch(uint spotAreaSno, uint spotHostAreaSno, ISnoArea area)
+        {
+            if (area == null)
+                return true;
+
+            return IsPoolAreaMatch(spotAreaSno, spotHostAreaSno, GetPrimaryAreaSno(area), GetHostAreaSno(area));
+        }
+
+        private bool IsPoolAreaMatch(uint spotAreaSno, uint spotHostAreaSno, uint areaSno, uint hostSno)
+        {
+            var canonicalSpotAreaSno = GetCanonicalPoolAreaSno(spotAreaSno);
+            var canonicalSpotHostAreaSno = GetCanonicalPoolAreaSno(spotHostAreaSno);
+            areaSno = GetCanonicalPoolAreaSno(areaSno);
+            hostSno = GetCanonicalPoolAreaSno(hostSno);
+
+            if (canonicalSpotAreaSno == 0 && canonicalSpotHostAreaSno == 0)
+                return true;
+            if (areaSno != 0 && (areaSno == canonicalSpotAreaSno || areaSno == canonicalSpotHostAreaSno))
+                return true;
+            if (hostSno != 0 && (hostSno == canonicalSpotAreaSno || hostSno == canonicalSpotHostAreaSno))
+                return true;
+            return false;
+        }
+
+        private static bool IsFinite(float value)
+        {
+            return !float.IsNaN(value) && !float.IsInfinity(value);
+        }
+
+        private PartyWorldStatus GetWorldPartyStatus(uint worldId)
+        {
+            var status = new PartyWorldStatus { Ready = false, Lines = new List<string>() };
+            if (worldId == 0 || Hud.Game == null || Hud.Game.Players == null)
+                return status;
+
+            var missing = new List<string>();
+            var count = 0;
+            try
+            {
+                foreach (var player in Hud.Game.Players)
+                {
+                    if (player == null || !player.IsInGame)
+                        continue;
+                    count++;
+                    if (player.WorldId != worldId)
+                        missing.Add(GetPlayerShortName(player));
+                }
+            }
+            catch { }
+
+            if (count <= 0)
+                return status;
+            if (missing.Count == 0)
+            {
+                status.Ready = true;
+                status.Lines.Add("READY");
+            }
+            else
+            {
+                status.Lines.Add("MISSING:");
+                status.Lines.AddRange(missing);
+            }
+            return status;
+        }
+
+        private void UpdateVisitedAreas()
+        {
+            if (!ShowVisitedWaypointMarkers || Hud.Game == null || Hud.Game.Players == null)
+                return;
+
+            var now = Hud.Game.CurrentRealTimeMilliseconds;
+            try
+            {
+                foreach (var player in Hud.Game.Players)
+                {
+                    if (player == null || !player.IsInGame || player.SnoArea == null)
+                        continue;
+                    AddVisitedArea(player.SnoArea, GetPlayerShortName(player), now);
+                }
+            }
+            catch { }
+        }
+
+        private void AddVisitedArea(ISnoArea area, string playerName, long now)
+        {
+            if (area == null || area.Sno == 0 || area.IsTown)
+                return;
+
+            var act = GetBountyActFromNumber(area.Act);
+            if (act == BountyAct.None)
+                act = GetBountyActFromNumber(Hud.Game.CurrentAct);
+
+            AddVisitedAreaSno(act, area.Sno, area.NameLocalized, playerName, now);
+            if (area.HostSnoArea != null && area.HostSnoArea.Sno != 0)
+            {
+                AddVisitedAreaSno(act, area.HostSnoArea.Sno, area.HostSnoArea.NameLocalized, playerName, now);
+            }
+            if (area.HostAreaSno != 0)
+                AddVisitedAreaSno(act, area.HostAreaSno, area.NameLocalized, playerName, now);
+
+            AddVisitedWaypointTargetsForArea(act, area, playerName, now);
+        }
+
+        private void AddVisitedWaypointTargetsForArea(BountyAct act, ISnoArea area, string playerName, long now)
+        {
+            if (act == BountyAct.None || area == null || Hud.Game == null || Hud.Game.ActMapWaypoints == null)
+                return;
+
+            try
+            {
+                var areaSno = GetPrimaryAreaSno(area);
+                var hostSno = GetHostAreaSno(area);
+                foreach (var waypoint in Hud.Game.ActMapWaypoints)
+                {
+                    if (waypoint == null || waypoint.TargetSnoArea == null || waypoint.BountyAct != act)
+                        continue;
+                    var target = waypoint.TargetSnoArea;
+                    var targetSno = GetPrimaryAreaSno(target);
+                    var targetHost = GetHostAreaSno(target);
+                    if ((areaSno != 0 && (areaSno == targetSno || areaSno == targetHost)) ||
+                        (hostSno != 0 && (hostSno == targetSno || hostSno == targetHost)))
+                        AddVisitedAreaSno(act, target.Sno, target.NameLocalized, playerName, now);
+                }
+            }
+            catch { }
+        }
+
+        private void AddVisitedAreaSno(BountyAct act, uint sno, string name, string playerName, long now)
+        {
+            if (sno == 0 || act == BountyAct.None)
+                return;
+            var key = BuildVisitedAreaKey(act, sno);
+            VisitedArea area;
+            if (!_visitedAreas.TryGetValue(key, out area))
+            {
+                area = new VisitedArea { Act = act, Sno = sno, Name = name ?? string.Empty };
+                _visitedAreas[key] = area;
+            }
+            area.LastSeenMs = now;
+            area.PlayerName = playerName ?? string.Empty;
+        }
+
+
+        private BountyAct GetDisplayedWaypointMapAct()
+        {
+            BountyAct currentAct;
+            try { currentAct = Hud.Game.ActMapCurrentAct; } catch { currentAct = BountyAct.None; }
+            if (currentAct != BountyAct.None)
+                return currentAct;
+
+            try
+            {
+                foreach (var pair in _actMapFallbackElements)
+                    if (pair.Key != null && pair.Key.Visible)
+                        return pair.Value;
+            }
+            catch { }
+
+            return BountyAct.None;
+        }
+
+        private void PaintVisitedWaypointMarkers()
+        {
+            if (!ShowVisitedWaypointMarkers || _visitedAreas.Count == 0 || Hud.Game == null || Hud.Game.ActMapWaypoints == null || Hud.Render.WorldMapUiElement == null)
+                return;
+
+            var map = Hud.Render.WorldMapUiElement;
+            if (!map.Visible || (Hud.Render.ActMapUiElement != null && Hud.Render.ActMapUiElement.Visible))
+                return;
+
+            var currentAct = GetDisplayedWaypointMapAct();
+
+            try
+            {
+                foreach (var waypoint in Hud.Game.ActMapWaypoints)
+                {
+                    if (waypoint == null || waypoint.TargetSnoArea == null)
+                        continue;
+                    if (currentAct == BountyAct.None || waypoint.BountyAct != currentAct)
+                        continue;
+                    var waypointAct = waypoint.BountyAct;
+                    if (!IsWaypointVisited(waypointAct, waypoint.TargetSnoArea))
+                        continue;
+
+                    var x = map.Rectangle.X + (waypoint.CoordinateOnMapUiElement.X * Hud.Window.HeightUiRatio) + (VisitedWaypointMarkerOffsetXPx * Hud.Window.HeightUiRatio);
+                    var y = map.Rectangle.Y + (waypoint.CoordinateOnMapUiElement.Y * Hud.Window.HeightUiRatio);
+                    var radius = Math.Max(3.0f, VisitedWaypointMarkerRadius * Hud.Window.HeightUiRatio);
+                    if (VisitedWaypointOutlineBrush != null)
+                        VisitedWaypointOutlineBrush.DrawEllipse(x, y, radius + 2.2f, radius + 2.2f);
+                    if (VisitedWaypointBrush != null)
+                        VisitedWaypointBrush.DrawEllipse(x, y, radius, radius);
+                    if (VisitedWaypointFont != null)
+                        DrawCenteredLine("✓", x, y - radius - 8.0f, VisitedWaypointFont, PoolOutlineFont, 1);
+                }
+            }
+            catch { }
+        }
+
+        private bool IsWaypointVisited(BountyAct act, ISnoArea area)
+        {
+            if (area == null || act == BountyAct.None)
+                return false;
+            if (_visitedAreas.ContainsKey(BuildVisitedAreaKey(act, area.Sno)))
+                return true;
+            if (area.HostAreaSno != 0 && _visitedAreas.ContainsKey(BuildVisitedAreaKey(act, area.HostAreaSno)))
+                return true;
+            if (area.HostSnoArea != null && _visitedAreas.ContainsKey(BuildVisitedAreaKey(act, area.HostSnoArea.Sno)))
+                return true;
+            return false;
+        }
+
+        private static string BuildVisitedAreaKey(BountyAct act, uint sno)
+        {
+            return ((int)act).ToString() + ":" + sno.ToString();
+        }
+
+
+        private string BuildPoolLocationLabel(string prefix, PoolSpot spot)
+        {
+            return BuildPoolLocationLabel(prefix, spot, spot != null && spot.LabelUncertain);
+        }
+
+        private string BuildPoolLocationLabel(string prefix, PoolSpot spot, bool uncertain)
+        {
+            if (spot == null)
+                return "A? - pool";
+
+            var name = ResolvePoolWaypointDisplayName(spot.AreaName);
+            if (string.IsNullOrEmpty(name))
+                name = "current area";
+            var actNumber = GetActNumber(spot.Act);
+            if (actNumber <= 0)
+                actNumber = Math.Max(1, Hud.Game.CurrentAct);
+            return "A" + actNumber.ToString() + " - " + name + (uncertain ? " (?)" : string.Empty);
+        }
+
+        private static string ResolvePoolWaypointDisplayName(string name)
+        {
+            if (string.IsNullOrEmpty(name))
+                return string.Empty;
+            var alias = GetPoolWaypointAlias(name);
+            return string.IsNullOrEmpty(alias) ? name : alias;
+        }
+
+        private static string GetPoolWaypointAlias(string name)
+        {
+            if (string.IsNullOrEmpty(name))
+                return string.Empty;
+            var n = name.Trim();
+            if (string.Equals(n, "Sundered Canyon", StringComparison.OrdinalIgnoreCase))
+                return "Howling Plateau";
+            if (string.Equals(n, "Highlands Crossing", StringComparison.OrdinalIgnoreCase))
+                return "Southern Highlands";
+            if (string.Equals(n, "The Battlefields", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(n, "Battlefields", StringComparison.OrdinalIgnoreCase))
+                return "Battlefields";
+            if (string.Equals(n, "The Arreat Gate", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(n, "Arreat Gate", StringComparison.OrdinalIgnoreCase))
+                return "Battlefields";
+            return string.Empty;
+        }
+
+        private static uint GetCanonicalPoolAreaSno(uint areaSno)
+        {
+            switch (areaSno)
+            {
+                case 93632u: return 19940u;
+                case 19836u: return 19837u;
+                case 314782u: return 261758u;
+                case 154644u: return 112548u;
+                default: return areaSno;
+            }
+        }
+
+        private ISnoArea GetActorSceneArea(IActor actor)
+        {
+            if (actor == null)
+                return null;
+
+            try
+            {
+                if (actor.Scene != null && actor.Scene.SnoArea != null && actor.Scene.SnoArea.Sno != 0)
+                    return actor.Scene.SnoArea;
+            }
+            catch { }
+
+            return null;
+        }
+
+        private ISnoArea FindAreaForWorld(uint worldId, long now)
+        {
+            var local = GetLocalPlayerAreaForWorld(worldId);
+            if (local != null)
+                return IsLocalPoolAreaStable(now) ? local : null;
+
+            try
+            {
+                if (Hud.Game.Players != null)
+                {
+                    foreach (var player in Hud.Game.Players)
+                    {
+                        if (player == null || !player.IsInGame || player.WorldId != worldId || player.SnoArea == null)
+                            continue;
+                        if (Hud.Game.Me != null && ReferenceEquals(player, Hud.Game.Me))
+                            continue;
+                        return player.SnoArea;
+                    }
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private ISnoArea GetLocalPlayerAreaForWorld(uint worldId)
+        {
+            try
+            {
+                if (Hud.Game.Me != null && Hud.Game.Me.WorldId == worldId)
+                    return Hud.Game.Me.SnoArea;
+            }
+            catch { }
+            return null;
+        }
+
+        private static uint GetPrimaryAreaSno(ISnoArea area)
+        {
+            if (area == null)
+                return 0;
+            return area.Sno;
+        }
+
+        private static uint GetHostAreaSno(ISnoArea area)
+        {
+            if (area == null)
+                return 0;
+            if (area.HostSnoArea != null && area.HostSnoArea.Sno != 0)
+                return area.HostSnoArea.Sno;
+            return area.HostAreaSno;
+        }
+
+        private static string GetAreaDisplayName(ISnoArea area)
+        {
+            if (area == null)
+                return string.Empty;
+            if (area.HostSnoArea != null && !string.IsNullOrEmpty(area.HostSnoArea.NameLocalized))
+                return area.HostSnoArea.NameLocalized;
+            return FirstNonEmpty(area.NameLocalized, area.NameEnglish, area.Code);
+        }
+
+        private static int GetActNumber(BountyAct act)
+        {
+            switch (act)
+            {
+                case BountyAct.A1: return 1;
+                case BountyAct.A2: return 2;
+                case BountyAct.A3: return 3;
+                case BountyAct.A4: return 4;
+                case BountyAct.A5: return 5;
+                default: return 0;
+            }
+        }
+
+        private bool IsInsideNephalemRiftArea()
+        {
+            try { return Hud.Game.SpecialArea == SpecialArea.Rift; }
+            catch { return false; }
+        }
+
+        private bool IsInsideGreaterRiftArea()
+        {
+            try { return Hud.Game.SpecialArea == SpecialArea.GreaterRift; }
+            catch { return false; }
+        }
+
+        private bool IsInGreaterRift()
+        {
+            try { return Hud.Game.Me.InGreaterRift || Hud.Game.SpecialArea == SpecialArea.GreaterRift; }
+            catch { return false; }
+        }
+
+        private double SafeRiftPercent()
+        {
+            try { return Hud.Game.RiftPercentage; } catch { return -1.0d; }
+        }
+
+        private static string BuildPylonKey(string id, uint worldId, IWorldCoordinate coordinate)
+        {
+            if (!string.IsNullOrEmpty(id))
+                return "id:" + id;
+            return BuildWorldKey("obj", worldId, coordinate);
+        }
+
+        private static string BuildWorldKey(string prefix, uint worldId, IWorldCoordinate coordinate)
+        {
+            if (coordinate == null)
+                return prefix + ":" + worldId.ToString();
+            return prefix + ":" + worldId.ToString() + ":" + ((int)Math.Round(coordinate.X)).ToString() + ":" + ((int)Math.Round(coordinate.Y)).ToString();
+        }
+
+        private string GetPylonShortName(IMarker marker)
+        {
+            if (marker == null)
+                return "PYL";
+            return GetPylonShortName(marker.SnoActor != null ? marker.SnoActor.Sno : 0, marker.Name);
+        }
+
+        private string GetPylonShortName(IShrine shrine)
+        {
+            if (shrine == null)
+                return "PYL";
+            string typeName = string.Empty;
+            try { typeName = shrine.Type.ToString(); } catch { }
+            return GetPylonShortName(shrine.SnoActor != null ? shrine.SnoActor.Sno : 0, typeName);
+        }
+
+        private ITexture GetPylonBuffIconTexture(ActorSnoEnum sno, string name)
+        {
+            var powerSno = GetPylonBuffPowerSno(sno, name);
+            if (powerSno == 0)
+                return null;
+
+            try
+            {
+                var power = Hud.Sno.GetSnoPower(powerSno);
+                if (power != null && power.NormalIconTextureId != 0)
+                    return Hud.Texture.GetTexture(power.NormalIconTextureId);
+
+                if (power != null && power.Icons != null && power.Icons.Length > 0 && power.Icons[0].TextureId != 0)
+                    return Hud.Texture.GetTexture(power.Icons[0].TextureId);
+            }
+            catch { }
+
+            return null;
+        }
+
+        private static uint GetPylonBuffPowerSno(ActorSnoEnum sno, string name)
+        {
+            switch (sno)
+            {
+                case ActorSnoEnum._x1_lr_shrine_damage: return 262935u; // Generic_PagesBuffDamage / Power
+                case ActorSnoEnum._x1_lr_shrine_electrified: return 403404u; // Generic_PagesBuffElectrifiedTieredRift / Conduit
+                case ActorSnoEnum._x1_lr_shrine_electrified_tieredrift: return 403404u; // Conduit
+                case ActorSnoEnum._x1_lr_shrine_infinite_casting: return 266258u; // Generic_PagesBuffInfiniteCasting / Channeling
+                case ActorSnoEnum._x1_lr_shrine_invulnerable: return 266254u; // Generic_PagesBuffInvulnerable / Shield
+                case ActorSnoEnum._x1_lr_shrine_run_speed: return 266271u; // Generic_PagesBuffRunSpeed / Speed
+            }
+
+            var n = (name ?? string.Empty).ToLowerInvariant();
+            if (n.IndexOf("damage") >= 0 || n.IndexOf("power") >= 0) return 262935u;
+            if (n.IndexOf("elect") >= 0 || n.IndexOf("conduit") >= 0) return 403404u;
+            if (n.IndexOf("channel") >= 0 || n.IndexOf("infinite") >= 0) return 266258u;
+            if (n.IndexOf("invulnerable") >= 0 || n.IndexOf("shield") >= 0) return 266254u;
+            if (n.IndexOf("speed") >= 0 || n.IndexOf("run") >= 0) return 266271u;
+            return 0u;
+        }
+
+        private string GetPylonShortName(ActorSnoEnum sno, string name)
+        {
+            switch (sno)
+            {
+                case ActorSnoEnum._x1_lr_shrine_damage: return "POW";
+                case ActorSnoEnum._x1_lr_shrine_electrified: return "CON";
+                case ActorSnoEnum._x1_lr_shrine_electrified_tieredrift: return "CON";
+                case ActorSnoEnum._x1_lr_shrine_infinite_casting: return "CHN";
+                case ActorSnoEnum._x1_lr_shrine_invulnerable: return "SHD";
+                case ActorSnoEnum._x1_lr_shrine_run_speed: return "SPD";
+            }
+            var n = (name ?? string.Empty).ToLowerInvariant();
+            if (n.IndexOf("damage") >= 0 || n.IndexOf("power") >= 0) return "POW";
+            if (n.IndexOf("elect") >= 0 || n.IndexOf("conduit") >= 0) return "CON";
+            if (n.IndexOf("channel") >= 0 || n.IndexOf("infinite") >= 0) return "CHN";
+            if (n.IndexOf("invulnerable") >= 0 || n.IndexOf("shield") >= 0) return "SHD";
+            if (n.IndexOf("speed") >= 0 || n.IndexOf("run") >= 0) return "SPD";
+            return "PYL";
+        }
+
+        private string GetPlayerShortName(IPlayer player)
+        {
+            if (player == null)
+                return "?";
+            try { if (!string.IsNullOrEmpty(player.BattleTagAbovePortrait)) return player.BattleTagAbovePortrait; } catch { }
+            try { if (!string.IsNullOrEmpty(player.HeroName)) return player.HeroName; } catch { }
+            try { return "P" + (player.Index + 1).ToString(); } catch { }
+            return "?";
+        }
+
+        private float DrawCenteredLine(string text, float centerX, float y, IFont font, IFont outline, int outlineRadius)
+        {
+            if (string.IsNullOrEmpty(text) || font == null)
+                return 0.0f;
+            var layout = font.GetTextLayout(text);
+            var x = centerX - (layout.Metrics.Width * 0.5f);
+            DrawOutlinedText(text, x, y, font, outline, outlineRadius);
+            return Math.Max(10.0f, layout.Metrics.Height + 1.0f);
+        }
+
+        private float DrawRightAlignedLine(string text, float rightX, float y, IFont font, IFont outline, int outlineRadius)
+        {
+            if (string.IsNullOrEmpty(text) || font == null)
+                return 0.0f;
+            var layout = font.GetTextLayout(text);
+            DrawOutlinedText(text, rightX - layout.Metrics.Width, y, font, outline, outlineRadius);
+            return Math.Max(10.0f, layout.Metrics.Height + 1.0f);
+        }
+
+        private void DrawOutlinedText(string text, float x, float y, IFont font, IFont outline, int radius)
+        {
+            radius = Math.Max(1, Math.Min(6, radius));
+            if (outline != null)
+            {
+                for (var dx = -radius; dx <= radius; dx++)
+                {
+                    for (var dy = -radius; dy <= radius; dy++)
+                    {
+                        if ((dx != 0 || dy != 0) && (dx * dx) + (dy * dy) <= (radius * radius) + 2)
+                            outline.DrawText(text, x + dx, y + dy, false);
+                    }
+                }
+            }
+            if (font != null)
+                font.DrawText(text, x, y, false);
+        }
+
+        private static string FirstNonEmpty(params string[] values)
+        {
+            if (values == null)
+                return string.Empty;
+            foreach (var value in values)
+                if (!string.IsNullOrEmpty(value))
+                    return value;
+            return string.Empty;
+        }
+
+        private static BountyAct GetBountyActFromNumber(int act)
+        {
+            switch (act)
+            {
+                case 1: return BountyAct.A1;
+                case 2: return BountyAct.A2;
+                case 3: return BountyAct.A3;
+                case 4: return BountyAct.A4;
+                case 5: return BountyAct.A5;
+                default: return BountyAct.None;
+            }
+        }
+
         private class LabelRule
         {
             public readonly string Label;
@@ -1668,6 +4033,203 @@ namespace Turbo.Plugins.s7o
                 return false;
             }
         }
+
+        private class PylonProgressMark
+        {
+            public string Key;
+            public float Percent;
+            public string Label;
+            public uint TextureSno;
+            public int TextureFrameIndex;
+            public ITexture Icon;
+            public bool UsesBuffIcon;
+            public long LastSeenMs;
+        }
+
+        private static readonly PoolAreaRectHint[] PoolAreaRectHints =
+        {
+            new PoolAreaRectHint(2826u, 480.0f, 240.0f, 720.0f, 480.0f, 19774u, 0u, BountyAct.A1, "Halls of Agony Level 1"),
+            new PoolAreaRectHint(2826u, 480.0f, 720.0f, 720.0f, 960.0f, 19774u, 0u, BountyAct.A1, "Halls of Agony Level 1"),
+            new PoolAreaRectHint(50582u, 480.0f, 720.0f, 720.0f, 960.0f, 19783u, 0u, BountyAct.A1, "Cathedral Level 2"),
+            new PoolAreaRectHint(71150u, 2220.0f, 1680.0f, 2340.0f, 1800.0f, 19954u, 0u, BountyAct.A1, "The Weeping Hollow"),
+            new PoolAreaRectHint(71150u, 2220.0f, 1920.0f, 2340.0f, 2040.0f, 19954u, 0u, BountyAct.A1, "The Weeping Hollow"),
+            new PoolAreaRectHint(71150u, 1920.0f, 960.0f, 2160.0f, 1200.0f, 19952u, 0u, BountyAct.A1, "Fields of Misery"),
+            new PoolAreaRectHint(95804u, 1200.0f, 480.0f, 1440.0f, 720.0f, 69504u, 0u, BountyAct.A3, "Rakkis Crossing"),
+            new PoolAreaRectHint(95804u, 4320.0f, 240.0f, 4560.0f, 480.0f, 154644u, 112548u, BountyAct.A3, "Battlefields"),
+            new PoolAreaRectHint(95804u, 3840.0f, 240.0f, 4080.0f, 480.0f, 112548u, 0u, BountyAct.A3, "Battlefields"),
+            new PoolAreaRectHint(154587u, 240.0f, 720.0f, 480.0f, 960.0f, 154588u, 0u, BountyAct.A1, "Defiled Crypt"),
+            new PoolAreaRectHint(409000u, 240.0f, 240.0f, 480.0f, 480.0f, 409001u, 0u, BountyAct.A4, "Besieged Tower Level 1"),
+            new PoolAreaRectHint(136415u, 720.0f, 240.0f, 960.0f, 480.0f, 136448u, 0u, BountyAct.A3, "The Keep Depths Level 3"),
+            new PoolAreaRectHint(79401u, 1080.0f, 720.0f, 1440.0f, 1080.0f, 80791u, 0u, BountyAct.A3, "Tower of the Damned Level 1"),
+            new PoolAreaRectHint(93099u, 3120.0f, 3120.0f, 3360.0f, 3360.0f, 93173u, 0u, BountyAct.A3, "Stonefort"),
+            new PoolAreaRectHint(93099u, 4080.0f, 4080.0f, 4320.0f, 4320.0f, 93173u, 0u, BountyAct.A3, "Stonefort"),
+            new PoolAreaRectHint(338600u, 1440.0f, 720.0f, 1560.0f, 840.0f, 338602u, 0u, BountyAct.A5, "Battlefields of Eternity"),
+            new PoolAreaRectHint(338600u, 960.0f, 480.0f, 1080.0f, 600.0f, 338602u, 0u, BountyAct.A5, "Battlefields of Eternity"),
+            new PoolAreaRectHint(460372u, 1080.0f, 240.0f, 1200.0f, 360.0f, 460671u, 0u, BountyAct.A5, "Shrouded Moors"),
+            new PoolAreaRectHint(460372u, 600.0f, 1200.0f, 720.0f, 1320.0f, 460671u, 0u, BountyAct.A5, "Shrouded Moors"),
+            new PoolAreaRectHint(408254u, 480.0f, 360.0f, 600.0f, 480.0f, 427763u, 0u, BountyAct.A5, "Greyhollow Island"),
+            new PoolAreaRectHint(261712u, 1680.0f, 720.0f, 1920.0f, 960.0f, 261758u, 0u, BountyAct.A5, "Westmarch Commons"),
+            new PoolAreaRectHint(263494u, 1200.0f, 720.0f, 1440.0f, 960.0f, 263493u, 0u, BountyAct.A5, "Westmarch Heights"),
+            new PoolAreaRectHint(283566u, 240.0f, 480.0f, 480.0f, 720.0f, 283567u, 0u, BountyAct.A5, "Ruins of Corvus"),
+            new PoolAreaRectHint(283552u, 960.0f, 480.0f, 1200.0f, 720.0f, 283553u, 0u, BountyAct.A5, "Passage to Corvus"),
+            new PoolAreaRectHint(283552u, 720.0f, 240.0f, 960.0f, 480.0f, 283553u, 0u, BountyAct.A5, "Passage to Corvus"),
+            new PoolAreaRectHint(338600u, 240.0f, 1560.0f, 360.0f, 1680.0f, 367831u, 0u, BountyAct.A5, "The Crag of Eternity"),
+            new PoolAreaRectHint(267412u, 960.0f, 1560.0f, 1080.0f, 1680.0f, 258142u, 0u, BountyAct.A5, "Paths of the Drowned"),
+            new PoolAreaRectHint(263494u, 720.0f, 960.0f, 960.0f, 1200.0f, 263493u, 0u, BountyAct.A5, "Westmarch Heights"),
+            new PoolAreaRectHint(261712u, 1200.0f, 1440.0f, 1440.0f, 1680.0f, 261758u, 0u, BountyAct.A5, "Westmarch Commons"),
+            new PoolAreaRectHint(261712u, 720.0f, 720.0f, 960.0f, 960.0f, 314782u, 0u, BountyAct.A5, "Westmarch Commons"),
+            new PoolAreaRectHint(428493u, 480.0f, 240.0f, 720.0f, 480.0f, 428494u, 0u, BountyAct.A3, "The Ruins of Sescheron"),
+            new PoolAreaRectHint(71150u, 2100.0f, 1680.0f, 2220.0f, 1800.0f, 72712u, 0u, BountyAct.A1, "Cemetery of the Forsaken"),
+            new PoolAreaRectHint(71150u, 2340.0f, 4680.0f, 2460.0f, 4800.0f, 93632u, 0u, BountyAct.A1, "Highlands Crossing"),
+            new PoolAreaRectHint(70885u, 1440.0f, 480.0f, 1680.0f, 720.0f, 19839u, 0u, BountyAct.A2, "Stinging Winds"),
+            new PoolAreaRectHint(70885u, 1680.0f, 720.0f, 1920.0f, 960.0f, 19838u, 0u, BountyAct.A2, "Black Canyon Mines"),
+            new PoolAreaRectHint(70885u, 1680.0f, 960.0f, 1920.0f, 1200.0f, 19838u, 0u, BountyAct.A2, "Black Canyon Mines"),
+            new PoolAreaRectHint(70885u, 1920.0f, 720.0f, 2160.0f, 960.0f, 19838u, 0u, BountyAct.A2, "Black Canyon Mines"),
+            new PoolAreaRectHint(70885u, 1920.0f, 960.0f, 2160.0f, 1200.0f, 19838u, 0u, BountyAct.A2, "Black Canyon Mines"),
+            new PoolAreaRectHint(70885u, 2160.0f, 1200.0f, 2400.0f, 1440.0f, 19837u, 0u, BountyAct.A2, "Howling Plateau"),
+            new PoolAreaRectHint(70885u, 1440.0f, 960.0f, 1680.0f, 1200.0f, 19835u, 0u, BountyAct.A2, "Road to Alcarnus"),
+            new PoolAreaRectHint(70885u, 1440.0f, 1200.0f, 1680.0f, 1440.0f, 19835u, 0u, BountyAct.A2, "Road to Alcarnus"),
+            new PoolAreaRectHint(70885u, 960.0f, 3840.0f, 1200.0f, 4080.0f, 53834u, 0u, BountyAct.A2, "Desolate Sands"),
+            new PoolAreaRectHint(70885u, 2640.0f, 4560.0f, 2880.0f, 4800.0f, 57425u, 0u, BountyAct.A2, "Dahlgur Oasis"),
+            new PoolAreaRectHint(70885u, 2880.0f, 4080.0f, 3120.0f, 4320.0f, 57425u, 0u, BountyAct.A2, "Dahlgur Oasis"),
+            new PoolAreaRectHint(70885u, 2880.0f, 4320.0f, 3120.0f, 4560.0f, 57425u, 0u, BountyAct.A2, "Dahlgur Oasis"),
+            new PoolAreaRectHint(70885u, 2880.0f, 4560.0f, 3120.0f, 4800.0f, 57425u, 0u, BountyAct.A2, "Dahlgur Oasis"),
+            new PoolAreaRectHint(70885u, 3120.0f, 4080.0f, 3360.0f, 4320.0f, 57425u, 0u, BountyAct.A2, "Dahlgur Oasis"),
+            new PoolAreaRectHint(70885u, 3120.0f, 4320.0f, 3360.0f, 4560.0f, 57425u, 0u, BountyAct.A2, "Dahlgur Oasis"),
+            new PoolAreaRectHint(70885u, 3360.0f, 4080.0f, 3600.0f, 4320.0f, 57425u, 0u, BountyAct.A2, "Dahlgur Oasis"),
+            new PoolAreaRectHint(70885u, 3360.0f, 4320.0f, 3600.0f, 4560.0f, 57425u, 0u, BountyAct.A2, "Dahlgur Oasis"),
+            new PoolAreaRectHint(70885u, 2400.0f, 1440.0f, 2640.0f, 1680.0f, 19836u, 0u, BountyAct.A2, "Sundered Canyon"),
+            new PoolAreaRectHint(70885u, 2640.0f, 1440.0f, 2880.0f, 1680.0f, 19836u, 0u, BountyAct.A2, "Sundered Canyon"),
+            new PoolAreaRectHint(50585u, 960.0f, 480.0f, 1200.0f, 720.0f, 19787u, 0u, BountyAct.A1, "The Royal Crypts"),
+            new PoolAreaRectHint(180550u, 480.0f, 960.0f, 720.0f, 1200.0f, 78572u, 0u, BountyAct.A1, "Caverns of Araneae"),
+            new PoolAreaRectHint(71150u, 1020.0f, 3240.0f, 1260.0f, 3480.0f, 19943u, 0u, BountyAct.A1, "Leoric's Manor Courtyard"),
+            new PoolAreaRectHint(50588u, 600.0f, 600.0f, 720.0f, 720.0f, 19791u, 0u, BountyAct.A2, "Sewers of Caldeum"),
+            new PoolAreaRectHint(70885u, 960.0f, 960.0f, 1200.0f, 1200.0f, 19839u, 0u, BountyAct.A2, "Stinging Winds"),
+            new PoolAreaRectHint(95804u, 1920.0f, 480.0f, 2160.0f, 720.0f, 69504u, 0u, BountyAct.A3, "Rakkis Crossing"),
+            new PoolAreaRectHint(95804u, 2160.0f, 480.0f, 2400.0f, 720.0f, 69504u, 0u, BountyAct.A3, "Rakkis Crossing"),
+            new PoolAreaRectHint(119641u, 720.0f, 720.0f, 1080.0f, 1080.0f, 119653u, 0u, BountyAct.A3, "Tower of the Cursed Level 1"),
+            new PoolAreaRectHint(456029u, 970.0f, 1680.0f, 1210.0f, 1920.0f, 464886u, 0u, BountyAct.A4, "Upper Infernal Fate: Halls of Agony"),
+            new PoolAreaRectHint(458965u, 620.0f, 120.0f, 860.0f, 360.0f, 464870u, 0u, BountyAct.A4, "Fractured Fate: The Festering Woods"),
+            new PoolAreaRectHint(408254u, 240.0f, 480.0f, 360.0f, 600.0f, 427763u, 0u, BountyAct.A5, "Greyhollow Island"),
+            new PoolAreaRectHint(374774u, 720.0f, 480.0f, 960.0f, 720.0f, 374773u, 0u, BountyAct.A5, "Realm of the Banished"),
+            new PoolAreaRectHint(374774u, 960.0f, 480.0f, 1200.0f, 720.0f, 374773u, 0u, BountyAct.A5, "Realm of the Banished"),
+            new PoolAreaRectHint(261712u, 240.0f, 240.0f, 480.0f, 480.0f, 261758u, 0u, BountyAct.A5, "Westmarch Commons"),
+            new PoolAreaRectHint(458965u, 1240.0f, 600.0f, 1360.0f, 720.0f, 464873u, 0u, BountyAct.A4, "Fractured Fate: Battlefields of Eternity"),
+            new PoolAreaRectHint(458965u, 240.0f, 590.0f, 480.0f, 830.0f, 464874u, 0u, BountyAct.A4, "Fractured Fate: Keep Depths"),
+            new PoolAreaRectHint(2826u, 1200.0f, 240.0f, 1440.0f, 480.0f, 19774u, 0u, BountyAct.A1, "Halls of Agony Level 1"),
+            new PoolAreaRectHint(2826u, 1440.0f, 480.0f, 1680.0f, 720.0f, 19774u, 0u, BountyAct.A1, "Halls of Agony Level 1"),
+            new PoolAreaRectHint(50582u, 240.0f, 480.0f, 480.0f, 720.0f, 19783u, 0u, BountyAct.A1, "Cathedral Level 2"),
+            new PoolAreaRectHint(95804u, 3120.0f, 240.0f, 3360.0f, 480.0f, 112565u, 0u, BountyAct.A3, "Fields of Slaughter"),
+            new PoolAreaRectHint(338600u, 720.0f, 360.0f, 960.0f, 600.0f, 338602u, 0u, BountyAct.A5, "Battlefields of Eternity"),
+            new PoolAreaRectHint(457461u, 480.0f, 510.0f, 720.0f, 750.0f, 464821u, 0u, BountyAct.A4, "Unbending Fate: The Banished"),
+            new PoolAreaRectHint(71150u, 0.0f, 600.0f, 240.0f, 840.0f, 19953u, 0u, BountyAct.A1, "The Festering Woods"),
+            new PoolAreaRectHint(71150u, 120.0f, 840.0f, 240.0f, 960.0f, 19953u, 0u, BountyAct.A1, "The Festering Woods"),
+            new PoolAreaRectHint(71150u, 1020.0f, 3480.0f, 1260.0f, 3720.0f, 19943u, 0u, BountyAct.A1, "Leoric's Manor Courtyard"),
+            new PoolAreaRectHint(180550u, 480.0f, 1200.0f, 720.0f, 1440.0f, 78572u, 0u, BountyAct.A1, "Caverns of Araneae"),
+            new PoolAreaRectHint(58983u, 480.0f, 480.0f, 720.0f, 720.0f, 19776u, 0u, BountyAct.A1, "Halls of Agony Level 3"),
+            new PoolAreaRectHint(50584u, 480.0f, 480.0f, 720.0f, 720.0f, 19785u, 0u, BountyAct.A1, "Cathedral Level 4"),
+            new PoolAreaRectHint(456634u, 480.0f, 960.0f, 720.0f, 1200.0f, 456638u, 0u, BountyAct.A2, "Temple of the Firstborn Level 1"),
+            new PoolAreaRectHint(79401u, 720.0f, 720.0f, 1080.0f, 1080.0f, 80791u, 0u, BountyAct.A3, "Tower of the Damned Level 1"),
+            new PoolAreaRectHint(458965u, 1220.0f, 240.0f, 1460.0f, 480.0f, 464858u, 0u, BountyAct.A4, "Fractured Fate: Keep Depths"),
+            new PoolAreaRectHint(71150u, 1980.0f, 1800.0f, 2100.0f, 1920.0f, 72712u, 0u, BountyAct.A1, "Cemetery of the Forsaken"),
+            new PoolAreaRectHint(58982u, 240.0f, 720.0f, 480.0f, 960.0f, 19775u, 0u, BountyAct.A1, "Halls of Agony Level 2"),
+            new PoolAreaRectHint(456634u, 720.0f, 720.0f, 960.0f, 960.0f, 456638u, 0u, BountyAct.A2, "Temple of the Firstborn Level 1"),
+            new PoolAreaRectHint(95804u, 3360.0f, 480.0f, 3840.0f, 720.0f, 155048u, 0u, BountyAct.A3, "The Bridge of Korsikk"),
+            new PoolAreaRectHint(428493u, 720.0f, 240.0f, 960.0f, 480.0f, 428494u, 0u, BountyAct.A3, "The Ruins of Sescheron"),
+            new PoolAreaRectHint(428493u, 720.0f, 480.0f, 960.0f, 720.0f, 428494u, 0u, BountyAct.A3, "The Ruins of Sescheron"),
+        };
+
+        private class PoolAreaRectHint
+        {
+            public readonly uint WorldSno;
+            public readonly float MinX;
+            public readonly float MinY;
+            public readonly float MaxX;
+            public readonly float MaxY;
+            public readonly uint AreaSno;
+            public readonly uint HostAreaSno;
+            public readonly BountyAct Act;
+            public readonly string AreaName;
+
+            public PoolAreaRectHint(uint worldSno, float minX, float minY, float maxX, float maxY, uint areaSno, uint hostAreaSno, BountyAct act, string areaName)
+            {
+                WorldSno = worldSno;
+                MinX = minX;
+                MinY = minY;
+                MaxX = maxX;
+                MaxY = maxY;
+                AreaSno = areaSno;
+                HostAreaSno = hostAreaSno;
+                Act = act;
+                AreaName = areaName;
+            }
+        }
+
+        private class PoolAreaSnapshot
+        {
+            public uint AreaSno;
+            public uint HostAreaSno;
+            public BountyAct Act;
+            public string AreaName;
+        }
+
+        private class ConsumedPoolSpot
+        {
+            public uint WorldId;
+            public float X;
+            public float Y;
+        }
+
+        private class PoolSpot
+        {
+            public string Key;
+            public uint WorldId;
+            public uint AreaSno;
+            public uint HostAreaSno;
+            public BountyAct Act;
+            public IWorldCoordinate FloorCoordinate;
+            public string AreaName;
+            public string Label;
+            public bool LabelUncertain;
+            public bool LocationConfirmed;
+            public long FirstSeenMs;
+            public long FirstSeenOrder;
+            public long LastSeenMs;
+            public long LastArrowAreaVisitSequence;
+        }
+
+        private class PoolArrowAlert
+        {
+            public string Key;
+            public float X;
+            public float Y;
+            public float Z;
+            public uint WorldId;
+            public uint AreaSno;
+            public uint HostAreaSno;
+            public long StartMs;
+            public long ExpireMs;
+            public float LastUx;
+            public float LastUy;
+            public bool TargetWasVisible;
+            public long TargetVisibleSinceMs;
+        }
+
+        private class PartyWorldStatus
+        {
+            public bool Ready;
+            public List<string> Lines;
+        }
+
+        private class VisitedArea
+        {
+            public BountyAct Act;
+            public uint Sno;
+            public string Name;
+            public string PlayerName;
+            public long LastSeenMs;
+        }
+
 
         private class ItemMarker
         {
