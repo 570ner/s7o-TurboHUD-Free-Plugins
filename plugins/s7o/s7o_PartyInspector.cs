@@ -3331,6 +3331,10 @@ namespace Turbo.Plugins.s7o
                             AddCcForRune(skill, ref flags, HardCcFlags.Freeze, "Frostbite");
                             break;
 
+                        case 80263: // Barbarian_Cleave
+                            AddCcForRune(skill, ref flags, HardCcFlags.Knockback, "Scattering Blast");
+                            break;
+
                         case 78548: // Barbarian_Frenzy
                             AddCcForRune(skill, ref flags, HardCcFlags.Stun, "Smite");
                             break;
@@ -3354,6 +3358,8 @@ namespace Turbo.Plugins.s7o
                             break;
 
                         case 377453: // Barbarian_AncientSpear
+                            AddCcForRune(skill, ref flags, HardCcFlags.Knockback, "Ranseur");
+                            AddCcForRune(skill, ref flags, HardCcFlags.Pull, "Harpoon");
                             AddCcForRune(skill, ref flags, HardCcFlags.Pull, "Rage Flip");
                             break;
 
@@ -3380,7 +3386,23 @@ namespace Turbo.Plugins.s7o
                             AddCcForRune(skill, ref flags, HardCcFlags.Freeze, "Glacier");
                             break;
 
+                        case 96296: // Barbarian_Whirlwind
+                            AddCcForRune(skill, ref flags, HardCcFlags.Pull, "Hurricane");
+                            break;
+
+                        case 79528: // Barbarian_IgnorePain
+                            AddCcForRune(skill, ref flags, HardCcFlags.Knockback, "Bravado");
+                            break;
+
                         // Crusader
+                        case 266766: // Crusader_BlessedHammer
+                            AddCcForRune(skill, ref flags, HardCcFlags.Stun, "Brute Force");
+                            break;
+
+                        case 267600: // Crusader_Judgment
+                            AddCcForRune(skill, ref flags, HardCcFlags.Pull, "Mass Verdict");
+                            break;
+
                         case 266627: // Crusader_Condemn
                             AddCcForRune(skill, ref flags, HardCcFlags.Pull, "Vacuum");
                             break;
@@ -3419,6 +3441,14 @@ namespace Turbo.Plugins.s7o
                             AddCcForRune(skill, ref flags, HardCcFlags.Fear, "Flee Fool");
                             break;
 
+                        case 291804: // Crusader_IronSkin
+                            AddCcForRune(skill, ref flags, HardCcFlags.Stun, "Charged Up");
+                            break;
+
+                        case 330729: // Crusader_Phalanx
+                            AddCcForRune(skill, ref flags, HardCcFlags.Stun, "Stampede");
+                            break;
+
                         // Demon Hunter
                         case 77552: // DemonHunter_Bolas
                             AddCcForRune(skill, ref flags, HardCcFlags.Stun, "Thunder Ball");
@@ -3452,7 +3482,20 @@ namespace Turbo.Plugins.s7o
                                 flags |= HardCcFlags.Stun | HardCcFlags.Knockback;
                             break;
 
+                        case 365311: // DemonHunter_Companion
+                            AddCcForRune(skill, ref flags, HardCcFlags.Taunt, "Boar Companion");
+                            break;
+
+                        case 131325: // DemonHunter_ElementalArrow
+                            AddCcForRune(skill, ref flags, HardCcFlags.Stun, "Lightning Bolts");
+                            break;
+
                         // Monk
+                        case 96019: // Monk_DeadlyReach
+                            if (!RuneIs(skill, "Scattered Blows"))
+                                flags |= HardCcFlags.Knockback;
+                            break;
+
                         case 95940: // Monk_FistsOfThunder
                             AddCcForRune(skill, ref flags, HardCcFlags.Knockback, "Thunderclap");
                             AddCcForRune(skill, ref flags, HardCcFlags.Freeze, "Wind Blast");
@@ -3483,8 +3526,17 @@ namespace Turbo.Plugins.s7o
                             AddCcForRune(skill, ref flags, HardCcFlags.Freeze, "Tsunami");
                             break;
 
+                        case 121442: // Monk_TempestRush
+                            AddCcForRune(skill, ref flags, HardCcFlags.Knockback, "Bluster");
+                            break;
+
                         case 96033: // Monk_WaveOfLight
                             AddCcForRune(skill, ref flags, HardCcFlags.Knockback, "Explosive Light");
+                            break;
+
+                        case 362102: // Monk_MysticAlly
+                            AddCcForRune(skill, ref flags, HardCcFlags.Freeze, "Water Ally");
+                            AddCcForRune(skill, ref flags, HardCcFlags.Knockback, "Earth Ally");
                             break;
 
                         // Necromancer
@@ -3494,6 +3546,10 @@ namespace Turbo.Plugins.s7o
 
                         case 462147: // Necromancer_BoneSpikes
                             AddCcForRune(skill, ref flags, HardCcFlags.Stun, "Sudden Impact");
+                            break;
+
+                        case 462198: // Necromancer_GrimScythe
+                            AddCcForRune(skill, ref flags, HardCcFlags.Pull, "Dual Scythes");
                             break;
 
                         case 451537: // Necromancer_CommandGolem
@@ -3509,9 +3565,46 @@ namespace Turbo.Plugins.s7o
                             AddCcForRune(skill, ref flags, HardCcFlags.Freeze, "Frozen Lands");
                             break;
 
+                        case 460358: // Necromancer_ArmyOfTheDead
+                            AddCcForRune(skill, ref flags, HardCcFlags.Pull, "Death Valley");
+                            break;
+
+                        case 464896: // Necromancer_BoneSpirit
+                            AddCcForRune(skill, ref flags, HardCcFlags.Fear, "Panic Attack");
+                            AddCcForRune(skill, ref flags, HardCcFlags.Charm, "Possession");
+                            break;
+
+                        case 454174: // Necromancer_CorpseExplosion
+                            AddCcForRune(skill, ref flags, HardCcFlags.Freeze, "Dead Cold");
+                            AddCcForRune(skill, ref flags, HardCcFlags.Pull, "Final Embrace");
+                            break;
+
+                        case 461650: // Necromancer_CorpseLance
+                            AddCcForRune(skill, ref flags, HardCcFlags.Stun, "Visceral Impact");
+                            break;
+
+                        case 451491: // Necromancer_Decrepify
+                            AddCcForRune(skill, ref flags, HardCcFlags.Stun, "Dizzying Curse");
+                            break;
+
+                        case 462239: // Necromancer_Revive
+                            AddCcForRune(skill, ref flags, HardCcFlags.Fear, "Horrific Return");
+                            break;
+
                         // Witch Doctor
+                        case 103181: // WitchDoctor_PoisonDart
+                            AddCcForRune(skill, ref flags, HardCcFlags.Stun, "Snake to the Face");
+                            break;
+
+                        case 106465: // WitchDoctor_PlagueOfToads
+                            AddCcForRune(skill, ref flags, HardCcFlags.Charm, "Addling Toads");
+                            break;
+
                         case 30631: // WitchDoctor_Hex
-                            flags |= HardCcFlags.Charm;
+                            if (RuneIs(skill, "Toad of Hugeness"))
+                                flags |= HardCcFlags.Pull;
+                            else if (!RuneIs(skill, "Angry Chicken"))
+                                flags |= HardCcFlags.Charm;
                             break;
 
                         case 67668: // WitchDoctor_Horrify
@@ -3520,9 +3613,16 @@ namespace Turbo.Plugins.s7o
 
                         case 67600: // WitchDoctor_MassConfusion
                             flags |= HardCcFlags.Charm;
+                            AddCcForRune(skill, ref flags, HardCcFlags.Stun, "Mass Hysteria");
+                            break;
+
+                        case 30624: // WitchDoctor_Gargantuan
+                            AddCcForRune(skill, ref flags, HardCcFlags.Knockback, "Wrathful Protector");
+                            AddCcForRune(skill, ref flags, HardCcFlags.Stun, "Bruiser");
                             break;
 
                         case 347265: // WitchDoctor_Piranhas
+                            AddCcForRune(skill, ref flags, HardCcFlags.Stun, "Bogadile");
                             AddCcForRune(skill, ref flags, HardCcFlags.Pull, "Piranhado");
                             break;
 
@@ -3664,6 +3764,33 @@ namespace Turbo.Plugins.s7o
 
             try
             {
+                if (IsBuffActive(player.Powers.UsedLegendaryPowers.TheTormentor))
+                    flags |= HardCcFlags.Charm;
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                if (IsBuffActive(player.Powers.UsedLegendaryPowers.DeathseersCowl))
+                    flags |= HardCcFlags.Charm;
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                if (IsBuffActive(player.Powers.UsedLegendaryPowers.TheButchersSickle))
+                    flags |= HardCcFlags.Pull;
+            }
+            catch
+            {
+            }
+
+            try
+            {
                 if (IsBuffActive(player.Powers.UsedLegendaryPowers.LeonineBowOfHashir) && HasUsedSkill(player, 77552))
                     flags |= HardCcFlags.Pull;
             }
@@ -3673,7 +3800,107 @@ namespace Turbo.Plugins.s7o
 
             try
             {
+                if (IsBuffActive(player.Powers.UsedLegendaryPowers.ChanonBolter) && HasUsedSkill(player, 75301)) // DemonHunter_SpikeTrap
+                    flags |= HardCcFlags.Taunt;
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                if (IsBuffActive(player.Powers.UsedLegendaryPowers.SkullOfResonance) && HasUsedSkill(player, 79077)) // Barbarian_ThreateningShout
+                    flags |= HardCcFlags.Charm;
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                if (IsBuffActive(player.Powers.UsedLegendaryPowers.BriggsWrath) &&
+                    (HasUsedSkill(player, 451491) || HasUsedSkill(player, 460870) || HasUsedSkill(player, 462255))) // Necromancer curses
+                    flags |= HardCcFlags.Pull;
+            }
+            catch
+            {
+            }
+
+            try
+            {
                 if (IsBuffActive(player.Powers.UsedLegendaryPowers.Frostburn) && HasColdSkill(player))
+                    flags |= HardCcFlags.Freeze;
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                if (IsBuffActive(player.Powers.UsedLegendaryPowers.Azurewrath))
+                    flags |= HardCcFlags.Freeze;
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                if (IsBuffActive(player.Powers.UsedLegendaryPowers.TheMagistrate) && HasUsedSkill(player, 30725)) // Wizard_Hydra
+                    flags |= HardCcFlags.Freeze;
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                if (IsBuffActive(player.Powers.UsedLegendaryPowers.HaloOfArlyse) && HasUsedSkill(player, 73223)) // Wizard_IceArmor
+                    flags |= HardCcFlags.Freeze;
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                if (IsBuffActive(player.Powers.UsedLegendaryPowers.FreezeOfDeflection))
+                    flags |= HardCcFlags.Freeze;
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                if (IsBuffActive(player.Powers.UsedLegendaryPowers.Eunjangdo))
+                    flags |= HardCcFlags.Freeze;
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                if (IsBuffActive(player.Powers.UsedLegendaryPowers.Wyrdward) && HasLightningSkill(player))
+                    flags |= HardCcFlags.Stun;
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                if (IsBuffActive(player.Powers.UsedLegendaryPowers.RanslorsFolly) && HasUsedSkill(player, 77113)) // Wizard_EnergyTwister
+                    flags |= HardCcFlags.Pull;
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                if (IsBuffActive(player.Powers.UsedLegendaryPowers.WinterFlurry) && HasColdSkill(player))
                     flags |= HardCcFlags.Freeze;
             }
             catch
@@ -3780,6 +4007,16 @@ namespace Turbo.Plugins.s7o
 
         private bool HasColdSkill(IPlayer player)
         {
+            return HasElementalSkill(player, 3);
+        }
+
+        private bool HasLightningSkill(IPlayer player)
+        {
+            return HasElementalSkill(player, 2);
+        }
+
+        private bool HasElementalSkill(IPlayer player, int elementalType)
+        {
             if (player == null || player.Powers == null || player.Powers.SkillSlots == null)
                 return false;
 
@@ -3787,7 +4024,7 @@ namespace Turbo.Plugins.s7o
             {
                 foreach (var skill in player.Powers.SkillSlots)
                 {
-                    if (skill != null && skill.ElementalType == 3)
+                    if (skill != null && skill.ElementalType == elementalType)
                         return true;
                 }
             }
