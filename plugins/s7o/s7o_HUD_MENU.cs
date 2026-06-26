@@ -40,7 +40,7 @@ namespace Turbo.Plugins.s7o
         // while avoiding the old overly large +4f inflated hit test.
         private const float ProfileCloseMaskPaddingPx = 3f;
 
-        private const int SettingsVersion = 11;
+        private const int SettingsVersion = 13;
 
         // Default menu-dot placement target:
         // lower-right skill-bar area on 1920x1080, away from chat and other overlays.
@@ -422,15 +422,35 @@ namespace Turbo.Plugins.s7o
         private static readonly string[] DefaultDisabledPluginTypeNames =
         {
             "PlayerBottomBuffListPlugin",
+            "s7o_Pestilence_RGK",
         };
 
         private readonly Dictionary<string, bool> _pluginEnabledOverrides =
             new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, int> _macroToggleFlashTicks = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         private s7o_AutoSkill _autoSkillPlugin = null;
+        private s7o_Pestilence_RGK _pestilenceRgkPlugin = null;
+        private s7o_InventoryAdjustments _inventoryPlugin = null;
         private s7o_TipsHelper _tipsHelperPlugin = null;
         private bool _autoSkillKeybindsExpanded = false;
         private int _autoSkillKeybindCaptureSlot = -1;
+        private bool _inventoryDropExpanded = false;
+        private bool _inventoryDropEnabled = true;
+        private bool _inventoryDropNonAccountLegendaries = false;
+        private bool _inventoryDropTrash = true;
+        private bool _inventoryDropGifts = true;
+        private bool _inventoryDropScreams = false;
+        private bool _inventoryDropGems = false;
+        private bool _pestilenceRgkExpanded = false;
+        private int _pestilenceRgkNormalStacks = 8;
+        private int _pestilenceRgkPowerStacks = 6;
+        private bool _pestilenceRgkAutoSiphon = true;
+        private bool _pestilenceRgkLateRefreshAssist = true;
+        private bool _pestilenceRgkPrioritizeDebuffed = true;
+        private bool _pestilenceRgkAggressiveScan = false;
+        private bool _pestilenceRgkIncludeTrash = true;
+        private bool _pestilenceRgkCursorRestore = true;
+        private int _pestilenceRgkTargetRange = 70;
         private readonly ActionKey[] _autoSkillBindActions =
         {
             ActionKey.Skill1,
@@ -1614,6 +1634,13 @@ namespace Turbo.Plugins.s7o
 
         public void PaintTopInGame(ClipState clipState)
         {
+            if (clipState == ClipState.BeforeClip)
+            {
+                EnsureResources();
+                try { DrawVisualSiphonDebuffRing(); } catch { }
+                return;
+            }
+
             if (clipState != ClipState.AfterClip)
                 return;
 
@@ -2159,6 +2186,13 @@ namespace Turbo.Plugins.s7o
             if (action == "main:plugin:autoskill" || action == "toggles:plugin:autoskill")
                 return TogglePluginByTypeName("AUTOSKILL", "s7o_AutoSkill");
 
+            if (action == "toggles:plugin:pestilencergk")
+            {
+                bool ok = TogglePluginByTypeName("PESTILENCE RGK", "s7o_Pestilence_RGK");
+                ApplyPestilenceRgkSettingsToPlugin();
+                return ok;
+            }
+
             if (action == "main:plugin:dhstrafe" || action == "toggles:plugin:dhstrafe")
                 return TogglePluginByTypeName("DH STRAFE", "s7o_DHStrafePrimaryPlugin", "s7o_DHStrafe");
 
@@ -2627,6 +2661,7 @@ namespace Turbo.Plugins.s7o
                     _ttsAlertsScrollPx = 0;
                     _draggingTtsScrollThumb = false;
                     _autoSkillPlugin = null;
+                    _inventoryPlugin = null;
                     _tipsHelperPlugin = null;
                     _status = "TOGGLES: " + ToggleCategoryLabel(_activeToggleCategory);
                     MarkRowsDirty();
@@ -2687,6 +2722,20 @@ namespace Turbo.Plugins.s7o
             {
                 _zbarbAutoSnapHotkeyCapture = true;
                 _status = "PRESS Z-BARB AUTOSNAP HOTKEY";
+                return;
+            }
+
+            if (action.Equals("inventorydrop:expand", StringComparison.OrdinalIgnoreCase)
+                || action.Equals("inventorydrop:toggle", StringComparison.OrdinalIgnoreCase)
+                || action.StartsWith("inventorydrop:option:", StringComparison.OrdinalIgnoreCase))
+            {
+                HandleInventoryDropOptionAction(action);
+                return;
+            }
+
+            if (action.Equals("pestilence:expand", StringComparison.OrdinalIgnoreCase) || action.StartsWith("pestilence:option:", StringComparison.OrdinalIgnoreCase))
+            {
+                HandlePestilenceRgkOptionAction(action);
                 return;
             }
 
@@ -3515,7 +3564,7 @@ namespace Turbo.Plugins.s7o
             // Rift content
             if (ContainsAny(s, "rift", "greatrift", "urshi", "gem", "pylon", "boss", "timer", "progress")) return ManagerTab.Rift;
             // Combat + world overlays (oculus, triune merged here)
-            if (ContainsAny(s, "autoskill", "autocast", "skill", "snap", "zbarb", "barb", "monster", "elite", "healthbar", "buff", "cooldown", "sentry", "archon", "strafe", "oculus", "triune")) return ManagerTab.Combat;
+            if (ContainsAny(s, "autoskill", "autocast", "skill", "snap", "zbarb", "barb", "monster", "elite", "healthbar", "buff", "cooldown", "sentry", "archon", "strafe", "oculus", "triune", "pestilence", "rgk")) return ManagerTab.Combat;
             return ManagerTab.Other;
         }
 
@@ -4295,6 +4344,8 @@ namespace Turbo.Plugins.s7o
             ApplyRiftFishingMapSettings();
             ApplyPartyInspectorHotkeyToPlugin();
             ApplyTipsHelperSettingsToPlugin();
+            ApplyInventoryDropSettingsToPlugin();
+            ApplyPestilenceRgkSettingsToPlugin();
         }
 
 
@@ -5982,6 +6033,263 @@ namespace Turbo.Plugins.s7o
         }
 
 
+
+        private s7o_InventoryAdjustments GetInventoryPlugin()
+        {
+            if (_inventoryPlugin != null) return _inventoryPlugin;
+            _inventoryPlugin = FindPluginByTypeName("s7o_InventoryAdjustments") as s7o_InventoryAdjustments;
+            return _inventoryPlugin;
+        }
+
+        private void ApplyInventoryDropSettingsToPlugin()
+        {
+            var plugin = GetInventoryPlugin();
+            if (plugin == null)
+                return;
+
+            try
+            {
+                plugin.ConfigureItemDropFeature(
+                    _inventoryDropEnabled,
+                    _inventoryDropNonAccountLegendaries,
+                    _inventoryDropTrash,
+                    _inventoryDropGifts,
+                    _inventoryDropScreams,
+                    _inventoryDropGems);
+            }
+            catch { }
+        }
+
+        private void HandleInventoryDropOptionAction(string action)
+        {
+            if (string.Equals(action, "inventorydrop:expand", StringComparison.OrdinalIgnoreCase))
+            {
+                _inventoryDropExpanded = !_inventoryDropExpanded;
+                _macroToggleFlashTicks["inventory_drop_feature"] = Environment.TickCount;
+                _status = _inventoryDropExpanded ? "ITEM DROP OPTIONS: EXPANDED" : "ITEM DROP OPTIONS: COLLAPSED";
+                SaveSettings();
+                return;
+            }
+
+            if (string.Equals(action, "inventorydrop:toggle", StringComparison.OrdinalIgnoreCase))
+            {
+                _inventoryDropEnabled = !_inventoryDropEnabled;
+                _macroToggleFlashTicks["inventory_drop_feature"] = Environment.TickCount;
+                _status = "ITEM DROP: " + (_inventoryDropEnabled ? "ON" : "OFF");
+                ApplyInventoryDropSettingsToPlugin();
+                SaveSettings();
+                return;
+            }
+
+            const string prefix = "inventorydrop:option:";
+            if (!action.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                return;
+
+            int kind;
+            if (!int.TryParse(action.Substring(prefix.Length), NumberStyles.Integer, CultureInfo.InvariantCulture, out kind))
+                return;
+
+            switch (kind)
+            {
+                case 2: _inventoryDropNonAccountLegendaries = !_inventoryDropNonAccountLegendaries; _status = "ITEM DROP NON-BOUND LEGENDARIES: " + (_inventoryDropNonAccountLegendaries ? "ON" : "OFF"); break;
+                case 3: _inventoryDropTrash = !_inventoryDropTrash; _status = "ITEM DROP TRASH: " + (_inventoryDropTrash ? "ON" : "OFF"); break;
+                case 4: _inventoryDropGifts = !_inventoryDropGifts; _status = "ITEM DROP GIFTS: " + (_inventoryDropGifts ? "ON" : "OFF"); break;
+                case 5: _inventoryDropScreams = !_inventoryDropScreams; _status = "ITEM DROP SCREAMS: " + (_inventoryDropScreams ? "ON" : "OFF"); break;
+                case 6: _inventoryDropGems = !_inventoryDropGems; _status = "ITEM DROP GEMS: " + (_inventoryDropGems ? "ON" : "OFF"); break;
+                default: return;
+            }
+
+            _macroToggleFlashTicks["inventory_drop_feature"] = Environment.TickCount;
+            ApplyInventoryDropSettingsToPlugin();
+            SaveSettings();
+        }
+
+        private s7o_Pestilence_RGK GetPestilenceRgkPlugin()
+        {
+            if (_pestilenceRgkPlugin != null) return _pestilenceRgkPlugin;
+            _pestilenceRgkPlugin = FindPluginByTypeName("s7o_Pestilence_RGK") as s7o_Pestilence_RGK;
+            return _pestilenceRgkPlugin;
+        }
+
+        private void ApplyPestilenceRgkSettingsToPlugin()
+        {
+            var plugin = GetPestilenceRgkPlugin();
+            if (plugin == null)
+                return;
+
+            try
+            {
+                plugin.Configure(
+                    _pestilenceRgkNormalStacks,
+                    _pestilenceRgkPowerStacks,
+                    _pestilenceRgkAutoSiphon,
+                    _pestilenceRgkLateRefreshAssist,
+                    _pestilenceRgkPrioritizeDebuffed,
+                    _pestilenceRgkAggressiveScan,
+                    _pestilenceRgkIncludeTrash,
+                    _pestilenceRgkCursorRestore,
+                    _pestilenceRgkTargetRange);
+            }
+            catch { }
+        }
+
+        private void HandlePestilenceRgkOptionAction(string action)
+        {
+            if (string.Equals(action, "pestilence:expand", StringComparison.OrdinalIgnoreCase))
+            {
+                _pestilenceRgkExpanded = !_pestilenceRgkExpanded;
+                _macroToggleFlashTicks["pestilence_rgk_plugin"] = Environment.TickCount;
+                _status = _pestilenceRgkExpanded ? "PESTILENCE RGK OPTIONS: EXPANDED" : "PESTILENCE RGK OPTIONS: COLLAPSED";
+                SaveSettings();
+                return;
+            }
+
+            const string prefix = "pestilence:option:";
+            if (!action.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                return;
+
+            int kind;
+            if (!int.TryParse(action.Substring(prefix.Length), NumberStyles.Integer, CultureInfo.InvariantCulture, out kind))
+                return;
+
+            switch (kind)
+            {
+                case 1:
+                    _pestilenceRgkAutoSiphon = !_pestilenceRgkAutoSiphon;
+                    _status = "PESTILENCE AUTOSIPHON: " + (_pestilenceRgkAutoSiphon ? "ON" : "OFF");
+                    break;
+                case 2:
+                    _pestilenceRgkNormalStacks = CyclePestilenceRgkStackTarget(_pestilenceRgkNormalStacks);
+                    _status = "PESTILENCE NORMAL STACKS: " + _pestilenceRgkNormalStacks.ToString(CultureInfo.InvariantCulture);
+                    break;
+                case 3:
+                    _pestilenceRgkPowerStacks = CyclePestilenceRgkStackTarget(_pestilenceRgkPowerStacks);
+                    _status = "PESTILENCE POWER STACKS: " + _pestilenceRgkPowerStacks.ToString(CultureInfo.InvariantCulture);
+                    break;
+                case 4:
+                    _pestilenceRgkLateRefreshAssist = !_pestilenceRgkLateRefreshAssist;
+                    _status = "PESTILENCE LATE REFRESH: " + (_pestilenceRgkLateRefreshAssist ? "ON" : "OFF");
+                    break;
+                case 5:
+                    _pestilenceRgkPrioritizeDebuffed = !_pestilenceRgkPrioritizeDebuffed;
+                    _status = "PESTILENCE DEBUFF PRIORITY: " + (_pestilenceRgkPrioritizeDebuffed ? "ON" : "OFF");
+                    break;
+                case 6:
+                    _pestilenceRgkAggressiveScan = !_pestilenceRgkAggressiveScan;
+                    _status = "PESTILENCE AGGRESSIVE SCAN: " + (_pestilenceRgkAggressiveScan ? "ON" : "OFF");
+                    break;
+                case 7:
+                    _pestilenceRgkIncludeTrash = !_pestilenceRgkIncludeTrash;
+                    _status = "PESTILENCE TRASH FALLBACK: " + (_pestilenceRgkIncludeTrash ? "ON" : "OFF");
+                    break;
+                case 8:
+                    _pestilenceRgkTargetRange = CyclePestilenceRgkTargetRange(_pestilenceRgkTargetRange);
+                    _status = "PESTILENCE TARGET RANGE: " + _pestilenceRgkTargetRange.ToString(CultureInfo.InvariantCulture) + "y";
+                    break;
+                case 9:
+                    _pestilenceRgkCursorRestore = !_pestilenceRgkCursorRestore;
+                    _status = "PESTILENCE CURSOR RESTORE: " + (_pestilenceRgkCursorRestore ? "ON" : "OFF");
+                    break;
+            }
+
+            _macroToggleFlashTicks["pestilence_rgk_plugin"] = Environment.TickCount;
+            ApplyPestilenceRgkSettingsToPlugin();
+            SaveSettings();
+        }
+
+
+        private string GetInventoryDropOptionLabel(int kind, bool installed)
+        {
+            if (!installed)
+                return "NOT INSTALLED";
+            return GetInventoryDropOptionEnabled(kind) ? "ON" : "OFF";
+        }
+
+        private bool GetInventoryDropOptionEnabled(int kind)
+        {
+            switch (kind)
+            {
+                case 2: return _inventoryDropNonAccountLegendaries;
+                case 3: return _inventoryDropTrash;
+                case 4: return _inventoryDropGifts;
+                case 5: return _inventoryDropScreams;
+                case 6: return _inventoryDropGems;
+                default: return false;
+            }
+        }
+
+        private string GetPestilenceOptionLabel(int kind, bool installed)
+        {
+            if (!installed)
+                return "NOT INSTALLED";
+
+            switch (kind)
+            {
+                case 1: return _pestilenceRgkAutoSiphon ? "ON" : "OFF";
+                case 2: return _pestilenceRgkNormalStacks.ToString(CultureInfo.InvariantCulture);
+                case 3: return _pestilenceRgkPowerStacks.ToString(CultureInfo.InvariantCulture);
+                case 4: return _pestilenceRgkLateRefreshAssist ? "ON" : "OFF";
+                case 5: return _pestilenceRgkPrioritizeDebuffed ? "ON" : "OFF";
+                case 6: return _pestilenceRgkAggressiveScan ? "ON" : "OFF";
+                case 7: return _pestilenceRgkIncludeTrash ? "ON" : "OFF";
+                case 8: return _pestilenceRgkTargetRange.ToString(CultureInfo.InvariantCulture) + "y";
+                case 9: return _pestilenceRgkCursorRestore ? "ON" : "OFF";
+            }
+
+            return "";
+        }
+
+        private bool GetPestilenceOptionEnabled(int kind)
+        {
+            switch (kind)
+            {
+                case 1: return _pestilenceRgkAutoSiphon;
+                case 4: return _pestilenceRgkLateRefreshAssist;
+                case 5: return _pestilenceRgkPrioritizeDebuffed;
+                case 6: return _pestilenceRgkAggressiveScan;
+                case 7: return _pestilenceRgkIncludeTrash;
+                case 9: return _pestilenceRgkCursorRestore;
+            }
+            return true;
+        }
+
+        private string GetPestilenceRgkStackLabel(int kind)
+        {
+            int stacks = kind == 2 ? _pestilenceRgkPowerStacks : _pestilenceRgkNormalStacks;
+            return stacks.ToString(CultureInfo.InvariantCulture);
+        }
+
+        private int CyclePestilenceRgkStackTarget(int current)
+        {
+            current = ClampPestilenceRgkStackTarget(current);
+            if (current <= 4) return 6;
+            if (current <= 6) return 8;
+            if (current <= 8) return 10;
+            return 4;
+        }
+
+        private int ClampPestilenceRgkStackTarget(int value)
+        {
+            if (value <= 4) return 4;
+            if (value <= 6) return 6;
+            if (value <= 8) return 8;
+            return 10;
+        }
+
+        private int CyclePestilenceRgkTargetRange(int current)
+        {
+            current = ClampPestilenceRgkTargetRange(current);
+            current += 5;
+            return current > 90 ? 15 : current;
+        }
+
+        private int ClampPestilenceRgkTargetRange(int value)
+        {
+            if (value < 15) return 15;
+            if (value > 90) return 90;
+            return ((value + 2) / 5) * 5;
+        }
+
         private s7o_AutoSkill GetAutoSkillPlugin()
         {
             if (_autoSkillPlugin != null) return _autoSkillPlugin;
@@ -6853,15 +7161,13 @@ namespace Turbo.Plugins.s7o
 
             if (!_visLineToTargetEnabled &&
                 !_visTargetReticleEnabled &&
-                !_visReticleOutlineEnabled &&
-                !_visSiphonEnabled)
+                !_visReticleOutlineEnabled)
             {
                 return;
             }
 
             DrawVisualLineToTarget();
             DrawVisualTargetReticle();
-            DrawVisualSiphonDebuffRing();
         }
 
         private IMonster GetSelectedVisualMonster()
@@ -6928,7 +7234,9 @@ namespace Turbo.Plugins.s7o
 
         private void DrawVisualSiphonDebuffRing()
         {
-            if (!_visSiphonEnabled || Hud.Game.AliveMonsters == null) return;
+            if (!_visSiphonEnabled || Hud == null || Hud.Game == null || !Hud.Game.IsInGame || Hud.Game.IsInTown || Hud.Game.AliveMonsters == null)
+                return;
+
             try
             {
                 int gameTick     = Hud.Game.CurrentGameTick;
@@ -6936,24 +7244,35 @@ namespace Turbo.Plugins.s7o
                 float ringRadius = Math.Max(18f, 50f + pulse * 5.0f);
                 float rotation   = gameTick * 0.52f;
                 const int dots   = 16;
-                Color c          = GetVisualPickerColorToned(_visSiphonColorIdx, _visSiphonTone);
+
+                Color debuff300Color = GetVisualPickerColorToned(_visSiphonColorIdx, _visSiphonTone);
+                Color debuff600Color = Color.FromArgb(0, 230, 0);
 
                 foreach (IMonster m in Hud.Game.AliveMonsters)
                 {
-                    if (m == null || !m.IsAlive || !m.IsElite || m.FloorCoordinate == null) continue;
+                    if (m == null || !m.IsAlive || !m.IsElite || m.FloorCoordinate == null)
+                        continue;
+
                     double hasDebuff;
                     try { hasDebuff = m.GetAttributeValue(Hud.Sno.Attributes.Power_Buff_9_Visual_Effect_D, VisualSiphonDebuffSno); }
                     catch { continue; }
                     if (hasDebuff != 1.0) continue;
 
+                    bool is600 = false;
+                    try { is600 = m.GetAttributeValue(Hud.Sno.Attributes.Power_Buff_11_Visual_Effect_D, VisualSiphonDebuffSno) == 1.0; }
+                    catch { }
+
+                    Color c = is600 ? debuff600Color : debuff300Color;
+                    IBrush dotBrush = GetVisualBrush(is600 ? 242 : 245, c.R, c.G, c.B, is600 ? 3.2f : 3.8f);
+                    if (dotBrush == null) continue;
+
                     var sc = m.FloorCoordinate.ToScreenCoordinate();
                     for (int i = 0; i < dots; i++)
                     {
                         float angle = rotation + (float)(Math.PI * 2.0 * i / dots);
-                        DrawScreenEllipseOutlined(
-                            sc.X + (float)Math.Cos(angle) * ringRadius,
-                            sc.Y + (float)Math.Sin(angle) * ringRadius * 0.74f,
-                            _visSiphonDotSize, _visSiphonDotSize, c, 2.0f, 235);
+                        float x = sc.X + (float)Math.Cos(angle) * ringRadius;
+                        float y = sc.Y + (float)Math.Sin(angle) * ringRadius * 0.74f;
+                        dotBrush.DrawEllipse(x, y, _visSiphonDotSize, _visSiphonDotSize);
                     }
                 }
             }
@@ -8251,7 +8570,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             // Fixed header (not scrolled)
             float headerY = detail.Top + 8f;
             _fSection.DrawText("VISUAL", x + 10f, headerY + 4f);
-            _fLabel.DrawText("World-space circles, target indicators, and click visuals.", x + 10f, headerY + 30f);
+            _fLabel.DrawText("Overlays for player circles, elite affixes, skill indicators, and others.", x + 10f, headerY + 30f);
 
             float listTop = headerY + 58f;
             float clipTop = listTop;
@@ -8547,6 +8866,14 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             public bool   IsOpenGrMapChild;
             public bool   IsAutoSkillKeybindSelector;
             public bool   IsAutoSkillKeybindChild;
+            public bool   IsInventoryDropSelector;
+            public bool   IsInventoryDropChild;
+            public int    InventoryDropOptionKind;
+            public bool   IsPestilenceSelector;
+            public bool   IsPestilenceChild;
+            public int    PestilenceOptionKind;
+            public bool   IsPestilenceStackTarget;
+            public int    PestilenceStackKind;
             public RiftMapGroup RiftGroup;
             public RiftMapGroup RiftGroupRight;
             public string[] PluginTypeNames;
@@ -8625,6 +8952,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
         private const float MacroListSlotH = 84f;
         private const float OpenGrMapChildSlotH = 22f;
         private const float AutoSkillKeybindChildSlotH = 58f;
+        private const float PestilenceChildSlotH = 36f;
         private const float MacroEntryH = 76f;
         private const float MacroHeaderH = 36f;
 
@@ -8636,6 +8964,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             if (item.Entry.IsAutoSkillKeybindChild)
                 return AutoSkillKeybindChildSlotH;
 
+            if (item.Entry.IsInventoryDropChild)
+                return PestilenceChildSlotH;
+
+            if (item.Entry.IsPestilenceChild)
+                return PestilenceChildSlotH;
+
             return MacroListSlotH;
         }
 
@@ -8645,7 +8979,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
         private void DrawMacrosFixedHeader(RectangleF detail)
         {
             _fSection.DrawText("MACROS", detail.Left + 14f, detail.Top + 10f);
-            _fLabel.DrawText("Autocast conditional rules per class.", detail.Left + 14f, detail.Top + 34f);
+            _fLabel.DrawText("Autocast conditional rules and utility macros.", detail.Left + 14f, detail.Top + 34f);
         }
 
         private void DrawMacroSectionItem(RectangleF r, string title)
@@ -8671,6 +9005,18 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 return;
             }
 
+            if (entry.IsInventoryDropChild)
+            {
+                DrawInventoryDropChildRow(slot, entry, rowIdx);
+                return;
+            }
+
+            if (entry.IsPestilenceChild)
+            {
+                DrawPestilenceChildRow(slot, entry, rowIdx);
+                return;
+            }
+
             const float starW  = 32f;
             const float stateW = 138f;
             const float hotkeyW = 86f;
@@ -8692,6 +9038,16 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 installed = GetAutoSkillPlugin() != null;
                 enabled = _autoSkillKeybindsExpanded;
             }
+            else if (entry.IsPestilenceStackTarget)
+            {
+                installed = GetPestilenceRgkPlugin() != null;
+                enabled = installed;
+            }
+            else if (entry.IsInventoryDropSelector)
+            {
+                installed = GetInventoryPlugin() != null;
+                enabled = installed && _inventoryDropEnabled;
+            }
             else if (entry.IsPlugin)
             {
                 IPlugin plugin = FindPluginByTypeName(entry.PluginTypeNames);
@@ -8710,13 +9066,18 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             RegisterToggleHit("macro:star:" + entry.Code, starR);
 
             RectangleF stateR = new RectangleF(rr.Right - stateW - 8f, rr.Top + 6f, stateW, rr.Height - 12f);
+            RectangleF expandR = RectangleF.Empty;
+            if (entry.IsPestilenceSelector || entry.IsInventoryDropSelector)
+            {
+                expandR = new RectangleF(stateR.Left - 34f - buttonGap, rr.Top + 6f, 34f, rr.Height - 12f);
+            }
 
             RectangleF hotkeyR = RectangleF.Empty;
             if (entry.HasHotkeyButton)
                 hotkeyR = new RectangleF(stateR.Left - hotkeyW - buttonGap, rr.Top + 6f, hotkeyW, rr.Height - 12f);
 
             float textX = starR.Right + 10f;
-            float textRight = entry.HasHotkeyButton ? hotkeyR.Left - 10f : stateR.Left - 10f;
+            float textRight = entry.HasHotkeyButton ? hotkeyR.Left - 10f : ((entry.IsPestilenceSelector || entry.IsInventoryDropSelector) ? expandR.Left - 10f : stateR.Left - 10f);
             float textW = Math.Max(40f, textRight - textX);
 
             DrawOutlinedTextAt(_fRowTitle, _fRowTitleShadow,
@@ -8739,12 +9100,16 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 stateLabel = installed ? (_openGrMapsExpanded ? "-" : "+") : "NOT INSTALLED";
             else if (entry.IsAutoSkillKeybindSelector)
                 stateLabel = installed ? (_autoSkillKeybindsExpanded ? "-" : "+") : "NOT INSTALLED";
+            else if (entry.IsPestilenceStackTarget)
+                stateLabel = installed ? GetPestilenceRgkStackLabel(entry.PestilenceStackKind) : "NOT INSTALLED";
+            else if (entry.IsInventoryDropSelector)
+                stateLabel = installed ? (_inventoryDropEnabled ? "ON" : "OFF") : "NOT INSTALLED";
             else if (entry.IsPlugin)
                 stateLabel = installed ? (enabled ? "ON" : "OFF") : "NOT INSTALLED";
             else
                 stateLabel = enabled ? "ON" : "OFF";
 
-            bool canToggle = entry.IsOpenGrMapSelector ? installed : (entry.IsAutoSkillKeybindSelector ? installed : (entry.IsPlugin ? installed : GetAutoSkillPlugin() != null));
+            bool canToggle = entry.IsOpenGrMapSelector ? installed : (entry.IsAutoSkillKeybindSelector ? installed : (entry.IsInventoryDropSelector ? installed : (entry.IsPestilenceStackTarget ? installed : (entry.IsPlugin ? installed : GetAutoSkillPlugin() != null))));
 
             int flashTk;
             _macroToggleFlashTicks.TryGetValue(entry.Code, out flashTk);
@@ -8756,6 +9121,18 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 string hotkeyLabel = GetZBarbAutoSnapHotkeyLabel();
                 DrawGlossButton(hotkeyR, FitButtonLabel(hotkeyLabel, hotkeyR.Width), _zbarbAutoSnapHotkeyCapture, false, false);
                 RegisterToggleHit(entry.HotkeyAction, hotkeyR);
+            }
+
+            if (entry.IsInventoryDropSelector)
+            {
+                DrawGlossButton(expandR, _inventoryDropExpanded ? "-" : "+", _inventoryDropExpanded, false, false);
+                RegisterToggleHit("inventorydrop:expand", expandR);
+            }
+
+            if (entry.IsPestilenceSelector)
+            {
+                DrawGlossButton(expandR, _pestilenceRgkExpanded ? "-" : "+", _pestilenceRgkExpanded, false, false);
+                RegisterToggleHit("pestilence:expand", expandR);
             }
 
             // Persistent enabled-state color.
@@ -8771,6 +9148,10 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     RegisterToggleHit("riftmaps:expand", stateR);
                 else if (entry.IsAutoSkillKeybindSelector)
                     RegisterToggleHit("autoskill:keybinds:expand", stateR);
+                else if (entry.IsInventoryDropSelector)
+                    RegisterToggleHit("inventorydrop:toggle", stateR);
+                else if (entry.IsPestilenceStackTarget)
+                    RegisterToggleHit(entry.PestilenceStackKind == 2 ? "pestilence:stacks:power" : "pestilence:stacks:normal", stateR);
                 else if (entry.IsPlugin)
                     RegisterToggleHit(entry.PluginAction, stateR);
                 else
@@ -8810,6 +9191,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             bool openGrFavorited = _macroFavorites.Contains("OpenGR_MapSelector");
             bool autoSkillKeybindsFavorited = _macroFavorites.Contains("AutoSkill_Keybindings");
+            bool inventoryDropFavorited = _macroFavorites.Contains("inventory_drop_feature");
 
             if (favEntries.Count > 0)
             {
@@ -8865,6 +9247,16 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                             IsFavoriteDisplay = true
                         });
                     }
+
+                    if (entry.IsInventoryDropSelector && _inventoryDropExpanded)
+                    {
+                        AddInventoryDropChildItems(items, true);
+                    }
+
+                    if (entry.IsPestilenceSelector && _pestilenceRgkExpanded)
+                    {
+                        AddPestilenceChildItems(items, true);
+                    }
                 }
             }
 
@@ -8892,6 +9284,9 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     if (entry.IsAutoSkillKeybindChild && autoSkillKeybindsFavorited)
                         continue;
 
+                    if (entry.IsInventoryDropChild && inventoryDropFavorited)
+                        continue;
+
                     items.Add(new MacroListItem
                     {
                         Kind = MacroListItemKind.Entry,
@@ -8899,10 +9294,94 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                         IsFavoriteDisplay = false,
                         IsCompactOpenGrMapRow = entry.IsOpenGrMapChild
                     });
+
+                    if (entry.IsPestilenceSelector && _pestilenceRgkExpanded)
+                    {
+                        AddPestilenceChildItems(items, false);
+                    }
                 }
             }
 
             return items;
+        }
+
+
+
+        private void AddInventoryDropChildEntries(List<MacroEntry> entries)
+        {
+            AddInventoryDropChildEntry(entries, "Unbound legendaries", "Shift+F3: drop unbound legendary/set items, including ancient and primal items.", "inventory_drop_nonbound_legendary", 2);
+            AddInventoryDropChildEntry(entries, "Trash", "Drop rare, magic, normal, superior, and inferior items.", "inventory_drop_trash", 3);
+            AddInventoryDropChildEntry(entries, "Gifts", "Drop Ramaladni's Gifts.", "inventory_drop_gifts", 4);
+            AddInventoryDropChildEntry(entries, "Screams", "Drop Petrified Screams.", "inventory_drop_screams", 5);
+            AddInventoryDropChildEntry(entries, "Gems", "Drop normal gems, not legendary gems.", "inventory_drop_gems", 6);
+        }
+
+        private void AddInventoryDropChildEntry(List<MacroEntry> entries, string title, string description, string code, int kind)
+        {
+            entries.Add(new MacroEntry
+            {
+                Title = title,
+                Description = description,
+                Code = code,
+                IsInventoryDropChild = true,
+                InventoryDropOptionKind = kind
+            });
+        }
+
+        private void AddInventoryDropChildItems(List<MacroListItem> items, bool favoriteDisplay)
+        {
+            AddInventoryDropChildItem(items, favoriteDisplay, "Unbound legendaries", "Shift+F3: drop unbound legendary/set items, including ancient and primal items.", "inventory_drop_nonbound_legendary", 2);
+            AddInventoryDropChildItem(items, favoriteDisplay, "Trash", "Drop rare, magic, normal, superior, and inferior items.", "inventory_drop_trash", 3);
+            AddInventoryDropChildItem(items, favoriteDisplay, "Gifts", "Drop Ramaladni's Gifts.", "inventory_drop_gifts", 4);
+            AddInventoryDropChildItem(items, favoriteDisplay, "Screams", "Drop Petrified Screams.", "inventory_drop_screams", 5);
+            AddInventoryDropChildItem(items, favoriteDisplay, "Gems", "Drop normal gems, not legendary gems.", "inventory_drop_gems", 6);
+        }
+
+        private void AddInventoryDropChildItem(List<MacroListItem> items, bool favoriteDisplay, string title, string description, string code, int kind)
+        {
+            items.Add(new MacroListItem
+            {
+                Kind = MacroListItemKind.Entry,
+                Entry = new MacroEntry
+                {
+                    Title = title,
+                    Description = description,
+                    Code = code,
+                    IsInventoryDropChild = true,
+                    InventoryDropOptionKind = kind
+                },
+                IsFavoriteDisplay = favoriteDisplay
+            });
+        }
+
+        private void AddPestilenceChildItems(List<MacroListItem> items, bool favoriteDisplay)
+        {
+            AddPestilenceChildItem(items, favoriteDisplay, "AutoSiphon", "Pulse Siphon Blood while Corpse Lance is held.", "pestilence_rgk_autosiphon", 1);
+            AddPestilenceChildItem(items, favoriteDisplay, "Normal stacks", "Power Shift target without Power pylon.", "pestilence_rgk_normal_stacks", 2);
+            AddPestilenceChildItem(items, favoriteDisplay, "Power stacks", "Power Shift target while Power pylon is active.", "pestilence_rgk_power_stacks", 3);
+            AddPestilenceChildItem(items, favoriteDisplay, "Late refresh assist", "Allow late refresh pulses when AutoSiphon is off.", "pestilence_rgk_late_refresh", 4);
+            AddPestilenceChildItem(items, favoriteDisplay, "Debuffed elite priority", "Prefer Siphon-debuffed elites inside the same priority bucket.", "pestilence_rgk_debuff_priority", 5);
+            AddPestilenceChildItem(items, favoriteDisplay, "Aggressive scan", "Use faster target hover probing for awkward elite hitboxes.", "pestilence_rgk_aggressive_scan", 6);
+            AddPestilenceChildItem(items, favoriteDisplay, "Trash fallback", "Target close trash/high-value trash only after elite leaders are gone.", "pestilence_rgk_trash_fallback", 7);
+            AddPestilenceChildItem(items, favoriteDisplay, "Target range", "Target selection range in yards.", "pestilence_rgk_target_range", 8);
+            AddPestilenceChildItem(items, favoriteDisplay, "Cursor restore", "Restore cursor after short Pestilence target-assist holds; long holds restore near player.", "pestilence_rgk_cursor_restore", 9);
+        }
+
+        private void AddPestilenceChildItem(List<MacroListItem> items, bool favoriteDisplay, string title, string description, string code, int kind)
+        {
+            items.Add(new MacroListItem
+            {
+                Kind = MacroListItemKind.Entry,
+                Entry = new MacroEntry
+                {
+                    Title = title,
+                    Description = description,
+                    Code = code,
+                    IsPestilenceChild = true,
+                    PestilenceOptionKind = kind
+                },
+                IsFavoriteDisplay = favoriteDisplay
+            });
         }
 
 
@@ -8991,6 +9470,49 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             }
         }
 
+
+        private void DrawInventoryDropChildRow(RectangleF r, MacroEntry entry, int rowIdx)
+        {
+            (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
+
+            bool installed = GetInventoryPlugin() != null;
+            string label = GetInventoryDropOptionLabel(entry.InventoryDropOptionKind, installed);
+            bool on = GetInventoryDropOptionEnabled(entry.InventoryDropOptionKind);
+
+            float pad = 44f;
+            float stateW = 120f;
+            RectangleF stateR = new RectangleF(r.Right - stateW - 8f, r.Top + 5f, stateW, r.Height - 10f);
+            float textX = r.Left + pad;
+            float textW = Math.Max(40f, stateR.Left - textX - 10f);
+
+            DrawOutlinedTextAt(_fRowText, _fRowTextShadow, Trim("• " + entry.Title, ApproxCharsForWidth(textW, 5.4f)), textX, r.Top + 10f);
+            DrawGlossButton(stateR, FitButtonLabel(label, stateR.Width), on, false, false);
+
+            if (installed)
+                RegisterToggleHit("inventorydrop:option:" + entry.InventoryDropOptionKind.ToString(CultureInfo.InvariantCulture), stateR);
+        }
+
+        private void DrawPestilenceChildRow(RectangleF r, MacroEntry entry, int rowIdx)
+        {
+            (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
+
+            bool installed = GetPestilenceRgkPlugin() != null;
+            string label = GetPestilenceOptionLabel(entry.PestilenceOptionKind, installed);
+            bool on = GetPestilenceOptionEnabled(entry.PestilenceOptionKind);
+
+            float pad = 44f;
+            float stateW = 120f;
+            RectangleF stateR = new RectangleF(r.Right - stateW - 8f, r.Top + 5f, stateW, r.Height - 10f);
+            float textX = r.Left + pad;
+            float textW = Math.Max(40f, stateR.Left - textX - 10f);
+
+            DrawOutlinedTextAt(_fRowText, _fRowTextShadow, Trim("• " + entry.Title, ApproxCharsForWidth(textW, 5.4f)), textX, r.Top + 10f);
+            DrawGlossButton(stateR, FitButtonLabel(label, stateR.Width), on, false, false);
+
+            if (installed)
+                RegisterToggleHit("pestilence:option:" + entry.PestilenceOptionKind.ToString(CultureInfo.InvariantCulture), stateR);
+        }
+
         private void DrawToggleMacrosCategory(RectangleF detail)
         {
             // ── Build ordered entry list (favorites first) ────────────────────
@@ -9040,6 +9562,17 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     IsAutoSkillKeybindChild=true
                 });
             }
+
+            allEntries.Add(new MacroEntry
+            {
+                Title="Inventory Item Drop",
+                Description="Shift+F2 drops all items.\nShift+F3 only drops filtered items.",
+                Code="inventory_drop_feature",
+                IsInventoryDropSelector=true
+            });
+
+            if (_inventoryDropExpanded)
+                AddInventoryDropChildEntries(allEntries);
 
             int barbarianStart = allEntries.Count;
 
@@ -9092,10 +9625,15 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 new MacroEntry { Title="Mystic Ally",          Description="Casts Mystic Ally when spirit is low or elite/boss is nearby.",      Code="Monk_MysticAlly_ResourceOrElite",   IsBuff=false },
                 new MacroEntry { Title="Serenity",             Description="Panic-button invulnerability when health is low or elites close.",   Code="Monk_Serenity_Defensive",           IsBuff=false },
                 // ── Necromancer ───────────────────────────────────────────────
+                new MacroEntry { Title="Pestilence RGK",     Description="AutoSiphon Power Shift + Pestilence target assist. Expand for options.",
+                    Code="pestilence_rgk_plugin", IsPlugin=true, IsPestilenceSelector=true,
+                    PluginTypeNames=new[]{"s7o_Pestilence_RGK"},
+                    PluginAction="toggles:plugin:pestilencergk" },
                 new MacroEntry { Title="Bone Armor",           Description="Casts Bone Armor near enemies when missing or expiring.",            Code="Necro_BoneArmor_NearEnemies",       IsBuff=false },
                 new MacroEntry { Title="Simulacrum",           Description="Casts Simulacrum near elites or dense packs.",                       Code="Necro_Simulacrum_EliteOrDensity",   IsBuff=false },
                 new MacroEntry { Title="Land of the Dead",     Description="Casts LotD on elites or dense packs (disabled by default).",         Code="Necro_LandOfTheDead_EliteOrDensity",IsBuff=false },
-                new MacroEntry { Title="Command Skeletons",    Description="Issues attack command to skeleton warriors near elite targets.",      Code="Necro_CommandSkeletons_Elite",      IsBuff=false },
+                new MacroEntry { Title="Devour",               Description="Maintains Devour buffs/resources; fast-casts during Land of the Dead.",        Code="Necro_Devour_CorpseOrLotD",        IsBuff=false },
+                new MacroEntry { Title="Command Skeletons",    Description="Maintains Jesseth target commands; otherwise assists elite/RG targeting.",      Code="Necro_CommandSkeletons_Elite",      IsBuff=false },
                 new MacroEntry { Title="Skeletal Mage",        Description="Casts Skeletal Mage when essence is high (disabled by default).",     Code="Necro_SkeletalMage_EssenceHigh",    IsBuff=false },
                 // ── Witch Doctor ──────────────────────────────────────────────
                 new MacroEntry { Title="Spirit Walk",          Description="Defensive Spirit Walk when health is critical or elites are close.",  Code="WD_SpiritWalk_Defensive",           IsBuff=false },
@@ -9127,7 +9665,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             int demonHunterStart = crusaderStart + 7;
             int monkStart = demonHunterStart + 9;
             int necromancerStart = monkStart + 7;
-            int witchDoctorStart = necromancerStart + 5;
+            int witchDoctorStart = necromancerStart + 6;
             int wizardStart = witchDoctorStart + 7;
 
             int[] classStarts = { 0, barbarianStart, crusaderStart, demonHunterStart, monkStart, necromancerStart, witchDoctorStart, wizardStart };
@@ -9232,7 +9770,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
         {
             _fSection.DrawText("TTS ALERTS", detail.Left + 14f, detail.Top + 10f);
             _fLabel.DrawText(
-                Trim("TTS-powered alert plugins. Global TTS and volume are controlled from the top bar.", 114),
+                Trim("TTS alert notifications for long range banners, pylons, and messages.", 114),
                 detail.Left + 14f,
                 detail.Top + 34f);
         }
@@ -13708,6 +14246,24 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     lines.Add("TTS_CUSTOM_" + i.ToString(CultureInfo.InvariantCulture) + "_TEXT=" + EncodeSettingText(msg.Text));
                 }
 
+                lines.Add("INVENTORY_DROP_EXPANDED=" + _inventoryDropExpanded.ToString(CultureInfo.InvariantCulture));
+                lines.Add("INVENTORY_DROP_ENABLED=" + _inventoryDropEnabled.ToString(CultureInfo.InvariantCulture));
+                lines.Add("INVENTORY_DROP_NONBOUND_LEGENDARY=" + _inventoryDropNonAccountLegendaries.ToString(CultureInfo.InvariantCulture));
+                lines.Add("INVENTORY_DROP_TRASH=" + _inventoryDropTrash.ToString(CultureInfo.InvariantCulture));
+                lines.Add("INVENTORY_DROP_GIFTS=" + _inventoryDropGifts.ToString(CultureInfo.InvariantCulture));
+                lines.Add("INVENTORY_DROP_SCREAMS=" + _inventoryDropScreams.ToString(CultureInfo.InvariantCulture));
+                lines.Add("INVENTORY_DROP_GEMS=" + _inventoryDropGems.ToString(CultureInfo.InvariantCulture));
+
+                lines.Add("PESTILENCE_RGK_EXPANDED=" + _pestilenceRgkExpanded.ToString(CultureInfo.InvariantCulture));
+                lines.Add("PESTILENCE_RGK_NORMAL_STACKS=" + _pestilenceRgkNormalStacks.ToString(CultureInfo.InvariantCulture));
+                lines.Add("PESTILENCE_RGK_POWER_STACKS=" + _pestilenceRgkPowerStacks.ToString(CultureInfo.InvariantCulture));
+                lines.Add("PESTILENCE_RGK_AUTOSIPHON=" + _pestilenceRgkAutoSiphon.ToString(CultureInfo.InvariantCulture));
+                lines.Add("PESTILENCE_RGK_LATE_REFRESH=" + _pestilenceRgkLateRefreshAssist.ToString(CultureInfo.InvariantCulture));
+                lines.Add("PESTILENCE_RGK_DEBUFF_PRIORITY=" + _pestilenceRgkPrioritizeDebuffed.ToString(CultureInfo.InvariantCulture));
+                lines.Add("PESTILENCE_RGK_AGGRESSIVE_SCAN=" + _pestilenceRgkAggressiveScan.ToString(CultureInfo.InvariantCulture));
+                lines.Add("PESTILENCE_RGK_INCLUDE_TRASH=" + _pestilenceRgkIncludeTrash.ToString(CultureInfo.InvariantCulture));
+                lines.Add("PESTILENCE_RGK_CURSOR_RESTORE=" + _pestilenceRgkCursorRestore.ToString(CultureInfo.InvariantCulture));
+                lines.Add("PESTILENCE_RGK_TARGET_RANGE=" + _pestilenceRgkTargetRange.ToString(CultureInfo.InvariantCulture));
                 lines.Add("AUTOSKILL_KEYBINDS_EXPANDED=" + _autoSkillKeybindsExpanded.ToString(CultureInfo.InvariantCulture));
 
                 // AutoSnap
@@ -14227,6 +14783,98 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     {
                         TryLoadTtsCustomMessageSetting(key, val);
                     }
+                    else if (string.Equals(key, "INVENTORY_DROP_EXPANDED", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool tmp;
+                        if (bool.TryParse(val, out tmp)) _inventoryDropExpanded = tmp;
+                    }
+                    else if (string.Equals(key, "INVENTORY_DROP_ENABLED", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool tmp;
+                        if (bool.TryParse(val, out tmp)) _inventoryDropEnabled = tmp;
+                    }
+                    else if (string.Equals(key, "INVENTORY_DROP_ALL", StringComparison.OrdinalIgnoreCase))
+                    {
+                        // Legacy REV06 setting. Shift+F2 is now always the drop-all hotkey.
+                    }
+                    else if (string.Equals(key, "INVENTORY_DROP_NONBOUND_LEGENDARY", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool tmp;
+                        if (bool.TryParse(val, out tmp)) _inventoryDropNonAccountLegendaries = tmp;
+                    }
+                    else if (string.Equals(key, "INVENTORY_DROP_TRASH", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool tmp;
+                        if (bool.TryParse(val, out tmp)) _inventoryDropTrash = tmp;
+                    }
+                    else if (string.Equals(key, "INVENTORY_DROP_GIFTS", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool tmp;
+                        if (bool.TryParse(val, out tmp)) _inventoryDropGifts = tmp;
+                    }
+                    else if (string.Equals(key, "INVENTORY_DROP_SCREAMS", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool tmp;
+                        if (bool.TryParse(val, out tmp)) _inventoryDropScreams = tmp;
+                    }
+                    else if (string.Equals(key, "INVENTORY_DROP_GEMS", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool tmp;
+                        if (bool.TryParse(val, out tmp)) _inventoryDropGems = tmp;
+                    }
+                    else if (string.Equals(key, "PESTILENCE_RGK_EXPANDED", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool tmp;
+                        if (bool.TryParse(val, out tmp)) _pestilenceRgkExpanded = tmp;
+                    }
+                    else if (key == "PESTILENCE_RGK_NORMAL_STACKS")
+                    {
+                        int tmp;
+                        if (int.TryParse(val, NumberStyles.Integer, CultureInfo.InvariantCulture, out tmp))
+                            _pestilenceRgkNormalStacks = ClampPestilenceRgkStackTarget(tmp);
+                    }
+                    else if (key == "PESTILENCE_RGK_POWER_STACKS")
+                    {
+                        int tmp;
+                        if (int.TryParse(val, NumberStyles.Integer, CultureInfo.InvariantCulture, out tmp))
+                            _pestilenceRgkPowerStacks = ClampPestilenceRgkStackTarget(tmp);
+                    }
+                    else if (string.Equals(key, "PESTILENCE_RGK_AUTOSIPHON", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool tmp;
+                        if (bool.TryParse(val, out tmp)) _pestilenceRgkAutoSiphon = tmp;
+                    }
+                    else if (string.Equals(key, "PESTILENCE_RGK_LATE_REFRESH", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool tmp;
+                        if (bool.TryParse(val, out tmp)) _pestilenceRgkLateRefreshAssist = tmp;
+                    }
+                    else if (string.Equals(key, "PESTILENCE_RGK_DEBUFF_PRIORITY", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool tmp;
+                        if (bool.TryParse(val, out tmp)) _pestilenceRgkPrioritizeDebuffed = tmp;
+                    }
+                    else if (string.Equals(key, "PESTILENCE_RGK_AGGRESSIVE_SCAN", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool tmp;
+                        if (bool.TryParse(val, out tmp)) _pestilenceRgkAggressiveScan = tmp;
+                    }
+                    else if (string.Equals(key, "PESTILENCE_RGK_INCLUDE_TRASH", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool tmp;
+                        if (bool.TryParse(val, out tmp)) _pestilenceRgkIncludeTrash = tmp;
+                    }
+                    else if (string.Equals(key, "PESTILENCE_RGK_CURSOR_RESTORE", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool tmp;
+                        if (bool.TryParse(val, out tmp)) _pestilenceRgkCursorRestore = tmp;
+                    }
+                    else if (string.Equals(key, "PESTILENCE_RGK_TARGET_RANGE", StringComparison.OrdinalIgnoreCase))
+                    {
+                        int tmp;
+                        if (int.TryParse(val, NumberStyles.Integer, CultureInfo.InvariantCulture, out tmp))
+                            _pestilenceRgkTargetRange = ClampPestilenceRgkTargetRange(tmp);
+                    }
                     else if (key == "AUTOSKILL_KEYBINDS_EXPANDED")
                     {
                         _autoSkillKeybindsExpanded = ParseBool(val, _autoSkillKeybindsExpanded);
@@ -14338,6 +14986,15 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 {
                     _riftMapSelectionHasOverride = true;
                     _riftEnabledMapIds.Clear();
+                }
+
+                if (_loadedSettingsVersion > 0 && _loadedSettingsVersion < 13)
+                {
+                    _inventoryDropNonAccountLegendaries = false;
+                    _inventoryDropTrash = true;
+                    _inventoryDropGifts = true;
+                    _inventoryDropScreams = false;
+                    _inventoryDropGems = false;
                 }
 
                 try
