@@ -14,15 +14,19 @@ namespace Turbo.Plugins.s7o
 {
     public class s7o_AutoSkill : BasePlugin, IAfterCollectHandler, IInGameTopPainter, IMouseClickHandler, INewAreaHandler
     {
+        private const uint JessethArmsDamageBuffSno = 476047u;
+        private const string CommandSkeletonsProfileCode = "Necro_CommandSkeletons_Elite";
+        private const string DevourProfileCode = "Necro_Devour_CorpseOrLotD";
+
         #region Settings
 
         public bool EnableManualSlotAutoCast = true;
         public bool EnableAutomaticBuffUpkeep = true;
         public bool EnableConditionalAutoCastProfiles = true;
 
-        public int ConditionalProfileRecheckMs = 100;
-        public int ConditionalProfileDelayMinMs = 250;
-        public int ConditionalProfileDelayMaxMs = 600;
+        public int ConditionalProfileRecheckMs = 25;
+        public int ConditionalProfileDelayMinMs = 100;
+        public int ConditionalProfileDelayMaxMs = 150;
 
         public bool EnableHoverToggle = true;
         public bool EnableClickToggle = false;
@@ -31,6 +35,7 @@ namespace Turbo.Plugins.s7o
         public bool UseForceStandstillForCasts = true;
         public bool AllowBuffUpkeepInTown = true;
         public bool BlockLeftSkillOnSelectedClickableActor = true;
+        public bool CommandSkeletonsMoveCursorToTarget = false;
         public ushort ForceStandstillVirtualKey = 0x10; // Shift
 
         public ushort Skill1VirtualKey = 0x31; // 1
@@ -39,12 +44,12 @@ namespace Turbo.Plugins.s7o
         public ushort Skill4VirtualKey = 0x34; // 4
         public ushort HealVirtualKey = 0x51;   // Q
 
-        public int GlobalCastDelayMs = 90;
-        public int ManualSlotDelayMinMs = 120;
-        public int ManualSlotDelayMaxMs = 220;
-        public int BuffCastDelayMinMs = 350;
-        public int BuffCastDelayMaxMs = 700;
-        public int BuffRecheckMs = 150;
+        public int GlobalCastDelayMs = 50;
+        public int ManualSlotDelayMinMs = 100;
+        public int ManualSlotDelayMaxMs = 100;
+        public int BuffCastDelayMinMs = 150;
+        public int BuffCastDelayMaxMs = 250;
+        public int BuffRecheckMs = 50;
 
         public bool EnableFastMissingBuffRetry = true;
         public int MissingBuffRetryMs = 100;
@@ -75,6 +80,14 @@ namespace Turbo.Plugins.s7o
         private readonly Dictionary<uint, int> _lastCastTickByPower = new Dictionary<uint, int>();
         private readonly Dictionary<string, RandomNode> _randomNodes = new Dictionary<string, RandomNode>();
         private readonly Dictionary<string, int> _nextSkipLogTickByKey = new Dictionary<string, int>();
+        private int _lastCommandSkeletonsRequestTick;
+        private bool _commandSkeletonsBloodsongLotdCast;
+        private bool _commandSkeletonsHasAimTarget;
+        private int _commandSkeletonsAimX;
+        private int _commandSkeletonsAimY;
+        private bool _commandSkeletonsCursorRestoreKnown;
+        private int _commandSkeletonsRestoreX;
+        private int _commandSkeletonsRestoreY;
 
         private readonly List<SkillSlotState> _skillSlots = new List<SkillSlotState>();
         private readonly List<AutoBuffProfile> _buffProfiles = new List<AutoBuffProfile>();
@@ -238,6 +251,8 @@ namespace Turbo.Plugins.s7o
             _entryBuffBurstStartTick = 0;
             _lastActMapVisibleTick = 0;
             _lastWorldMapVisibleTick = 0;
+            _lastCommandSkeletonsRequestTick = 0;
+            _commandSkeletonsBloodsongLotdCast = false;
             _lastBlockedReason = null;
             _nextBlockedLogTick = 0;
             ResetHoverToggle();
@@ -301,7 +316,7 @@ namespace Turbo.Plugins.s7o
                 string conditionalBlockedReason;
                 if (IsValidAutomationContext(false, out conditionalBlockedReason))
                 {
-                    _nextConditionalProfileCheckTick = now + Math.Max(50, ConditionalProfileRecheckMs);
+                    _nextConditionalProfileCheckTick = now + Math.Max(25, ConditionalProfileRecheckMs);
 
                     if (TryRunConditionalAutoCastProfiles(now))
                         return;
@@ -854,7 +869,7 @@ namespace Turbo.Plugins.s7o
             if (IsEntryBuffBurstActive(now))
                 return Math.Max(1, EntryBuffBurstGapMs);
 
-            return Math.Max(50, BuffRecheckMs);
+            return Math.Max(25, BuffRecheckMs);
         }
 
         private int GetBuffCheckIntervalAfterCast(int now, bool missing)
@@ -1016,32 +1031,47 @@ namespace Turbo.Plugins.s7o
                     profile.CastDelayMaxMs > 0 ? profile.CastDelayMaxMs : ConditionalProfileDelayMaxMs,
                     1000);
 
-                string reason;
-                if (!CanCastSkill(slot.Skill, slot.ActionKey, now, delay, out reason))
+                bool commandSkeletonsCursorMoved = false;
+                try
                 {
-                    LogDebugCastSkipThrottled("conditional", slot.Skill, profile.Code + ": " + reason, now);
-                    continue;
+                    if (IsCommandSkeletonsProfile(profile) && CommandSkeletonsMoveCursorToTarget)
+                        commandSkeletonsCursorMoved = TryMoveCursorToCommandSkeletonsTarget();
+
+                    string reason;
+                    if (!CanCastSkill(slot.Skill, slot.ActionKey, now, delay, out reason))
+                    {
+                        LogDebugCastSkipThrottled("conditional", slot.Skill, profile.Code + ": " + reason, now);
+                        continue;
+                    }
+
+                    if (!HasEnoughPrimaryResource(slot.Skill, profile.ReservePrimaryResource, profile.BasePrimaryResourceRequirement))
+                    {
+                        LogDebugCastSkipThrottled("conditional", slot.Skill, profile.Code + ": reserved primary resource", now);
+                        continue;
+                    }
+
+                    if (!HasEnoughSecondaryResource(profile.ReserveSecondaryResource, profile.BaseSecondaryResourceRequirement))
+                    {
+                        LogDebugCastSkipThrottled("conditional", slot.Skill, profile.Code + ": reserved secondary resource", now);
+                        continue;
+                    }
+
+                    if (DoAction(slot.ActionKey, profile.UseStandstill && UseForceStandstillForCasts))
+                    {
+                        MarkSkillCast(slot.Skill, now);
+                        _lastConditionalProfileCastTickByCode[profile.Code] = now;
+                        if (IsCommandSkeletonsProfile(profile))
+                            _lastCommandSkeletonsRequestTick = now;
+
+                        LogDebug("Conditional profile cast: " + profile.Code + ", skill=" + SafeSkillCode(slot.Skill));
+                        return true;
+                    }
                 }
-
-                if (!HasEnoughPrimaryResource(slot.Skill, profile.ReservePrimaryResource, profile.BasePrimaryResourceRequirement))
+                finally
                 {
-                    LogDebugCastSkipThrottled("conditional", slot.Skill, profile.Code + ": reserved primary resource", now);
-                    continue;
-                }
-
-                if (!HasEnoughSecondaryResource(profile.ReserveSecondaryResource, profile.BaseSecondaryResourceRequirement))
-                {
-                    LogDebugCastSkipThrottled("conditional", slot.Skill, profile.Code + ": reserved secondary resource", now);
-                    continue;
-                }
-
-                if (DoAction(slot.ActionKey, profile.UseStandstill && UseForceStandstillForCasts))
-                {
-                    MarkSkillCast(slot.Skill, now);
-                    _lastConditionalProfileCastTickByCode[profile.Code] = now;
-
-                    LogDebug("Conditional profile cast: " + profile.Code + ", skill=" + SafeSkillCode(slot.Skill));
-                    return true;
+                    if (commandSkeletonsCursorMoved)
+                        RestoreCommandSkeletonsCursor();
+                    ClearCommandSkeletonsAimTarget();
                 }
             }
 
@@ -1060,7 +1090,7 @@ namespace Turbo.Plugins.s7o
             Func<ConditionalCastContext, bool> shouldCast,
             int castDelayMinMs = 250,
             int castDelayMaxMs = 600,
-            int recheckMs = 100,
+            int recheckMs = 50,
             int reservePrimaryResource = 0,
             int reserveSecondaryResource = 0,
             float basePrimaryRequirement = 0,
@@ -1199,11 +1229,11 @@ namespace Turbo.Plugins.s7o
                     if (ctx.Skill.Rune == 0) return false;
                     if (ctx.Skill.Rune == 3 && HealthPctBelow(40)) return true;
                     return SecondaryResourceMissingAtLeast(30);
-                }, 350, 700, 250);
+                }, ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
 
-            AddConditionalProfile(Hud.Sno.SnoPowers.DemonHunter_Preparation, 129212, "DH_Preparation_Punishment_Hatred", "Preparation: Punishment Hatred", "Demon Hunter", "Resource", "Casts Punishment rune when hatred is missing by about 75.", true, ctx => ctx.Skill.Rune == 0 && PrimaryResourceMissingAtLeast(75), 350, 700, 250);
-            AddConditionalProfile(Hud.Sno.SnoPowers.DemonHunter_Companion, 365311, "DH_Companion_Bat_Hatred", "Companion: Bat Hatred", "Demon Hunter", "Resource", "Casts Bat Companion when hatred is very low.", true, ctx => ctx.Skill.Rune == 3 && PrimaryResourcePctBelow(15), 350, 700, 250);
-            AddConditionalProfile(Hud.Sno.SnoPowers.DemonHunter_Companion, 365311, "DH_Companion_EliteOrBoss", "Companion: Elite/Boss", "Demon Hunter", "Combat", "Casts non-Bat Companion active when an elite, boss, or goblin is nearby.", true, ctx => ctx.Skill.Rune != 3 && IsEliteOrBossNearby(40, false), 350, 700, 250);
+            AddConditionalProfile(Hud.Sno.SnoPowers.DemonHunter_Preparation, 129212, "DH_Preparation_Punishment_Hatred", "Preparation: Punishment Hatred", "Demon Hunter", "Resource", "Casts Punishment rune when hatred is missing by about 75.", true, ctx => ctx.Skill.Rune == 0 && PrimaryResourceMissingAtLeast(75), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
+            AddConditionalProfile(Hud.Sno.SnoPowers.DemonHunter_Companion, 365311, "DH_Companion_Bat_Hatred", "Companion: Bat Hatred", "Demon Hunter", "Resource", "Casts Bat Companion when hatred is very low.", true, ctx => ctx.Skill.Rune == 3 && PrimaryResourcePctBelow(15), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
+            AddConditionalProfile(Hud.Sno.SnoPowers.DemonHunter_Companion, 365311, "DH_Companion_EliteOrBoss", "Companion: Elite/Boss", "Demon Hunter", "Combat", "Casts non-Bat Companion active when an elite, boss, or goblin is nearby.", true, ctx => ctx.Skill.Rune != 3 && IsEliteOrBossNearby(40, false), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
 
             AddConditionalProfile(Hud.Sno.SnoPowers.DemonHunter_Vengeance, 302846, "DH_Vengeance_KeepCombatBuff", "Vengeance: Combat Buff", "Demon Hunter", "Buff", "Casts Vengeance in combat when missing or almost expired. Also supports Dark Heart/Seethe style resource/danger use.", true,
                 ctx =>
@@ -1211,9 +1241,9 @@ namespace Turbo.Plugins.s7o
                     if (!IsEliteOrBossNearby(100, true) && CountAliveMonstersWithin(100) < 1) return false;
                     if ((ctx.Skill.Rune == 1 || ctx.Skill.Rune == 3) && !HealthPctBelow(60)) return false;
                     return SkillBuffRemainingBelow(ctx.Skill, 50, 100);
-                }, 350, 700, 250);
+                }, ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
 
-            AddConditionalProfile(Hud.Sno.SnoPowers.DemonHunter_Vengeance, 302846, "DH_Vengeance_HatredBurst", "Vengeance: Hatred Burst", "Demon Hunter", "Resource", "For hatred-return rune, casts Vengeance when hatred is below 30.", true, ctx => ctx.Skill.Rune == 4 && PrimaryResourceBelow(30) && SkillBuffRemainingBelow(ctx.Skill, 50, 100), 350, 700, 250);
+            AddConditionalProfile(Hud.Sno.SnoPowers.DemonHunter_Vengeance, 302846, "DH_Vengeance_HatredBurst", "Vengeance: Hatred Burst", "Demon Hunter", "Resource", "For hatred-return rune, casts Vengeance when hatred is below 30.", true, ctx => ctx.Skill.Rune == 4 && PrimaryResourceBelow(30) && SkillBuffRemainingBelow(ctx.Skill, 50, 100), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
 
             AddConditionalProfile(Hud.Sno.SnoPowers.DemonHunter_ShadowPower, 130830, "DH_ShadowPower_Defensive", "Shadow Power: Defensive", "Demon Hunter", "Defense", "Casts Shadow Power when missing and health/danger conditions are met.", true,
                 ctx =>
@@ -1222,81 +1252,82 @@ namespace Turbo.Plugins.s7o
                     if (HealthPctBelow(65)) return true;
                     if (Hud.Game.IsEliteOnScreen && HealthPctBelow(75)) return true;
                     return false;
-                }, 350, 700, 250);
+                }, ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
 
             AddConditionalProfile(Hud.Sno.SnoPowers.DemonHunter_ShadowPower, 130830, "DH_ShadowPower_ElusiveRing", "Shadow Power: Elusive Ring", "Demon Hunter", "Defense", "Best-effort Elusive Ring upkeep using Shadow Power when enemies are nearby.", true,
                 ctx =>
                 {
                     if (!IsEliteOrBossNearby(40, true) && CountAliveMonstersWithin(40) < 1) return false;
                     return SkillBuffRemainingBelow(ctx.Skill, 30, 100);
-                }, 350, 700, 250);
+                }, ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
         }
 
         private void BuildBarbarianConditionalProfiles()
         {
-            AddConditionalProfile(Hud.Sno.SnoPowers.Barbarian_BattleRage, 79076, "Barbarian_BattleRage_KeepUp", "Battle Rage: Keep Up", "Barbarian", "Buff", "Keeps Battle Rage active.", true, ctx => SkillBuffRemainingBelow(ctx.Skill, 1000, 2000), 350, 700, 250);
-            AddConditionalProfile(Hud.Sno.SnoPowers.Barbarian_WarCry, 375483, "Barbarian_WarCry_KeepUp", "War Cry: Keep Up", "Barbarian", "Buff", "Keeps War Cry active.", true, ctx => SkillBuffRemainingBelow(ctx.Skill, 1000, 2000), 350, 700, 250);
-            AddConditionalProfile(Hud.Sno.SnoPowers.Barbarian_Sprint, 78551, "Barbarian_Sprint_KeepUpMoving", "Sprint: Keep Up", "Barbarian", "Movement", "Keeps Sprint up while monsters are nearby.", false, ctx => CountAliveMonstersWithin(80) > 0 && SkillBuffRemainingBelow(ctx.Skill, 500, 1000), 350, 700, 250);
-            AddConditionalProfile(Hud.Sno.SnoPowers.Barbarian_WrathOfTheBerserker, 79607, "Barbarian_WOTB_EliteOrDensity", "Wrath of the Berserker: Elite/Density", "Barbarian", "Cooldown", "Casts WOTB when elite/boss nearby or high monster density.", true, ctx => (IsEliteOrBossNearby(80, false) || CountAliveMonstersWithin(60) >= 8) && SkillBuffRemainingBelow(ctx.Skill, 50, 100), 350, 700, 250);
-            AddConditionalProfile(Hud.Sno.SnoPowers.Barbarian_CallOfTheAncients, 80049, "Barbarian_COTA_Combat", "Call of the Ancients: Combat", "Barbarian", "Pet", "Casts Call of the Ancients in combat when missing.", true, ctx => (IsEliteOrBossNearby(80, true) || CountAliveMonstersWithin(80) >= 1) && SkillBuffMissing(ctx.Skill), 350, 700, 250);
-            AddConditionalProfile(Hud.Sno.SnoPowers.Barbarian_IgnorePain, 79528, "Barbarian_IgnorePain_Defensive", "Ignore Pain: Defensive", "Barbarian", "Defense", "Casts Ignore Pain when health is low or elites are nearby.", true, ctx => (HealthPctBelow(65) || IsEliteOrBossNearby(50, true)) && SkillBuffRemainingBelow(ctx.Skill, 100, 250), 350, 700, 250);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Barbarian_BattleRage, 79076, "Barbarian_BattleRage_KeepUp", "Battle Rage: Keep Up", "Barbarian", "Buff", "Keeps Battle Rage active.", true, ctx => SkillBuffRemainingBelow(ctx.Skill, 1000, 2000), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Barbarian_WarCry, 375483, "Barbarian_WarCry_KeepUp", "War Cry: Keep Up", "Barbarian", "Buff", "Keeps War Cry active.", true, ctx => SkillBuffRemainingBelow(ctx.Skill, 1000, 2000), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Barbarian_Sprint, 78551, "Barbarian_Sprint_KeepUpMoving", "Sprint: Keep Up", "Barbarian", "Movement", "Keeps Sprint up while monsters are nearby.", false, ctx => CountAliveMonstersWithin(80) > 0 && SkillBuffRemainingBelow(ctx.Skill, 500, 1000), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Barbarian_WrathOfTheBerserker, 79607, "Barbarian_WOTB_EliteOrDensity", "Wrath of the Berserker: Elite/Density", "Barbarian", "Cooldown", "Casts WOTB when elite/boss nearby or high monster density.", true, ctx => (IsEliteOrBossNearby(80, false) || CountAliveMonstersWithin(60) >= 8) && SkillBuffRemainingBelow(ctx.Skill, 50, 100), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Barbarian_CallOfTheAncients, 80049, "Barbarian_COTA_Combat", "Call of the Ancients: Combat", "Barbarian", "Pet", "Casts Call of the Ancients in combat when missing.", true, ctx => (IsEliteOrBossNearby(80, true) || CountAliveMonstersWithin(80) >= 1) && SkillBuffMissing(ctx.Skill), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Barbarian_IgnorePain, 79528, "Barbarian_IgnorePain_Defensive", "Ignore Pain: Defensive", "Barbarian", "Defense", "Casts Ignore Pain when health is low or elites are nearby.", true, ctx => (HealthPctBelow(65) || IsEliteOrBossNearby(50, true)) && SkillBuffRemainingBelow(ctx.Skill, 100, 250), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
         }
 
         private void BuildCrusaderConditionalProfiles()
         {
-            AddConditionalProfile(Hud.Sno.SnoPowers.Crusader_AkaratsChampion, 269032, "Crusader_AkaratsChampion_Combat", "Akarat's Champion: Combat", "Crusader", "Cooldown", "Casts Akarat's Champion when elites/bosses or density are nearby.", true, ctx => (IsEliteOrBossNearby(80, true) || CountAliveMonstersWithin(60) >= 8) && SkillBuffRemainingBelow(ctx.Skill, 50, 100), 350, 700, 250);
-            AddConditionalProfile(Hud.Sno.SnoPowers.Crusader_LawsOfValor, 342281, "Crusader_LawsOfValor_Elite", "Laws of Valor: Elite", "Crusader", "Law", "Activates Law of Valor when elites or bosses are nearby.", true, ctx => IsEliteOrBossNearby(60, true), 350, 700, 250);
-            AddConditionalProfile(Hud.Sno.SnoPowers.Crusader_LawsOfJustice, 342280, "Crusader_LawsOfJustice_Defensive", "Laws of Justice: Defensive", "Crusader", "Law", "Activates Law of Justice when health is low or elites are nearby.", true, ctx => HealthPctBelow(70) || IsEliteOrBossNearby(50, true), 350, 700, 250);
-            AddConditionalProfile(Hud.Sno.SnoPowers.Crusader_LawsOfHope, 342279, "Crusader_LawsOfHope_Defensive", "Laws of Hope: Defensive", "Crusader", "Law", "Activates Law of Hope when health is low.", true, ctx => HealthPctBelow(70), 350, 700, 250);
-            AddConditionalProfile(Hud.Sno.SnoPowers.Crusader_IronSkin, 291804, "Crusader_IronSkin_Defensive", "Iron Skin: Defensive", "Crusader", "Defense", "Casts Iron Skin when health is low or elites are nearby.", true, ctx => (HealthPctBelow(70) || IsEliteOrBossNearby(45, true)) && SkillBuffRemainingBelow(ctx.Skill, 50, 100), 350, 700, 250);
-            AddConditionalProfile(Hud.Sno.SnoPowers.Crusader_Provoke, 290545, "Crusader_Provoke_ResourceOrDensity", "Provoke: Resource/Density", "Crusader", "Resource", "Casts Provoke when wrath is missing and enemies are nearby.", true, ctx => PrimaryResourceMissingAtLeast(40) && CountAliveMonstersWithin(30) >= 3, 350, 700, 250);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Crusader_AkaratsChampion, 269032, "Crusader_AkaratsChampion_Combat", "Akarat's Champion: Combat", "Crusader", "Cooldown", "Casts Akarat's Champion when elites/bosses or density are nearby.", true, ctx => (IsEliteOrBossNearby(80, true) || CountAliveMonstersWithin(60) >= 8) && SkillBuffRemainingBelow(ctx.Skill, 50, 100), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Crusader_LawsOfValor, 342281, "Crusader_LawsOfValor_Elite", "Laws of Valor: Elite", "Crusader", "Law", "Activates Law of Valor when elites or bosses are nearby.", true, ctx => IsEliteOrBossNearby(60, true), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Crusader_LawsOfJustice, 342280, "Crusader_LawsOfJustice_Defensive", "Laws of Justice: Defensive", "Crusader", "Law", "Activates Law of Justice when health is low or elites are nearby.", true, ctx => HealthPctBelow(70) || IsEliteOrBossNearby(50, true), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Crusader_LawsOfHope, 342279, "Crusader_LawsOfHope_Defensive", "Laws of Hope: Defensive", "Crusader", "Law", "Activates Law of Hope when health is low.", true, ctx => HealthPctBelow(70), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Crusader_IronSkin, 291804, "Crusader_IronSkin_Defensive", "Iron Skin: Defensive", "Crusader", "Defense", "Casts Iron Skin when health is low or elites are nearby.", true, ctx => (HealthPctBelow(70) || IsEliteOrBossNearby(45, true)) && SkillBuffRemainingBelow(ctx.Skill, 50, 100), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Crusader_Provoke, 290545, "Crusader_Provoke_ResourceOrDensity", "Provoke: Resource/Density", "Crusader", "Resource", "Casts Provoke when wrath is missing and enemies are nearby.", true, ctx => PrimaryResourceMissingAtLeast(40) && CountAliveMonstersWithin(30) >= 3, ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
             // Default false until we add a proper menu toggle and more build-specific guards.
-            AddConditionalProfile(Hud.Sno.SnoPowers.Crusader_Bombardment, 284876, "Crusader_Bombardment_EliteOrDensity", "Bombardment: Elite/Density", "Crusader", "Cooldown", "Casts Bombardment on elite/boss or dense packs.", false, ctx => IsEliteOrBossNearby(60, true) || CountAliveMonstersWithin(50) >= 10, 350, 700, 250);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Crusader_Bombardment, 284876, "Crusader_Bombardment_EliteOrDensity", "Bombardment: Elite/Density", "Crusader", "Cooldown", "Casts Bombardment on elite/boss or dense packs.", false, ctx => IsEliteOrBossNearby(60, true) || CountAliveMonstersWithin(50) >= 10, ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
         }
 
         private void BuildMonkConditionalProfiles()
         {
-            AddConditionalProfile(Hud.Sno.SnoPowers.Monk_Epiphany, 312307, "Monk_Epiphany_Combat", "Epiphany: Combat", "Monk", "Cooldown", "Casts Epiphany when elite/boss or density is nearby.", true, ctx => (IsEliteOrBossNearby(80, true) || CountAliveMonstersWithin(60) >= 8) && SkillBuffRemainingBelow(ctx.Skill, 50, 100), 350, 700, 250);
-            AddConditionalProfile(Hud.Sno.SnoPowers.Monk_SweepingWind, 96090, "Monk_SweepingWind_KeepUp", "Sweeping Wind: Keep Up", "Monk", "Buff", "Keeps Sweeping Wind active near enemies.", true, ctx => CountAliveMonstersWithin(60) > 0 && SkillBuffRemainingBelow(ctx.Skill, 1000, 2000), 350, 700, 250);
-            AddConditionalProfile(Hud.Sno.SnoPowers.Monk_MantraOfConviction, 375088, "Monk_MantraConviction_Elite", "Mantra of Conviction: Elite", "Monk", "Mantra", "Activates Mantra of Conviction near elites or density.", true, ctx => IsEliteOrBossNearby(50, true) || CountAliveMonstersWithin(35) >= 5, 350, 700, 250);
-            AddConditionalProfile(Hud.Sno.SnoPowers.Monk_MantraOfSalvation, 375049, "Monk_MantraSalvation_Defensive", "Mantra of Salvation: Defensive", "Monk", "Mantra", "Activates Mantra of Salvation when health is low or elites are nearby.", true, ctx => HealthPctBelow(70) || IsEliteOrBossNearby(45, true), 350, 700, 250);
-            AddConditionalProfile(Hud.Sno.SnoPowers.Monk_MantraOfHealing, 373143, "Monk_MantraHealing_Defensive", "Mantra of Healing: Defensive", "Monk", "Mantra", "Activates Mantra of Healing when health is low.", true, ctx => HealthPctBelow(75), 350, 700, 250);
-            AddConditionalProfile(Hud.Sno.SnoPowers.Monk_MysticAlly, 362102, "Monk_MysticAlly_ResourceOrElite", "Mystic Ally: Resource/Elite", "Monk", "Resource", "Casts Mystic Ally when spirit is low or elite/boss is nearby.", true, ctx => PrimaryResourcePctBelow(35) || IsEliteOrBossNearby(50, true), 350, 700, 250);
-            AddConditionalProfile(Hud.Sno.SnoPowers.Monk_Serenity, 96215, "Monk_Serenity_Defensive", "Serenity: Defensive", "Monk", "Defense", "Casts Serenity when health is low or elites are close.", true, ctx => (HealthPctBelow(55) || IsEliteOrBossNearby(30, true)) && SkillBuffRemainingBelow(ctx.Skill, 50, 100), 350, 700, 250);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Monk_Epiphany, 312307, "Monk_Epiphany_Combat", "Epiphany: Combat", "Monk", "Cooldown", "Casts Epiphany when elite/boss or density is nearby.", true, ctx => (IsEliteOrBossNearby(80, true) || CountAliveMonstersWithin(60) >= 8) && SkillBuffRemainingBelow(ctx.Skill, 50, 100), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Monk_SweepingWind, 96090, "Monk_SweepingWind_KeepUp", "Sweeping Wind: Keep Up", "Monk", "Buff", "Keeps Sweeping Wind active near enemies.", true, ctx => CountAliveMonstersWithin(60) > 0 && SkillBuffRemainingBelow(ctx.Skill, 1000, 2000), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Monk_MantraOfConviction, 375088, "Monk_MantraConviction_Elite", "Mantra of Conviction: Elite", "Monk", "Mantra", "Activates Mantra of Conviction near elites or density.", true, ctx => IsEliteOrBossNearby(50, true) || CountAliveMonstersWithin(35) >= 5, ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Monk_MantraOfSalvation, 375049, "Monk_MantraSalvation_Defensive", "Mantra of Salvation: Defensive", "Monk", "Mantra", "Activates Mantra of Salvation when health is low or elites are nearby.", true, ctx => HealthPctBelow(70) || IsEliteOrBossNearby(45, true), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Monk_MantraOfHealing, 373143, "Monk_MantraHealing_Defensive", "Mantra of Healing: Defensive", "Monk", "Mantra", "Activates Mantra of Healing when health is low.", true, ctx => HealthPctBelow(75), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Monk_MysticAlly, 362102, "Monk_MysticAlly_ResourceOrElite", "Mystic Ally: Resource/Elite", "Monk", "Resource", "Casts Mystic Ally when spirit is low or elite/boss is nearby.", true, ctx => PrimaryResourcePctBelow(35) || IsEliteOrBossNearby(50, true), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Monk_Serenity, 96215, "Monk_Serenity_Defensive", "Serenity: Defensive", "Monk", "Defense", "Casts Serenity when health is low or elites are close.", true, ctx => (HealthPctBelow(55) || IsEliteOrBossNearby(30, true)) && SkillBuffRemainingBelow(ctx.Skill, 50, 100), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
         }
 
         private void BuildNecromancerConditionalProfiles()
         {
-            AddConditionalProfile(Hud.Sno.SnoPowers.Necromancer_BoneArmor, 466857, "Necro_BoneArmor_NearEnemies", "Bone Armor: Near Enemies", "Necromancer", "Buff", "Casts Bone Armor near enemies when missing/expiring.", true, ctx => CountAliveMonstersWithin(25) >= 1 && SkillBuffRemainingBelow(ctx.Skill, 1000, 2000), 350, 700, 250);
-            AddConditionalProfile(Hud.Sno.SnoPowers.Necromancer_Simulacrum, 465350, "Necro_Simulacrum_EliteOrDensity", "Simulacrum: Elite/Density", "Necromancer", "Cooldown", "Casts Simulacrum near elites or dense packs.", true, ctx => IsEliteOrBossNearby(80, true) || CountAliveMonstersWithin(60) >= 10, 350, 700, 250);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Necromancer_BoneArmor, 466857, "Necro_BoneArmor_NearEnemies", "Bone Armor: Near Enemies", "Necromancer", "Buff", "Casts Bone Armor near enemies when missing/expiring.", true, ctx => CountAliveMonstersWithin(25) >= 1 && SkillBuffRemainingBelow(ctx.Skill, 1000, 2000), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Necromancer_Simulacrum, 465350, "Necro_Simulacrum_EliteOrDensity", "Simulacrum: Elite/Density", "Necromancer", "Cooldown", "Casts Simulacrum near elites or dense packs.", true, ctx => IsEliteOrBossNearby(80, true) || CountAliveMonstersWithin(60) >= 10, ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
             // Default false until we add a proper menu toggle and more build-specific guards.
-            AddConditionalProfile(Hud.Sno.SnoPowers.Necromancer_LandOfTheDead, 465839, "Necro_LandOfTheDead_EliteOrDensity", "Land of the Dead: Elite/Density", "Necromancer", "Cooldown", "Casts Land of the Dead on elites or dense packs.", false, ctx => IsEliteOrBossNearby(80, true) || CountAliveMonstersWithin(60) >= 12, 350, 700, 250);
-            AddConditionalProfile(Hud.Sno.SnoPowers.Necromancer_CommandSkeletons, 453801, "Necro_CommandSkeletons_Elite", "Command Skeletons: Elite", "Necromancer", "Targeting", "Best-effort casts Command Skeletons near elites/bosses.", true, ctx => IsEliteOrBossNearby(60, true), 350, 700, 250);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Necromancer_LandOfTheDead, 465839, "Necro_LandOfTheDead_EliteOrDensity", "Land of the Dead: Elite/Density", "Necromancer", "Cooldown", "Casts Land of the Dead on elites or dense packs.", false, ctx => IsEliteOrBossNearby(80, true) || CountAliveMonstersWithin(60) >= 12, ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Necromancer_Devour, 460757, DevourProfileCode, "Devour: Corpses/LotD", "Necromancer", "Resource", "Maintains Devour buffs/resources; fast-casts while Land of the Dead is active.", true, ShouldCastDevour, 100, 150, 25, 0, 0, 0, 0, false);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Necromancer_CommandSkeletons, 453801, "Necro_CommandSkeletons_Elite", "Command Skeletons: Active Target", "Necromancer", "Targeting", "Maintains Command Skeletons/Jesseth on your selected target without moving the cursor.", true, ShouldCastCommandSkeletons, 350, 700, 250);
             // Default false until we add a proper menu toggle and more build-specific guards.
-            AddConditionalProfile(Hud.Sno.SnoPowers.Necromancer_SkeletalMage, 462089, "Necro_SkeletalMage_EssenceHigh", "Skeletal Mage: Essence High", "Necromancer", "Resource", "Casts Skeletal Mage when essence is high.", false, ctx => !PrimaryResourcePctBelow(80), 350, 700, 250);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Necromancer_SkeletalMage, 462089, "Necro_SkeletalMage_EssenceHigh", "Skeletal Mage: Essence High", "Necromancer", "Resource", "Casts Skeletal Mage when essence is high.", false, ctx => !PrimaryResourcePctBelow(80), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
         }
 
         private void BuildWitchDoctorConditionalProfiles()
         {
-            AddConditionalProfile(Hud.Sno.SnoPowers.WitchDoctor_FetishArmy, 72785, "WD_FetishArmy_Combat", "Fetish Army: Combat", "Witch Doctor", "Pet", "Casts Fetish Army near elites or dense packs.", true, ctx => IsEliteOrBossNearby(80, true) || CountAliveMonstersWithin(60) >= 8, 350, 700, 250);
-            AddConditionalProfile(Hud.Sno.SnoPowers.WitchDoctor_Gargantuan, 30624, "WD_Gargantuan_KeepUp", "Gargantuan: Keep Up", "Witch Doctor", "Pet", "Casts Gargantuan when missing near enemies.", true, ctx => CountAliveMonstersWithin(80) > 0 && SkillBuffMissing(ctx.Skill), 350, 700, 250);
-            AddConditionalProfile(Hud.Sno.SnoPowers.WitchDoctor_SummonZombieDog, 102573, "WD_ZombieDogs_KeepUp", "Zombie Dogs: Keep Up", "Witch Doctor", "Pet", "Summons Zombie Dogs when missing near enemies.", true, ctx => CountAliveMonstersWithin(80) > 0 && SkillBuffMissing(ctx.Skill), 350, 700, 250);
-            AddConditionalProfile(Hud.Sno.SnoPowers.WitchDoctor_SoulHarvest, 67616, "WD_SoulHarvest_NearEnemies", "Soul Harvest: Near Enemies", "Witch Doctor", "Buff", "Casts Soul Harvest when enemies are close and the buff needs upkeep.", true, ctx => CountAliveMonstersWithin(18) >= 1 && SkillBuffRemainingBelow(ctx.Skill, 500, 1500), 350, 700, 250);
-            AddConditionalProfile(Hud.Sno.SnoPowers.WitchDoctor_Horrify, 67668, "WD_Horrify_Defensive", "Horrify: Defensive", "Witch Doctor", "Defense", "Casts Horrify when enemies are close or health is low.", true, ctx => HealthPctBelow(70) || CountAliveMonstersWithin(24) >= 1, 350, 700, 250);
-            AddConditionalProfile(Hud.Sno.SnoPowers.WitchDoctor_SpiritWalk, 106237, "WD_SpiritWalk_Defensive", "Spirit Walk: Defensive", "Witch Doctor", "Defense", "Casts Spirit Walk defensively. Movement use stays manual.", true, ctx => HealthPctBelow(55) || IsEliteOrBossNearby(30, true), 350, 700, 250);
+            AddConditionalProfile(Hud.Sno.SnoPowers.WitchDoctor_FetishArmy, 72785, "WD_FetishArmy_Combat", "Fetish Army: Combat", "Witch Doctor", "Pet", "Casts Fetish Army near elites or dense packs.", true, ctx => IsEliteOrBossNearby(80, true) || CountAliveMonstersWithin(60) >= 8, ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
+            AddConditionalProfile(Hud.Sno.SnoPowers.WitchDoctor_Gargantuan, 30624, "WD_Gargantuan_KeepUp", "Gargantuan: Keep Up", "Witch Doctor", "Pet", "Casts Gargantuan when missing near enemies.", true, ctx => CountAliveMonstersWithin(80) > 0 && SkillBuffMissing(ctx.Skill), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
+            AddConditionalProfile(Hud.Sno.SnoPowers.WitchDoctor_SummonZombieDog, 102573, "WD_ZombieDogs_KeepUp", "Zombie Dogs: Keep Up", "Witch Doctor", "Pet", "Summons Zombie Dogs when missing near enemies.", true, ctx => CountAliveMonstersWithin(80) > 0 && SkillBuffMissing(ctx.Skill), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
+            AddConditionalProfile(Hud.Sno.SnoPowers.WitchDoctor_SoulHarvest, 67616, "WD_SoulHarvest_NearEnemies", "Soul Harvest: Near Enemies", "Witch Doctor", "Buff", "Casts Soul Harvest when enemies are close and the buff needs upkeep.", true, ctx => CountAliveMonstersWithin(18) >= 1 && SkillBuffRemainingBelow(ctx.Skill, 500, 1500), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
+            AddConditionalProfile(Hud.Sno.SnoPowers.WitchDoctor_Horrify, 67668, "WD_Horrify_Defensive", "Horrify: Defensive", "Witch Doctor", "Defense", "Casts Horrify when enemies are close or health is low.", true, ctx => HealthPctBelow(70) || CountAliveMonstersWithin(24) >= 1, ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
+            AddConditionalProfile(Hud.Sno.SnoPowers.WitchDoctor_SpiritWalk, 106237, "WD_SpiritWalk_Defensive", "Spirit Walk: Defensive", "Witch Doctor", "Defense", "Casts Spirit Walk defensively. Movement use stays manual.", true, ctx => HealthPctBelow(55) || IsEliteOrBossNearby(30, true), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
             // Default false until we add a proper menu toggle and more build-specific guards.
-            AddConditionalProfile(Hud.Sno.SnoPowers.WitchDoctor_BigBadVoodoo, 117402, "WD_BigBadVoodoo_EliteOrDensity", "Big Bad Voodoo: Elite/Density", "Witch Doctor", "Cooldown", "Casts Big Bad Voodoo on elites or dense packs.", false, ctx => IsEliteOrBossNearby(60, true) || CountAliveMonstersWithin(50) >= 10, 350, 700, 250);
+            AddConditionalProfile(Hud.Sno.SnoPowers.WitchDoctor_BigBadVoodoo, 117402, "WD_BigBadVoodoo_EliteOrDensity", "Big Bad Voodoo: Elite/Density", "Witch Doctor", "Cooldown", "Casts Big Bad Voodoo on elites or dense packs.", false, ctx => IsEliteOrBossNearby(60, true) || CountAliveMonstersWithin(50) >= 10, ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
         }
 
         private void BuildWizardConditionalProfiles()
         {
-            AddConditionalProfile(Hud.Sno.SnoPowers.Wizard_DiamondSkin, 75599, "Wizard_DiamondSkin_Defensive", "Diamond Skin: Defensive", "Wizard", "Defense", "Casts Diamond Skin when health is low or elites are close.", true, ctx => (HealthPctBelow(70) || IsEliteOrBossNearby(35, true)) && SkillBuffRemainingBelow(ctx.Skill, 50, 100), 350, 700, 250);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Wizard_DiamondSkin, 75599, "Wizard_DiamondSkin_Defensive", "Diamond Skin: Defensive", "Wizard", "Defense", "Casts Diamond Skin when health is low or elites are close.", true, ctx => (HealthPctBelow(70) || IsEliteOrBossNearby(35, true)) && SkillBuffRemainingBelow(ctx.Skill, 50, 100), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
             // Default false until we add a proper menu toggle and more build-specific guards.
-            AddConditionalProfile(Hud.Sno.SnoPowers.Wizard_Archon, 134872, "Wizard_Archon_EliteOrDensity", "Archon: Elite/Density", "Wizard", "Cooldown", "Casts Archon near elites or dense packs.", false, ctx => IsEliteOrBossNearby(80, true) || CountAliveMonstersWithin(60) >= 10, 350, 700, 250);
-            AddConditionalProfile(Hud.Sno.SnoPowers.Wizard_MirrorImage, 98027, "Wizard_MirrorImage_Defensive", "Mirror Image: Defensive", "Wizard", "Defense", "Casts Mirror Image when health is low or elites are nearby.", true, ctx => HealthPctBelow(65) || IsEliteOrBossNearby(40, true), 350, 700, 250);
-            AddConditionalProfile(Hud.Sno.SnoPowers.Wizard_FrostNova, 30718, "Wizard_FrostNova_CloseEnemies", "Frost Nova: Close Enemies", "Wizard", "Defense", "Casts Frost Nova when enemies are close.", true, ctx => CountAliveMonstersWithin(18) >= 1, 350, 700, 250);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Wizard_Archon, 134872, "Wizard_Archon_EliteOrDensity", "Archon: Elite/Density", "Wizard", "Cooldown", "Casts Archon near elites or dense packs.", false, ctx => IsEliteOrBossNearby(80, true) || CountAliveMonstersWithin(60) >= 10, ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Wizard_MirrorImage, 98027, "Wizard_MirrorImage_Defensive", "Mirror Image: Defensive", "Wizard", "Defense", "Casts Mirror Image when health is low or elites are nearby.", true, ctx => HealthPctBelow(65) || IsEliteOrBossNearby(40, true), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Wizard_FrostNova, 30718, "Wizard_FrostNova_CloseEnemies", "Frost Nova: Close Enemies", "Wizard", "Defense", "Casts Frost Nova when enemies are close.", true, ctx => CountAliveMonstersWithin(18) >= 1, ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
             // Default false until we add a proper menu toggle and more build-specific guards.
-            AddConditionalProfile(Hud.Sno.SnoPowers.Wizard_ExplosiveBlast, 87525, "Wizard_ExplosiveBlast_CloseEnemies", "Explosive Blast: Close Enemies", "Wizard", "Offense", "Casts Explosive Blast when enemies are close.", false, ctx => CountAliveMonstersWithin(15) >= 1, 250, 500, 100);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Wizard_ExplosiveBlast, 87525, "Wizard_ExplosiveBlast_CloseEnemies", "Explosive Blast: Close Enemies", "Wizard", "Offense", "Casts Explosive Blast when enemies are close.", false, ctx => CountAliveMonstersWithin(15) >= 1, ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
         }
 
         private bool IsOwnBuffActive(uint sno)
@@ -1481,6 +1512,409 @@ namespace Turbo.Plugins.s7o
             if (remaining <= 0) return true;
             int thresholdMs = GetRandomizedDelay("conditional_buff_refresh_" + skill.SnoPower.Sno.ToString(CultureInfo.InvariantCulture), minMs, maxMs, Math.Max(maxMs, BuffRefreshJitterChangeMs));
             return remaining <= thresholdMs / 1000.0d;
+        }
+
+        private bool ShouldCastDevour(ConditionalCastContext ctx)
+        {
+            try
+            {
+                if (ctx == null || ctx.Skill == null || Hud == null || Hud.Game == null || Hud.Game.Me == null)
+                    return false;
+
+                // LightningMod skips Devouring Aura; it is an aura-style rune and should not be key-spammed.
+                if (ctx.Skill.Rune == 3)
+                    return false;
+
+                int nearbyMonsters = CountAliveMonstersWithin(60);
+                bool combatContext = nearbyMonsters > 0 || Hud.Game.SpecialArea == SpecialArea.PvP;
+                if (!combatContext)
+                    return false;
+
+                if (IsOwnBuffActive(Hud.Sno.SnoPowers.Necromancer_LandOfTheDead.Sno))
+                    return true;
+
+                int corpseCount = CountNecromancerCorpsesWithin(60d);
+                if (corpseCount <= 0)
+                    return false;
+
+                // Cannibalize rune: LM casts for recovery when health is low, or scales the health threshold by corpse count.
+                if (ctx.Skill.Rune == 0)
+                {
+                    float health = CurrentHealthPct();
+                    if (health < 70f || health < 95f - (corpseCount * 3f))
+                        return true;
+                }
+
+                if (EssencePctBelow(100f))
+                    return true;
+
+                // Trag'Oul 4-piece preservation from LM: keep the generic set buff stacked/refreshed.
+                if (HasSetPieces(740282u, 4))
+                {
+                    uint tragOulBuff = Hud.Sno.SnoPowers.Generic_P6ItemPassiveUniqueRing011.Sno;
+                    if (GetOwnBuffMaxIconCount(tragOulBuff) < 25 || GetOwnBuffRemainingSeconds(tragOulBuff, 1) < 2d)
+                        return true;
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        private int CountNecromancerCorpsesWithin(double range)
+        {
+            try
+            {
+                var actors = Hud != null && Hud.Game != null ? Hud.Game.Actors : null;
+                if (actors == null) return 0;
+
+                int count = 0;
+                foreach (var actor in actors)
+                {
+                    if (actor == null || actor.SnoActor == null || actor.SnoActor.Sno != ActorSnoEnum._p6_necro_corpse_flesh)
+                        continue;
+                    if (actor.CentralXyDistanceToMe <= range)
+                        count++;
+                }
+                return count;
+            }
+            catch { return 0; }
+        }
+
+        private float CurrentHealthPct()
+        {
+            try { return Hud.Game.Me.Defense.HealthPct; }
+            catch { return 0f; }
+        }
+
+        private bool EssencePctBelow(float pct)
+        {
+            try { return Hud.Game.Me.Stats.ResourcePctEssence < pct; }
+            catch { return false; }
+        }
+
+        private int GetOwnBuffMaxIconCount(uint sno)
+        {
+            try
+            {
+                var powers = Hud != null && Hud.Game != null && Hud.Game.Me != null ? Hud.Game.Me.Powers : null;
+                if (powers == null) return 0;
+
+                var buff = powers.GetBuff(sno);
+                if (buff == null || !buff.Active || buff.IconCounts == null || buff.IconCounts.Length == 0)
+                    return 0;
+
+                int max = 0;
+                for (int i = 0; i < buff.IconCounts.Length; i++)
+                    if (buff.IconCounts[i] > max) max = buff.IconCounts[i];
+                return max;
+            }
+            catch { return 0; }
+        }
+
+        private bool ShouldCastCommandSkeletons(ConditionalCastContext ctx)
+        {
+            ClearCommandSkeletonsAimTarget();
+
+            try
+            {
+                if (ctx == null || ctx.Skill == null || ctx.Skill.SnoPower == null)
+                    return false;
+
+                // LightningMod explicitly skips poison skeletons.
+                if (ctx.Skill.Rune == 3)
+                    return false;
+
+                var selected = GetSelectedCommandSkeletonsTarget();
+
+                // LM rule 1: selected boss gets a command if Command Skeletons is not already assigned.
+                if (selected != null && IsBossLike(selected) && !IsOwnBuffActive(ctx.Skill.SnoPower.Sno))
+                {
+                    if (SetCommandSkeletonsAimTarget(selected) && CommandSkeletonsThrottleReady(350))
+                        return true;
+                }
+
+                // LM Bloodsong Mail rule: one Command Skeletons cast during Land of the Dead when Bloodsong is active.
+                // FreeHUD safety: do not autosnap/move the cursor; only use the player's selected/hovered target.
+                if (IsBloodsongMailActive())
+                {
+                    if (IsOwnBuffActive(Hud.Sno.SnoPowers.Necromancer_LandOfTheDead.Sno))
+                    {
+                        if (!_commandSkeletonsBloodsongLotdCast && selected != null)
+                        {
+                            if (SetCommandSkeletonsAimTarget(selected) && CommandSkeletonsThrottleReady(350))
+                            {
+                                _commandSkeletonsBloodsongLotdCast = true;
+                                return true;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        _commandSkeletonsBloodsongLotdCast = false;
+                    }
+                }
+                else
+                {
+                    _commandSkeletonsBloodsongLotdCast = false;
+                }
+
+                // LM rule 2: once Command Skeletons is assigned/highlighted, do not keep spending essence.
+                if (IsOwnBuffActive(ctx.Skill.SnoPower.Sno))
+                    return false;
+
+                // LM rule 2: Jesseth Arms active + any monster = command it.  This is what keeps the
+                // Jesseth damage bonus alive on trash; do not require an elite here.
+                if (IsOwnBuffActive(JessethArmsDamageBuffSno))
+                {
+                    if (selected != null && SetCommandSkeletonsAimTarget(selected) && CommandSkeletonsThrottleReady(350))
+                        return true;
+                }
+
+                // LM rule 3: Zodiac + low-cost Command Skeletons can keep commanding the player's selected/hovered monster.
+                if (GetSkillResourceRequirementSafe(ctx.Skill) <= 35f && IsOwnBuffActive(402459u))
+                {
+                    if (selected != null && SetCommandSkeletonsAimTarget(selected) && CommandSkeletonsThrottleReady(350))
+                        return true;
+                }
+
+                // LM rule 4: slower elite/boss fallback, selected target only. Do not autosnap to nearby targets.
+                if (selected != null && IsEliteOrBossTarget(selected) && SetCommandSkeletonsAimTarget(selected) && CommandSkeletonsThrottleReady(2000))
+                    return true;
+
+                return false;
+            }
+            catch { return false; }
+        }
+
+        private float GetSkillResourceRequirementSafe(IPlayerSkill skill)
+        {
+            try { return skill != null ? skill.GetResourceRequirement() : 0f; }
+            catch { return 0f; }
+        }
+
+        private bool CommandSkeletonsThrottleReady(int throttleMs)
+        {
+            int tick = Environment.TickCount;
+            if (_lastCommandSkeletonsRequestTick > 0 && unchecked(tick - _lastCommandSkeletonsRequestTick) < Math.Max(0, throttleMs))
+                return false;
+
+            _lastCommandSkeletonsRequestTick = tick;
+            return true;
+        }
+
+        private bool IsBloodsongMailActive()
+        {
+            try
+            {
+                var powers = Hud != null && Hud.Game != null && Hud.Game.Me != null ? Hud.Game.Me.Powers : null;
+                var used = powers != null ? powers.UsedLegendaryPowers : null;
+                return used != null && used.BloodsongMail != null && used.BloodsongMail.Active;
+            }
+            catch { return false; }
+        }
+
+        private bool IsEliteOrBossTarget(IMonster monster)
+        {
+            try
+            {
+                if (!IsValidCommandSkeletonsTarget(monster))
+                    return false;
+
+                return IsBossLike(monster)
+                    || monster.Rarity == ActorRarity.Champion
+                    || monster.Rarity == ActorRarity.Rare
+                    || monster.IsElite;
+            }
+            catch { return false; }
+        }
+
+        private bool IsBossLike(IMonster monster)
+        {
+            try
+            {
+                if (monster == null)
+                    return false;
+
+                if (monster.Rarity == ActorRarity.Boss)
+                    return true;
+
+                var value = GetBoolProperty(monster, "IsBoss")
+                    || GetBoolProperty(monster, "Boss")
+                    || GetBoolProperty(monster, "IsRiftGuardian")
+                    || GetBoolProperty(monster, "RiftGuardian");
+
+                if (value)
+                    return true;
+
+                var sno = monster.SnoMonster;
+                return sno != null && (GetBoolProperty(sno, "IsBoss") || GetBoolProperty(sno, "Boss") || GetBoolProperty(sno, "IsRiftGuardian") || GetBoolProperty(sno, "RiftGuardian"));
+            }
+            catch { return false; }
+        }
+
+        private bool IsCommandSkeletonsProfile(ConditionalCastProfile profile)
+        {
+            return profile != null && string.Equals(profile.Code, CommandSkeletonsProfileCode, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private void ClearCommandSkeletonsAimTarget()
+        {
+            _commandSkeletonsHasAimTarget = false;
+            _commandSkeletonsAimX = 0;
+            _commandSkeletonsAimY = 0;
+            _commandSkeletonsCursorRestoreKnown = false;
+        }
+
+        private bool SetCommandSkeletonsAimTarget(IMonster monster)
+        {
+            try
+            {
+                if (!IsValidCommandSkeletonsTarget(monster) || !monster.IsOnScreen)
+                    return false;
+
+                var screen = monster.ScreenCoordinate;
+                if (screen == null && monster.FloorCoordinate != null)
+                    screen = monster.FloorCoordinate.ToScreenCoordinate();
+                if (screen == null)
+                    return false;
+
+                float x = screen.X;
+                float y = screen.Y;
+
+                try
+                {
+                    if (monster.FloorCoordinate != null)
+                    {
+                        var floor = monster.FloorCoordinate.ToScreenCoordinate();
+                        if (floor != null && Math.Abs(y - floor.Y) < 4f)
+                        {
+                            float radius = monster.RadiusBottom > 0f ? monster.RadiusBottom : 3.15f;
+                            float scale = Math.Max(0.65f, Math.Min(radius / 3.15f, 2.8f));
+                            y -= 22f * scale;
+                        }
+                    }
+                }
+                catch { }
+
+                if (!IsCommandSkeletonsAimSafe(x, y))
+                    return false;
+
+                _commandSkeletonsAimX = (int)Math.Round(x);
+                _commandSkeletonsAimY = (int)Math.Round(y);
+                _commandSkeletonsHasAimTarget = true;
+                return true;
+            }
+            catch { return false; }
+        }
+
+        private bool TryMoveCursorToCommandSkeletonsTarget()
+        {
+            try
+            {
+                if (!CommandSkeletonsMoveCursorToTarget || !_commandSkeletonsHasAimTarget)
+                    return false;
+
+                if (!IsCommandSkeletonsAimSafe(_commandSkeletonsAimX, _commandSkeletonsAimY))
+                    return false;
+
+                CursorPoint point;
+                if (!GetCursorPos(out point))
+                    return false;
+
+                _commandSkeletonsRestoreX = point.X;
+                _commandSkeletonsRestoreY = point.Y;
+                _commandSkeletonsCursorRestoreKnown = true;
+
+                return SetCursorPos(_commandSkeletonsAimX, _commandSkeletonsAimY);
+            }
+            catch { return false; }
+        }
+
+        private void RestoreCommandSkeletonsCursor()
+        {
+            try
+            {
+                if (_commandSkeletonsCursorRestoreKnown)
+                    SetCursorPos(_commandSkeletonsRestoreX, _commandSkeletonsRestoreY);
+            }
+            catch { }
+            finally
+            {
+                _commandSkeletonsCursorRestoreKnown = false;
+            }
+        }
+
+        private bool IsCommandSkeletonsAimSafe(float x, float y)
+        {
+            try
+            {
+                if (Hud == null || Hud.Window == null)
+                    return false;
+
+                float w = Hud.Window.Size.Width;
+                float h = Hud.Window.Size.Height;
+                if (w <= 0f || h <= 0f)
+                    return false;
+
+                if (x < 2f || y < 2f || x > w - 2f || y > h - 2f)
+                    return false;
+
+                try
+                {
+                    if (!Hud.Window.GroundRectangle.Contains((int)Math.Round(x), (int)Math.Round(y)))
+                        return false;
+                }
+                catch { }
+
+                if (y > h * 0.88f)
+                    return false;
+
+                return true;
+            }
+            catch { return false; }
+        }
+
+        private IMonster GetSelectedCommandSkeletonsTarget()
+        {
+            try
+            {
+                var m = Hud.Game.SelectedMonster2;
+                return IsValidCommandSkeletonsTarget(m) ? m : null;
+            }
+            catch { return null; }
+        }
+
+        private bool IsValidCommandSkeletonsTarget(IMonster monster)
+        {
+            try
+            {
+                return monster != null
+                    && monster.IsAlive
+                    && !monster.Illusion
+                    && !monster.Hidden
+                    && !monster.Invisible
+                    && !monster.Stealthed
+                    && !monster.Untargetable
+                    && monster.Attackable;
+            }
+            catch { return false; }
+        }
+
+        private bool GetBoolProperty(object source, string name)
+        {
+            try
+            {
+                if (source == null || string.IsNullOrEmpty(name))
+                    return false;
+
+                var prop = source.GetType().GetProperty(name);
+                if (prop == null || prop.PropertyType != typeof(bool))
+                    return false;
+
+                return (bool)prop.GetValue(source, null);
+            }
+            catch { return false; }
         }
 
         #endregion
@@ -2169,6 +2603,7 @@ namespace Turbo.Plugins.s7o
                 sb.AppendLine("EnableHoverToggle=" + EnableHoverToggle.ToString(CultureInfo.InvariantCulture));
                 sb.AppendLine("AllowBuffUpkeepInTown=" + AllowBuffUpkeepInTown.ToString(CultureInfo.InvariantCulture));
                 sb.AppendLine("BlockLeftSkillOnSelectedClickableActor=" + BlockLeftSkillOnSelectedClickableActor.ToString(CultureInfo.InvariantCulture));
+                sb.AppendLine("CommandSkeletonsMoveCursorToTarget=" + CommandSkeletonsMoveCursorToTarget.ToString(CultureInfo.InvariantCulture));
                 sb.AppendLine("DebugLogging=" + DebugLogging.ToString(CultureInfo.InvariantCulture));
                 sb.AppendLine("Skill1VirtualKey=" + Skill1VirtualKey.ToString(CultureInfo.InvariantCulture));
                 sb.AppendLine("Skill2VirtualKey=" + Skill2VirtualKey.ToString(CultureInfo.InvariantCulture));
@@ -2324,6 +2759,12 @@ namespace Turbo.Plugins.s7o
             if (StringEquals(key, "BlockLeftSkillOnSelectedClickableActor"))
             {
                 BlockLeftSkillOnSelectedClickableActor = parsed;
+                return;
+            }
+
+            if (StringEquals(key, "CommandSkeletonsMoveCursorToTarget"))
+            {
+                CommandSkeletonsMoveCursorToTarget = parsed;
                 return;
             }
 
@@ -2613,6 +3054,19 @@ namespace Turbo.Plugins.s7o
         // regardless of any synthetic key events the plugin may have injected.
         [DllImport("user32.dll")]
         private static extern short GetAsyncKeyState(int vKey);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct CursorPoint
+        {
+            public int X;
+            public int Y;
+        }
+
+        [DllImport("user32.dll")]
+        private static extern bool GetCursorPos(out CursorPoint lpPoint);
+
+        [DllImport("user32.dll")]
+        private static extern bool SetCursorPos(int x, int y);
 
         private static bool IsKeyPhysicallyDown(ushort virtualKey)
         {
