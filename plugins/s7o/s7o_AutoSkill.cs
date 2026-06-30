@@ -15,8 +15,11 @@ namespace Turbo.Plugins.s7o
     public class s7o_AutoSkill : BasePlugin, IAfterCollectHandler, IInGameTopPainter, IMouseClickHandler, INewAreaHandler
     {
         private const uint JessethArmsDamageBuffSno = 476047u;
+        private const uint NayrsBlackDeathBuffSno = 476587u;
+        private const uint SiphonBloodPowerSno = 453563u;
         private const string CommandSkeletonsProfileCode = "Necro_CommandSkeletons_Elite";
         private const string DevourProfileCode = "Necro_Devour_CorpseOrLotD";
+        private const string NayrsBlackDeathProfileCode = "Necro_NayrsBlackDeath";
 
         #region Settings
 
@@ -27,6 +30,7 @@ namespace Turbo.Plugins.s7o
         public int ConditionalProfileRecheckMs = 25;
         public int ConditionalProfileDelayMinMs = 100;
         public int ConditionalProfileDelayMaxMs = 150;
+        public int NayrsSiphonCombatWindowMs = 800;
 
         public bool EnableHoverToggle = true;
         public bool EnableClickToggle = false;
@@ -96,6 +100,7 @@ namespace Turbo.Plugins.s7o
         private readonly HashSet<uint> _conditionalProfileSnos = new HashSet<uint>();
         private readonly Dictionary<string, int> _lastConditionalProfileCastTickByCode = new Dictionary<string, int>();
         private readonly HashSet<uint> _channelingPowerSnos = new HashSet<uint>();
+        private int _lastNayrsSiphonBloodCueTick;
 
         private int _nextSkillCacheRefreshTick;
         private int _nextBuffCheckTick;
@@ -176,6 +181,7 @@ namespace Turbo.Plugins.s7o
 
             public bool AllowInTown = false;
             public bool UseStandstill = true;
+            public bool AllowChannelingSkill = false;
 
             public int CastDelayMinMs;
             public int CastDelayMaxMs;
@@ -247,6 +253,7 @@ namespace Turbo.Plugins.s7o
             _nextBuffCheckTick = 0;
             _nextConditionalProfileCheckTick = 0;
             _lastConditionalProfileCastTickByCode.Clear();
+            _lastNayrsSiphonBloodCueTick = 0;
             _entryBuffBurstPending = true;
             _entryBuffBurstStartTick = 0;
             _lastActMapVisibleTick = 0;
@@ -292,6 +299,7 @@ namespace Turbo.Plugins.s7o
 
             UpdateRecentMapTicks(now);
             RefreshSkillCacheIfNeeded(now);
+            UpdateNayrsSiphonBloodCue(now);
             UpdateHoverToggle(now);
 
             if (EnableAutomaticBuffUpkeep && IsTickReached(now, _nextBuffCheckTick))
@@ -319,6 +327,15 @@ namespace Turbo.Plugins.s7o
                     _nextConditionalProfileCheckTick = now + Math.Max(25, ConditionalProfileRecheckMs);
 
                     if (TryRunConditionalAutoCastProfiles(now))
+                        return;
+                }
+                else if (StringEquals(conditionalBlockedReason, "player busy")
+                    && IsOwnBuffActive(Hud.Sno.SnoPowers.Necromancer_LandOfTheDead.Sno)
+                    && !IsHardBusyOrTeleportMovementForLotdDevour())
+                {
+                    _nextConditionalProfileCheckTick = now + Math.Max(25, ConditionalProfileRecheckMs);
+
+                    if (TryRunConditionalAutoCastProfiles(now, true))
                         return;
                 }
                 else
@@ -509,6 +526,34 @@ namespace Turbo.Plugins.s7o
             if (me.AnimationState == AcdAnimationState.Transform) return true;
             if (me.AnimationState == AcdAnimationState.CastingPortal) return true;
             if (me.AnimationState == AcdAnimationState.Dead) return true;
+
+            return false;
+        }
+
+        private bool IsHardBusyOrTeleportMovementForLotdDevour()
+        {
+            try
+            {
+                var me = Hud != null && Hud.Game != null ? Hud.Game.Me : null;
+                if (me == null)
+                    return true;
+
+                var powers = me.Powers;
+                if (powers == null)
+                    return true;
+
+                if (powers.BuffIsActive(Hud.Sno.SnoPowers.Generic_IdentifyAllWithCast.Sno)) return true;
+                if (powers.BuffIsActive(Hud.Sno.SnoPowers.Generic_IdentifyWithCast.Sno)) return true;
+                if (powers.BuffIsActive(Hud.Sno.SnoPowers.Generic_IdentifyWithCastLegendary.Sno)) return true;
+                if (powers.BuffIsActive(Hud.Sno.SnoPowers.Generic_AxeOperateGizmo.Sno)) return true;
+
+                if (me.AnimationState == AcdAnimationState.CastingPortal) return true;
+                if (me.AnimationState == AcdAnimationState.Dead) return true;
+            }
+            catch
+            {
+                return true;
+            }
 
             return false;
         }
@@ -978,12 +1023,15 @@ namespace Turbo.Plugins.s7o
             BuildWizardConditionalProfiles();
         }
 
-        private bool TryRunConditionalAutoCastProfiles(int now)
+        private bool TryRunConditionalAutoCastProfiles(int now, bool lotdDevourOnly = false)
         {
             for (int i = 0; i < _conditionalProfiles.Count; i++)
             {
                 var profile = _conditionalProfiles[i];
                 if (profile == null || !profile.Enabled || profile.Sno == 0)
+                    continue;
+
+                if (lotdDevourOnly && !StringEquals(profile.Code, DevourProfileCode))
                     continue;
 
                 var slot = FindEquippedSkillBySno(profile.Sno);
@@ -1038,7 +1086,7 @@ namespace Turbo.Plugins.s7o
                         commandSkeletonsCursorMoved = TryMoveCursorToCommandSkeletonsTarget();
 
                     string reason;
-                    if (!CanCastSkill(slot.Skill, slot.ActionKey, now, delay, out reason))
+                    if (!CanCastSkill(slot.Skill, slot.ActionKey, now, delay, out reason, -1, profile.AllowChannelingSkill))
                     {
                         LogDebugCastSkipThrottled("conditional", slot.Skill, profile.Code + ": " + reason, now);
                         continue;
@@ -1096,7 +1144,8 @@ namespace Turbo.Plugins.s7o
             float basePrimaryRequirement = 0,
             float baseSecondaryRequirement = 0,
             bool useStandstill = true,
-            bool allowInTown = false)
+            bool allowInTown = false,
+            bool allowChannelingSkill = false)
         {
             uint sno = GetSno(snoPower, fallbackSno);
             if (sno == 0 || string.IsNullOrEmpty(code))
@@ -1124,7 +1173,8 @@ namespace Turbo.Plugins.s7o
                 BaseSecondaryResourceRequirement = baseSecondaryRequirement,
 
                 UseStandstill = useStandstill,
-                AllowInTown = allowInTown
+                AllowInTown = allowInTown,
+                AllowChannelingSkill = allowChannelingSkill
             };
 
             _conditionalProfiles.Add(profile);
@@ -1136,29 +1186,67 @@ namespace Turbo.Plugins.s7o
         /// <summary>Get whether a conditional cast profile is enabled by code.</summary>
         public bool GetConditionalProfileEnabled(string code)
         {
-            var p = FindConditionalProfile(code);
-            return p != null && p.Enabled;
+            bool found = false;
+            bool anyEnabled = false;
+
+            for (int i = 0; i < _conditionalProfiles.Count; i++)
+            {
+                var p = _conditionalProfiles[i];
+                if (p == null || !StringEquals(p.Code, code))
+                    continue;
+
+                found = true;
+                if (p.Enabled)
+                    anyEnabled = true;
+            }
+
+            return found && anyEnabled;
         }
 
-        /// <summary>Toggle a conditional cast profile on/off by code. Returns new state, or false if not found.</summary>
+        /// <summary>Toggle conditional cast profile(s) on/off by code. Returns new state, or false if not found.</summary>
         public bool ToggleConditionalProfile(string code)
         {
-            var p = FindConditionalProfile(code);
-            if (p == null) return false;
-            p.Enabled = !p.Enabled;
-            if (PersistUserSettings) try { SaveUserSettings(); } catch { }
-            return p.Enabled;
+            bool found = false;
+            bool newState = true;
+
+            for (int i = 0; i < _conditionalProfiles.Count; i++)
+            {
+                var p = _conditionalProfiles[i];
+                if (p == null || !StringEquals(p.Code, code))
+                    continue;
+
+                if (!found)
+                {
+                    newState = !p.Enabled;
+                    found = true;
+                }
+
+                p.Enabled = newState;
+            }
+
+            if (found && PersistUserSettings)
+                try { SaveUserSettings(); } catch { }
+
+            return found && newState;
         }
 
-        /// <summary>Set a conditional cast profile enabled state by code.</summary>
+        /// <summary>Set conditional cast profile(s) enabled state by code.</summary>
         public void SetConditionalProfileEnabled(string code, bool enabled)
         {
-            var p = FindConditionalProfile(code);
-            if (p != null)
+            bool found = false;
+
+            for (int i = 0; i < _conditionalProfiles.Count; i++)
             {
+                var p = _conditionalProfiles[i];
+                if (p == null || !StringEquals(p.Code, code))
+                    continue;
+
                 p.Enabled = enabled;
-                if (PersistUserSettings) try { SaveUserSettings(); } catch { }
+                found = true;
             }
+
+            if (found && PersistUserSettings)
+                try { SaveUserSettings(); } catch { }
         }
 
         /// <summary>Get whether a buff upkeep profile is enabled by code.</summary>
@@ -1303,6 +1391,7 @@ namespace Turbo.Plugins.s7o
             AddConditionalProfile(Hud.Sno.SnoPowers.Necromancer_LandOfTheDead, 465839, "Necro_LandOfTheDead_EliteOrDensity", "Land of the Dead: Elite/Density", "Necromancer", "Cooldown", "Casts Land of the Dead on elites or dense packs.", false, ctx => IsEliteOrBossNearby(80, true) || CountAliveMonstersWithin(60) >= 12, ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
             AddConditionalProfile(Hud.Sno.SnoPowers.Necromancer_Devour, 460757, DevourProfileCode, "Devour: Corpses/LotD", "Necromancer", "Resource", "Maintains Devour buffs/resources; fast-casts while Land of the Dead is active.", true, ShouldCastDevour, 100, 150, 25, 0, 0, 0, 0, false);
             AddConditionalProfile(Hud.Sno.SnoPowers.Necromancer_CommandSkeletons, 453801, "Necro_CommandSkeletons_Elite", "Command Skeletons: Active Target", "Necromancer", "Targeting", "Maintains Command Skeletons/Jesseth on your selected target without moving the cursor.", true, ShouldCastCommandSkeletons, 350, 700, 250);
+            AddNayrsBlackDeathProfiles();
             // Default false until we add a proper menu toggle and more build-specific guards.
             AddConditionalProfile(Hud.Sno.SnoPowers.Necromancer_SkeletalMage, 462089, "Necro_SkeletalMage_EssenceHigh", "Skeletal Mage: Essence High", "Necromancer", "Resource", "Casts Skeletal Mage when essence is high.", false, ctx => !PrimaryResourcePctBelow(80), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
         }
@@ -1514,6 +1603,182 @@ namespace Turbo.Plugins.s7o
             return remaining <= thresholdMs / 1000.0d;
         }
 
+        private void AddNayrsBlackDeathProfiles()
+        {
+            const string title = "Nayr's Black Death: Keep Stacks";
+            const string description = "Maintains Nayr poison stacks after you start attacking with Siphon Blood.";
+
+            AddConditionalProfile(Hud.Sno.SnoPowers.Necromancer_BoneArmor, 466857, NayrsBlackDeathProfileCode, title, "Necromancer", "Buff", description, false, ShouldCastNayrsBlackDeath, 100, 150, 25);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Necromancer_BoneSpear, 451490, NayrsBlackDeathProfileCode, title, "Necromancer", "Buff", description, false, ShouldCastNayrsBlackDeath, 100, 150, 25);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Necromancer_BoneSpikes, 462147, NayrsBlackDeathProfileCode, title, "Necromancer", "Buff", description, false, ShouldCastNayrsBlackDeath, 100, 150, 25);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Necromancer_CommandSkeletons, 453801, NayrsBlackDeathProfileCode, title, "Necromancer", "Buff", description, false, ShouldCastNayrsBlackDeath, 100, 150, 25);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Necromancer_DeathNova, 462243, NayrsBlackDeathProfileCode, title, "Necromancer", "Buff", description, false, ShouldCastNayrsBlackDeath, 100, 150, 25);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Necromancer_SkeletalMage, 462089, NayrsBlackDeathProfileCode, title, "Necromancer", "Buff", description, false, ShouldCastNayrsBlackDeath, 100, 150, 25);
+        }
+
+        private bool ShouldCastNayrsBlackDeath(ConditionalCastContext ctx)
+        {
+            try
+            {
+                if (ctx == null || ctx.Skill == null || ctx.Skill.SnoPower == null)
+                    return false;
+
+                if (!IsNayrsBlackDeathEquippedOrCubed())
+                    return false;
+
+                if (!IsNayrsPoisonSkillRune(ctx.Skill))
+                    return false;
+
+                if (!IsNayrsSiphonCombatWindowActive(ctx.Now))
+                    return false;
+
+                if (!IsNayrsCombatContext(ctx.Skill))
+                    return false;
+
+                return GetNayrsRemainingSeconds(ctx.Skill) < 0.5d;
+            }
+            catch { return false; }
+        }
+
+        private void UpdateNayrsSiphonBloodCue(int now)
+        {
+            try
+            {
+                if (!GetConditionalProfileEnabled(NayrsBlackDeathProfileCode))
+                    return;
+
+                var slot = FindEquippedSkillBySno(GetSno(Hud.Sno.SnoPowers.Necromancer_SiphonBlood, SiphonBloodPowerSno));
+                if (slot == null || slot.Skill == null)
+                    return;
+
+                if (IsSiphonBloodActive(slot.Skill) || IsSiphonBloodActionHeldForCombat(slot.ActionKey))
+                    _lastNayrsSiphonBloodCueTick = now;
+            }
+            catch { }
+        }
+
+        private bool IsNayrsSiphonCombatWindowActive(int now)
+        {
+            int window = Math.Max(250, NayrsSiphonCombatWindowMs);
+            return _lastNayrsSiphonBloodCueTick != 0 && (uint)(now - _lastNayrsSiphonBloodCueTick) <= (uint)window;
+        }
+
+        private bool IsSiphonBloodActive(IPlayerSkill skill)
+        {
+            try
+            {
+                if (skill != null && skill.BuffIsActive)
+                    return true;
+
+                return IsOwnBuffActive(SiphonBloodPowerSno);
+            }
+            catch { return false; }
+        }
+
+        private bool IsSiphonBloodActionHeldForCombat(ActionKey actionKey)
+        {
+            switch (actionKey)
+            {
+                case ActionKey.RightSkill:
+                    return IsKeyPhysicallyDown(0x02);
+
+                case ActionKey.Skill1:
+                    return IsKeyPhysicallyDown(Skill1VirtualKey);
+
+                case ActionKey.Skill2:
+                    return IsKeyPhysicallyDown(Skill2VirtualKey);
+
+                case ActionKey.Skill3:
+                    return IsKeyPhysicallyDown(Skill3VirtualKey);
+
+                case ActionKey.Skill4:
+                    return IsKeyPhysicallyDown(Skill4VirtualKey);
+
+                case ActionKey.LeftSkill:
+                    return ForceStandstillVirtualKey != 0
+                        && IsKeyPhysicallyDown(0x01)
+                        && IsKeyPhysicallyDown(ForceStandstillVirtualKey);
+
+                default:
+                    return false;
+            }
+        }
+
+        private bool IsNayrsBlackDeathEquippedOrCubed()
+        {
+            try
+            {
+                if (IsOwnBuffActive(NayrsBlackDeathBuffSno))
+                    return true;
+
+                var powers = Hud != null && Hud.Game != null && Hud.Game.Me != null ? Hud.Game.Me.Powers : null;
+                var used = powers != null ? powers.UsedLegendaryPowers : null;
+                return used != null && used.NayrsBlackDeath != null && used.NayrsBlackDeath.Active;
+            }
+            catch { return false; }
+        }
+
+        private bool IsNayrsPoisonSkillRune(IPlayerSkill skill)
+        {
+            if (skill == null || skill.SnoPower == null)
+                return false;
+
+            uint sno = skill.SnoPower.Sno;
+            int rune = skill.Rune;
+
+            if (sno == GetSno(Hud.Sno.SnoPowers.Necromancer_BoneArmor, 466857)) return rune == 2;
+            if (sno == GetSno(Hud.Sno.SnoPowers.Necromancer_BoneSpear, 451490)) return rune == 2;
+            if (sno == GetSno(Hud.Sno.SnoPowers.Necromancer_BoneSpikes, 462147)) return rune == 2;
+            if (sno == GetSno(Hud.Sno.SnoPowers.Necromancer_CommandSkeletons, 453801)) return rune == 3;
+            if (sno == GetSno(Hud.Sno.SnoPowers.Necromancer_DeathNova, 462243)) return rune == 3 || rune == 4;
+            if (sno == GetSno(Hud.Sno.SnoPowers.Necromancer_SkeletalMage, 462089)) return rune == 3;
+
+            return false;
+        }
+
+        private bool IsNayrsCombatContext(IPlayerSkill skill)
+        {
+            if (skill == null || skill.SnoPower == null)
+                return false;
+
+            uint sno = skill.SnoPower.Sno;
+
+            if (sno == GetSno(Hud.Sno.SnoPowers.Necromancer_BoneArmor, 466857))
+                return CountAliveMonstersWithin(25) >= 1;
+
+            if (sno == GetSno(Hud.Sno.SnoPowers.Necromancer_DeathNova, 462243))
+                return CountAliveMonstersWithin(25) >= 1;
+
+            if (sno == GetSno(Hud.Sno.SnoPowers.Necromancer_CommandSkeletons, 453801))
+                return GetSelectedCommandSkeletonsTarget() != null;
+
+            return CountAliveMonstersWithin(100) >= 1;
+        }
+
+        private double GetNayrsRemainingSeconds(IPlayerSkill skill)
+        {
+            try
+            {
+                if (skill == null)
+                    return 0;
+
+                var powers = Hud != null && Hud.Game != null && Hud.Game.Me != null ? Hud.Game.Me.Powers : null;
+                if (powers == null)
+                    return 0;
+
+                var buff = powers.GetBuff(NayrsBlackDeathBuffSno);
+                if (buff == null || !buff.Active || buff.TimeLeftSeconds == null || buff.TimeLeftSeconds.Length == 0)
+                    return 0;
+
+                int iconIndex = skill.Key.GetHashCode() + 1;
+                if (iconIndex >= 0 && iconIndex < buff.TimeLeftSeconds.Length)
+                    return buff.TimeLeftSeconds[iconIndex];
+
+                return 0;
+            }
+            catch { return 0; }
+        }
+
         private bool ShouldCastDevour(ConditionalCastContext ctx)
         {
             try
@@ -1525,13 +1790,14 @@ namespace Turbo.Plugins.s7o
                 if (ctx.Skill.Rune == 3)
                     return false;
 
+                bool landOfTheDeadActive = IsOwnBuffActive(Hud.Sno.SnoPowers.Necromancer_LandOfTheDead.Sno);
+                if (landOfTheDeadActive)
+                    return true;
+
                 int nearbyMonsters = CountAliveMonstersWithin(60);
                 bool combatContext = nearbyMonsters > 0 || Hud.Game.SpecialArea == SpecialArea.PvP;
                 if (!combatContext)
                     return false;
-
-                if (IsOwnBuffActive(Hud.Sno.SnoPowers.Necromancer_LandOfTheDead.Sno))
-                    return true;
 
                 int corpseCount = CountNecromancerCorpsesWithin(60d);
                 if (corpseCount <= 0)
@@ -1696,7 +1962,8 @@ namespace Turbo.Plugins.s7o
         private bool CommandSkeletonsThrottleReady(int throttleMs)
         {
             int tick = Environment.TickCount;
-            if (_lastCommandSkeletonsRequestTick > 0 && unchecked(tick - _lastCommandSkeletonsRequestTick) < Math.Max(0, throttleMs))
+            int delay = Math.Max(0, throttleMs);
+            if (_lastCommandSkeletonsRequestTick != 0 && (uint)(tick - _lastCommandSkeletonsRequestTick) < (uint)delay)
                 return false;
 
             _lastCommandSkeletonsRequestTick = tick;
@@ -1921,7 +2188,7 @@ namespace Turbo.Plugins.s7o
 
         #region Cast Rules
 
-        private bool CanCastSkill(IPlayerSkill skill, ActionKey actionKey, int now, int minDelayMs, out string reason, int globalDelayOverrideMs = -1)
+        private bool CanCastSkill(IPlayerSkill skill, ActionKey actionKey, int now, int minDelayMs, out string reason, int globalDelayOverrideMs = -1, bool allowChannelingSkill = false)
         {
             reason = null;
 
@@ -1967,7 +2234,7 @@ namespace Turbo.Plugins.s7o
                 return false;
             }
 
-            if (IsChannelingSkill(skill))
+            if (!allowChannelingSkill && IsChannelingSkill(skill))
             {
                 reason = "channeling unsupported";
                 return false;
@@ -2623,12 +2890,14 @@ namespace Turbo.Plugins.s7o
                     sb.AppendLine("BuffProfile_" + profile.Code + "=" + profile.Enabled.ToString(CultureInfo.InvariantCulture));
                 }
 
+                var savedConditionalCodes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 for (int i = 0; i < _conditionalProfiles.Count; i++)
                 {
                     var profile = _conditionalProfiles[i];
-                    if (profile == null || string.IsNullOrEmpty(profile.Code))
+                    if (profile == null || string.IsNullOrEmpty(profile.Code) || savedConditionalCodes.Contains(profile.Code))
                         continue;
 
+                    savedConditionalCodes.Add(profile.Code);
                     sb.AppendLine("ConditionalProfile_" + profile.Code + "=" + profile.Enabled.ToString(CultureInfo.InvariantCulture));
                 }
 
@@ -2792,13 +3061,20 @@ namespace Turbo.Plugins.s7o
             if (key.StartsWith("ConditionalProfile_", StringComparison.OrdinalIgnoreCase))
             {
                 string code = key.Substring("ConditionalProfile_".Length);
-                var profile = FindConditionalProfile(code);
+                bool found = false;
 
-                if (profile != null)
+                for (int i = 0; i < _conditionalProfiles.Count; i++)
                 {
+                    var profile = _conditionalProfiles[i];
+                    if (profile == null || !StringEquals(profile.Code, code))
+                        continue;
+
                     profile.Enabled = parsed;
-                    return;
+                    found = true;
                 }
+
+                if (found)
+                    return;
             }
 
             if (key.StartsWith("Slot", StringComparison.OrdinalIgnoreCase))
@@ -2966,12 +3242,12 @@ namespace Turbo.Plugins.s7o
 
         private bool IsTickReached(int now, int targetTick)
         {
-            return (int)(now - targetTick) >= 0;
+            return targetTick == 0 || targetTick == int.MinValue || unchecked(now - targetTick) >= 0;
         }
 
         private bool IsTickInFuture(int targetTick, int now)
         {
-            return targetTick != 0 && (int)(targetTick - now) > 0;
+            return targetTick != 0 && targetTick != int.MinValue && unchecked(now - targetTick) < 0;
         }
 
         private bool StringEquals(string a, string b)
