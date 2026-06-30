@@ -16,6 +16,7 @@ namespace Turbo.Plugins.s7o
     {
         private const string SettingsFileName = "s7o_KadalaHelper.ini";
         private const int SettingsVersion = 1;
+        private const int NoTick = int.MinValue;
         private const int MinActionDelayMs = 30;
         private const int TabSwitchDelayMs = 60;
         private const int StatusHoldMs = 1400;
@@ -48,7 +49,7 @@ namespace Turbo.Plugins.s7o
         private int _lastClickedItemId;
         private int _boughtCount;
         private string _lastStatus;
-        private int _statusUntilTick;
+        private int _statusUntilTick = NoTick;
 
         private RectangleF _panelRect = RectangleF.Empty;
         private RectangleF _selectHotkeyRect = RectangleF.Empty;
@@ -248,7 +249,7 @@ namespace Turbo.Plugins.s7o
 
         private void AdvanceBuyRun(int now)
         {
-            if ((int)(now - _nextActionTick) < 0)
+            if (!TickReachedOrUnset(now, _nextActionTick))
                 return;
 
             if (!IsKadalaShopOpen() || Hud.Window == null || !Hud.Window.IsForeground)
@@ -524,7 +525,7 @@ namespace Turbo.Plugins.s7o
 
         private string GetStatusText()
         {
-            if (!string.IsNullOrEmpty(_lastStatus) && (int)(Environment.TickCount - _statusUntilTick) < 0)
+            if (!string.IsNullOrEmpty(_lastStatus) && TickIsFuture(Environment.TickCount, _statusUntilTick))
                 return _lastStatus;
             if (_running)
                 return "buying...";
@@ -867,7 +868,17 @@ namespace Turbo.Plugins.s7o
         private void ShowStatus(string text, int ms)
         {
             _lastStatus = text;
-            _statusUntilTick = Environment.TickCount + Math.Max(0, ms);
+            _statusUntilTick = unchecked(Environment.TickCount + Math.Max(0, ms));
+        }
+
+        private static bool TickReachedOrUnset(int now, int tick)
+        {
+            return tick == 0 || tick == NoTick || unchecked(now - tick) >= 0;
+        }
+
+        private static bool TickIsFuture(int now, int untilTick)
+        {
+            return untilTick != 0 && untilTick != NoTick && unchecked(now - untilTick) < 0;
         }
 
         private void DrawRoundedRect(RectangleF rect, float radius, IBrush fill, IBrush border)
