@@ -138,6 +138,8 @@ namespace Turbo.Plugins.s7o
         INewAreaHandler
     {
         // ── Mystic Enchant Automation ──────────────────────────────────────────────
+        private const int NoTick = int.MinValue;
+
 
         // Default hotkey. This is independent from TurboCube and ItemSalvage.
         public Key MysticEnchantHotkey = Key.F3;
@@ -268,9 +270,9 @@ namespace Turbo.Plugins.s7o
         private RectangleF _attemptMinusRect = RectangleF.Empty;
         private RectangleF _attemptValueRect = RectangleF.Empty;
         private RectangleF _attemptPlusRect = RectangleF.Empty;
-        private int _attemptMinusFlashUntilTick;
-        private int _attemptValueFlashUntilTick;
-        private int _attemptPlusFlashUntilTick;
+        private int _attemptMinusFlashUntilTick = NoTick;
+        private int _attemptValueFlashUntilTick = NoTick;
+        private int _attemptPlusFlashUntilTick = NoTick;
         private int _lastFiniteMaxEnchantAttempts = 100;
 
         private enum MysticStage
@@ -342,7 +344,7 @@ namespace Turbo.Plugins.s7o
         private int _attemptCount;
         private int _cycleStartTick;
         private int _lastCycleElapsedMs;
-        private int _hotkeyFlashUntilTick;
+        private int _hotkeyFlashUntilTick = NoTick;
 
         private string _lastChoicesSignature = string.Empty;
         private int _choicesStableSinceTick;
@@ -585,11 +587,11 @@ namespace Turbo.Plugins.s7o
             if (hitAttemptMinus || hitAttemptValue || hitAttemptPlus)
             {
                 if (hitAttemptMinus)
-                    _attemptMinusFlashUntilTick = now + Math.Max(30, ButtonFlashMs);
+                    _attemptMinusFlashUntilTick = unchecked(now + Math.Max(30, ButtonFlashMs));
                 else if (hitAttemptValue)
-                    _attemptValueFlashUntilTick = now + Math.Max(30, ButtonFlashMs);
+                    _attemptValueFlashUntilTick = unchecked(now + Math.Max(30, ButtonFlashMs));
                 else
-                    _attemptPlusFlashUntilTick = now + Math.Max(30, ButtonFlashMs);
+                    _attemptPlusFlashUntilTick = unchecked(now + Math.Max(30, ButtonFlashMs));
 
                 if (_running)
                 {
@@ -605,14 +607,14 @@ namespace Turbo.Plugins.s7o
             {
                 if (_running)
                 {
-                    _hotkeyFlashUntilTick = now + ButtonFlashMs;
+                    _hotkeyFlashUntilTick = unchecked(now + ButtonFlashMs);
                     ToggleAutomation();
                 }
                 else
                 {
                     _capturingHotkey = true;
                     _lastStatus = "press a key, or Escape to cancel";
-                    _hotkeyFlashUntilTick = now + ButtonFlashMs;
+                    _hotkeyFlashUntilTick = unchecked(now + ButtonFlashMs);
                 }
 
                 return true;
@@ -939,7 +941,7 @@ namespace Turbo.Plugins.s7o
                     _selectedChoice = best;
                     _perfectPendingStop = best.IsMax;
 
-                    if (_lastChoiceClickTick != 0 && (int)(now - _lastChoiceClickTick) < ChoiceClickRetryMs)
+                    if (_lastChoiceClickTick != 0 && unchecked(now - _lastChoiceClickTick) < ChoiceClickRetryMs)
                     {
                         Delay(now, p.PollDelay);
                         return;
@@ -979,7 +981,7 @@ namespace Turbo.Plugins.s7o
                     // If the click did not register, retry selecting the same choice.
                     if (_selectedChoice != null
                         && _lastChoiceClickTick != 0
-                        && (int)(now - _lastChoiceClickTick) >= ChoiceClickRetryMs
+                        && unchecked(now - _lastChoiceClickTick) >= ChoiceClickRetryMs
                         && buttonReady)
                     {
                         if (ClickChoice(_selectedChoice))
@@ -1611,7 +1613,7 @@ namespace Turbo.Plugins.s7o
                 return false;
             }
 
-            return _choicesStableSinceTick != 0 && (int)(now - _choicesStableSinceTick) >= ChoiceStableMs;
+            return _choicesStableSinceTick != 0 && unchecked(now - _choicesStableSinceTick) >= ChoiceStableMs;
         }
 
         private bool CurrentCommittedAffixIsMax()
@@ -1847,7 +1849,12 @@ namespace Turbo.Plugins.s7o
 
         private static bool TickReached(int now, int tick)
         {
-            return (int)(now - tick) >= 0;
+            return tick == 0 || tick == NoTick || unchecked(now - tick) >= 0;
+        }
+
+        private static bool TickIsFuture(int now, int untilTick)
+        {
+            return untilTick != 0 && untilTick != NoTick && unchecked(now - untilTick) < 0;
         }
 
         private void Delay(int now, int ms)
@@ -1940,7 +1947,7 @@ namespace Turbo.Plugins.s7o
             _headerFont.DrawText(layout, labelX, topY);
 
             string hotkeyText = _capturingHotkey ? "..." : MysticEnchantHotkey.ToString();
-            bool flash = !TickReached(Environment.TickCount, _hotkeyFlashUntilTick);
+            bool flash = TickIsFuture(Environment.TickCount, _hotkeyFlashUntilTick);
 
             DrawPillButton(_hotkeyButtonRect, hotkeyText, _running || _capturingHotkey || flash, true, flash);
         }
@@ -1967,13 +1974,13 @@ namespace Turbo.Plugins.s7o
 
             DrawSegmentedAttemptPillBase(_attemptToggleRect);
 
-            if (!TickReached(now, _attemptMinusFlashUntilTick))
+            if (TickIsFuture(now, _attemptMinusFlashUntilTick))
                 DrawAttemptPillSegment(_attemptMinusRect, true, false);
 
-            if (!TickReached(now, _attemptValueFlashUntilTick))
+            if (TickIsFuture(now, _attemptValueFlashUntilTick))
                 DrawAttemptPillSegment(_attemptValueRect, false, false);
 
-            if (!TickReached(now, _attemptPlusFlashUntilTick))
+            if (TickIsFuture(now, _attemptPlusFlashUntilTick))
                 DrawAttemptPillSegment(_attemptPlusRect, false, true);
 
             DrawAttemptSeparators();
