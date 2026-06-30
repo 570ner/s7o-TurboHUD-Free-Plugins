@@ -126,6 +126,8 @@ namespace Turbo.Plugins.s7o
         IKeyEventHandler, IInGameTopPainter, IAfterCollectHandler,
         IMouseClickHandler, INewAreaHandler
     {
+        private const int NoTick = int.MinValue;
+
         // ── Speed 1 base — intentionally slow/LightningMod-style normal speed ─
         public int MaxPageNavigationClicks    { get; set; } = 12;
         public int ToggleDebounceMs           { get; set; } = 750;
@@ -265,14 +267,15 @@ namespace Turbo.Plugins.s7o
         private bool _geometryDrawFailed;
         private bool _geometryDrawFailureLogged;
 
-        private int _minusFlashUntilTick;
-        private int _plusFlashUntilTick;
+        private int _minusFlashUntilTick = NoTick;
+        private int _plusFlashUntilTick = NoTick;
 
         private string _header, _info, _noItem, _running, _lockMissing;
         private enum CubeStage { Idle, EnsurePage, AcquireTarget, InsertTarget, Fill1, Fill2, Transmute, FlipWaitReadyNext, FlipClickNext, FlipWaitNextConfirm, FlipRightToLeftDelay, FlipWaitReadyPrev, FlipClickPrev, FlipWaitPrevConfirm, OpenPageRecovery, PostCycleEvaluate, Finish, PageArrowDown, PageArrowUp }
         private sealed class CubeTarget { public RectangleF Rect; public string Uid; public string Key; public IItem Item; }
         private CubeStage _stage = CubeStage.Idle, _afterArrowStage = CubeStage.Idle;
-        private int _nextActionTick, _deadlineTick, _afterArrowDelayMs, _runPage, _doneThisRun, _snapshotIndex, _snapshotLimit, _openPageClicks, _flipPrevAttempts, _savedCursorX, _savedCursorY, _nextOverlayCacheRefreshTick, _cachedOverlayPage = -1, _cachedCandidateCount;
+        private int _nextActionTick, _deadlineTick, _afterArrowDelayMs, _runPage, _doneThisRun, _snapshotIndex, _snapshotLimit, _openPageClicks, _flipPrevAttempts, _savedCursorX, _savedCursorY, _cachedOverlayPage = -1, _cachedCandidateCount;
+        private int _nextOverlayCacheRefreshTick = NoTick;
         private bool _repairingPageAfterNext;
         private IUiElement _pendingArrowButton;
         private string _pendingArrowLabel, _cachedStatusText = string.Empty;
@@ -525,7 +528,12 @@ namespace Turbo.Plugins.s7o
 
         private static bool TickReached(int now, int tick)
         {
-            return (int)(now - tick) >= 0;
+            return tick == 0 || tick == NoTick || unchecked(now - tick) >= 0;
+        }
+
+        private static bool TickIsFuture(int now, int untilTick)
+        {
+            return untilTick != 0 && untilTick != NoTick && unchecked(now - untilTick) < 0;
         }
 
         private void Delay(int now, int ms)
@@ -1372,7 +1380,7 @@ namespace Turbo.Plugins.s7o
 
                 int old = Clamp(SpeedLevel);
                 SpeedLevel = Clamp(old - 1);
-                _minusFlashUntilTick = now + Math.Max(30, ButtonFlashMs);
+                _minusFlashUntilTick = unchecked(now + Math.Max(30, ButtonFlashMs));
 
                 if (SpeedLevel != old)
                     SaveSettings();
@@ -1391,7 +1399,7 @@ namespace Turbo.Plugins.s7o
 
                 int old = Clamp(SpeedLevel);
                 SpeedLevel = Clamp(old + 1);
-                _plusFlashUntilTick = now + Math.Max(30, ButtonFlashMs);
+                _plusFlashUntilTick = unchecked(now + Math.Max(30, ButtonFlashMs));
 
                 if (SpeedLevel != old)
                     SaveSettings();
@@ -1519,10 +1527,10 @@ namespace Turbo.Plugins.s7o
 
             DrawSegmentedPillBase(_speedControlRect);
 
-            if ((int)(now - _minusFlashUntilTick) < 0)
+            if (TickIsFuture(now, _minusFlashUntilTick))
                 DrawPillSegment(_speedMinusRect, true, false, true);
 
-            if ((int)(now - _plusFlashUntilTick) < 0)
+            if (TickIsFuture(now, _plusFlashUntilTick))
                 DrawPillSegment(_speedPlusRect, false, true, true);
 
             if (_pillOrangeSeparatorBrush != null)
@@ -2142,10 +2150,10 @@ namespace Turbo.Plugins.s7o
             // Running needs responsive candidate/status updates; idle overlay does not.
             var refreshMs = Running ? 200 : 350;
 
-            if (_cachedOverlayPage == page && (int)(now - _nextOverlayCacheRefreshTick) < 0)
+            if (_cachedOverlayPage == page && TickIsFuture(now, _nextOverlayCacheRefreshTick))
                 return;
 
-            _nextOverlayCacheRefreshTick = now + refreshMs;
+            _nextOverlayCacheRefreshTick = unchecked(now + refreshMs);
             _cachedOverlayPage = page;
 
             var items = Candidates(page);
