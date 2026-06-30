@@ -17,6 +17,7 @@ namespace Turbo.Plugins.s7o
         private const uint JessethArmsDamageBuffSno = 476047u;
         private const uint NayrsBlackDeathBuffSno = 476587u;
         private const uint SiphonBloodPowerSno = 453563u;
+        private const uint CrusaderSteedChargePowerSno = 243853u;
         private const string CommandSkeletonsProfileCode = "Necro_CommandSkeletons_Elite";
         private const string DevourProfileCode = "Necro_Devour_CorpseOrLotD";
         private const string NayrsBlackDeathProfileCode = "Necro_NayrsBlackDeath";
@@ -751,6 +752,8 @@ namespace Turbo.Plugins.s7o
 
         private bool TryRunManualSlotAutoCast(int now)
         {
+            bool deferredSteedCharge = false;
+
             for (int slotIndex = 0; slotIndex < _enabledSlots.Length; slotIndex++)
             {
                 if (!_enabledSlots[slotIndex])
@@ -764,21 +767,55 @@ namespace Turbo.Plugins.s7o
                 if (skill == null || skill.SnoPower == null)
                     continue;
 
-                int delay = GetRandomizedDelay("manual_" + skill.SnoPower.Sno.ToString(CultureInfo.InvariantCulture), ManualSlotDelayMinMs, ManualSlotDelayMaxMs, 1000);
-
-                string reason;
-                if (!CanCastSkill(skill, slot.ActionKey, now, delay, out reason))
+                if (IsCrusaderSteedChargeSkill(skill))
                 {
-                    LogDebugCastSkipThrottled("manual", skill, reason, now);
+                    deferredSteedCharge = true;
                     continue;
                 }
 
-                if (DoAction(slot.ActionKey, UseForceStandstillForCasts))
-                {
-                    MarkSkillCast(skill, now);
-                    LogDebug("Manual auto-cast: slot=" + slotIndex.ToString(CultureInfo.InvariantCulture) + ", skill=" + SafeSkillCode(skill));
+                if (TryManualCastSlot(slotIndex, slot, skill, now))
                     return true;
-                }
+            }
+
+            if (!deferredSteedCharge)
+                return false;
+
+            for (int slotIndex = 0; slotIndex < _enabledSlots.Length; slotIndex++)
+            {
+                if (!_enabledSlots[slotIndex])
+                    continue;
+
+                var slot = FindSlotState(slotIndex);
+                if (slot == null || !slot.IsValid || slot.Skill == null)
+                    continue;
+
+                var skill = ResolveSkillForSlot(slotIndex);
+                if (skill == null || skill.SnoPower == null || !IsCrusaderSteedChargeSkill(skill))
+                    continue;
+
+                if (TryManualCastSlot(slotIndex, slot, skill, now))
+                    return true;
+            }
+
+            return false;
+        }
+
+        private bool TryManualCastSlot(int slotIndex, SkillSlotState slot, IPlayerSkill skill, int now)
+        {
+            int delay = GetRandomizedDelay("manual_" + skill.SnoPower.Sno.ToString(CultureInfo.InvariantCulture), ManualSlotDelayMinMs, ManualSlotDelayMaxMs, 1000);
+
+            string reason;
+            if (!CanCastSkill(skill, slot.ActionKey, now, delay, out reason))
+            {
+                LogDebugCastSkipThrottled("manual", skill, reason, now);
+                return false;
+            }
+
+            if (DoAction(slot.ActionKey, UseForceStandstillForCasts))
+            {
+                MarkSkillCast(skill, now);
+                LogDebug("Manual auto-cast: slot=" + slotIndex.ToString(CultureInfo.InvariantCulture) + ", skill=" + SafeSkillCode(skill));
+                return true;
             }
 
             return false;
@@ -2210,6 +2247,12 @@ namespace Turbo.Plugins.s7o
                 return false;
             }
 
+            if (actionKey != ActionKey.Heal && IsCrusaderSteedChargeActive())
+            {
+                reason = "steed charge active";
+                return false;
+            }
+
             if (!IsActionCursorSafe(actionKey))
             {
                 reason = "cursor unsafe";
@@ -2241,6 +2284,54 @@ namespace Turbo.Plugins.s7o
             }
 
             return true;
+        }
+
+        private bool IsCrusaderSteedChargeSkill(IPlayerSkill skill)
+        {
+            try
+            {
+                return IsLocalCrusader()
+                    && skill != null
+                    && skill.SnoPower != null
+                    && skill.SnoPower.Sno == GetSno(Hud.Sno.SnoPowers.Crusader_SteedCharge, CrusaderSteedChargePowerSno);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private bool IsCrusaderSteedChargeActive()
+        {
+            try
+            {
+                return IsLocalCrusader()
+                    && Hud != null
+                    && Hud.Game != null
+                    && Hud.Game.Me != null
+                    && Hud.Game.Me.Powers != null
+                    && Hud.Game.Me.Powers.BuffIsActive(GetSno(Hud.Sno.SnoPowers.Crusader_SteedCharge, CrusaderSteedChargePowerSno));
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private bool IsLocalCrusader()
+        {
+            try
+            {
+                return Hud != null
+                    && Hud.Game != null
+                    && Hud.Game.Me != null
+                    && Hud.Game.Me.HeroClassDefinition != null
+                    && Hud.Game.Me.HeroClassDefinition.HeroClass == HeroClass.Crusader;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private bool HasEnoughPrimaryResource(IPlayerSkill skill, int spareResource, float baseRequirement)
