@@ -40,7 +40,7 @@ namespace Turbo.Plugins.s7o
         // while avoiding the old overly large +4f inflated hit test.
         private const float ProfileCloseMaskPaddingPx = 3f;
 
-        private const int SettingsVersion = 13;
+        private const int SettingsVersion = 16;
 
         // Default menu-dot placement target:
         // lower-right skill-bar area on 1920x1080, away from chat and other overlays.
@@ -431,9 +431,21 @@ namespace Turbo.Plugins.s7o
         private s7o_AutoSkill _autoSkillPlugin = null;
         private s7o_Pestilence_RGK _pestilenceRgkPlugin = null;
         private s7o_InventoryAdjustments _inventoryPlugin = null;
+        private s7o_AutoLoot _autoLootPlugin = null;
         private s7o_TipsHelper _tipsHelperPlugin = null;
         private bool _autoSkillKeybindsExpanded = false;
         private int _autoSkillKeybindCaptureSlot = -1;
+        private bool _autoLootExpanded = false;
+        private bool _autoLootEnabled = false;
+        private bool _autoLootPrimals = true;
+        private bool _autoLootAncients = true;
+        private bool _autoLootLegendaries = true;
+        private bool _autoLootGems = true;
+        private bool _autoLootGifts = true;
+        private bool _autoLootScreams = true;
+        private bool _autoLootTrash = false;
+        private bool _autoLootMaterials = true;
+        private bool _autoLootDeathsBreath = false;
         private bool _inventoryDropExpanded = false;
         private bool _inventoryDropEnabled = true;
         private bool _inventoryDropNonAccountLegendaries = false;
@@ -451,6 +463,10 @@ namespace Turbo.Plugins.s7o
         private bool _pestilenceRgkIncludeTrash = true;
         private bool _pestilenceRgkCursorRestore = true;
         private int _pestilenceRgkTargetRange = 70;
+        private bool _pestilenceRgkJuggerHotkeyEnabled = true;
+        private ushort _pestilenceRgkJuggerHotkeyVk = 0x20;
+        private bool _pestilenceRgkJuggerHotkeyCapture = false;
+        private bool _pestilenceRgkRgAssist = false;
         private readonly ActionKey[] _autoSkillBindActions =
         {
             ActionKey.Skill1,
@@ -1221,6 +1237,31 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
+
+            if (_pestilenceRgkJuggerHotkeyCapture)
+            {
+                if (IsCaptureCancelKey(keyEvent.Key))
+                {
+                    _pestilenceRgkJuggerHotkeyCapture = false;
+                    _status = "PESTILENCE JUGGER HOTKEY CAPTURE CANCELLED";
+                    return;
+                }
+
+                ushort vk;
+                if (!TryGetVirtualKeyFromDirectInputKey(keyEvent.Key, out vk))
+                {
+                    _pestilenceRgkJuggerHotkeyCapture = false;
+                    _status = "UNSUPPORTED PESTILENCE JUGGER HOTKEY";
+                    return;
+                }
+
+                _pestilenceRgkJuggerHotkeyVk = vk;
+                _pestilenceRgkJuggerHotkeyCapture = false;
+                ApplyPestilenceRgkSettingsToPlugin();
+                _status = "PESTILENCE JUGGER HOTKEY SET TO " + AutoSkillVirtualKeyLabel(vk);
+                SaveSettings();
+                return;
+            }
             for (int i = 0; i < _asHotkeyCaptureActive.Length; i++)
             {
                 if (_asHotkeyCaptureActive[i])
@@ -2661,6 +2702,7 @@ namespace Turbo.Plugins.s7o
                     _ttsAlertsScrollPx = 0;
                     _draggingTtsScrollThumb = false;
                     _autoSkillPlugin = null;
+                    _autoLootPlugin = null;
                     _inventoryPlugin = null;
                     _tipsHelperPlugin = null;
                     _status = "TOGGLES: " + ToggleCategoryLabel(_activeToggleCategory);
@@ -2722,6 +2764,14 @@ namespace Turbo.Plugins.s7o
             {
                 _zbarbAutoSnapHotkeyCapture = true;
                 _status = "PRESS Z-BARB AUTOSNAP HOTKEY";
+                return;
+            }
+
+            if (action.Equals("autoloot:expand", StringComparison.OrdinalIgnoreCase)
+                || action.Equals("autoloot:toggle", StringComparison.OrdinalIgnoreCase)
+                || action.StartsWith("autoloot:option:", StringComparison.OrdinalIgnoreCase))
+            {
+                HandleAutoLootOptionAction(action);
                 return;
             }
 
@@ -4344,6 +4394,7 @@ namespace Turbo.Plugins.s7o
             ApplyRiftFishingMapSettings();
             ApplyPartyInspectorHotkeyToPlugin();
             ApplyTipsHelperSettingsToPlugin();
+            ApplyAutoLootSettingsToPlugin();
             ApplyInventoryDropSettingsToPlugin();
             ApplyPestilenceRgkSettingsToPlugin();
         }
@@ -5818,7 +5869,7 @@ namespace Turbo.Plugins.s7o
 
         private bool IsRecentTick(int tick, int durationMs)
         {
-            if (tick == int.MinValue) return false;
+            if (tick == 0 || tick == int.MinValue) return false;
             int e = unchecked(Environment.TickCount - tick);
             return e >= 0 && e <= durationMs;
         }
@@ -5826,7 +5877,7 @@ namespace Turbo.Plugins.s7o
         // Green emanation flash — 100ms duration, safe at any frame rate.
         private bool IsFlashActive(int tick)
         {
-            if (tick == int.MinValue) return false;
+            if (tick == 0 || tick == int.MinValue) return false;
             int e = unchecked(Environment.TickCount - tick);
             return e >= 0 && e < 150;
         }
@@ -6034,6 +6085,108 @@ namespace Turbo.Plugins.s7o
 
 
 
+        private s7o_AutoLoot GetAutoLootPlugin()
+        {
+            if (_autoLootPlugin != null) return _autoLootPlugin;
+            _autoLootPlugin = FindPluginByTypeName("s7o_AutoLoot") as s7o_AutoLoot;
+            return _autoLootPlugin;
+        }
+
+        private void ApplyAutoLootSettingsToPlugin()
+        {
+            var plugin = GetAutoLootPlugin();
+            if (plugin == null)
+                return;
+
+            try
+            {
+                plugin.ConfigureAutoLoot(
+                    _autoLootEnabled,
+                    _autoLootPrimals,
+                    _autoLootAncients,
+                    _autoLootLegendaries,
+                    _autoLootGems,
+                    _autoLootGifts,
+                    _autoLootScreams,
+                    _autoLootTrash,
+                    _autoLootMaterials,
+                    _autoLootDeathsBreath);
+            }
+            catch { }
+        }
+
+        private void HandleAutoLootOptionAction(string action)
+        {
+            if (string.Equals(action, "autoloot:expand", StringComparison.OrdinalIgnoreCase))
+            {
+                _autoLootExpanded = !_autoLootExpanded;
+                _macroToggleFlashTicks["auto_loot_pickup"] = Environment.TickCount;
+                _status = _autoLootExpanded ? "AUTO LOOT OPTIONS: EXPANDED" : "AUTO LOOT OPTIONS: COLLAPSED";
+                SaveSettings();
+                return;
+            }
+
+            if (string.Equals(action, "autoloot:toggle", StringComparison.OrdinalIgnoreCase))
+            {
+                _autoLootEnabled = !_autoLootEnabled;
+                _macroToggleFlashTicks["auto_loot_pickup"] = Environment.TickCount;
+                _status = "AUTO LOOT PICKUP: " + (_autoLootEnabled ? "ON" : "OFF");
+                ApplyAutoLootSettingsToPlugin();
+                SaveSettings();
+                return;
+            }
+
+            const string prefix = "autoloot:option:";
+            if (!action.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                return;
+
+            int kind;
+            if (!int.TryParse(action.Substring(prefix.Length), NumberStyles.Integer, CultureInfo.InvariantCulture, out kind))
+                return;
+
+            switch (kind)
+            {
+                case 1: _autoLootPrimals = !_autoLootPrimals; _status = "AUTO LOOT PRIMALS: " + (_autoLootPrimals ? "ON" : "OFF"); break;
+                case 2: _autoLootAncients = !_autoLootAncients; _status = "AUTO LOOT ANCIENTS: " + (_autoLootAncients ? "ON" : "OFF"); break;
+                case 3: _autoLootLegendaries = !_autoLootLegendaries; _status = "AUTO LOOT LEGENDARIES: " + (_autoLootLegendaries ? "ON" : "OFF"); break;
+                case 4: _autoLootGems = !_autoLootGems; _status = "AUTO LOOT GEMS: " + (_autoLootGems ? "ON" : "OFF"); break;
+                case 5: _autoLootGifts = !_autoLootGifts; _status = "AUTO LOOT GIFTS: " + (_autoLootGifts ? "ON" : "OFF"); break;
+                case 6: _autoLootScreams = !_autoLootScreams; _status = "AUTO LOOT SCREAMS: " + (_autoLootScreams ? "ON" : "OFF"); break;
+                case 7: _autoLootTrash = !_autoLootTrash; _status = "AUTO LOOT TRASH ITEMS: " + (_autoLootTrash ? "ON" : "OFF"); break;
+                case 8: _autoLootMaterials = !_autoLootMaterials; _status = "AUTO LOOT MATERIALS: " + (_autoLootMaterials ? "ON" : "OFF"); break;
+                case 9: _autoLootDeathsBreath = !_autoLootDeathsBreath; _status = "AUTO LOOT DEATH'S BREATH: " + (_autoLootDeathsBreath ? "ON" : "OFF"); break;
+                default: return;
+            }
+
+            _macroToggleFlashTicks["auto_loot_pickup"] = Environment.TickCount;
+            ApplyAutoLootSettingsToPlugin();
+            SaveSettings();
+        }
+
+        private string GetAutoLootOptionLabel(int kind, bool installed)
+        {
+            if (!installed)
+                return "NOT INSTALLED";
+            return GetAutoLootOptionEnabled(kind) ? "ON" : "OFF";
+        }
+
+        private bool GetAutoLootOptionEnabled(int kind)
+        {
+            switch (kind)
+            {
+                case 1: return _autoLootPrimals;
+                case 2: return _autoLootAncients;
+                case 3: return _autoLootLegendaries;
+                case 4: return _autoLootGems;
+                case 5: return _autoLootGifts;
+                case 6: return _autoLootScreams;
+                case 7: return _autoLootTrash;
+                case 8: return _autoLootMaterials;
+                case 9: return _autoLootDeathsBreath;
+                default: return false;
+            }
+        }
+
         private s7o_InventoryAdjustments GetInventoryPlugin()
         {
             if (_inventoryPlugin != null) return _inventoryPlugin;
@@ -6128,7 +6281,10 @@ namespace Turbo.Plugins.s7o
                     _pestilenceRgkAggressiveScan,
                     _pestilenceRgkIncludeTrash,
                     _pestilenceRgkCursorRestore,
-                    _pestilenceRgkTargetRange);
+                    _pestilenceRgkTargetRange,
+                    _pestilenceRgkJuggerHotkeyEnabled,
+                    _pestilenceRgkJuggerHotkeyVk,
+                    _pestilenceRgkRgAssist);
             }
             catch { }
         }
@@ -6190,6 +6346,17 @@ namespace Turbo.Plugins.s7o
                     _pestilenceRgkCursorRestore = !_pestilenceRgkCursorRestore;
                     _status = "PESTILENCE CURSOR RESTORE: " + (_pestilenceRgkCursorRestore ? "ON" : "OFF");
                     break;
+                case 10:
+                    _pestilenceRgkJuggerHotkeyEnabled = !_pestilenceRgkJuggerHotkeyEnabled;
+                    _status = "PESTILENCE JUGGER LOCK: " + (_pestilenceRgkJuggerHotkeyEnabled ? "ON" : "OFF");
+                    break;
+                case 11:
+                    BeginPestilenceJuggerHotkeyCapture();
+                    return;
+                case 12:
+                    _pestilenceRgkRgAssist = !_pestilenceRgkRgAssist;
+                    _status = "PESTILENCE RG ASSIST: " + (_pestilenceRgkRgAssist ? "ON" : "OFF");
+                    break;
             }
 
             _macroToggleFlashTicks["pestilence_rgk_plugin"] = Environment.TickCount;
@@ -6197,6 +6364,18 @@ namespace Turbo.Plugins.s7o
             SaveSettings();
         }
 
+
+        private void BeginPestilenceJuggerHotkeyCapture()
+        {
+            if (GetPestilenceRgkPlugin() == null)
+            {
+                _status = "PESTILENCE RGK PLUGIN NOT FOUND";
+                return;
+            }
+
+            _pestilenceRgkJuggerHotkeyCapture = true;
+            _status = "PRESS PESTILENCE JUGGER LOCK HOTKEY";
+        }
 
         private string GetInventoryDropOptionLabel(int kind, bool installed)
         {
@@ -6234,6 +6413,9 @@ namespace Turbo.Plugins.s7o
                 case 7: return _pestilenceRgkIncludeTrash ? "ON" : "OFF";
                 case 8: return _pestilenceRgkTargetRange.ToString(CultureInfo.InvariantCulture) + "y";
                 case 9: return _pestilenceRgkCursorRestore ? "ON" : "OFF";
+                case 10: return _pestilenceRgkJuggerHotkeyEnabled ? "ON" : "OFF";
+                case 11: return _pestilenceRgkJuggerHotkeyCapture ? "PRESS" : AutoSkillVirtualKeyLabel(_pestilenceRgkJuggerHotkeyVk);
+                case 12: return _pestilenceRgkRgAssist ? "ON" : "OFF";
             }
 
             return "";
@@ -6249,6 +6431,9 @@ namespace Turbo.Plugins.s7o
                 case 6: return _pestilenceRgkAggressiveScan;
                 case 7: return _pestilenceRgkIncludeTrash;
                 case 9: return _pestilenceRgkCursorRestore;
+                case 10: return _pestilenceRgkJuggerHotkeyEnabled;
+                case 11: return _pestilenceRgkJuggerHotkeyCapture;
+                case 12: return _pestilenceRgkRgAssist;
             }
             return true;
         }
@@ -6262,18 +6447,14 @@ namespace Turbo.Plugins.s7o
         private int CyclePestilenceRgkStackTarget(int current)
         {
             current = ClampPestilenceRgkStackTarget(current);
-            if (current <= 4) return 6;
-            if (current <= 6) return 8;
-            if (current <= 8) return 10;
-            return 4;
+            return current >= 10 ? 1 : current + 1;
         }
 
         private int ClampPestilenceRgkStackTarget(int value)
         {
-            if (value <= 4) return 4;
-            if (value <= 6) return 6;
-            if (value <= 8) return 8;
-            return 10;
+            if (value < 1) return 1;
+            if (value > 10) return 10;
+            return value;
         }
 
         private int CyclePestilenceRgkTargetRange(int current)
@@ -8866,6 +9047,9 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             public bool   IsOpenGrMapChild;
             public bool   IsAutoSkillKeybindSelector;
             public bool   IsAutoSkillKeybindChild;
+            public bool   IsAutoLootSelector;
+            public bool   IsAutoLootChild;
+            public int    AutoLootOptionKind;
             public bool   IsInventoryDropSelector;
             public bool   IsInventoryDropChild;
             public int    InventoryDropOptionKind;
@@ -8964,6 +9148,9 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             if (item.Entry.IsAutoSkillKeybindChild)
                 return AutoSkillKeybindChildSlotH;
 
+            if (item.Entry.IsAutoLootChild)
+                return PestilenceChildSlotH;
+
             if (item.Entry.IsInventoryDropChild)
                 return PestilenceChildSlotH;
 
@@ -9005,6 +9192,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 return;
             }
 
+            if (entry.IsAutoLootChild)
+            {
+                DrawAutoLootChildRow(slot, entry, rowIdx);
+                return;
+            }
+
             if (entry.IsInventoryDropChild)
             {
                 DrawInventoryDropChildRow(slot, entry, rowIdx);
@@ -9043,6 +9236,11 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 installed = GetPestilenceRgkPlugin() != null;
                 enabled = installed;
             }
+            else if (entry.IsAutoLootSelector)
+            {
+                installed = GetAutoLootPlugin() != null;
+                enabled = installed && _autoLootEnabled;
+            }
             else if (entry.IsInventoryDropSelector)
             {
                 installed = GetInventoryPlugin() != null;
@@ -9067,7 +9265,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             RectangleF stateR = new RectangleF(rr.Right - stateW - 8f, rr.Top + 6f, stateW, rr.Height - 12f);
             RectangleF expandR = RectangleF.Empty;
-            if (entry.IsPestilenceSelector || entry.IsInventoryDropSelector)
+            if (entry.IsPestilenceSelector || entry.IsAutoLootSelector || entry.IsInventoryDropSelector)
             {
                 expandR = new RectangleF(stateR.Left - 34f - buttonGap, rr.Top + 6f, 34f, rr.Height - 12f);
             }
@@ -9077,7 +9275,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 hotkeyR = new RectangleF(stateR.Left - hotkeyW - buttonGap, rr.Top + 6f, hotkeyW, rr.Height - 12f);
 
             float textX = starR.Right + 10f;
-            float textRight = entry.HasHotkeyButton ? hotkeyR.Left - 10f : ((entry.IsPestilenceSelector || entry.IsInventoryDropSelector) ? expandR.Left - 10f : stateR.Left - 10f);
+            float textRight = entry.HasHotkeyButton ? hotkeyR.Left - 10f : ((entry.IsPestilenceSelector || entry.IsAutoLootSelector || entry.IsInventoryDropSelector) ? expandR.Left - 10f : stateR.Left - 10f);
             float textW = Math.Max(40f, textRight - textX);
 
             DrawOutlinedTextAt(_fRowTitle, _fRowTitleShadow,
@@ -9102,6 +9300,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 stateLabel = installed ? (_autoSkillKeybindsExpanded ? "-" : "+") : "NOT INSTALLED";
             else if (entry.IsPestilenceStackTarget)
                 stateLabel = installed ? GetPestilenceRgkStackLabel(entry.PestilenceStackKind) : "NOT INSTALLED";
+            else if (entry.IsAutoLootSelector)
+                stateLabel = installed ? (_autoLootEnabled ? "ON" : "OFF") : "NOT INSTALLED";
             else if (entry.IsInventoryDropSelector)
                 stateLabel = installed ? (_inventoryDropEnabled ? "ON" : "OFF") : "NOT INSTALLED";
             else if (entry.IsPlugin)
@@ -9109,7 +9309,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             else
                 stateLabel = enabled ? "ON" : "OFF";
 
-            bool canToggle = entry.IsOpenGrMapSelector ? installed : (entry.IsAutoSkillKeybindSelector ? installed : (entry.IsInventoryDropSelector ? installed : (entry.IsPestilenceStackTarget ? installed : (entry.IsPlugin ? installed : GetAutoSkillPlugin() != null))));
+            bool canToggle = entry.IsOpenGrMapSelector ? installed : (entry.IsAutoSkillKeybindSelector ? installed : (entry.IsAutoLootSelector ? installed : (entry.IsInventoryDropSelector ? installed : (entry.IsPestilenceStackTarget ? installed : (entry.IsPlugin ? installed : GetAutoSkillPlugin() != null)))));
 
             int flashTk;
             _macroToggleFlashTicks.TryGetValue(entry.Code, out flashTk);
@@ -9121,6 +9321,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 string hotkeyLabel = GetZBarbAutoSnapHotkeyLabel();
                 DrawGlossButton(hotkeyR, FitButtonLabel(hotkeyLabel, hotkeyR.Width), _zbarbAutoSnapHotkeyCapture, false, false);
                 RegisterToggleHit(entry.HotkeyAction, hotkeyR);
+            }
+
+            if (entry.IsAutoLootSelector)
+            {
+                DrawGlossButton(expandR, _autoLootExpanded ? "-" : "+", _autoLootExpanded, false, false);
+                RegisterToggleHit("autoloot:expand", expandR);
             }
 
             if (entry.IsInventoryDropSelector)
@@ -9148,6 +9354,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     RegisterToggleHit("riftmaps:expand", stateR);
                 else if (entry.IsAutoSkillKeybindSelector)
                     RegisterToggleHit("autoskill:keybinds:expand", stateR);
+                else if (entry.IsAutoLootSelector)
+                    RegisterToggleHit("autoloot:toggle", stateR);
                 else if (entry.IsInventoryDropSelector)
                     RegisterToggleHit("inventorydrop:toggle", stateR);
                 else if (entry.IsPestilenceStackTarget)
@@ -9191,6 +9399,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             bool openGrFavorited = _macroFavorites.Contains("OpenGR_MapSelector");
             bool autoSkillKeybindsFavorited = _macroFavorites.Contains("AutoSkill_Keybindings");
+            bool autoLootFavorited = _macroFavorites.Contains("auto_loot_pickup");
             bool inventoryDropFavorited = _macroFavorites.Contains("inventory_drop_feature");
 
             if (favEntries.Count > 0)
@@ -9248,6 +9457,11 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                         });
                     }
 
+                    if (entry.IsAutoLootSelector && _autoLootExpanded)
+                    {
+                        AddAutoLootChildItems(items, true);
+                    }
+
                     if (entry.IsInventoryDropSelector && _inventoryDropExpanded)
                     {
                         AddInventoryDropChildItems(items, true);
@@ -9284,6 +9498,9 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     if (entry.IsAutoSkillKeybindChild && autoSkillKeybindsFavorited)
                         continue;
 
+                    if (entry.IsAutoLootChild && autoLootFavorited)
+                        continue;
+
                     if (entry.IsInventoryDropChild && inventoryDropFavorited)
                         continue;
 
@@ -9306,6 +9523,61 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
         }
 
 
+
+        private void AddAutoLootChildEntries(List<MacroEntry> entries)
+        {
+            AddAutoLootChildEntry(entries, "Primals", "Pick up primal ancient legendary/set items.", "auto_loot_primals", 1);
+            AddAutoLootChildEntry(entries, "Ancients", "Pick up ancient legendary/set items.", "auto_loot_ancients", 2);
+            AddAutoLootChildEntry(entries, "Legendaries", "Pick up normal legendary/set items and legendary potions.", "auto_loot_legendaries", 3);
+            AddAutoLootChildEntry(entries, "Gems", "Pick up normal and legendary gems.", "auto_loot_gems", 4);
+            AddAutoLootChildEntry(entries, "Gifts", "Pick up Ramaladni's Gifts.", "auto_loot_gifts", 5);
+            AddAutoLootChildEntry(entries, "Screams", "Pick up Petrified Screams.", "auto_loot_screams", 6);
+            AddAutoLootChildEntry(entries, "Materials", "Pick up crafting materials except Death's Breaths.", "auto_loot_materials", 8);
+            AddAutoLootChildEntry(entries, "Death's Breath", "Pick up Death's Breaths separately from materials.", "auto_loot_deaths_breath", 9);
+            AddAutoLootChildEntry(entries, "Trash Items", "Pick up rare, magic, and normal items.", "auto_loot_trash", 7);
+        }
+
+        private void AddAutoLootChildEntry(List<MacroEntry> entries, string title, string description, string code, int kind)
+        {
+            entries.Add(new MacroEntry
+            {
+                Title = title,
+                Description = description,
+                Code = code,
+                IsAutoLootChild = true,
+                AutoLootOptionKind = kind
+            });
+        }
+
+        private void AddAutoLootChildItems(List<MacroListItem> items, bool favoriteDisplay)
+        {
+            AddAutoLootChildItem(items, favoriteDisplay, "Primals", "Pick up primal ancient legendary/set items.", "auto_loot_primals", 1);
+            AddAutoLootChildItem(items, favoriteDisplay, "Ancients", "Pick up ancient legendary/set items.", "auto_loot_ancients", 2);
+            AddAutoLootChildItem(items, favoriteDisplay, "Legendaries", "Pick up normal legendary/set items and legendary potions.", "auto_loot_legendaries", 3);
+            AddAutoLootChildItem(items, favoriteDisplay, "Gems", "Pick up normal and legendary gems.", "auto_loot_gems", 4);
+            AddAutoLootChildItem(items, favoriteDisplay, "Gifts", "Pick up Ramaladni's Gifts.", "auto_loot_gifts", 5);
+            AddAutoLootChildItem(items, favoriteDisplay, "Screams", "Pick up Petrified Screams.", "auto_loot_screams", 6);
+            AddAutoLootChildItem(items, favoriteDisplay, "Materials", "Pick up crafting materials except Death's Breaths.", "auto_loot_materials", 8);
+            AddAutoLootChildItem(items, favoriteDisplay, "Death's Breath", "Pick up Death's Breaths separately from materials.", "auto_loot_deaths_breath", 9);
+            AddAutoLootChildItem(items, favoriteDisplay, "Trash Items", "Pick up rare, magic, and normal items.", "auto_loot_trash", 7);
+        }
+
+        private void AddAutoLootChildItem(List<MacroListItem> items, bool favoriteDisplay, string title, string description, string code, int kind)
+        {
+            items.Add(new MacroListItem
+            {
+                Kind = MacroListItemKind.Entry,
+                Entry = new MacroEntry
+                {
+                    Title = title,
+                    Description = description,
+                    Code = code,
+                    IsAutoLootChild = true,
+                    AutoLootOptionKind = kind
+                },
+                IsFavoriteDisplay = favoriteDisplay
+            });
+        }
 
         private void AddInventoryDropChildEntries(List<MacroEntry> entries)
         {
@@ -9364,7 +9636,10 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             AddPestilenceChildItem(items, favoriteDisplay, "Aggressive scan", "Use faster target hover probing for awkward elite hitboxes.", "pestilence_rgk_aggressive_scan", 6);
             AddPestilenceChildItem(items, favoriteDisplay, "Trash fallback", "Target close trash/high-value trash only after elite leaders are gone.", "pestilence_rgk_trash_fallback", 7);
             AddPestilenceChildItem(items, favoriteDisplay, "Target range", "Target selection range in yards.", "pestilence_rgk_target_range", 8);
-            AddPestilenceChildItem(items, favoriteDisplay, "Cursor restore", "Restore cursor after short Pestilence target-assist holds; long holds restore near player.", "pestilence_rgk_cursor_restore", 9);
+            AddPestilenceChildItem(items, favoriteDisplay, "Cursor restore", "Restore cursor after short Pestilence target-assist holds.", "pestilence_rgk_cursor_restore", 9);
+            AddPestilenceChildItem(items, favoriteDisplay, "Jugger lock", "Hotkey locks the closest Juggernaut and shows a 10-yard yellow circle.", "pestilence_rgk_jugger_lock", 10);
+            AddPestilenceChildItem(items, favoriteDisplay, "Jugger hotkey", "Click to change the Juggernaut lock hotkey.", "pestilence_rgk_jugger_hotkey", 11);
+            AddPestilenceChildItem(items, favoriteDisplay, "RG AutoSnap/Siphon", "Treat the Rift Guardian as highest priority and build/maintain Siphon stacks.", "pestilence_rgk_rg_assist", 12);
         }
 
         private void AddPestilenceChildItem(List<MacroListItem> items, bool favoriteDisplay, string title, string description, string code, int kind)
@@ -9471,6 +9746,27 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
         }
 
 
+        private void DrawAutoLootChildRow(RectangleF r, MacroEntry entry, int rowIdx)
+        {
+            (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
+
+            bool installed = GetAutoLootPlugin() != null;
+            string label = GetAutoLootOptionLabel(entry.AutoLootOptionKind, installed);
+            bool on = GetAutoLootOptionEnabled(entry.AutoLootOptionKind);
+
+            float pad = 44f;
+            float stateW = 120f;
+            RectangleF stateR = new RectangleF(r.Right - stateW - 8f, r.Top + 5f, stateW, r.Height - 10f);
+            float textX = r.Left + pad;
+            float textW = Math.Max(40f, stateR.Left - textX - 10f);
+
+            DrawOutlinedTextAt(_fRowText, _fRowTextShadow, Trim("• " + entry.Title, ApproxCharsForWidth(textW, 5.4f)), textX, r.Top + 10f);
+            DrawGlossButton(stateR, FitButtonLabel(label, stateR.Width), on, false, false);
+
+            if (installed)
+                RegisterToggleHit("autoloot:option:" + entry.AutoLootOptionKind.ToString(CultureInfo.InvariantCulture), stateR);
+        }
+
         private void DrawInventoryDropChildRow(RectangleF r, MacroEntry entry, int rowIdx)
         {
             (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
@@ -9499,6 +9795,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             bool installed = GetPestilenceRgkPlugin() != null;
             string label = GetPestilenceOptionLabel(entry.PestilenceOptionKind, installed);
             bool on = GetPestilenceOptionEnabled(entry.PestilenceOptionKind);
+            bool hotkeyRow = entry.PestilenceOptionKind == 11;
 
             float pad = 44f;
             float stateW = 120f;
@@ -9507,7 +9804,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             float textW = Math.Max(40f, stateR.Left - textX - 10f);
 
             DrawOutlinedTextAt(_fRowText, _fRowTextShadow, Trim("• " + entry.Title, ApproxCharsForWidth(textW, 5.4f)), textX, r.Top + 10f);
-            DrawGlossButton(stateR, FitButtonLabel(label, stateR.Width), on, false, false);
+            DrawGlossButton(stateR, FitButtonLabel(label, stateR.Width), hotkeyRow ? _pestilenceRgkJuggerHotkeyCapture : on, false, hotkeyRow);
 
             if (installed)
                 RegisterToggleHit("pestilence:option:" + entry.PestilenceOptionKind.ToString(CultureInfo.InvariantCulture), stateR);
@@ -9546,6 +9843,28 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             allEntries.Add(new MacroEntry
             {
+                Title="Auto Loot Pickup",
+                Description="Automatically picks up selected floor loot while avoiding Urshi misclick loops.",
+                Code="auto_loot_pickup",
+                IsAutoLootSelector=true
+            });
+
+            if (_autoLootExpanded)
+                AddAutoLootChildEntries(allEntries);
+
+            allEntries.Add(new MacroEntry
+            {
+                Title="Inventory Item Drop",
+                Description="Shift+F2 drops all items.\nShift+F3 only drops filtered items.",
+                Code="inventory_drop_feature",
+                IsInventoryDropSelector=true
+            });
+
+            if (_inventoryDropExpanded)
+                AddInventoryDropChildEntries(allEntries);
+
+            allEntries.Add(new MacroEntry
+            {
                 Title="AutoSkill Keybindings",
                 Description="Set the keyboard cast keys AutoSkill sends for skill slots and potion.",
                 Code="AutoSkill_Keybindings",
@@ -9562,17 +9881,6 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     IsAutoSkillKeybindChild=true
                 });
             }
-
-            allEntries.Add(new MacroEntry
-            {
-                Title="Inventory Item Drop",
-                Description="Shift+F2 drops all items.\nShift+F3 only drops filtered items.",
-                Code="inventory_drop_feature",
-                IsInventoryDropSelector=true
-            });
-
-            if (_inventoryDropExpanded)
-                AddInventoryDropChildEntries(allEntries);
 
             int barbarianStart = allEntries.Count;
 
@@ -9634,6 +9942,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 new MacroEntry { Title="Land of the Dead",     Description="Casts LotD on elites or dense packs (disabled by default).",         Code="Necro_LandOfTheDead_EliteOrDensity",IsBuff=false },
                 new MacroEntry { Title="Devour",               Description="Maintains Devour buffs/resources; fast-casts during Land of the Dead.",        Code="Necro_Devour_CorpseOrLotD",        IsBuff=false },
                 new MacroEntry { Title="Command Skeletons",    Description="Maintains Jesseth target commands; otherwise assists elite/RG targeting.",      Code="Necro_CommandSkeletons_Elite",      IsBuff=false },
+                new MacroEntry { Title="Nayr's Black Death",   Description="Maintains Nayr stacks after you start attacking with Siphon Blood.",           Code="Necro_NayrsBlackDeath",             IsBuff=false },
                 new MacroEntry { Title="Skeletal Mage",        Description="Casts Skeletal Mage when essence is high (disabled by default).",     Code="Necro_SkeletalMage_EssenceHigh",    IsBuff=false },
                 // ── Witch Doctor ──────────────────────────────────────────────
                 new MacroEntry { Title="Spirit Walk",          Description="Defensive Spirit Walk when health is critical or elites are close.",  Code="WD_SpiritWalk_Defensive",           IsBuff=false },
@@ -9665,7 +9974,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             int demonHunterStart = crusaderStart + 7;
             int monkStart = demonHunterStart + 9;
             int necromancerStart = monkStart + 7;
-            int witchDoctorStart = necromancerStart + 6;
+            int witchDoctorStart = necromancerStart + 8;
             int wizardStart = witchDoctorStart + 7;
 
             int[] classStarts = { 0, barbarianStart, crusaderStart, demonHunterStart, monkStart, necromancerStart, witchDoctorStart, wizardStart };
@@ -10825,8 +11134,14 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             {
                 LogDebug("Menu close requested; No-Click background bound, delaying menu hide until Shift+P close is issued.");
                 _capturingHotkey = false;
+                _capturingHudHotkeyIdx = -1;
+                _ttsCustomMessageHotkeyCaptureIndex = -1;
+                _zbarbAutoSnapHotkeyCapture = false;
+                _partyInspectorHotkeyCapture = false;
                 _autoSkillKeybindCaptureSlot = -1;
                 _tipsPlayerMarkerHotkeyCapture = false;
+                _pestilenceRgkJuggerHotkeyCapture = false;
+                ClearAnySnapHotkeyCapture();
                 _draggingWindow = false;
                 _draggingDot = false;
                 _draggingScrollThumb = false;
@@ -10851,8 +11166,13 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             _visible = false;
             _capturingHotkey = false;
+            _capturingHudHotkeyIdx = -1;
+            _ttsCustomMessageHotkeyCaptureIndex = -1;
+            _zbarbAutoSnapHotkeyCapture = false;
+            _partyInspectorHotkeyCapture = false;
             _autoSkillKeybindCaptureSlot = -1;
             _tipsPlayerMarkerHotkeyCapture = false;
+            _pestilenceRgkJuggerHotkeyCapture = false;
             _draggingWindow = false;
             _draggingDot = false;
             _draggingScrollThumb = false;
@@ -14223,6 +14543,17 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
                 lines.Add("OPEN_GR_MAP_OVERRIDE=" + _riftMapSelectionHasOverride.ToString(CultureInfo.InvariantCulture));
                 lines.Add("OPEN_GR_MAP_IDS=" + string.Join("|", _riftEnabledMapIds.OrderBy(v => v).Select(v => v.ToString(CultureInfo.InvariantCulture)).ToArray()));
+                lines.Add("AUTO_LOOT_EXPANDED=" + _autoLootExpanded.ToString(CultureInfo.InvariantCulture));
+                lines.Add("AUTO_LOOT_ENABLED=" + _autoLootEnabled.ToString(CultureInfo.InvariantCulture));
+                lines.Add("AUTO_LOOT_PRIMALS=" + _autoLootPrimals.ToString(CultureInfo.InvariantCulture));
+                lines.Add("AUTO_LOOT_ANCIENTS=" + _autoLootAncients.ToString(CultureInfo.InvariantCulture));
+                lines.Add("AUTO_LOOT_LEGENDARIES=" + _autoLootLegendaries.ToString(CultureInfo.InvariantCulture));
+                lines.Add("AUTO_LOOT_GEMS=" + _autoLootGems.ToString(CultureInfo.InvariantCulture));
+                lines.Add("AUTO_LOOT_GIFTS=" + _autoLootGifts.ToString(CultureInfo.InvariantCulture));
+                lines.Add("AUTO_LOOT_SCREAMS=" + _autoLootScreams.ToString(CultureInfo.InvariantCulture));
+                lines.Add("AUTO_LOOT_TRASH=" + _autoLootTrash.ToString(CultureInfo.InvariantCulture));
+                lines.Add("AUTO_LOOT_MATERIALS=" + _autoLootMaterials.ToString(CultureInfo.InvariantCulture));
+                lines.Add("AUTO_LOOT_DEATHS_BREATH=" + _autoLootDeathsBreath.ToString(CultureInfo.InvariantCulture));
 
 
                 lines.Add("TOGGLE_CATEGORY=" + _activeToggleCategory);
@@ -14264,6 +14595,9 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 lines.Add("PESTILENCE_RGK_INCLUDE_TRASH=" + _pestilenceRgkIncludeTrash.ToString(CultureInfo.InvariantCulture));
                 lines.Add("PESTILENCE_RGK_CURSOR_RESTORE=" + _pestilenceRgkCursorRestore.ToString(CultureInfo.InvariantCulture));
                 lines.Add("PESTILENCE_RGK_TARGET_RANGE=" + _pestilenceRgkTargetRange.ToString(CultureInfo.InvariantCulture));
+                lines.Add("PESTILENCE_RGK_JUGGER_LOCK=" + _pestilenceRgkJuggerHotkeyEnabled.ToString(CultureInfo.InvariantCulture));
+                lines.Add("PESTILENCE_RGK_JUGGER_HOTKEY=" + _pestilenceRgkJuggerHotkeyVk.ToString(CultureInfo.InvariantCulture));
+                lines.Add("PESTILENCE_RGK_RG_ASSIST=" + _pestilenceRgkRgAssist.ToString(CultureInfo.InvariantCulture));
                 lines.Add("AUTOSKILL_KEYBINDS_EXPANDED=" + _autoSkillKeybindsExpanded.ToString(CultureInfo.InvariantCulture));
 
                 // AutoSnap
@@ -14722,6 +15056,50 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     {
                         ParseOpenGrMapIds(val);
                     }
+                    else if (string.Equals(key, "AUTO_LOOT_EXPANDED", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _autoLootExpanded = ParseBool(val, _autoLootExpanded);
+                    }
+                    else if (string.Equals(key, "AUTO_LOOT_ENABLED", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _autoLootEnabled = ParseBool(val, _autoLootEnabled);
+                    }
+                    else if (string.Equals(key, "AUTO_LOOT_PRIMALS", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _autoLootPrimals = ParseBool(val, _autoLootPrimals);
+                    }
+                    else if (string.Equals(key, "AUTO_LOOT_ANCIENTS", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _autoLootAncients = ParseBool(val, _autoLootAncients);
+                    }
+                    else if (string.Equals(key, "AUTO_LOOT_LEGENDARIES", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _autoLootLegendaries = ParseBool(val, _autoLootLegendaries);
+                    }
+                    else if (string.Equals(key, "AUTO_LOOT_GEMS", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _autoLootGems = ParseBool(val, _autoLootGems);
+                    }
+                    else if (string.Equals(key, "AUTO_LOOT_GIFTS", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _autoLootGifts = ParseBool(val, _autoLootGifts);
+                    }
+                    else if (string.Equals(key, "AUTO_LOOT_SCREAMS", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _autoLootScreams = ParseBool(val, _autoLootScreams);
+                    }
+                    else if (string.Equals(key, "AUTO_LOOT_TRASH", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _autoLootTrash = ParseBool(val, _autoLootTrash);
+                    }
+                    else if (string.Equals(key, "AUTO_LOOT_MATERIALS", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _autoLootMaterials = ParseBool(val, _autoLootMaterials);
+                    }
+                    else if (string.Equals(key, "AUTO_LOOT_DEATHS_BREATH", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _autoLootDeathsBreath = ParseBool(val, _autoLootDeathsBreath);
+                    }
                     else if (key == "TOGGLE_CATEGORY")
                     {
                         ToggleCategory cat;
@@ -14874,6 +15252,22 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                         int tmp;
                         if (int.TryParse(val, NumberStyles.Integer, CultureInfo.InvariantCulture, out tmp))
                             _pestilenceRgkTargetRange = ClampPestilenceRgkTargetRange(tmp);
+                    }
+                    else if (string.Equals(key, "PESTILENCE_RGK_JUGGER_LOCK", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool tmp;
+                        if (bool.TryParse(val, out tmp)) _pestilenceRgkJuggerHotkeyEnabled = tmp;
+                    }
+                    else if (string.Equals(key, "PESTILENCE_RGK_JUGGER_HOTKEY", StringComparison.OrdinalIgnoreCase))
+                    {
+                        int tmp;
+                        if (int.TryParse(val, NumberStyles.Integer, CultureInfo.InvariantCulture, out tmp) && tmp > 0 && tmp <= ushort.MaxValue)
+                            _pestilenceRgkJuggerHotkeyVk = (ushort)tmp;
+                    }
+                    else if (string.Equals(key, "PESTILENCE_RGK_RG_ASSIST", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool tmp;
+                        if (bool.TryParse(val, out tmp)) _pestilenceRgkRgAssist = tmp;
                     }
                     else if (key == "AUTOSKILL_KEYBINDS_EXPANDED")
                     {
