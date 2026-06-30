@@ -26,6 +26,12 @@ namespace Turbo.Plugins.s7o
         private const int StartupPluginRefreshMs = 500;
         private const int StartupPluginRefreshDurationMs = 6000;
         private const int HotkeyDebounceMs = 220;
+        private const int AutoLootToastDurationMs = 1100;
+        private const int AutoLootToastPopMs = 320;
+        private const int AutoLootToastFadeMs = 520;
+        private const float AutoLootIndicatorBaseX = 450f;
+        private const float AutoLootIndicatorBaseY = 1027f;
+        private const float AutoLootIndicatorBaseSize = 17f;
 
         // Larger header reserve because the menu has title controls,
         // page tabs, and a No-Click Background toggle above page content.
@@ -343,6 +349,7 @@ namespace Turbo.Plugins.s7o
         private bool _affixBossFallingRocks = true;
         private bool _affixBossLeapTelegraphs = true;
         private bool _affixBossMeteors = true;
+        private bool _affixEchoingNightmareMeteors = true;
         private bool _affixBossKulleHazards = true;
         private bool _affixBossBlighterHazards = true;
         private bool _affixBossRatKingHazards = true;
@@ -437,6 +444,12 @@ namespace Turbo.Plugins.s7o
         private int _autoSkillKeybindCaptureSlot = -1;
         private bool _autoLootExpanded = false;
         private bool _autoLootEnabled = false;
+        private bool _autoLootPaused = false;
+        private bool _autoLootPauseHotkeyCapture = false;
+        private Key _autoLootPauseHotkey = Key.F7;
+        private int _lastAutoLootPauseHotkeyTick = int.MinValue;
+        private int _autoLootToastStartTick = int.MinValue;
+        private string _autoLootToastText = string.Empty;
         private bool _autoLootPrimals = true;
         private bool _autoLootAncients = true;
         private bool _autoLootLegendaries = true;
@@ -867,6 +880,8 @@ namespace Turbo.Plugins.s7o
         private IFont _fTitle, _fLabel, _fSection, _fText, _fSmall, _fButton, _fButtonActive;
         private IFont _fSmallShadow, _fButtonShadow;
         private IFont _fButtonLarge, _fButtonLargeActive, _fButtonLargeShadow;
+        private IFont[] _fAutoLootToastGreenFade, _fAutoLootToastRedFade, _fAutoLootToastShadowFade;
+        private IFont[] _fAutoLootToastGreenPop, _fAutoLootToastRedPop, _fAutoLootToastShadowPop;
         // Larger outlined row fonts for TOGGLES detail rows only.
         private IFont _fRowTitle, _fRowTitleShadow;
         private IFont _fRowText, _fRowTextShadow;
@@ -1187,6 +1202,22 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
+            if (_autoLootPauseHotkeyCapture)
+            {
+                if (IsCaptureCancelKey(keyEvent.Key))
+                {
+                    _autoLootPauseHotkeyCapture = false;
+                    _status = "AUTO LOOT PAUSE HOTKEY CAPTURE CANCELLED";
+                    return;
+                }
+
+                _autoLootPauseHotkey = keyEvent.Key;
+                _autoLootPauseHotkeyCapture = false;
+                _status = "AUTO LOOT PAUSE HOTKEY SET TO " + CaptureKeyLabel(_autoLootPauseHotkey);
+                SaveSettings();
+                return;
+            }
+
             if (_tipsPlayerMarkerHotkeyCapture)
             {
                 if (IsCaptureCancelKey(keyEvent.Key))
@@ -1336,6 +1367,12 @@ namespace Turbo.Plugins.s7o
                 _status = "HOTKEY SET TO " + MenuHotkey;
                 SaveSettings();
                 LogDebug("Menu hotkey changed to " + MenuHotkey + ".");
+                return;
+            }
+
+            if (_autoLootEnabled && _autoLootPauseHotkey != Key.Unknown && keyEvent.Key == _autoLootPauseHotkey)
+            {
+                ToggleAutoLootPausedFromHotkey();
                 return;
             }
 
@@ -1528,6 +1565,9 @@ namespace Turbo.Plugins.s7o
                 return ConsumeLeftMouseDown();
             }
 
+            if (TryHandleAutoLootRuntimeIndicatorClick(x, y))
+                return ConsumeLeftMouseDown();
+
             if (!_visible) return false;
             if (!Contains(layout.Window, x, y)) return false;
 
@@ -1692,6 +1732,8 @@ namespace Turbo.Plugins.s7o
                 DrawVisualTopOverlays();
             }
             catch { }
+
+            try { DrawAutoLootRuntimeIndicator(); } catch { }
 
             var layout = GetLayout();
 
@@ -2769,6 +2811,7 @@ namespace Turbo.Plugins.s7o
 
             if (action.Equals("autoloot:expand", StringComparison.OrdinalIgnoreCase)
                 || action.Equals("autoloot:toggle", StringComparison.OrdinalIgnoreCase)
+                || action.Equals("autoloot:hotkey", StringComparison.OrdinalIgnoreCase)
                 || action.StartsWith("autoloot:option:", StringComparison.OrdinalIgnoreCase))
             {
                 HandleAutoLootOptionAction(action);
@@ -2884,6 +2927,10 @@ namespace Turbo.Plugins.s7o
 
                 case "affix:bossmeteors":
                     _affixBossMeteors = !_affixBossMeteors;
+                    break;
+
+                case "affix:echoingmeteors":
+                    _affixEchoingNightmareMeteors = !_affixEchoingNightmareMeteors;
                     break;
 
                 case "affix:bosskullehazards":
@@ -4155,6 +4202,7 @@ namespace Turbo.Plugins.s7o
                     SetPluginBoolProperty(dangerousOverlay, "ShowBossFallingRocks", master && _affixBossFallingRocks);
                     SetPluginBoolProperty(dangerousOverlay, "ShowBossLeapTelegraphs", master && _affixBossLeapTelegraphs);
                     SetPluginBoolProperty(dangerousOverlay, "ShowBossMeteors", master && _affixBossMeteors);
+                    SetPluginBoolProperty(dangerousOverlay, "ShowEchoingNightmareMeteors", master && _affixEchoingNightmareMeteors);
                     SetPluginBoolProperty(dangerousOverlay, "ShowBossKulleHazards", master && _affixBossKulleHazards);
                     SetPluginBoolProperty(dangerousOverlay, "ShowBossBlighterHazards", master && _affixBossBlighterHazards);
 
@@ -6100,6 +6148,9 @@ namespace Turbo.Plugins.s7o
 
             try
             {
+                if (!_autoLootEnabled)
+                    _autoLootPaused = false;
+
                 plugin.ConfigureAutoLoot(
                     _autoLootEnabled,
                     _autoLootPrimals,
@@ -6111,8 +6162,64 @@ namespace Turbo.Plugins.s7o
                     _autoLootTrash,
                     _autoLootMaterials,
                     _autoLootDeathsBreath);
+                plugin.SetPaused(_autoLootEnabled && _autoLootPaused);
             }
             catch { }
+        }
+
+        private void SetAutoLootPaused(bool paused, bool showStatus)
+        {
+            _autoLootPaused = paused && _autoLootEnabled;
+            try
+            {
+                var plugin = GetAutoLootPlugin();
+                if (plugin != null)
+                    plugin.SetPaused(_autoLootEnabled && _autoLootPaused);
+            }
+            catch { }
+
+            if (showStatus)
+            {
+                _status = _autoLootEnabled
+                    ? (_autoLootPaused ? "AUTO LOOT PAUSED (" : "AUTO LOOT ENABLED (") + CaptureKeyLabel(_autoLootPauseHotkey) + ")"
+                    : "AUTO LOOT PICKUP: OFF";
+                StartAutoLootToast();
+            }
+        }
+
+        private void ToggleAutoLootPausedFromHotkey()
+        {
+            if (!_autoLootEnabled)
+                return;
+
+            int now = Environment.TickCount;
+            if (_lastAutoLootPauseHotkeyTick != int.MinValue && unchecked(now - _lastAutoLootPauseHotkeyTick) < HotkeyDebounceMs)
+                return;
+
+            _lastAutoLootPauseHotkeyTick = now;
+            SetAutoLootPaused(!_autoLootPaused, true);
+            _macroToggleFlashTicks["auto_loot_pickup"] = now;
+        }
+
+        private void BeginAutoLootPauseHotkeyCapture()
+        {
+            if (GetAutoLootPlugin() == null)
+            {
+                _status = "AUTO LOOT PLUGIN NOT FOUND";
+                return;
+            }
+
+            _autoLootPauseHotkeyCapture = true;
+            _status = "PRESS AUTO LOOT PAUSE HOTKEY";
+        }
+
+        private void StartAutoLootToast()
+        {
+            if (!_autoLootEnabled)
+                return;
+
+            _autoLootToastText = _autoLootPaused ? "PAUSED" : "ENABLED";
+            _autoLootToastStartTick = Environment.TickCount;
         }
 
         private void HandleAutoLootOptionAction(string action)
@@ -6129,10 +6236,17 @@ namespace Turbo.Plugins.s7o
             if (string.Equals(action, "autoloot:toggle", StringComparison.OrdinalIgnoreCase))
             {
                 _autoLootEnabled = !_autoLootEnabled;
+                if (!_autoLootEnabled) _autoLootPaused = false;
                 _macroToggleFlashTicks["auto_loot_pickup"] = Environment.TickCount;
                 _status = "AUTO LOOT PICKUP: " + (_autoLootEnabled ? "ON" : "OFF");
                 ApplyAutoLootSettingsToPlugin();
                 SaveSettings();
+                return;
+            }
+
+            if (string.Equals(action, "autoloot:hotkey", StringComparison.OrdinalIgnoreCase))
+            {
+                BeginAutoLootPauseHotkeyCapture();
                 return;
             }
 
@@ -6143,6 +6257,12 @@ namespace Turbo.Plugins.s7o
             int kind;
             if (!int.TryParse(action.Substring(prefix.Length), NumberStyles.Integer, CultureInfo.InvariantCulture, out kind))
                 return;
+
+            if (kind == 0)
+            {
+                BeginAutoLootPauseHotkeyCapture();
+                return;
+            }
 
             switch (kind)
             {
@@ -6167,6 +6287,8 @@ namespace Turbo.Plugins.s7o
         {
             if (!installed)
                 return "NOT INSTALLED";
+            if (kind == 0)
+                return _autoLootPauseHotkeyCapture ? "PRESS" : CaptureKeyLabel(_autoLootPauseHotkey);
             return GetAutoLootOptionEnabled(kind) ? "ON" : "OFF";
         }
 
@@ -6174,6 +6296,7 @@ namespace Turbo.Plugins.s7o
         {
             switch (kind)
             {
+                case 0: return _autoLootPauseHotkeyCapture;
                 case 1: return _autoLootPrimals;
                 case 2: return _autoLootAncients;
                 case 3: return _autoLootLegendaries;
@@ -7335,6 +7458,183 @@ namespace Turbo.Plugins.s7o
         // VISUAL TOP-SCREEN OVERLAYS (PaintTopInGame)
         // ════════════════════════════════════════════════════════════════════════
 
+        private void DrawAutoLootRuntimeIndicator()
+        {
+            if (!_autoLootEnabled || GetAutoLootPlugin() == null)
+            {
+                _autoLootToastStartTick = int.MinValue;
+                return;
+            }
+
+            RectangleF dot = GetAutoLootIndicatorRect();
+            float cx = dot.Left + dot.Width * 0.5f;
+            float cy = dot.Top + dot.Height * 0.5f;
+            float rx = dot.Width * 0.5f;
+            float ry = dot.Height * 0.5f;
+
+            _bDotRim.DrawEllipse(cx, cy, rx, ry);
+            (_autoLootPaused ? _bDotFill : _bDotFillOpen).DrawEllipse(cx, cy, rx * 0.86f, ry * 0.86f);
+            (_autoLootPaused ? _bDotShadow : _bDotShadowOpen).DrawEllipse(cx, cy + ry * 0.25f, rx * 0.62f, ry * 0.44f);
+            _bDotSpec.DrawEllipse(cx - rx * 0.22f, cy - ry * 0.25f, rx * 0.43f, ry * 0.28f);
+
+            DrawAutoLootPauseToast(dot);
+
+            float mx = Hud.Window.CursorX;
+            float my = Hud.Window.CursorY;
+            if (mx >= dot.Left - 3f && mx <= dot.Right + 3f && my >= dot.Top - 3f && my <= dot.Bottom + 3f)
+                DrawAutoLootIndicatorTooltip(dot);
+        }
+
+        private RectangleF GetAutoLootIndicatorRect()
+        {
+            float sw = 1920f;
+            float sh = 1080f;
+            try
+            {
+                sw = Hud.Window.Size.Width;
+                sh = Hud.Window.Size.Height;
+            }
+            catch { }
+
+            float scale = Math.Max(0.65f, Math.Min(sw / 1920f, sh / 1080f));
+            float size = AutoLootIndicatorBaseSize * scale;
+            float x = sw * (AutoLootIndicatorBaseX / 1920f) - size * 0.5f;
+            float y = sh * (AutoLootIndicatorBaseY / 1080f) - size * 0.5f;
+            return new RectangleF(x, y, size, size);
+        }
+
+        private bool TryHandleAutoLootRuntimeIndicatorClick(float x, float y)
+        {
+            if (!_autoLootEnabled || GetAutoLootPlugin() == null)
+                return false;
+
+            RectangleF dot = GetAutoLootIndicatorRect();
+            RectangleF hit = new RectangleF(dot.Left - 5f, dot.Top - 5f, dot.Width + 10f, dot.Height + 10f);
+            if (!Contains(hit, x, y))
+                return false;
+
+            SetAutoLootPaused(!_autoLootPaused, true);
+            return true;
+        }
+
+        private void DrawAutoLootIndicatorTooltip(RectangleF dot)
+        {
+            string text = _autoLootPaused ? "Paused - Click to Resume" : "Active - Click to Pause";
+            float w = 170f;
+            float h = 24f;
+            RectangleF tip = new RectangleF(dot.Right + 8f, dot.Top - 4f, w, h);
+
+            try
+            {
+                float sw = Hud.Window.Size.Width;
+                if (tip.Right > sw - 4f)
+                    tip.X = dot.Left - w - 8f;
+            }
+            catch { }
+
+            _bTextDimBg.DrawRectangle(tip.Left, tip.Top, tip.Width, tip.Height);
+            _bBtnEdge.DrawRectangle(tip.Left, tip.Top, tip.Width, tip.Height);
+            DrawCenteredOutlinedTextExact(_fButton, _fButtonShadow, text, tip);
+        }
+
+        private void DrawAutoLootPauseToast(RectangleF targetDot)
+        {
+            if (_autoLootToastStartTick == int.MinValue || string.IsNullOrEmpty(_autoLootToastText))
+                return;
+
+            int now = Environment.TickCount;
+            int age = unchecked(now - _autoLootToastStartTick);
+            if (age < 0 || age > AutoLootToastDurationMs)
+            {
+                _autoLootToastStartTick = int.MinValue;
+                _autoLootToastText = string.Empty;
+                return;
+            }
+
+            bool pausedToast = string.Equals(_autoLootToastText, "PAUSED", StringComparison.OrdinalIgnoreCase);
+            IFont main = GetAutoLootToastFont(pausedToast, age, false);
+            IFont shadow = GetAutoLootToastFont(pausedToast, age, true);
+            if (main == null && shadow == null)
+                return;
+
+            float scale = 1f;
+            try
+            {
+                float sw = Hud.Window.Size.Width;
+                float sh = Hud.Window.Size.Height;
+                scale = Math.Max(0.65f, Math.Min(sw / 1920f, sh / 1080f));
+            }
+            catch { }
+
+            float w = 128f * scale;
+            float h = 32f * scale;
+
+            float dotX = targetDot.Left + targetDot.Width * 0.5f;
+            float dotY = targetDot.Bottom - 2f + h * 0.5f;
+            RectangleF dotToast = new RectangleF(dotX - w * 0.5f, dotY - h * 0.5f, w, h);
+            DrawCenteredOutlinedTextExact(main, shadow, _autoLootToastText, dotToast);
+
+            try
+            {
+                if (Hud.Game != null && Hud.Game.Me != null && Hud.Game.Me.FloorCoordinate != null)
+                {
+                    var me = Hud.Game.Me.FloorCoordinate.ToScreenCoordinate();
+                    float playerX = me.X;
+                    float playerY = me.Y - (150f * scale);
+                    RectangleF playerToast = new RectangleF(playerX - w * 0.5f, playerY - h * 0.5f, w, h);
+                    DrawCenteredOutlinedTextExact(main, shadow, _autoLootToastText, playerToast);
+                }
+            }
+            catch { }
+        }
+
+        private IFont GetAutoLootToastFont(bool pausedToast, int age, bool shadow)
+        {
+            if (age >= 0 && age <= AutoLootToastPopMs)
+            {
+                IFont[] pop = shadow
+                    ? _fAutoLootToastShadowPop
+                    : (pausedToast ? _fAutoLootToastRedPop : _fAutoLootToastGreenPop);
+                return PickAutoLootPopFont(pop, age);
+            }
+
+            int bucket = GetAutoLootToastAlphaBucket(age);
+            if (bucket <= 0) return null;
+
+            IFont[] fade = shadow
+                ? _fAutoLootToastShadowFade
+                : (pausedToast ? _fAutoLootToastRedFade : _fAutoLootToastGreenFade);
+            if (fade == null || bucket >= fade.Length) return null;
+            return fade[bucket];
+        }
+
+        private static int GetAutoLootToastAlphaBucket(int age)
+        {
+            int fadeStart = AutoLootToastDurationMs - AutoLootToastFadeMs;
+            if (age < fadeStart) return 10;
+            if (age >= AutoLootToastDurationMs) return 0;
+
+            float p = ViClampF((age - fadeStart) / (float)AutoLootToastFadeMs, 0f, 1f);
+            return Math.Max(1, Math.Min(10, (int)Math.Ceiling((1f - p) * 10f)));
+        }
+
+        private static IFont PickAutoLootPopFont(IFont[] fonts, int age)
+        {
+            if (fonts == null || fonts.Length == 0) return null;
+            if (fonts.Length == 1 || AutoLootToastPopMs <= 0) return fonts[0];
+
+            float t = ViClampF(age / (float)AutoLootToastPopMs, 0f, 1f);
+            float u = t < 0.5f ? AutoLootSmooth(t / 0.5f) : 1f - AutoLootSmooth((t - 0.5f) / 0.5f);
+            int idx = Math.Max(0, Math.Min(fonts.Length - 1, (int)Math.Round(u * (fonts.Length - 1))));
+            return fonts[idx];
+        }
+
+        private static float AutoLootSmooth(float t)
+        {
+            t = ViClampF(t, 0f, 1f);
+            return t * t * (3f - 2f * t);
+        }
+
         private void DrawVisualTopOverlays()
         {
             if (Hud == null || Hud.Game == null || !Hud.Game.IsInGame)
@@ -8128,7 +8428,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 return 12;
 
             if (feature == "dangeraffixes")
-                return 25;
+                return 26;
 
             if (feature == "menubutton")
                 return 2;
@@ -8698,38 +8998,42 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                         return;
 
                     case 15:
-                        DrawSingleToggleOptionRow(r, rowIdx, "Zoltun Kulle", "Zoltun Kulle boulder warning.", _affixBossKulleHazards, "affix:bosskullehazards", "bosskullehazards");
+                        DrawSingleToggleOptionRow(r, rowIdx, "Echoing Nightmare Meteors", "Green meteor warning circles in Echoing Nightmare.", _affixEchoingNightmareMeteors, "affix:echoingmeteors", "echoingmeteors");
                         return;
 
                     case 16:
-                        DrawSingleToggleOptionRow(r, rowIdx, "Blighter", "Blighter's poison warning circle overlays.", _affixBossBlighterHazards, "affix:bossblighterhazards", "bossblighterhazards");
+                        DrawSingleToggleOptionRow(r, rowIdx, "Zoltun Kulle", "Zoltun Kulle boulder warning.", _affixBossKulleHazards, "affix:bosskullehazards", "bosskullehazards");
                         return;
 
                     case 17:
-                        DrawSingleToggleOptionRow(r, rowIdx, "Hamelin / Rat King", "Rat cloud warning overlays.", _affixBossRatKingHazards, "affix:bossratkinghazards", "bossratkinghazards");
+                        DrawSingleToggleOptionRow(r, rowIdx, "Blighter", "Blighter's poison warning circle overlays.", _affixBossBlighterHazards, "affix:bossblighterhazards", "bossblighterhazards");
                         return;
 
                     case 18:
-                        DrawSingleToggleOptionRow(r, rowIdx, "Tethrys Geysers", "Tethrys geyser warning circles.", _affixBossAdriaGeysers, "affix:bossadriageysers", "bossadriageysers");
+                        DrawSingleToggleOptionRow(r, rowIdx, "Hamelin / Rat King", "Rat cloud warning overlays.", _affixBossRatKingHazards, "affix:bossratkinghazards", "bossratkinghazards");
                         return;
 
                     case 19:
-                        DrawSingleToggleOptionRow(r, rowIdx, "Butcher Fire", "Butcher fire warning circle.", _affixBossButcherFire, "affix:bossbutcherfire", "bossbutcherfire");
+                        DrawSingleToggleOptionRow(r, rowIdx, "Tethrys Geysers", "Tethrys geyser warning circles.", _affixBossAdriaGeysers, "affix:bossadriageysers", "bossadriageysers");
                         return;
 
                     case 20:
-                        DrawSingleToggleOptionRow(r, rowIdx, "Rime", "Rime cold warning circle overlays.", _affixBossRimeHazards, "affix:bossrimehazards", "bossrimehazards");
+                        DrawSingleToggleOptionRow(r, rowIdx, "Butcher Fire", "Butcher fire warning circle.", _affixBossButcherFire, "affix:bossbutcherfire", "bossbutcherfire");
                         return;
 
                     case 21:
-                        DrawSingleToggleOptionRow(r, rowIdx, "Shock Tower", "Shock tower danger-zone overlay.", _affixShockTowerHazards, "affix:shocktowerhazards", "shocktowerhazards");
+                        DrawSingleToggleOptionRow(r, rowIdx, "Rime", "Rime cold warning circle overlays.", _affixBossRimeHazards, "affix:bossrimehazards", "bossrimehazards");
                         return;
 
                     case 22:
-                        DrawSingleToggleOptionRow(r, rowIdx, "Stonesinger Turret", "Stonesinger turret warning circle.", _affixBossSandmonsterTurretHazards, "affix:bosssandmonsterturret", "bosssandmonsterturret");
+                        DrawSingleToggleOptionRow(r, rowIdx, "Shock Tower", "Shock tower danger-zone overlay.", _affixShockTowerHazards, "affix:shocktowerhazards", "shocktowerhazards");
                         return;
 
                     case 23:
+                        DrawSingleToggleOptionRow(r, rowIdx, "Stonesinger Turret", "Stonesinger turret warning circle.", _affixBossSandmonsterTurretHazards, "affix:bosssandmonsterturret", "bosssandmonsterturret");
+                        return;
+
+                    case 24:
                         DrawSingleToggleOptionRow(r, rowIdx, "Elite Affix Labels", "Text labels showing elite affixes above packs.", _eliteAffixLabelsEnabled, "affix:labels", "labels");
                         return;
 
@@ -9526,6 +9830,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
         private void AddAutoLootChildEntries(List<MacroEntry> entries)
         {
+            AddAutoLootChildEntry(entries, "Pause Hotkey", "Click the key button to change the temporary Auto Loot pause/resume hotkey. Click the status dot or press the hotkey to pause/resume.", "auto_loot_pause", 0);
             AddAutoLootChildEntry(entries, "Primals", "Pick up primal ancient legendary/set items.", "auto_loot_primals", 1);
             AddAutoLootChildEntry(entries, "Ancients", "Pick up ancient legendary/set items.", "auto_loot_ancients", 2);
             AddAutoLootChildEntry(entries, "Legendaries", "Pick up normal legendary/set items and legendary potions.", "auto_loot_legendaries", 3);
@@ -9551,6 +9856,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
         private void AddAutoLootChildItems(List<MacroListItem> items, bool favoriteDisplay)
         {
+            AddAutoLootChildItem(items, favoriteDisplay, "Pause Hotkey", "Click the key button to change the temporary Auto Loot pause/resume hotkey. Click the status dot or press the hotkey to pause/resume.", "auto_loot_pause", 0);
             AddAutoLootChildItem(items, favoriteDisplay, "Primals", "Pick up primal ancient legendary/set items.", "auto_loot_primals", 1);
             AddAutoLootChildItem(items, favoriteDisplay, "Ancients", "Pick up ancient legendary/set items.", "auto_loot_ancients", 2);
             AddAutoLootChildItem(items, favoriteDisplay, "Legendaries", "Pick up normal legendary/set items and legendary potions.", "auto_loot_legendaries", 3);
@@ -9761,10 +10067,15 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             float textW = Math.Max(40f, stateR.Left - textX - 10f);
 
             DrawOutlinedTextAt(_fRowText, _fRowTextShadow, Trim("• " + entry.Title, ApproxCharsForWidth(textW, 5.4f)), textX, r.Top + 10f);
-            DrawGlossButton(stateR, FitButtonLabel(label, stateR.Width), on, false, false);
+            DrawGlossButton(stateR, FitButtonLabel(label, stateR.Width), on, false, entry.AutoLootOptionKind == 0);
 
             if (installed)
-                RegisterToggleHit("autoloot:option:" + entry.AutoLootOptionKind.ToString(CultureInfo.InvariantCulture), stateR);
+            {
+                if (entry.AutoLootOptionKind == 0)
+                    RegisterToggleHit("autoloot:hotkey", stateR);
+                else
+                    RegisterToggleHit("autoloot:option:" + entry.AutoLootOptionKind.ToString(CultureInfo.InvariantCulture), stateR);
+            }
         }
 
         private void DrawInventoryDropChildRow(RectangleF r, MacroEntry entry, int rowIdx)
@@ -11137,6 +11448,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 _capturingHudHotkeyIdx = -1;
                 _ttsCustomMessageHotkeyCaptureIndex = -1;
                 _zbarbAutoSnapHotkeyCapture = false;
+                _autoLootPauseHotkeyCapture = false;
                 _partyInspectorHotkeyCapture = false;
                 _autoSkillKeybindCaptureSlot = -1;
                 _tipsPlayerMarkerHotkeyCapture = false;
@@ -11169,6 +11481,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             _capturingHudHotkeyIdx = -1;
             _ttsCustomMessageHotkeyCaptureIndex = -1;
             _zbarbAutoSnapHotkeyCapture = false;
+            _autoLootPauseHotkeyCapture = false;
             _partyInspectorHotkeyCapture = false;
             _autoSkillKeybindCaptureSlot = -1;
             _tipsPlayerMarkerHotkeyCapture = false;
@@ -12459,6 +12772,13 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             _fButtonShadow = Hud.Render.CreateFont("tahoma",  7.8f, 245, 0, 0, 0, false, false, 0, 0, 0, 0, false);
             _fButtonLargeShadow = Hud.Render.CreateFont("tahoma", 10.0f, 245, 0, 0, 0, true, false, 0, 0, 0, 0, false);
 
+            _fAutoLootToastGreenFade = CreateAutoLootToastFadeFonts(88, 230, 84, 11.2f);
+            _fAutoLootToastRedFade = CreateAutoLootToastFadeFonts(235, 72, 72, 11.2f);
+            _fAutoLootToastShadowFade = CreateAutoLootToastFadeFonts(0, 0, 0, 11.2f);
+            _fAutoLootToastGreenPop = CreateAutoLootToastPopFonts(88, 230, 84, 11.2f);
+            _fAutoLootToastRedPop = CreateAutoLootToastPopFonts(235, 72, 72, 11.2f);
+            _fAutoLootToastShadowPop = CreateAutoLootToastPopFonts(0, 0, 0, 11.2f);
+
             // Local row fonts for larger TOGGLES rows — not used globally.
             _fRowTitle = Hud.Render.CreateFont("tahoma", 9.8f, 255, 255, 225, 70, true, false, 145, 0, 0, 0, true);
             _fRowText  = Hud.Render.CreateFont("tahoma", 9.2f, 255, 235, 242, 246, true, false, 135, 0, 0, 0, true);
@@ -12469,6 +12789,28 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             _fStar       = Hud.Render.CreateFont("tahoma", 9.4f, 255, 255, 225, 70, true, false, 140, 0, 0, 0, true);
             _fStarShadow = Hud.Render.CreateFont("tahoma", 9.4f, 245, 0, 0, 0, true, false, 0, 0, 0, 0, false);
             EnsureVisualPickerBrushes();
+        }
+
+        private IFont[] CreateAutoLootToastFadeFonts(int r, int g, int b, float size)
+        {
+            var fonts = new IFont[11];
+            float fontSize = Math.Max(6.0f, size);
+            for (int i = 0; i < fonts.Length; i++)
+            {
+                int alpha = (int)Math.Round(255.0d * i / 10.0d);
+                fonts[i] = Hud.Render.CreateFont("tahoma", fontSize, alpha, r, g, b, true, false, false);
+            }
+            return fonts;
+        }
+
+        private IFont[] CreateAutoLootToastPopFonts(int r, int g, int b, float size)
+        {
+            var fonts = new IFont[21];
+            float min = Math.Max(6.0f, size);
+            float max = min * 1.45f;
+            for (int i = 0; i < fonts.Length; i++)
+                fonts[i] = Hud.Render.CreateFont("tahoma", min + ((max - min) * i / (fonts.Length - 1)), 255, r, g, b, true, false, false);
+            return fonts;
         }
 
         // ── AutoSnap runtime helpers ─────────────────────────────────────────────
@@ -14527,6 +14869,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 lines.Add("AFFIX_BOSS_FALLING_ROCKS=" + _affixBossFallingRocks.ToString(CultureInfo.InvariantCulture));
                 lines.Add("AFFIX_BOSS_LEAP_TELEGRAPHS=" + _affixBossLeapTelegraphs.ToString(CultureInfo.InvariantCulture));
                 lines.Add("AFFIX_BOSS_METEORS=" + _affixBossMeteors.ToString(CultureInfo.InvariantCulture));
+                lines.Add("AFFIX_ECHOING_NIGHTMARE_METEORS=" + _affixEchoingNightmareMeteors.ToString(CultureInfo.InvariantCulture));
                 lines.Add("AFFIX_BOSS_KULLE_HAZARDS=" + _affixBossKulleHazards.ToString(CultureInfo.InvariantCulture));
                 lines.Add("AFFIX_BOSS_BLIGHTER_HAZARDS=" + _affixBossBlighterHazards.ToString(CultureInfo.InvariantCulture));
                 lines.Add("AFFIX_BOSS_RATKING_HAZARDS=" + _affixBossRatKingHazards.ToString(CultureInfo.InvariantCulture));
@@ -14545,6 +14888,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 lines.Add("OPEN_GR_MAP_IDS=" + string.Join("|", _riftEnabledMapIds.OrderBy(v => v).Select(v => v.ToString(CultureInfo.InvariantCulture)).ToArray()));
                 lines.Add("AUTO_LOOT_EXPANDED=" + _autoLootExpanded.ToString(CultureInfo.InvariantCulture));
                 lines.Add("AUTO_LOOT_ENABLED=" + _autoLootEnabled.ToString(CultureInfo.InvariantCulture));
+                lines.Add("AUTO_LOOT_PAUSE_HOTKEY=" + _autoLootPauseHotkey.ToString());
                 lines.Add("AUTO_LOOT_PRIMALS=" + _autoLootPrimals.ToString(CultureInfo.InvariantCulture));
                 lines.Add("AUTO_LOOT_ANCIENTS=" + _autoLootAncients.ToString(CultureInfo.InvariantCulture));
                 lines.Add("AUTO_LOOT_LEGENDARIES=" + _autoLootLegendaries.ToString(CultureInfo.InvariantCulture));
@@ -14983,6 +15327,10 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     {
                         _affixBossMeteors = ParseBool(val, _affixBossMeteors);
                     }
+                    else if (key == "AFFIX_ECHOING_NIGHTMARE_METEORS")
+                    {
+                        _affixEchoingNightmareMeteors = ParseBool(val, _affixEchoingNightmareMeteors);
+                    }
                     else if (key == "AFFIX_BOSS_KULLE_HAZARDS")
                     {
                         _affixBossKulleHazards = ParseBool(val, _affixBossKulleHazards);
@@ -15063,6 +15411,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     else if (string.Equals(key, "AUTO_LOOT_ENABLED", StringComparison.OrdinalIgnoreCase))
                     {
                         _autoLootEnabled = ParseBool(val, _autoLootEnabled);
+                    }
+                    else if (string.Equals(key, "AUTO_LOOT_PAUSE_HOTKEY", StringComparison.OrdinalIgnoreCase))
+                    {
+                        Key k;
+                        if (Enum.TryParse<Key>(val, true, out k) && k != Key.Unknown)
+                            _autoLootPauseHotkey = k;
                     }
                     else if (string.Equals(key, "AUTO_LOOT_PRIMALS", StringComparison.OrdinalIgnoreCase))
                     {
