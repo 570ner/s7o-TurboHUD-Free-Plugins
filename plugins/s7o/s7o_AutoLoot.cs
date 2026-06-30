@@ -25,6 +25,10 @@ namespace Turbo.Plugins.s7o
         private const int MovementSampleMs = 90;
         private const float MovementThresholdYards = 0.22f;
         private const int MaxAttempts = 8;
+        private const int StuckRetryCooldownMs = 6000;
+        private const int ProtectedChestBlockYards = 45;
+        private const int ProtectedChestRiskYards = 16;
+        private const int VisionFightBlockYards = 70;
         private const int UrshiRiskYards = 16;
         private const int CleanupMonsterBlockYards = 45;
         private const int UrshiPanelCloseDelayMs = 200;
@@ -34,7 +38,6 @@ namespace Turbo.Plugins.s7o
         private const int UrshiRiskMaxCycleAttempts = 4;
         private const int DroppedItemIgnoreMs = 20000;
         private const int DroppedItemVisibilityGraceMs = 500;
-        private const int HighValueRetryCooldownMs = 2000;
         private const uint RamaladniGiftSno = 1844495708;
         private const uint PetrifiedScreamSno = 1051857800;
         private const uint WhisperLowSno = 685356142;
@@ -81,6 +84,7 @@ namespace Turbo.Plugins.s7o
         private bool _cleanupLatched;
         private bool _lastCleanupClickFar;
         private bool _enabled;
+        private bool _paused;
         private bool _primals = true, _ancients = true, _legendaries = true, _gems = true, _gifts = true, _screams = true, _trash, _materials = true, _deathsBreath;
         private uint _lastAreaSno;
         private long _lootBurstCleanupUntilMs;
@@ -127,7 +131,40 @@ namespace Turbo.Plugins.s7o
             _trash = trash;
             _materials = materials;
             _deathsBreath = deathsBreath;
-            if (!_enabled) { _attempts.Clear(); _retryAfterMs.Clear(); _droppedSuppress.Clear(); _lastClickSeed = 0; _lastCleanupClickFar = false; _cleanupLatched = false; _lootBurstCleanupUntilMs = 0; _lastMovementSampleMs = 0; _playerMoving = false; _pendingCursorRestore = false; _urshiCloseAtMs = 0; _urshiEscapeSent = false; _nextUrshiRiskClickMs = 0; _urshiArmedSeed = 0; }
+            if (!_enabled)
+            {
+                _paused = false;
+                ResetRuntimeState();
+            }
+        }
+
+        public bool IsPaused { get { return _paused; } }
+
+        public void SetPaused(bool paused)
+        {
+            if (_paused == paused) return;
+            _paused = paused;
+            ResetRuntimeState(true);
+        }
+
+        private void ResetRuntimeState(bool keepDroppedSuppress = false)
+        {
+            _attempts.Clear();
+            _retryAfterMs.Clear();
+            if (!keepDroppedSuppress)
+                _droppedSuppress.Clear();
+            _lastClickSeed = 0;
+            _lastCleanupClickFar = false;
+            _cleanupLatched = false;
+            _lootBurstCleanupUntilMs = 0;
+            _lastMovementSampleMs = 0;
+            _playerMoving = false;
+            _pendingCursorRestore = false;
+            _urshiArmedUntilMs = 0;
+            _urshiCloseAtMs = 0;
+            _nextUrshiRiskClickMs = 0;
+            _urshiEscapeSent = false;
+            _urshiArmedSeed = 0;
         }
 
         public void OnItemPicked(IItem item)
@@ -156,21 +193,7 @@ namespace Turbo.Plugins.s7o
             if (newGame || sno != _lastAreaSno)
             {
                 _lastAreaSno = sno;
-                _attempts.Clear();
-                _retryAfterMs.Clear();
-                _droppedSuppress.Clear();
-                _lastClickSeed = 0;
-                _lastCleanupClickFar = false;
-                _urshiArmedUntilMs = 0;
-                _urshiCloseAtMs = 0;
-                _nextUrshiRiskClickMs = 0;
-                _urshiEscapeSent = false;
-                _urshiArmedSeed = 0;
-                _cleanupLatched = false;
-                _lootBurstCleanupUntilMs = 0;
-                _lastMovementSampleMs = 0;
-                _playerMoving = false;
-                _pendingCursorRestore = false;
+                ResetRuntimeState();
             }
         }
 
@@ -179,7 +202,7 @@ namespace Turbo.Plugins.s7o
             if (Hud != null && Hud.Game != null && Hud.Game.IsInGame)
                 ProcessPendingCursorRestore(Hud.Game.CurrentRealTimeMilliseconds);
 
-            if (!_enabled || Hud == null || Hud.Game == null || !Hud.Game.IsInGame || Hud.Game.IsPaused || !Hud.Window.IsForeground)
+            if (!_enabled || _paused || Hud == null || Hud.Game == null || !Hud.Game.IsInGame || Hud.Game.IsPaused || !Hud.Window.IsForeground)
                 return;
             if (Hud.Render.WorldMapUiElement != null && Hud.Render.WorldMapUiElement.Visible)
                 return;
@@ -192,6 +215,7 @@ namespace Turbo.Plugins.s7o
 
             long now = Hud.Game.CurrentRealTimeMilliseconds;
             PurgeDroppedSuppressions(now);
+            PurgeRetryState(now);
             if (IsUrshiPanelVisible())
             {
                 if (ShouldCloseUrshiPanel(now))
@@ -212,8 +236,10 @@ namespace Turbo.Plugins.s7o
             _urshiEscapeSent = false;
 
             bool inTown = Hud.Game.IsInTown;
-            bool postRiftCleanup = !inTown && IsPostRiftCleanup();
-            bool lootBurstCleanup = IsLootBurstCleanup(now, inTown);
+            IActor protectedChest = GetUnopenedProtectedChest();
+            bool protectedChestBlocked = protectedChest != null;
+            bool postRiftCleanup = !inTown && !protectedChestBlocked && IsPostRiftCleanup();
+            bool lootBurstCleanup = !protectedChestBlocked && IsLootBurstCleanup(now, inTown);
             bool wideCleanup = postRiftCleanup || lootBurstCleanup;
             var state = Hud.Game.Me.AnimationState;
             bool combatAction = state == AcdAnimationState.Attacking || state == AcdAnimationState.Casting || state == AcdAnimationState.Channeling;
@@ -237,9 +263,9 @@ namespace Turbo.Plugins.s7o
             IActor urshi = GetUrshiActor();
 
             var target = Hud.Game.Items
-                .Where(i => i != null && i.Location == ItemLocation.Floor && i.IsOnScreen && !IsExcludedPickup(i) && !IsSuppressedDroppedItem(i, now) && i.CentralXyDistanceToMe <= range)
+                .Where(i => i != null && i.Location == ItemLocation.Floor && i.IsOnScreen && !IsExcludedPickup(i) && !IsSuppressedDroppedItem(i, now) && !IsProtectedChestRisk(i, protectedChest) && i.CentralXyDistanceToMe <= range)
                 .Select(i => new LootCandidate(i, WantedPriority(i), IsUrshiRisk(i, urshi)))
-                .Where(c => c.Priority >= 0 && CanFit(c.Item, freeSlots) && CanTry(c.Item, postRiftCleanup, c.UrshiRisk, now))
+                .Where(c => c.Priority >= 0 && CanFit(c.Item, freeSlots) && CanTry(c.Item, c.UrshiRisk, now))
                 .OrderBy(c => postRiftCleanup && c.UrshiRisk ? 1 : 0)
                 .ThenBy(c => c.Item.Seed == _lastClickSeed ? 1 : 0)
                 .ThenBy(c => wideCleanup ? 0 : c.Priority)
@@ -264,6 +290,18 @@ namespace Turbo.Plugins.s7o
             }
         }
 
+        private void PurgeRetryState(long now)
+        {
+            if (_attempts.Count == 0 && _retryAfterMs.Count == 0) return;
+            foreach (var seed in _attempts.Keys.ToArray())
+                if (!IsVisibleFloorSeed(seed)) _attempts.Remove(seed);
+            foreach (var pair in _retryAfterMs.ToArray())
+            {
+                if (now >= pair.Value || !IsVisibleFloorSeed(pair.Key))
+                    _retryAfterMs.Remove(pair.Key);
+            }
+        }
+
         private bool IsSuppressedDroppedItem(IItem item, long now)
         {
             DropSuppress block;
@@ -281,7 +319,7 @@ namespace Turbo.Plugins.s7o
             return Hud.Game.Items.Any(i => i != null && i.Seed == seed && i.Location == ItemLocation.Floor && i.IsOnScreen);
         }
 
-        private bool CanTry(IItem item, bool cleanup, bool riskyUrshi, long now)
+        private bool CanTry(IItem item, bool riskyUrshi, long now)
         {
             int n;
             long retryAt;
@@ -304,20 +342,12 @@ namespace Turbo.Plugins.s7o
                 return true;
             }
 
-            if (cleanup) return true;
-            if (IsHighValueRetryCandidate(item))
-            {
-                if (n >= MaxAttempts)
-                {
-                    _attempts[item.Seed] = 0;
-                    _retryAfterMs[item.Seed] = now + HighValueRetryCooldownMs;
-                    return false;
-                }
+            if (n < MaxAttempts)
                 return true;
-            }
 
-            if (IsRetryFriendly(item)) return true;
-            return n < MaxAttempts;
+            _attempts[item.Seed] = 0;
+            _retryAfterMs[item.Seed] = now + StuckRetryCooldownMs;
+            return false;
         }
 
         private void ClickItem(IItem item, bool riskyUrshi, bool cleanup, long now)
@@ -451,28 +481,6 @@ namespace Turbo.Plugins.s7o
             return kind == ItemKind.uberstuff || kind == ItemKind.craft || kind == ItemKind.gem || group == "gems_unique" || group == "ring" || group == "amulet" || group == "belt" || group == "consumable";
         }
 
-        private bool IsRetryFriendly(IItem item)
-        {
-            return IsNoSpacePickup(item) || IsGem(item) || HasMatchingStack(item);
-        }
-
-        private bool IsHighValueRetryCandidate(IItem item)
-        {
-            if (item == null) return false;
-            ActorSnoEnum actor = item.SnoActor != null ? item.SnoActor.Sno : 0;
-            uint itemSno = item.SnoItem != null ? item.SnoItem.Sno : 0;
-            return IsNoSpacePickup(item)
-                || PlanActors.Contains(actor)
-                || IsWhisper(item)
-                || IsGem(item)
-                || IsLegendaryLike(item)
-                || itemSno == RamaladniGiftSno
-                || actor == ActorSnoEnum._consumable_add_sockets
-                || actor == ActorSnoEnum._consumable_add_sockets_flippy
-                || itemSno == PetrifiedScreamSno
-                || actor == ActorSnoEnum._swarmriftkey;
-        }
-
         private bool HasMatchingStack(IItem item)
         {
             if (item == null || item.SnoActor == null) return false;
@@ -575,6 +583,12 @@ namespace Turbo.Plugins.s7o
 
         private bool IsLootBurstCleanup(long now, bool allowTown)
         {
+            if (HasUnopenedProtectedChestNearby(ProtectedChestBlockYards) || HasActiveVisionFight())
+            {
+                _lootBurstCleanupUntilMs = 0;
+                return false;
+            }
+
             if (!allowTown && HasNearbyAttackableMonster(LootBurstMonsterBlockYards))
             {
                 _lootBurstCleanupUntilMs = 0;
@@ -623,6 +637,86 @@ namespace Turbo.Plugins.s7o
                 return Hud.Game.AliveMonsters.Any(m => m != null && m.IsAlive && m.Attackable && !m.Illusion && m.CentralXyDistanceToMe <= yards);
             }
             catch { return true; }
+        }
+
+        private IActor GetUnopenedProtectedChest()
+        {
+            try
+            {
+                return Hud.Game.Actors.FirstOrDefault(a => IsUnopenedProtectedChest(a) && a.CentralXyDistanceToMe <= ProtectedChestBlockYards);
+            }
+            catch { return null; }
+        }
+
+        private bool HasUnopenedProtectedChestNearby(int yards)
+        {
+            try
+            {
+                return Hud.Game.Actors.Any(a => IsUnopenedProtectedChest(a) && a.CentralXyDistanceToMe <= yards);
+            }
+            catch { return true; }
+        }
+
+        private static bool IsUnopenedProtectedChest(IActor actor)
+        {
+            if (actor == null || actor.SnoActor == null) return false;
+            ActorSnoEnum sno = actor.SnoActor.Sno;
+            if (sno != ActorSnoEnum._p76_chest && sno != ActorSnoEnum._p73_chestreward) return false;
+            if (actor.IsDisabled || actor.IsOperated) return false;
+            return actor.IsClickable || actor.DisplayOnOverlay;
+        }
+
+        private static bool IsProtectedChestRisk(IItem item, IActor chest)
+        {
+            try { return item != null && chest != null && item.FloorCoordinate.XYDistanceTo(chest.FloorCoordinate) <= ProtectedChestRiskYards; }
+            catch { return true; }
+        }
+
+        private bool HasActiveVisionFight()
+        {
+            if (!IsVisionWorld()) return false;
+            try { if (Hud.Game.IsGoblinOnScreen) return true; } catch { }
+            try
+            {
+                return Hud.Game.AliveMonsters.Any(m => m != null && m.IsAlive && !m.Illusion && m.CentralXyDistanceToMe <= VisionFightBlockYards && (m.Attackable || IsTreasureGoblin(m)));
+            }
+            catch { return true; }
+        }
+
+        private bool IsVisionWorld()
+        {
+            try
+            {
+                var me = Hud != null && Hud.Game != null ? Hud.Game.Me : null;
+                if (me == null) return false;
+                if (IsP76WorldSno(me.WorldSno)) return true;
+                var area = me.SnoArea;
+                string code = area != null ? area.Code : null;
+                return !string.IsNullOrEmpty(code) && code.IndexOf("p76", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+            catch { return false; }
+        }
+
+        private static bool IsP76WorldSno(uint sno)
+        {
+            switch (sno)
+            {
+                case 488371u: case 488457u: case 488658u: case 488686u: case 488695u:
+                case 488725u: case 488760u: case 488769u: case 488786u: case 488792u:
+                case 488817u: case 488826u: case 488829u: case 488837u: case 488862u:
+                    return true;
+                default: return false;
+            }
+        }
+
+        private static bool IsTreasureGoblin(IActor actor)
+        {
+            if (actor == null || actor.SnoActor == null) return false;
+            int sno = (int)actor.SnoActor.Sno;
+            return (sno >= 5984 && sno <= 5987)
+                || sno == 391593 || sno == 408354 || sno == 408655 || sno == 408989 || sno == 413289 || sno == 428663 || sno == 429161 || sno == 450993
+                || (sno >= 487312 && sno <= 487318)
+                || sno == 488564 || sno == 488932 || (sno >= 488935 && sno <= 488939);
         }
 
         private bool IsUrshiPanelVisible()
