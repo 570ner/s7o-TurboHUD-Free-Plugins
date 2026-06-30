@@ -32,6 +32,7 @@ namespace Turbo.Plugins.s7o
         public bool DropGems { get; set; } = false;
 
         public bool StoreStackables { get; set; } = true;
+        public bool StoreLegendaryGems { get; set; } = true;
         public bool StorePrimals { get; set; } = true;
         public bool StoreAncients { get; set; } = false;
 
@@ -87,7 +88,7 @@ namespace Turbo.Plugins.s7o
         private const uint PetrifiedScreamSno = 1051857800;
         private const uint RamaladniGiftSno = 1844495708;
         private const ushort VkEscape = 0x1B;
-        private const int StorageSettingsVersion = 8;
+        private const int StorageSettingsVersion = 11;
         private const int SpecialTooltipProbeInitialDelayMs = 30;
         private const int SpecialTooltipProbePollMs = 30;
         private const int SpecialTooltipProbeTimeoutMs = 300;
@@ -108,6 +109,7 @@ namespace Turbo.Plugins.s7o
 
         private RectangleF _hotkeyButtonRect;
         private RectangleF _stackablesRect;
+        private RectangleF _legendaryGemsRect;
         private RectangleF _primalsRect;
         private RectangleF _ancientsRect;
         private RectangleF _sellGiftsRect;
@@ -323,7 +325,7 @@ namespace Turbo.Plugins.s7o
 
             if (_running)
             {
-                if (PointInRect(_stackablesRect, x, y) || PointInRect(_primalsRect, x, y) || PointInRect(_ancientsRect, x, y)
+                if (PointInRect(_stackablesRect, x, y) || PointInRect(_legendaryGemsRect, x, y) || PointInRect(_primalsRect, x, y) || PointInRect(_ancientsRect, x, y)
                     || PointInRect(_sellGiftsRect, x, y) || PointInRect(_sellScreamsRect, x, y) || PointInRect(_sellGemsRect, x, y) || PointInRect(_dropUnidentifiedRect, x, y)
                     || PointInRect(_tabMinusRect, x, y) || PointInRect(_tabPlusRect, x, y) || PointInRect(_tabValueRect, x, y))
                 {
@@ -370,6 +372,13 @@ namespace Turbo.Plugins.s7o
             if (PointInRect(_stackablesRect, x, y))
             {
                 StoreStackables = !StoreStackables;
+                SaveSettings();
+                return true;
+            }
+
+            if (PointInRect(_legendaryGemsRect, x, y))
+            {
+                StoreLegendaryGems = !StoreLegendaryGems;
                 SaveSettings();
                 return true;
             }
@@ -430,7 +439,7 @@ namespace Turbo.Plugins.s7o
 
         private void BeginStoreRun()
         {
-            if (!StoreStackables && !StorePrimals && !StoreAncients)
+            if (!StoreStackables && !StoreLegendaryGems && !StorePrimals && !StoreAncients)
             {
                 ShowStatus("nothing selected", 1200);
                 return;
@@ -568,7 +577,7 @@ namespace Turbo.Plugins.s7o
 
         private static bool TickReached(int now, int tick)
         {
-            return (int)(now - tick) >= 0;
+            return tick == 0 || tick == int.MinValue || unchecked(now - tick) >= 0;
         }
 
         public void ConfigureItemDropFeature(bool enabled, bool nonAccountBoundLegendaries, bool trash, bool gifts, bool screams, bool gems)
@@ -1148,7 +1157,7 @@ namespace Turbo.Plugins.s7o
 
         private static bool ShouldContinueSpecialTooltipProbe(int now, int startedTick)
         {
-            return startedTick != 0 && (int)(now - startedTick) < SpecialTooltipProbeTimeoutMs;
+            return startedTick != 0 && unchecked(now - startedTick) < SpecialTooltipProbeTimeoutMs;
         }
 
         private SpecialTooltipDecision ReadSpecialTooltipDecision(IItem item)
@@ -1492,6 +1501,18 @@ namespace Turbo.Plugins.s7o
                 }
             }
 
+            if (StoreLegendaryGems)
+            {
+                foreach (var item in sorted)
+                {
+                    if (!IsLegendaryGemItem(item))
+                        continue;
+
+                    int targetTabAbs = ResolveLegendaryGemTargetTab(item, plan);
+                    TryQueueCandidate(item, StoreKind.LegendaryGem, targetTabAbs);
+                }
+            }
+
             if (StorePrimals || StoreAncients)
             {
                 foreach (var item in sorted)
@@ -1574,6 +1595,12 @@ namespace Turbo.Plugins.s7o
                 return true;
             }
 
+            if (StoreLegendaryGems && IsLegendaryGemItem(item))
+            {
+                kind = StoreKind.LegendaryGem;
+                return true;
+            }
+
             return TryClassifyEquipmentCandidate(item, out kind);
         }
 
@@ -1605,6 +1632,23 @@ namespace Turbo.Plugins.s7o
 
             string main = item.SnoItem.MainGroupCode ?? string.Empty;
             return !EqualsText(main, "gems_unique");
+        }
+
+        private static bool IsLegendaryGemItem(IItem item)
+        {
+            return item != null
+                && item.SnoItem != null
+                && item.IsLegendary
+                && EqualsText(item.SnoItem.MainGroupCode, "gems_unique");
+        }
+
+        private static bool IsWhisperOfAtonementItem(IItem item)
+        {
+            if (!IsLegendaryGemItem(item))
+                return false;
+
+            string name = item.FullNameEnglish ?? item.SnoItem.NameEnglish ?? string.Empty;
+            return name.IndexOf("Whisper of Atonement", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private int FindMatchingStackTab(IItem item, StashPlan plan)
@@ -1650,6 +1694,53 @@ namespace Turbo.Plugins.s7o
                 return relatedStackableTab;
 
             return plan.FindAndReserveFreeTab(item, 0, true);
+        }
+
+        private int ResolveLegendaryGemTargetTab(IItem item, StashPlan plan)
+        {
+            if (item == null || item.SnoItem == null || plan == null)
+                return -1;
+
+            if (IsWhisperOfAtonementItem(item))
+            {
+                int whisperTab = FindAndReserveInTabs(item, plan, plan.WhisperTabs);
+                if (whisperTab >= 0) return whisperTab;
+
+                int gemTab = FindAndReserveInTabs(item, plan, plan.NormalLegendaryGemTabs);
+                if (gemTab >= 0) return gemTab;
+            }
+            else
+            {
+                List<int> exactTabs;
+                if (plan.LegendaryGemTabsBySno.TryGetValue(item.SnoItem.Sno, out exactTabs))
+                {
+                    int exactTab = FindAndReserveInTabs(item, plan, exactTabs);
+                    if (exactTab >= 0) return exactTab;
+                }
+
+                int normalGemTab = FindAndReserveInTabs(item, plan, plan.NormalLegendaryGemTabs);
+                if (normalGemTab >= 0) return normalGemTab;
+            }
+
+            int anyLegendaryGemTab = FindAndReserveInTabs(item, plan, plan.LegendaryGemTabs);
+            if (anyLegendaryGemTab >= 0) return anyLegendaryGemTab;
+
+            int normalGemStorageTab = FindAndReserveInTabs(item, plan, plan.NormalGemTabs);
+            if (normalGemStorageTab >= 0) return normalGemStorageTab;
+
+            return plan.FindAndReserveFreeTab(item, 0, true);
+        }
+
+        private static int FindAndReserveInTabs(IItem item, StashPlan plan, List<int> tabs)
+        {
+            if (item == null || plan == null || tabs == null || tabs.Count <= 0)
+                return -1;
+
+            foreach (int tab in tabs.OrderBy(t => t))
+                if (plan.TryReserveInTab(item, tab))
+                    return tab;
+
+            return -1;
         }
 
         private int ResolveSpecialStackableTargetTab(IItem item, StashPlan plan, bool tooltipConfirmedIdentified)
@@ -1738,6 +1829,9 @@ namespace Turbo.Plugins.s7o
 
                 if (IsStashStackableIndexItem(item))
                     plan.AddStack(item);
+
+                if (IsLegendaryGemItem(item))
+                    plan.AddLegendaryGem(item);
             }
 
             return plan;
@@ -2055,7 +2149,8 @@ namespace Turbo.Plugins.s7o
             DrawPillButton(_hotkeyButtonRect, _capturingHotkey ? "..." : StoreItemsHotkey.ToString(), _capturingHotkey);
             DrawText(YellowFont, "to store items", _headerTailX, _headerPressY);
 
-            DrawToggleButton(_stackablesRect, "Stackables", StoreStackables);
+            DrawToggleButton(_stackablesRect, "Stacks", StoreStackables);
+            DrawToggleButton(_legendaryGemsRect, "Legendary Gems", StoreLegendaryGems);
             DrawToggleButton(_primalsRect, "Primals", StorePrimals);
             DrawToggleButton(_ancientsRect, "Ancients", StoreAncients);
 
@@ -2104,6 +2199,7 @@ namespace Turbo.Plugins.s7o
         {
             _hotkeyButtonRect = RectangleF.Empty;
             _stackablesRect = RectangleF.Empty;
+            _legendaryGemsRect = RectangleF.Empty;
             _primalsRect = RectangleF.Empty;
             _ancientsRect = RectangleF.Empty;
             _sellGiftsRect = RectangleF.Empty;
@@ -2204,6 +2300,7 @@ namespace Turbo.Plugins.s7o
         {
             _hotkeyButtonRect = RectangleF.Empty;
             _stackablesRect = RectangleF.Empty;
+            _legendaryGemsRect = RectangleF.Empty;
             _primalsRect = RectangleF.Empty;
             _ancientsRect = RectangleF.Empty;
             _sellGiftsRect = RectangleF.Empty;
@@ -2242,14 +2339,16 @@ namespace Turbo.Plugins.s7o
             _headerTailX = _hotkeyButtonRect.Right + headerGap;
 
             float toggleY = panel.Y + 28.0f;
-            float toggleGap = 34.0f;
-            float stackW = GetToggleWidth("Stackables");
+            float toggleGap = 16.0f;
+            float stackW = GetToggleWidth("Stacks");
+            float legendaryGemW = GetToggleWidth("Legendary Gems");
             float primalW = GetToggleWidth("Primals");
             float ancientW = GetToggleWidth("Ancients");
-            float toggleTotalW = stackW + toggleGap + primalW + toggleGap + ancientW;
+            float toggleTotalW = stackW + toggleGap + legendaryGemW + toggleGap + primalW + toggleGap + ancientW;
             float toggleX = centerX - toggleTotalW * 0.5f;
             _stackablesRect = new RectangleF(toggleX, toggleY, stackW, SmallButtonHeight);
-            _primalsRect = new RectangleF(_stackablesRect.Right + toggleGap, toggleY, primalW, SmallButtonHeight);
+            _legendaryGemsRect = new RectangleF(_stackablesRect.Right + toggleGap, toggleY, legendaryGemW, SmallButtonHeight);
+            _primalsRect = new RectangleF(_legendaryGemsRect.Right + toggleGap, toggleY, primalW, SmallButtonHeight);
             _ancientsRect = new RectangleF(_primalsRect.Right + toggleGap, toggleY, ancientW, SmallButtonHeight);
 
             float tabY = panel.Y + 52.0f;
@@ -2578,7 +2677,7 @@ namespace Turbo.Plugins.s7o
         private void ShowStatus(string text, int ms)
         {
             _lastStatus = text ?? string.Empty;
-            _statusUntilTick = Environment.TickCount + Math.Max(0, ms);
+            _statusUntilTick = unchecked(Environment.TickCount + Math.Max(0, ms));
         }
 
         private static bool PointInRect(RectangleF rect, int x, int y)
@@ -2687,6 +2786,7 @@ namespace Turbo.Plugins.s7o
 
             if (StoreItemsTabSwitchDelayMs == 140) StoreItemsTabSwitchDelayMs = 100;
             if (StoreItemsClickDelayMs == 90) StoreItemsClickDelayMs = 30;
+            if (_settingsVersion == 10 && StoreItemsClickDelayMs == 50) StoreItemsClickDelayMs = 30;
             if (_settingsVersion < 6) SellGems = true;
             if (_settingsVersion < 8)
             {
@@ -2744,6 +2844,7 @@ namespace Turbo.Plugins.s7o
                     else if (key.Equals("DropScreams", StringComparison.OrdinalIgnoreCase)) DropScreams = ParseBool(value, DropScreams);
                     else if (key.Equals("DropGems", StringComparison.OrdinalIgnoreCase)) DropGems = ParseBool(value, DropGems);
                     else if (key.Equals("StoreStackables", StringComparison.OrdinalIgnoreCase)) StoreStackables = ParseBool(value, StoreStackables);
+                    else if (key.Equals("StoreLegendaryGems", StringComparison.OrdinalIgnoreCase)) StoreLegendaryGems = ParseBool(value, StoreLegendaryGems);
                     else if (key.Equals("StorePrimals", StringComparison.OrdinalIgnoreCase)) StorePrimals = ParseBool(value, StorePrimals);
                     else if (key.Equals("StoreAncients", StringComparison.OrdinalIgnoreCase)) StoreAncients = ParseBool(value, StoreAncients);
                     else if (key.Equals("SellGifts", StringComparison.OrdinalIgnoreCase)) SellGifts = ParseBool(value, SellGifts);
@@ -2781,6 +2882,7 @@ namespace Turbo.Plugins.s7o
                     "DropScreams=" + DropScreams + Environment.NewLine +
                     "DropGems=" + DropGems + Environment.NewLine +
                     "StoreStackables=" + StoreStackables + Environment.NewLine +
+                    "StoreLegendaryGems=" + StoreLegendaryGems + Environment.NewLine +
                     "StorePrimals=" + StorePrimals + Environment.NewLine +
                     "StoreAncients=" + StoreAncients + Environment.NewLine +
                     "SellGifts=" + SellGifts + Environment.NewLine +
@@ -2885,6 +2987,7 @@ namespace Turbo.Plugins.s7o
         {
             None,
             Stackable,
+            LegendaryGem,
             Primal,
             Ancient
         }
@@ -2960,8 +3063,12 @@ namespace Turbo.Plugins.s7o
             public readonly int MaxTabs;
             public readonly Dictionary<uint, List<IItem>> StacksBySno = new Dictionary<uint, List<IItem>>();
             public readonly Dictionary<uint, List<int>> KnownSpecialSeedsBySno = new Dictionary<uint, List<int>>();
+            public readonly Dictionary<uint, List<int>> LegendaryGemTabsBySno = new Dictionary<uint, List<int>>();
             public readonly List<int> StackableTabs = new List<int>();
             public readonly List<int> NormalGemTabs = new List<int>();
+            public readonly List<int> LegendaryGemTabs = new List<int>();
+            public readonly List<int> NormalLegendaryGemTabs = new List<int>();
+            public readonly List<int> WhisperTabs = new List<int>();
             private readonly bool[,,] _occupied;
 
             public StashPlan(int maxTabs)
@@ -2993,6 +3100,29 @@ namespace Turbo.Plugins.s7o
                     if (IsNormalGemItem(item))
                         AddUniqueTab(NormalGemTabs, tab);
                 }
+            }
+
+            public void AddLegendaryGem(IItem item)
+            {
+                if (!IsLegendaryGemItem(item)) return;
+
+                int tab = GetAbsoluteTab(item);
+                if (tab < 0 || tab >= MaxTabs) return;
+
+                AddUniqueTab(LegendaryGemTabs, tab);
+
+                List<int> bySno;
+                if (!LegendaryGemTabsBySno.TryGetValue(item.SnoItem.Sno, out bySno))
+                {
+                    bySno = new List<int>();
+                    LegendaryGemTabsBySno[item.SnoItem.Sno] = bySno;
+                }
+                AddUniqueTab(bySno, tab);
+
+                if (IsWhisperOfAtonementItem(item))
+                    AddUniqueTab(WhisperTabs, tab);
+                else
+                    AddUniqueTab(NormalLegendaryGemTabs, tab);
             }
 
             public void AddTrustedInventorySpecialSeeds(IEnumerable<IItem> items)
