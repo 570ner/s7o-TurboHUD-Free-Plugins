@@ -38,16 +38,18 @@ Use it to toggle plugins, change visual options, manage TTS alerts, set some hot
 | **s7o_TTS_Broadcast** | Type `.tts your message here` to speak a custom TTS message. |
 | **s7o_TTS_EnablePlugin** | Small TTS helper/cleanup plugin. Leave it installed if using TTS alerts. |
 | **s7o_Auto_Gem_Upgrade** | Urshi gem upgrade helper with town portal timing. |
-| **s7o_ItemSalvage** | Salvage helper with item protections, repair/fallback handling, and speed settings. |
+| **s7o_AutoLoot** | Configurable Auto Loot Pickup helper with filters for legendaries, gems, gifts, screams, materials, Death's Breath, trash items, and reward pile cleanup. |
+| **s7o_ItemSalvage** | Salvage helper with item protections, repair/fallback handling, speed settings, and improved forge/cursor stability. |
 | **s7o_KadalaHelper** | Kadala gambling helper. Hover a Kadala item and press F2 to mark/unmark it, then press F3 to spend shards on saved targets. |
 | **s7o_KanaiCube** | Kanai helper for common cube tasks like reforge, upgrade rare, and material conversion. |
 | **s7o_MysticEnchant** | Mystic reroll helper. Select the stat you want to roll, then press the hotkey (F3 by default). |
 | **s7o_DHStrafe** | Demon Hunter Strafe/primary helper. Defaults: (F3) start/stop, (F2) attack/move mode, (T) town portal sequence. |
 | **s7o_ExitArchon** | Wizard Archon cancel helper. Default hotkey: Space. |
-| **s7o_AutoSkill** | General skill automation helper for simple timed/conditional skill use. |
+| **s7o_AutoSkill** | General skill automation helper for simple timed/conditional skill use, with improved Land of the Dead Devour support. |
 | **s7o_ZB_AutoSnap** | AutoSnap helper mainly for support/zBarb-style gameplay. |
+| **s7o_ParagonHelper** | Core Paragon helper. Mark Primary Stat or Vitality, then quickly spend Core points or close the Paragon window. |
 | **s7o_DoorsMinimap** | Door indicators on the minimap. |
-| **s7o_InventoryMOD** | Extra inventory/material display, auto storage for stackables/primals/ancients, and merchant/shop helper for selling Gifts/Screams/gems. |
+| **s7o_InventoryMOD** | Extra inventory/material display, auto storage for stacks, Legendary Gems, primals, and ancients, plus merchant/shop helper for selling Gifts/Screams/gems. |
 
 ## Notes
 
@@ -56,4 +58,3 @@ Use it to toggle plugins, change visual options, manage TTS alerts, set some hot
 - This was mostly done using AI to create these plugins or port some over from other THUD forks.
 - Some plugins were not created by me but borrowed or modified to work with the hud menu.
 - If you find any bugs, please report them.
-
