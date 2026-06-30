@@ -12,21 +12,14 @@ namespace Turbo.Plugins.s7o
     // Adds extra dangerous affix visuals that FreeHUD's default EliteMonsterSkillPlugin
     // does not expose as public toggleable decorator collections.
     //
-    // Phase 1:
-    //   - Orbiter projectile circle
-    //   - Waller wall rectangle
-    //   - Wormhole mine circle + inside warning label
-    //   - Poison Enchanted / Corpse Bomber projectile circle + timer
-    //
     // Important:
     //   - Do not modify FreeHUD Default/Monsters/EliteMonsterSkillPlugin.cs.
     //   - Do not use LightningMOD Avoidance APIs.
-    //   - Do not add HUD MENU rows yet.
-    //   - HUD MENU can later reflect the public booleans in this class.
+    //   - HUD MENU reflects the public booleans in this class.
     public class s7o_DangerousSkillOverlays : BasePlugin, IInGameWorldPainter
     {
         // ============================================================
-        // Public toggles for future HUD MENU integration
+        // Public toggles for HUD MENU integration
         // ============================================================
         public bool ShowOrbiterProjectiles { get; set; }
         public bool ShowOrbiterFocalPoints { get; set; }
@@ -39,6 +32,7 @@ namespace Turbo.Plugins.s7o
         public bool ShowBossFallingRocks { get; set; }
         public bool ShowBossLeapTelegraphs { get; set; }
         public bool ShowBossMeteors { get; set; }
+        public bool ShowEchoingNightmareMeteors { get; set; }
         public bool ShowBossKulleHazards { get; set; }
         public bool ShowBossBlighterHazards { get; set; }
         public bool ShowBossRatKingHazards { get; set; }
@@ -102,6 +96,7 @@ namespace Turbo.Plugins.s7o
         public float BossMeteorFallbackRadius { get; set; }
         public IBrush BossMeteorBackBrush { get; set; }
         public IBrush BossMeteorFrontBrush { get; set; }
+        public float EchoingNightmareMeteorRadius { get; set; }
         public int BossMeteorRotatingDashCount { get; set; }
         public float BossMeteorRotatingDashFill { get; set; }
         public float BossMeteorRotationSecondsPerTurn { get; set; }
@@ -220,6 +215,7 @@ namespace Turbo.Plugins.s7o
             ShowBossFallingRocks = true;
             ShowBossLeapTelegraphs = true;
             ShowBossMeteors = true;
+            ShowEchoingNightmareMeteors = true;
             ShowBossKulleHazards = true;
             ShowBossBlighterHazards = true;
             ShowBossRatKingHazards = true;
@@ -248,6 +244,7 @@ namespace Turbo.Plugins.s7o
             // 90 ticks is 1.5 seconds at Diablo III's normal 60 ticks/sec rate.
             BossLeapPostImpactLingerTicks = 90;
             BossMeteorFallbackRadius = 22.0f;
+            EchoingNightmareMeteorRadius = 9.5f;
             BossMeteorRotatingDashCount = 52;
             BossMeteorRotatingDashFill = 0.42f;
             BossMeteorRotationSecondsPerTurn = 10.0f;
@@ -809,6 +806,11 @@ namespace Turbo.Plugins.s7o
                             PaintBossMeteor(actor);
                         break;
 
+                    case ActorSnoEnum._belial_groundbomb_event_pending:
+                        if (ShowEchoingNightmareMeteors)
+                            PaintEchoingNightmareMeteor(actor);
+                        break;
+
                     case ActorSnoEnum._zoltunkulle_energytwister:
                         if (ShowBossKulleHazards && isSandShaperRiftGuardianPresent)
                             PaintBossHazard(layer, actor, BossKulleTwisterDecorator);
@@ -1310,6 +1312,26 @@ namespace Turbo.Plugins.s7o
 
             DrawRotatingDashedCircle(coord, radius, dashCount, dashFill, phase, BossMeteorBackBrush);
             DrawRotatingDashedCircle(coord, radius, dashCount, dashFill, phase, BossMeteorFrontBrush);
+        }
+
+        private void PaintEchoingNightmareMeteor(IActor actor)
+        {
+            if (actor == null)
+                return;
+
+            IWorldCoordinate coord = GetBossHazardCoordinate(actor);
+            if (coord == null)
+                return;
+
+            float radius = Math.Max(0.0f, EchoingNightmareMeteorRadius);
+            if (radius <= 0.0f)
+                return;
+
+            if (BossBlighterCreepMobArmBackBrush != null)
+                BossBlighterCreepMobArmBackBrush.DrawWorldEllipse(radius, -1, coord);
+
+            if (BossBlighterCreepMobArmFrontBrush != null)
+                BossBlighterCreepMobArmFrontBrush.DrawWorldEllipse(radius, -1, coord);
         }
 
         private void PaintBossButcherFire(IActor actor)
