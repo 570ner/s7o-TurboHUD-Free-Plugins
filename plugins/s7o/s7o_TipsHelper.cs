@@ -13,6 +13,8 @@ namespace Turbo.Plugins.s7o
         private const int AncientRank = 1;
         private const int PrimalRank = 2;
         private const int PlayerMarkerSlots = 4;
+        private const uint BloodIsPowerSno = 465037u;
+        private const uint LandOfTheDeadSno = 465839u;
 
         public bool VisualHelpersEnabled { get; set; } = true;
 
@@ -40,6 +42,7 @@ namespace Turbo.Plugins.s7o
         public bool ShowPoolTracker { get; set; } = true;
         public bool ShowPoolPartyStatus { get; set; } = true;
         public bool ShowVisitedWaypointMarkers { get; set; } = true;
+        public bool ShowBloodIsPowerTracker { get; set; } = true;
 
         public int PylonProgressMarkerMaxAgeMs { get; set; } = 7200000;
         public float PylonProgressIconSize { get; set; } = 26.0f;
@@ -248,6 +251,19 @@ namespace Turbo.Plugins.s7o
         public IFont PoolOutlineFont { get; private set; }
         public IFont VisitedWaypointFont { get; private set; }
 
+        private const int BloodIsPowerColorSteps = 11;
+        private IFont[] _bipFonts;
+        private IBrush _bipBarBackBrush;
+        private IBrush[] _bipBarFillBrushes;
+        private IBrush _bipBarBorderBrush;
+
+        private float _bipLastHealth;
+        private float _bipLostHealth;
+        private int[] _bipSkillState;
+        private bool _bipSkillStateSeeded;
+        private int _bipLastProcTick;
+        private int _bipLastPlayerIndex = -1;
+
         private const ActorSnoEnum ValleyOfDeathActorSno = ActorSnoEnum._dh_markedfordeath_proxyactor;
         private readonly Dictionary<string, ItemMarker> _items = new Dictionary<string, ItemMarker>();
         private readonly List<PlayerMark> _players = new List<PlayerMark>();
@@ -359,6 +375,7 @@ namespace Turbo.Plugins.s7o
         public void OnNewArea(bool newGame, ISnoArea area)
         {
             ClearItems();
+            ResetBloodIsPowerTrackerForArea(newGame);
             if (newGame && IsNewGameSession())
             {
                 _players.Clear();
@@ -383,6 +400,7 @@ namespace Turbo.Plugins.s7o
             }
 
             RebuildResources(false);
+            UpdateBloodIsPowerTracker();
             UpdateItemMarkers();
             PurgePlayerMarks();
             UpdatePylonProgressMarkers();
@@ -460,6 +478,7 @@ namespace Turbo.Plugins.s7o
             PaintItemScreenEdgeArrows();
             PaintItemAlerts();
             PaintPlayerPortraitMarkers();
+            DrawBloodIsPowerTracker();
         }
 
         public IEnumerable<ITransparent> GetTransparents()
@@ -468,10 +487,12 @@ namespace Turbo.Plugins.s7o
                 AncientMapBrush, AncientMapOutlineBrush, PrimalMapBrush, PrimalMapOutlineBrush, AncientScreenArrowBrush, AncientScreenArrowOutlineBrush,
                 PrimalScreenArrowBrush, PrimalScreenArrowOutlineBrush, AncientAlertArrowBrush, AncientAlertArrowOutlineBrush, AncientAlertArrowHighlightBrush,
                 PrimalAlertArrowBrush, PrimalAlertArrowOutlineBrush, PrimalAlertArrowHighlightBrush, PlayerCircleBlackBrush, PlayerDotOutlineBrush, ValleyOfDeathBrush, ValleyOfDeathOutlineBrush,
-                PylonProgressLineBrush, PylonProgressLineOutlineBrush, PoolGroundBrush, PoolGroundOutlineBrush, PoolArrowLightBrush, PoolArrowShadowBrush, VisitedWaypointBrush, VisitedWaypointOutlineBrush))
+                PylonProgressLineBrush, PylonProgressLineOutlineBrush, PoolGroundBrush, PoolGroundOutlineBrush, PoolArrowLightBrush, PoolArrowShadowBrush, VisitedWaypointBrush, VisitedWaypointOutlineBrush, _bipBarBackBrush, _bipBarBorderBrush))
                 yield return brush;
+            foreach (var brush in Brushes(_bipBarFillBrushes)) yield return brush;
 
             foreach (var font in Fonts(new[] { PylonProgressTextFont, PoolLabelFont, PoolReadyFont, PoolMissingFont, PoolOutlineFont, VisitedWaypointFont })) yield return font;
+            foreach (var font in Fonts(_bipFonts)) yield return font;
 
             foreach (var brush in Brushes(PlayerFillBrushes)) yield return brush;
             foreach (var brush in Brushes(PlayerOutlineBrushes)) yield return brush;
@@ -558,6 +579,9 @@ namespace Turbo.Plugins.s7o
             PoolMissingFont = Hud.Render.CreateFont("tahoma", 8.8f, 255, 255, 70, 70, true, false, 255, 0, 0, 0, true);
             PoolOutlineFont = Hud.Render.CreateFont("tahoma", 8.8f, 245, 0, 0, 0, true, false, false);
             VisitedWaypointFont = Hud.Render.CreateFont("tahoma", 7.0f, 255, 210, 255, 210, true, false, 255, 0, 0, 0, true);
+            CreateBloodIsPowerVisualResources();
+            if (_bipSkillState == null || _bipSkillState.Length < 7)
+                _bipSkillState = new int[] { 0, 0, 0, 0, 0, 0, 0 };
             _trianglePainter = new RotatingTriangleShapePainter(Hud);
             _mapPulse = new StandardPingRadiusTransformator(Hud, 333);
         }
@@ -616,6 +640,7 @@ namespace Turbo.Plugins.s7o
             ClearItems();
             _players.Clear();
             ClearSessionTrackers();
+            ResetBloodIsPowerTracker();
         }
 
         private void ClearSessionTrackers()
@@ -742,6 +767,341 @@ namespace Turbo.Plugins.s7o
         private bool IsFullMapOpen()
         {
             return Hud.Game.MapMode == MapMode.WaypointMap || Hud.Game.MapMode == MapMode.ActMap || Hud.Game.MapMode == MapMode.Map;
+        }
+
+
+        private bool IsNecromancer()
+        {
+            try { return Hud.Game.Me.HeroClassDefinition.HeroClass == HeroClass.Necromancer; }
+            catch { return false; }
+        }
+
+        private bool HasBloodIsPowerPassive()
+        {
+            try
+            {
+                return Hud.Game.Me.Powers.UsedPassives.Any(p =>
+                    p != null &&
+                    (p.Sno == BloodIsPowerSno || p.Sno == Hud.Sno.SnoPowers.Necromancer_Passive_BloodIsPower.Sno));
+            }
+            catch { return false; }
+        }
+
+        private IPlayerSkill GetLandOfTheDeadSkill()
+        {
+            try
+            {
+                foreach (var skill in Hud.Game.Me.Powers.CurrentSkills)
+                {
+                    if (skill == null || skill.SnoPower == null)
+                        continue;
+
+                    if (skill.SnoPower.Sno == LandOfTheDeadSno || skill.SnoPower.Sno == Hud.Sno.SnoPowers.Necromancer_LandOfTheDead.Sno)
+                        return skill;
+                }
+            }
+            catch { }
+
+            return null;
+        }
+
+        private void CreateBloodIsPowerVisualResources()
+        {
+            int[,] colors =
+            {
+                { 235, 235, 235 }, // 0%: soft white
+                { 245, 242, 205 },
+                { 255, 238, 150 },
+                { 255, 225, 90  },
+                { 255, 205, 40  },
+                { 255, 175, 35  },
+                { 255, 140, 28  },
+                { 255, 105, 24  },
+                { 255, 65,  35  }, // 80%+: red family
+                { 245, 35,  35  },
+                { 230, 20,  20  },
+            };
+
+            _bipFonts = new IFont[BloodIsPowerColorSteps];
+            _bipBarFillBrushes = new IBrush[BloodIsPowerColorSteps];
+
+            for (int i = 0; i < BloodIsPowerColorSteps; i++)
+            {
+                int r = C(colors[i, 0]);
+                int g = C(colors[i, 1]);
+                int b = C(colors[i, 2]);
+                _bipFonts[i] = Hud.Render.CreateFont("tahoma", 7.0f, 220, r, g, b, true, false, 185, 0, 0, 0, true);
+                _bipBarFillBrushes[i] = Hud.Render.CreateBrush(230, 210, 45, 45, 0);
+            }
+
+            _bipBarBackBrush = Hud.Render.CreateBrush(130, 0, 0, 0, 0);
+            _bipBarBorderBrush = Hud.Render.CreateBrush(225, 255, 210, 40, 1.5f);
+        }
+
+        private int GetBloodIsPowerColorIndex(float pct)
+        {
+            if (pct < 0f) pct = 0f;
+            if (pct > 100f) pct = 100f;
+            int idx = (int)Math.Floor((double)(pct / 10f));
+            if (idx < 0) return 0;
+            if (idx >= BloodIsPowerColorSteps) return BloodIsPowerColorSteps - 1;
+            return idx;
+        }
+
+        private void SeedBloodIsPowerSkillState(IBuff buff)
+        {
+            if (_bipSkillStateSeeded)
+                return;
+
+            if (buff == null || buff.IconCounts == null)
+                return;
+
+            if (_bipSkillState == null || _bipSkillState.Length < 7)
+                _bipSkillState = new int[] { 0, 0, 0, 0, 0, 0, 0 };
+
+            try
+            {
+                var skills = Hud.Game.Me.Powers.CurrentSkills;
+                if (skills != null)
+                {
+                    foreach (var skill in skills)
+                    {
+                        if (skill == null)
+                            continue;
+
+                        int i = 1 + (int)skill.Key;
+                        if (i < 0 || i >= _bipSkillState.Length || i >= buff.IconCounts.Length)
+                            continue;
+
+                        _bipSkillState[i] = buff.IconCounts[i];
+                    }
+                }
+            }
+            catch { }
+
+            _bipSkillStateSeeded = true;
+        }
+
+        private void ResetBloodIsPowerTrackerForArea(bool newGame)
+        {
+            try
+            {
+                if (Hud == null || Hud.Game == null || Hud.Game.Me == null)
+                    return;
+
+                if (newGame || _bipLastPlayerIndex != Hud.Game.Me.Index)
+                {
+                    _bipLastPlayerIndex = Hud.Game.Me.Index;
+                    ResetBloodIsPowerTracker();
+                }
+            }
+            catch { }
+        }
+
+        private void ResetBloodIsPowerTracker()
+        {
+            _bipLastHealth = 0f;
+            _bipLostHealth = 0f;
+            _bipSkillStateSeeded = false;
+            _bipLastProcTick = 0;
+
+            if (_bipSkillState == null || _bipSkillState.Length < 7)
+                _bipSkillState = new int[] { 0, 0, 0, 0, 0, 0, 0 };
+            else
+            {
+                for (int i = 0; i < _bipSkillState.Length; i++)
+                    _bipSkillState[i] = 0;
+            }
+        }
+
+        // Blood is Power passive/cooldown state reference based on RNN's BloodIsPowerPlugin.
+        // Adapted for s7o TipsHelper as a compact Land of the Dead icon tracker.
+        private void UpdateBloodIsPowerTracker()
+        {
+            if (!ShowBloodIsPowerTracker)
+                return;
+
+            if (Hud == null || Hud.Game == null || !Hud.Game.IsInGame)
+                return;
+
+            if (!IsNecromancer() || !HasBloodIsPowerPassive())
+            {
+                ResetBloodIsPowerTracker();
+                return;
+            }
+
+            var me = Hud.Game.Me;
+            if (me == null || me.IsDead)
+            {
+                ResetBloodIsPowerTracker();
+                return;
+            }
+
+            var lotd = GetLandOfTheDeadSkill();
+            if (lotd == null)
+            {
+                ResetBloodIsPowerTracker();
+                return;
+            }
+
+            IBuff buff = null;
+            try { buff = me.Powers.GetBuff(BloodIsPowerSno); } catch { }
+            if (buff == null || buff.IconCounts == null)
+                return;
+
+            if (_bipSkillState == null || _bipSkillState.Length < 7)
+                _bipSkillState = new int[] { 0, 0, 0, 0, 0, 0, 0 };
+
+            // Optional polish: after a HUD reload or new player/session, seed the per-skill
+            // Blood is Power state from FreeHUD before processing health-loss deltas. This
+            // prevents an already-consumed skill from being mistaken for a brand-new proc.
+            SeedBloodIsPowerSkillState(buff);
+
+            float cur = 0f;
+            float max = 0f;
+            try
+            {
+                cur = me.Defense.HealthCur;
+                max = me.Defense.HealthMax;
+            }
+            catch { return; }
+
+            if (max <= 0f)
+                return;
+
+            if (_bipLastHealth <= 0f || cur > _bipLastHealth)
+            {
+                _bipLastHealth = cur;
+            }
+            else if (cur < _bipLastHealth)
+            {
+                bool receivedAny = false;
+                bool pendingCooldown = false;
+
+                try
+                {
+                    foreach (var skill in me.Powers.CurrentSkills)
+                    {
+                        if (skill == null)
+                            continue;
+
+                        int i = 1 + (int)skill.Key;
+                        if (i < 0 || i >= _bipSkillState.Length || i >= buff.IconCounts.Length)
+                            continue;
+
+                        int n = buff.IconCounts[i];
+
+                        if (n == 1)
+                        {
+                            if (n != _bipSkillState[i])
+                            {
+                                _bipSkillState[i] = n;
+                                receivedAny = true;
+                            }
+                        }
+                        else
+                        {
+                            if (n != _bipSkillState[i])
+                                _bipSkillState[i] = n;
+
+                            if (skill.IsOnCooldown && ((Hud.Game.CurrentGameTick - skill.CooldownStartTick) > 60))
+                                pendingCooldown = true;
+                        }
+                    }
+                }
+                catch { }
+
+                if (receivedAny)
+                {
+                    _bipLostHealth = Math.Max(0f, _bipLostHealth - max);
+                    _bipLastProcTick = Hud.Game.CurrentGameTick;
+                }
+                else
+                {
+                    _bipLostHealth += _bipLastHealth - cur;
+
+                    if (_bipLostHealth > max)
+                    {
+                        if (pendingCooldown)
+                            _bipLostHealth = max * 0.98f;
+                        else
+                        {
+                            _bipLostHealth = Math.Max(0f, _bipLostHealth - max);
+                            _bipLastProcTick = Hud.Game.CurrentGameTick;
+                        }
+                    }
+                }
+
+                _bipLastHealth = cur;
+            }
+        }
+
+        private void DrawBloodIsPowerTracker()
+        {
+            if (!ShowBloodIsPowerTracker)
+                return;
+
+            if (_bipFonts == null || _bipBarBackBrush == null || _bipBarFillBrushes == null || _bipBarBorderBrush == null)
+                return;
+
+            if (Hud == null || Hud.Game == null || !Hud.Game.IsInGame)
+                return;
+
+            if (!IsNecromancer() || !HasBloodIsPowerPassive())
+                return;
+
+            var lotd = GetLandOfTheDeadSkill();
+            if (lotd == null || !lotd.IsOnCooldown)
+                return;
+
+            IBuff buff = null;
+            try { buff = Hud.Game.Me.Powers.GetBuff(BloodIsPowerSno); } catch { }
+            if (buff == null || buff.IconCounts == null)
+                return;
+
+            int idx = 1 + (int)lotd.Key;
+            if (idx < 0 || idx >= buff.IconCounts.Length)
+                return;
+
+            if (buff.IconCounts[idx] == 1)
+                return;
+
+            float max = 0f;
+            try { max = Hud.Game.Me.Defense.HealthMax; } catch { }
+            if (max <= 0f)
+                return;
+
+            float pct = Math.Max(0f, Math.Min(100f, (_bipLostHealth / max) * 100f));
+
+            IUiElement ui = null;
+            try { ui = Hud.Render.GetPlayerSkillUiElement(lotd.Key); } catch { }
+            if (ui == null || ui.Rectangle.Width <= 0f || ui.Rectangle.Height <= 0f)
+                return;
+
+            var r = ui.Rectangle;
+
+            int colorIdx = GetBloodIsPowerColorIndex(pct);
+            IBrush fillBrush = colorIdx >= 0 && colorIdx < _bipBarFillBrushes.Length ? _bipBarFillBrushes[colorIdx] : null;
+            IFont font = colorIdx >= 0 && colorIdx < _bipFonts.Length ? _bipFonts[colorIdx] : null;
+            if (fillBrush == null || font == null)
+                return;
+
+            float barW = r.Width * 0.88f;
+            float barH = Math.Max(7f, r.Height * 0.1875f);
+            float barX = r.X + (r.Width - barW) * 0.5f;
+            float barY = r.Y + r.Height - barH - 1.5f;
+
+            _bipBarBackBrush.DrawRectangle(barX, barY, barW, barH);
+            fillBrush.DrawRectangle(barX, barY, barW * (pct / 100f), barH);
+            _bipBarBorderBrush.DrawRectangle(barX, barY, barW, barH);
+
+            string text = ((int)Math.Round((double)pct)).ToString() + "%";
+            var layout = font.GetTextLayout(text);
+
+            float tx = r.X + Math.Max(2f, r.Width * 0.05f);
+            float ty = r.Y + Math.Max(1f, r.Height * 0.04f);
+
+            font.DrawText(layout, tx, ty);
         }
 
         private void PaintPickupDots()
