@@ -31,11 +31,23 @@ namespace Turbo.Plugins.s7o
         private const int VisionFightBlockYards = 70;
         private const int UrshiRiskYards = 16;
         private const int CleanupMonsterBlockYards = 45;
-        private const int UrshiPanelCloseDelayMs = 200;
         private const int UrshiPanelRecoveryWindowMs = 2200;
+        private const int UrshiPanelConfirmDelayMs = 120;
         private const int UrshiRiskClickDelayMs = 300;
-        private const int UrshiRiskCyclePauseMs = 900;
         private const int UrshiRiskMaxCycleAttempts = 4;
+        private const int UrshiRiskRetryCooldownMs = 20000;
+        private const int UrshiSpaceRetryMs = 250;
+        private const int UrshiSpaceMaxAttempts = 2;
+        private const int UrshiFallbackRetryDelayMs = 350;
+        private const int UrshiFallbackWindowMs = 3500;
+        private const int UrshiFallbackMaxTries = 1;
+        private const int UrshiScreenAvoidPx = 44;
+        private const float UrshiLabelYOffsetPx1080 = 32f;
+        private const float UrshiLabelHalfWidthMinPx1080 = 48f;
+        private const float UrshiLabelHalfWidthMaxPx1080 = 180f;
+        private const float UrshiLabelHalfWidthBasePx1080 = 14f;
+        private const float UrshiLabelHalfWidthPerCharPx1080 = 4.6f;
+        private const int UrshiFallbackWindowMarginPx = 6;
         private const int DroppedItemIgnoreMs = 20000;
         private const int DroppedItemVisibilityGraceMs = 500;
         private const uint RamaladniGiftSno = 1844495708;
@@ -73,14 +85,23 @@ namespace Turbo.Plugins.s7o
         private readonly Dictionary<int, int> _attempts = new Dictionary<int, int>();
         private readonly Dictionary<int, long> _retryAfterMs = new Dictionary<int, long>();
         private readonly Dictionary<int, DropSuppress> _droppedSuppress = new Dictionary<int, DropSuppress>();
+        private readonly Dictionary<int, int> _urshiMisclicksBySeed = new Dictionary<int, int>();
+        private readonly Dictionary<int, int> _urshiFallbackTriesBySeed = new Dictionary<int, int>();
         private IUiElement _urshiGemPane;
+        private IUiElement _urshiConversationMain;
+        private IUiElement _chatEditLine;
         private long _lastClickMs;
         private long _urshiArmedUntilMs;
-        private long _urshiCloseAtMs;
         private long _nextUrshiRiskClickMs;
+        private long _nextUrshiSpaceMs;
         private int _lastClickSeed;
         private int _urshiArmedSeed;
-        private bool _urshiEscapeSent;
+        private int _urshiSpaceAttempts;
+        private int _urshiFallbackSeed;
+        private long _urshiFallbackUntilMs;
+        private int _urshiRecoveryOpenSeed;
+        private long _urshiRecoveryOpenSeenMs;
+        private bool _urshiRecoveryMisclickRecorded;
         private bool _cleanupLatched;
         private bool _lastCleanupClickFar;
         private bool _enabled;
@@ -115,6 +136,8 @@ namespace Turbo.Plugins.s7o
         {
             base.Load(hud);
             _urshiGemPane = Hud.Render.RegisterUiElement("Root.NormalLayer.vendor_dialog_mainPage.riftReward_dialog.LayoutRoot.gemUpgradePane", null, null);
+            _urshiConversationMain = Hud.Render.RegisterUiElement("Root.NormalLayer.conversation_dialog_main", null, null);
+            _chatEditLine = Hud.Render.RegisterUiElement("Root.NormalLayer.chatentry_dialog_backgroundScreen.chatentry_content.chat_editline", null, null);
             if (Hud.Game.IsInGame && Hud.Game.Me != null && Hud.Game.Me.SnoArea != null)
                 _lastAreaSno = Hud.Game.Me.SnoArea.Sno;
         }
@@ -161,10 +184,17 @@ namespace Turbo.Plugins.s7o
             _playerMoving = false;
             _pendingCursorRestore = false;
             _urshiArmedUntilMs = 0;
-            _urshiCloseAtMs = 0;
             _nextUrshiRiskClickMs = 0;
-            _urshiEscapeSent = false;
+            _nextUrshiSpaceMs = 0;
             _urshiArmedSeed = 0;
+            _urshiSpaceAttempts = 0;
+            _urshiMisclicksBySeed.Clear();
+            _urshiFallbackTriesBySeed.Clear();
+            _urshiFallbackSeed = 0;
+            _urshiFallbackUntilMs = 0;
+            _urshiRecoveryOpenSeed = 0;
+            _urshiRecoveryOpenSeenMs = 0;
+            _urshiRecoveryMisclickRecorded = false;
         }
 
         public void OnItemPicked(IItem item)
@@ -174,7 +204,15 @@ namespace Turbo.Plugins.s7o
             _retryAfterMs.Remove(item.Seed);
             if (_lastClickSeed == item.Seed) _lastClickSeed = 0;
             _droppedSuppress.Remove(item.Seed);
-            if (_urshiArmedSeed == item.Seed) _urshiArmedSeed = 0;
+            _urshiMisclicksBySeed.Remove(item.Seed);
+            _urshiFallbackTriesBySeed.Remove(item.Seed);
+            if (_urshiFallbackSeed == item.Seed)
+            {
+                _urshiFallbackSeed = 0;
+                _urshiFallbackUntilMs = 0;
+            }
+            if (_urshiArmedSeed == item.Seed)
+                ClearUrshiArmedRecoveryState(true);
         }
 
         public void OnItemLocationChanged(IItem item, ItemLocation from, ItemLocation to)
@@ -204,36 +242,24 @@ namespace Turbo.Plugins.s7o
 
             if (!_enabled || _paused || Hud == null || Hud.Game == null || !Hud.Game.IsInGame || Hud.Game.IsPaused || !Hud.Window.IsForeground)
                 return;
+
+            long now = Hud.Game.CurrentRealTimeMilliseconds;
+            PurgeDroppedSuppressions(now);
+            PurgeRetryState(now);
+            PurgeResolvedUrshiArmedState(now);
+
+            // Urshi recovery must run before inventory/vendor UI early returns because Urshi opens UI layers.
+            if (HandleAutoLootUrshiRecovery(now))
+                return;
+
             if (Hud.Render.WorldMapUiElement != null && Hud.Render.WorldMapUiElement.Visible)
                 return;
-            if (Hud.Inventory.InventoryMainUiElement != null && Hud.Inventory.InventoryMainUiElement.Visible)
+            if (Hud.Inventory != null && Hud.Inventory.InventoryMainUiElement != null && Hud.Inventory.InventoryMainUiElement.Visible)
                 return;
             if (Hud.Inventory != null && Hud.Inventory.StashMainUiElement != null && Hud.Inventory.StashMainUiElement.Visible)
                 return;
             if (Hud.Game.Me == null || Hud.Game.Me.Powers == null || Hud.Game.Me.Powers.CantMove)
                 return;
-
-            long now = Hud.Game.CurrentRealTimeMilliseconds;
-            PurgeDroppedSuppressions(now);
-            PurgeRetryState(now);
-            if (IsUrshiPanelVisible())
-            {
-                if (ShouldCloseUrshiPanel(now))
-                {
-                    if (_urshiCloseAtMs == 0) _urshiCloseAtMs = now + UrshiPanelCloseDelayMs;
-                    else if (!_urshiEscapeSent && now >= _urshiCloseAtMs)
-                    {
-                        SendEscape();
-                        _urshiEscapeSent = true;
-                        _urshiArmedUntilMs = 0;
-                        _nextUrshiRiskClickMs = now + UrshiRiskCyclePauseMs;
-                        _lastClickMs = now;
-                    }
-                }
-                return;
-            }
-            _urshiCloseAtMs = 0;
-            _urshiEscapeSent = false;
 
             bool inTown = Hud.Game.IsInTown;
             IActor protectedChest = GetUnopenedProtectedChest();
@@ -266,7 +292,7 @@ namespace Turbo.Plugins.s7o
                 .Where(i => i != null && i.Location == ItemLocation.Floor && i.IsOnScreen && !IsExcludedPickup(i) && !IsSuppressedDroppedItem(i, now) && !IsProtectedChestRisk(i, protectedChest) && i.CentralXyDistanceToMe <= range)
                 .Select(i => new LootCandidate(i, WantedPriority(i), IsUrshiRisk(i, urshi)))
                 .Where(c => c.Priority >= 0 && CanFit(c.Item, freeSlots) && CanTry(c.Item, c.UrshiRisk, now))
-                .OrderBy(c => postRiftCleanup && c.UrshiRisk ? 1 : 0)
+                .OrderBy(c => c.UrshiRisk ? 1 : 0)
                 .ThenBy(c => c.Item.Seed == _lastClickSeed ? 1 : 0)
                 .ThenBy(c => wideCleanup ? 0 : c.Priority)
                 .ThenBy(c => c.Item.CentralXyDistanceToMe)
@@ -292,14 +318,48 @@ namespace Turbo.Plugins.s7o
 
         private void PurgeRetryState(long now)
         {
-            if (_attempts.Count == 0 && _retryAfterMs.Count == 0) return;
-            foreach (var seed in _attempts.Keys.ToArray())
-                if (!IsVisibleFloorSeed(seed)) _attempts.Remove(seed);
-            foreach (var pair in _retryAfterMs.ToArray())
+            if (_attempts.Count != 0)
             {
-                if (now >= pair.Value || !IsVisibleFloorSeed(pair.Key))
-                    _retryAfterMs.Remove(pair.Key);
+                foreach (var seed in _attempts.Keys.ToArray())
+                    if (!IsVisibleFloorSeed(seed)) _attempts.Remove(seed);
             }
+
+            if (_retryAfterMs.Count != 0)
+            {
+                foreach (var pair in _retryAfterMs.ToArray())
+                {
+                    if (now >= pair.Value || !IsVisibleFloorSeed(pair.Key))
+                        _retryAfterMs.Remove(pair.Key);
+                }
+            }
+
+            if (_urshiFallbackSeed != 0 && (now > _urshiFallbackUntilMs || !IsVisibleFloorSeed(_urshiFallbackSeed)))
+            {
+                _urshiFallbackSeed = 0;
+                _urshiFallbackUntilMs = 0;
+            }
+
+            if (_urshiFallbackTriesBySeed.Count != 0)
+            {
+                foreach (var seed in _urshiFallbackTriesBySeed.Keys.ToArray())
+                    if (!IsVisibleFloorSeed(seed)) _urshiFallbackTriesBySeed.Remove(seed);
+            }
+
+            if (_urshiMisclicksBySeed.Count != 0)
+            {
+                foreach (var seed in _urshiMisclicksBySeed.Keys.ToArray())
+                    if (!IsVisibleFloorSeed(seed)) _urshiMisclicksBySeed.Remove(seed);
+            }
+        }
+
+
+        private void PurgeResolvedUrshiArmedState(long now)
+        {
+            if (_urshiArmedSeed == 0)
+                return;
+
+            if (now > _urshiArmedUntilMs || FindVisibleFloorItemBySeed(_urshiArmedSeed) == null)
+                ClearUrshiArmedRecoveryState(true);
         }
 
         private bool IsSuppressedDroppedItem(IItem item, long now)
@@ -332,11 +392,34 @@ namespace Turbo.Plugins.s7o
 
             if (riskyUrshi)
             {
+                bool fallbackMode = item.Seed == _urshiFallbackSeed && now <= _urshiFallbackUntilMs;
+
                 if (now < _nextUrshiRiskClickMs) return false;
+
+                if (fallbackMode)
+                {
+                    int fallbackTries;
+                    _urshiFallbackTriesBySeed.TryGetValue(item.Seed, out fallbackTries);
+
+                    if (fallbackTries >= UrshiFallbackMaxTries)
+                    {
+                        _retryAfterMs[item.Seed] = now + UrshiRiskRetryCooldownMs;
+                        _nextUrshiRiskClickMs = now + UrshiRiskRetryCooldownMs;
+                        _urshiFallbackSeed = 0;
+                        _urshiFallbackUntilMs = 0;
+                        return false;
+                    }
+
+                    return true;
+                }
+
                 if (n >= UrshiRiskMaxCycleAttempts)
                 {
                     _attempts[item.Seed] = 0;
-                    _nextUrshiRiskClickMs = now + UrshiRiskCyclePauseMs;
+                    _retryAfterMs[item.Seed] = now + UrshiRiskRetryCooldownMs;
+                    _nextUrshiRiskClickMs = now + UrshiRiskRetryCooldownMs;
+                    if (_urshiArmedSeed == item.Seed)
+                        ClearUrshiArmedRecoveryState(false);
                     return false;
                 }
                 return true;
@@ -358,9 +441,32 @@ namespace Turbo.Plugins.s7o
             _attempts.TryGetValue(item.Seed, out tries);
 
             int x, y;
-            GetClickPoint(item, tries, cleanup || riskyUrshi, out x, out y);
-            if (riskyUrshi)
-                OffsetAwayFromUrshi(ref x, ref y, tries);
+            bool fallbackMode = riskyUrshi && item.Seed == _urshiFallbackSeed && now <= _urshiFallbackUntilMs;
+
+            if (fallbackMode)
+            {
+                int fallbackTries;
+                _urshiFallbackTriesBySeed.TryGetValue(item.Seed, out fallbackTries);
+
+                IActor urshi = GetUrshiActor();
+                if (!TryGetUrshiSafeFallbackClickPoint(item, urshi, fallbackTries, out x, out y))
+                {
+                    _retryAfterMs[item.Seed] = now + UrshiRiskRetryCooldownMs;
+                    _nextUrshiRiskClickMs = now + UrshiRiskRetryCooldownMs;
+                    _urshiFallbackSeed = 0;
+                    _urshiFallbackUntilMs = 0;
+                    _lastClickMs = now;
+                    return;
+                }
+
+                _urshiFallbackTriesBySeed[item.Seed] = fallbackTries + 1;
+            }
+            else
+            {
+                GetClickPoint(item, tries, cleanup || riskyUrshi, out x, out y);
+                if (riskyUrshi)
+                    OffsetAwayFromUrshi(ref x, ref y, tries);
+            }
 
             if (!SetCursorPos(x, y))
             {
@@ -374,11 +480,12 @@ namespace Turbo.Plugins.s7o
                 _nextUrshiRiskClickMs = now + UrshiRiskClickDelayMs;
                 _urshiArmedUntilMs = now + UrshiPanelRecoveryWindowMs;
                 _urshiArmedSeed = item.Seed;
+                _nextUrshiSpaceMs = 0;
+                _urshiSpaceAttempts = 0;
             }
             else
             {
-                _urshiArmedUntilMs = 0;
-                _urshiArmedSeed = 0;
+                ClearUrshiArmedRecoveryState(true);
             }
 
             MouseLeftClick();
@@ -410,7 +517,7 @@ namespace Turbo.Plugins.s7o
 
         private void GetClickPoint(IItem item, int attempt, bool allowAlternate, out int x, out int y)
         {
-            int baseX = (int)Math.Round(item.ScreenCoordinate.X + Hud.Window.Offset.X);
+            int baseX = (int)Math.Round((double)item.ScreenCoordinate.X + (double)Hud.Window.Offset.X);
             int baseY = (int)Math.Round(item.ScreenCoordinate.Y - Hud.Window.Size.Height / 55f + Hud.Window.Offset.Y);
             x = baseX;
             y = baseY;
@@ -719,28 +826,212 @@ namespace Turbo.Plugins.s7o
                 || sno == 488564 || sno == 488932 || (sno >= 488935 && sno <= 488939);
         }
 
-        private bool IsUrshiPanelVisible()
-        {
-            try { return _urshiGemPane != null && _urshiGemPane.Visible; }
-            catch { return false; }
-        }
-
-        private bool ShouldCloseUrshiPanel(long now)
-        {
-            if (_urshiEscapeSent) return false;
-            if (_urshiArmedSeed != 0 && now <= _urshiArmedUntilMs) return true;
-            if (now - _lastClickMs > UrshiPanelRecoveryWindowMs) return false;
-            return IsPostRiftCleanup() && HasWantedVisibleLootForCleanup();
-        }
-
-        private bool HasWantedVisibleLootForCleanup()
+        private bool IsUiVisible(IUiElement element)
         {
             try
             {
-                int freeSlots = SafeFreeSlots();
-                return Hud.Game.Items.Any(i => i != null && i.Location == ItemLocation.Floor && i.IsOnScreen && !IsExcludedPickup(i) && WantedPriority(i) >= 0 && CanFit(i, freeSlots));
+                if (element == null) return false;
+                element.Refresh();
+                return element.Visible;
             }
             catch { return false; }
+        }
+
+        private bool IsUrshiGemPaneVisible()
+        {
+            return IsUiVisible(_urshiGemPane);
+        }
+
+        private bool IsUrshiConversationVisible()
+        {
+            return IsUiVisible(_urshiConversationMain);
+        }
+
+        private bool IsUrshiRecoveryUiVisible()
+        {
+            return IsUrshiGemPaneVisible() || IsUrshiConversationVisible();
+        }
+
+        private bool IsChatEntryOpen()
+        {
+            return IsUiVisible(_chatEditLine);
+        }
+
+        private bool IsStashUiOpen()
+        {
+            try
+            {
+                return Hud != null
+                    && Hud.Inventory != null
+                    && Hud.Inventory.StashMainUiElement != null
+                    && Hud.Inventory.StashMainUiElement.Visible;
+            }
+            catch { return false; }
+        }
+
+        private bool CanSendUrshiRecoverySpace()
+        {
+            if (IsChatEntryOpen()) return false;
+            if (IsStashUiOpen()) return false;
+            return true;
+        }
+
+
+        private IItem FindVisibleFloorItemBySeed(int seed)
+        {
+            if (seed == 0)
+                return null;
+
+            try
+            {
+                return Hud.Game.Items.FirstOrDefault(i =>
+                    i != null
+                    && i.Seed == seed
+                    && i.Location == ItemLocation.Floor
+                    && i.IsOnScreen);
+            }
+            catch { return null; }
+        }
+
+        private void ClearUrshiArmedRecoveryState(bool clearFallback)
+        {
+            _urshiArmedSeed = 0;
+            _urshiArmedUntilMs = 0;
+            _nextUrshiSpaceMs = 0;
+            _urshiSpaceAttempts = 0;
+            _urshiRecoveryOpenSeed = 0;
+            _urshiRecoveryOpenSeenMs = 0;
+            _urshiRecoveryMisclickRecorded = false;
+
+            if (clearFallback)
+            {
+                _urshiFallbackSeed = 0;
+                _urshiFallbackUntilMs = 0;
+            }
+        }
+
+        private bool HasPendingArmedUrshiLoot(long now)
+        {
+            if (_urshiArmedSeed == 0 || now > _urshiArmedUntilMs)
+                return false;
+
+            IItem item = FindVisibleFloorItemBySeed(_urshiArmedSeed);
+            if (item == null)
+                return false;
+
+            IActor urshi = GetUrshiActor();
+            if (urshi == null)
+                return false;
+
+            if (!IsUrshiRisk(item, urshi))
+                return false;
+
+            if (WantedPriority(item) < 0)
+                return false;
+
+            return true;
+        }
+
+        private bool ShouldRecoverAutoLootUrshiMisclick(long now)
+        {
+            return _urshiArmedSeed != 0 && now <= _urshiArmedUntilMs;
+        }
+
+        private bool HandleAutoLootUrshiRecovery(long now)
+        {
+            if (!IsUrshiRecoveryUiVisible())
+            {
+                bool recoveryAttempted = _urshiSpaceAttempts > 0 || _nextUrshiSpaceMs != 0;
+
+                if (recoveryAttempted || (_urshiArmedSeed != 0 && now > _urshiArmedUntilMs))
+                    ClearUrshiArmedRecoveryState(false);
+
+                _urshiRecoveryOpenSeed = 0;
+                _urshiRecoveryOpenSeenMs = 0;
+                _urshiRecoveryMisclickRecorded = false;
+                return false;
+            }
+
+            // Urshi UI is visible. Do not click floor loot behind it. If this is not a
+            // proven AutoLoot misclick on pending risky loot, leave the panel alone.
+            if (!HasPendingArmedUrshiLoot(now))
+            {
+                if (_urshiArmedSeed != 0 && (now > _urshiArmedUntilMs || FindVisibleFloorItemBySeed(_urshiArmedSeed) == null))
+                    ClearUrshiArmedRecoveryState(true);
+
+                return true;
+            }
+
+            if (_urshiRecoveryOpenSeed != _urshiArmedSeed)
+            {
+                _urshiRecoveryOpenSeed = _urshiArmedSeed;
+                _urshiRecoveryOpenSeenMs = now;
+                _urshiRecoveryMisclickRecorded = false;
+                _nextUrshiSpaceMs = now + UrshiPanelConfirmDelayMs;
+                return true;
+            }
+
+            if (!HasPendingArmedUrshiLoot(now))
+            {
+                ClearUrshiArmedRecoveryState(true);
+                return true;
+            }
+
+            if (now < _nextUrshiSpaceMs)
+                return true;
+
+            if (!_urshiRecoveryMisclickRecorded)
+            {
+                HandleArmedUrshiMisclick(now);
+                _urshiRecoveryMisclickRecorded = true;
+            }
+
+            if (!CanSendUrshiRecoverySpace())
+                return true;
+
+            if (_urshiSpaceAttempts >= UrshiSpaceMaxAttempts)
+                return true;
+
+            if (_nextUrshiSpaceMs != 0 && now < _nextUrshiSpaceMs)
+                return true;
+
+            SendSpace();
+            _urshiSpaceAttempts++;
+            _nextUrshiSpaceMs = now + UrshiSpaceRetryMs;
+            _lastClickMs = now;
+            return true;
+        }
+
+        private void HandleArmedUrshiMisclick(long now)
+        {
+            if (_urshiArmedSeed == 0)
+                return;
+
+            int seed = _urshiArmedSeed;
+            int closes;
+            _urshiMisclicksBySeed.TryGetValue(seed, out closes);
+            closes++;
+            _urshiMisclicksBySeed[seed] = closes;
+
+            _attempts[seed] = 0;
+
+            if (_lastClickSeed == seed)
+                _lastClickSeed = 0;
+
+            if (closes >= 2)
+            {
+                _retryAfterMs[seed] = now + UrshiRiskRetryCooldownMs;
+                _nextUrshiRiskClickMs = now + UrshiRiskRetryCooldownMs;
+                _urshiFallbackSeed = 0;
+                _urshiFallbackUntilMs = 0;
+            }
+            else
+            {
+                _urshiFallbackSeed = seed;
+                _urshiFallbackUntilMs = now + UrshiFallbackWindowMs;
+                _retryAfterMs[seed] = now + UrshiFallbackRetryDelayMs;
+                _nextUrshiRiskClickMs = now + UrshiFallbackRetryDelayMs;
+            }
         }
 
         private IActor GetUrshiActor()
@@ -758,6 +1049,150 @@ namespace Turbo.Plugins.s7o
         {
             try { return item != null && urshi != null && item.FloorCoordinate.XYDistanceTo(urshi.FloorCoordinate) <= UrshiRiskYards; }
             catch { return false; }
+        }
+
+        private float UiScale()
+        {
+            try
+            {
+                if (Hud == null || Hud.Window == null || Hud.Window.Size.Width <= 0 || Hud.Window.Size.Height <= 0)
+                    return 1f;
+
+                float sx = Hud.Window.Size.Width / 1920f;
+                float sy = Hud.Window.Size.Height / 1080f;
+                float s = Math.Min(sx, sy);
+
+                if (s < 0.65f) return 0.65f;
+                if (s > 2.25f) return 2.25f;
+                return s;
+            }
+            catch { return 1f; }
+        }
+
+        private string GetItemLabelText(IItem item)
+        {
+            try
+            {
+                if (item == null)
+                    return string.Empty;
+
+                if (!string.IsNullOrEmpty(item.FullNameEnglish))
+                    return item.FullNameEnglish;
+
+                if (item.SnoItem != null && !string.IsNullOrEmpty(item.SnoItem.NameEnglish))
+                    return item.SnoItem.NameEnglish;
+            }
+            catch { }
+
+            return string.Empty;
+        }
+
+        private float EstimateItemLabelHalfWidthPx(IItem item)
+        {
+            float scale = UiScale();
+            string name = GetItemLabelText(item);
+            int len = !string.IsNullOrEmpty(name) ? name.Length : 14;
+
+            float half = UrshiLabelHalfWidthBasePx1080 + len * UrshiLabelHalfWidthPerCharPx1080;
+            if (half < UrshiLabelHalfWidthMinPx1080)
+                half = UrshiLabelHalfWidthMinPx1080;
+            if (half > UrshiLabelHalfWidthMaxPx1080)
+                half = UrshiLabelHalfWidthMaxPx1080;
+
+            return half * scale;
+        }
+
+        private bool IsUsableScreenPoint(int x, int y)
+        {
+            try
+            {
+                if (Hud == null || Hud.Window == null)
+                    return false;
+
+                int left = (int)Math.Round((double)Hud.Window.Offset.X) + UrshiFallbackWindowMarginPx;
+                int top = (int)Math.Round((double)Hud.Window.Offset.Y) + UrshiFallbackWindowMarginPx;
+                int right = left + (int)Math.Round((double)Hud.Window.Size.Width) - UrshiFallbackWindowMarginPx * 2;
+                int bottom = top + (int)Math.Round((double)Hud.Window.Size.Height) - UrshiFallbackWindowMarginPx * 2;
+
+                return x >= left && x <= right && y >= top && y <= bottom;
+            }
+            catch { return false; }
+        }
+
+        private bool TryGetUrshiSafeFallbackClickPoint(IItem item, IActor urshi, int attempt, out int x, out int y)
+        {
+            x = 0;
+            y = 0;
+
+            if (item == null || urshi == null || item.ScreenCoordinate == null || urshi.ScreenCoordinate == null)
+                return false;
+
+            float scale = UiScale();
+
+            // Use the floor-label/icon screen proxy, but aim higher into the visible item text label band.
+            int labelCenterX = (int)Math.Round((double)item.ScreenCoordinate.X + (double)Hud.Window.Offset.X);
+            int labelCenterY = (int)Math.Round((double)item.ScreenCoordinate.Y - (double)(UrshiLabelYOffsetPx1080 * scale) + (double)Hud.Window.Offset.Y);
+
+            float halfWidth = EstimateItemLabelHalfWidthPx(item);
+            float ux = urshi.ScreenCoordinate.X + Hud.Window.Offset.X;
+            float uy = urshi.ScreenCoordinate.Y + Hud.Window.Offset.Y;
+            int awaySign = labelCenterX >= ux ? 1 : -1;
+
+            float[] xOffsets =
+            {
+                awaySign * halfWidth * 0.55f,
+                awaySign * halfWidth * 0.35f,
+                0f,
+                -awaySign * halfWidth * 0.25f
+            };
+
+            float[] yOffsets =
+            {
+                0f,
+                -4f * scale,
+                5f * scale
+            };
+
+            float bestScore = float.MinValue;
+            int bestX = 0;
+            int bestY = 0;
+            bool found = false;
+
+            for (int yi = 0; yi < yOffsets.Length; yi++)
+            {
+                for (int xi = 0; xi < xOffsets.Length; xi++)
+                {
+                    int cx = (int)Math.Round((double)labelCenterX + (double)xOffsets[xi]);
+                    int cy = (int)Math.Round((double)labelCenterY + (double)yOffsets[yi]);
+
+                    if (!IsUsableScreenPoint(cx, cy))
+                        continue;
+
+                    float dx = cx - ux;
+                    float dy = cy - uy;
+                    float distSq = dx * dx + dy * dy;
+
+                    if (distSq < UrshiScreenAvoidPx * UrshiScreenAvoidPx)
+                        continue;
+
+                    // Prefer farther from Urshi, while favoring earlier label-band candidates.
+                    float score = distSq - yi * 300f - xi * 40f;
+                    if (!found || score > bestScore)
+                    {
+                        found = true;
+                        bestScore = score;
+                        bestX = cx;
+                        bestY = cy;
+                    }
+                }
+            }
+
+            if (!found)
+                return false;
+
+            x = bestX;
+            y = bestY;
+            return true;
         }
 
         private void OffsetAwayFromUrshi(ref int x, ref int y, int attempt)
@@ -781,10 +1216,10 @@ namespace Turbo.Plugins.s7o
             mouse_event(6U, 0, 0, 0U, IntPtr.Zero);
         }
 
-        private static void SendEscape()
+        private static void SendSpace()
         {
-            keybd_event(0x1B, 0, 0, UIntPtr.Zero);
-            keybd_event(0x1B, 0, 2, UIntPtr.Zero);
+            keybd_event(0x20, 0, 0, UIntPtr.Zero);
+            keybd_event(0x20, 0, 2, UIntPtr.Zero);
         }
 
         private struct NativePoint { public int X; public int Y; }
