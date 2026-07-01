@@ -89,7 +89,11 @@ namespace Turbo.Plugins.s7o
         // the OK dialog before clicking another item; never send blind Enter.
         public int TurboLegendaryConfirmWindowMs = 180;
         public int TurboLegendaryConfirmPollMs = 10;
-        public int TurboPostConfirmSettleMs = 10;
+        public int TurboPostConfirmSettleMs = 20;
+
+        // Confirmation-first retry throttle. Keep this close to TurboLegendaryConfirmPollMs so
+        // safety does not turn turbo legendary salvage into strict per-item verification.
+        public int ConfirmRetryThrottleMs = 15;
 
         // If a clicked item is still present, give Diablo III a short stale/pending cooldown
         // before retrying it. This avoids hammering greyed items and preserves cleanup retries.
@@ -335,6 +339,9 @@ namespace Turbo.Plugins.s7o
         private int _lastItemClickTick;
         private int _lastConfirmTick;
         private int _lastGoneTick;
+        private int _confirmVisibleSinceTick = NoTick;
+        private int _lastConfirmPressTick = NoTick;
+        private int _confirmPressAttempts;
 
         private bool _cachedBlacksmithPaneVisible;
         private bool _stickyBlacksmithPaneVisible;
@@ -352,7 +359,7 @@ namespace Turbo.Plugins.s7o
 
         private readonly Queue<string> _pendingItemKeys = new Queue<string>();
         private string _activeItemKey;
-        private bool _releaseCursorAfterFinalItemClick;
+        private bool _parkCursorOnCompletionPending;
         private bool _finalCursorParked;
 
         private enum State
@@ -578,6 +585,10 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
+            // Confirmation popups are authoritative: do not complete/cancel/park/click another item while OK is visible.
+            if (HandleVisibleSalvageConfirmFirst(now, "after collect"))
+                return;
+
             if (CompleteIfNoLiveSalvageCandidates("after collect"))
                 return;
 
@@ -696,13 +707,6 @@ namespace Turbo.Plugins.s7o
                     return;
 
                 case State.EnableAnvil:
-                    if (_releaseCursorAfterFinalItemClick)
-                    {
-                        _runEndReason = "Item Salvage completed";
-                        CancelRun(false, true);
-                        return;
-                    }
-
                     bool anvilClicked;
                     if (!SetAnvil(true, out anvilClicked))
                     {
@@ -768,13 +772,6 @@ namespace Turbo.Plugins.s7o
             _activeItemKey = null;
             _activeRetryCount = 0;
 
-            if (_releaseCursorAfterFinalItemClick)
-            {
-                _runEndReason = "Item Salvage completed";
-                CancelRun(false, true);
-                return;
-            }
-
             while (_pendingItemKeys.Count > 0)
             {
                 string key = _pendingItemKeys.Dequeue();
@@ -798,7 +795,7 @@ namespace Turbo.Plugins.s7o
                 }
 
                 if (_pendingItemKeys.Count == 0)
-                    MarkFinalItemClickedAndParkCursor();
+                    MarkFinalItemClickedForCompletionPark();
 
                 _lastItemClickTick = now;
                 _runClickedCount++;
@@ -827,8 +824,7 @@ namespace Turbo.Plugins.s7o
                 _activeRetryCount = 0;
                 if (_pendingItemKeys.Count == 0)
                 {
-                    _runEndReason = "Item Salvage completed";
-                    CancelRun(false, true);
+                    CompleteRunWithOptionalCursorPark("Item Salvage completed");
                     return;
                 }
                 _state = State.ClickItem;
@@ -873,8 +869,7 @@ namespace Turbo.Plugins.s7o
                 _activeRetryCount = 0;
                 if (_pendingItemKeys.Count == 0)
                 {
-                    _runEndReason = "Item Salvage completed";
-                    CancelRun(false, true);
+                    CompleteRunWithOptionalCursorPark("Item Salvage completed");
                     return;
                 }
                 _state = State.ClickItem;
@@ -884,15 +879,6 @@ namespace Turbo.Plugins.s7o
 
             if ((uint)(now - _itemStartTick) >= (uint)GetItemTimeout())
             {
-                if (_releaseCursorAfterFinalItemClick)
-                {
-                    _runTimeoutSkipCount++;
-                    LogDebug("Final item timeout after release; stopping without retry or cursor movement.");
-                    _runEndReason = "Item Salvage completed";
-                    CancelRun(false, true);
-                    return;
-                }
-
                 IItem retryItem = ResolveCandidate(_activeItemKey);
                 if (retryItem != null && _activeRetryCount < Math.Max(0, MaxItemClickRetries))
                 {
@@ -986,20 +972,20 @@ namespace Turbo.Plugins.s7o
             if (!IsActiveSalvageMousePhase())
                 return false;
 
+            int now = Environment.TickCount;
+
+            if (HasUnresolvedSalvageWorkForEarlyCompletion(now))
+                return false;
+
             if (HasLiveSalvageCandidates())
                 return false;
 
-            _runEndReason = "Item Salvage completed";
-            LogDebug("No live salvage candidates remain; stopping without cursor movement. source=" + source + ".");
-            CancelRun(false, true);
-            return true;
+            LogDebug("No live salvage candidates remain; completing safely. source=" + source + ".");
+            return CompleteRunWithOptionalCursorPark("Item Salvage completed");
         }
 
         private bool ShouldRestoreCursorOnCancel()
         {
-            if (_releaseCursorAfterFinalItemClick)
-                return false;
-
             if (IsActiveSalvageMousePhase() && !HasLiveSalvageCandidates())
                 return false;
 
@@ -1008,10 +994,7 @@ namespace Turbo.Plugins.s7o
 
         private bool TryConfirmSalvageDialogWithEnter(int now, string source)
         {
-            if (_okButton == null) return false;
-
-            _okButton.Refresh();
-            if (!_okButton.Visible) return false;
+            if (!IsSalvageConfirmVisible()) return false;
 
             PressEnter();
             _lastConfirmTick = now;
@@ -1020,8 +1003,153 @@ namespace Turbo.Plugins.s7o
                 + source
                 + ", tick="
                 + now
-                + (_lastItemClickTick != 0 ? ", clickToConfirm=" + unchecked(now - _lastItemClickTick) + "ms" : string.Empty)
+                + (TickSet(_lastItemClickTick) ? ", clickToConfirm=" + unchecked(now - _lastItemClickTick) + "ms" : string.Empty)
                 + ".");
+            return true;
+        }
+
+        private bool IsSalvageConfirmVisible()
+        {
+            try
+            {
+                if (_okButton == null) return false;
+                _okButton.Refresh();
+                return _okButton.Visible;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private bool IsConfirmationSensitiveState()
+        {
+            return _state == State.ConfirmIfNeeded
+                || _state == State.WaitForItemGone
+                || _state == State.TurboAwaitLegendaryConfirm
+                || _state == State.TurboSettle
+                || _state == State.TurboFinalCleanupValidate
+                || !string.IsNullOrEmpty(_activeItemKey)
+                || _turboClickedKeys.Count > 0
+                || TickSet(_confirmStartTick)
+                || TickSet(_lastItemClickTick);
+        }
+
+        private bool HandleVisibleSalvageConfirmFirst(int now, string source)
+        {
+            if (!IsConfirmationSensitiveState())
+                return false;
+
+            if (!IsSalvageConfirmVisible())
+            {
+                _confirmVisibleSinceTick = NoTick;
+                _lastConfirmPressTick = NoTick;
+                _confirmPressAttempts = 0;
+                return false;
+            }
+
+            if (!TickSet(_confirmVisibleSinceTick))
+                _confirmVisibleSinceTick = now;
+
+            int confirmRetryMs = Math.Max(10, ConfirmRetryThrottleMs);
+            if (!ElapsedAtLeast(now, _lastConfirmPressTick, confirmRetryMs))
+                return true;
+
+            bool turboAwait = _state == State.TurboAwaitLegendaryConfirm;
+
+            _confirmPressAttempts++;
+            _lastConfirmPressTick = now;
+            _lastConfirmTick = now;
+
+            if (_confirmPressAttempts <= 3)
+            {
+                PressEnter();
+                LogDebug("Confirmation visible; pressed Enter. source="
+                    + source
+                    + ", attempt="
+                    + _confirmPressAttempts
+                    + ".");
+            }
+            else
+            {
+                ClickUiDirectNoCompletionCheck(_okButton);
+                LogDebug("Confirmation visible; clicked OK fallback. source="
+                    + source
+                    + ", attempt="
+                    + _confirmPressAttempts
+                    + ".");
+            }
+
+            if (turboAwait)
+            {
+                _activeItemKey = null;
+                ScheduleNextTurboStepAfterItem(
+                    now,
+                    Math.Max(GetActiveTurboClickDelay(), Math.Max(20, TurboPostConfirmSettleMs)));
+                return true;
+            }
+
+            _nextStepTick = unchecked(now + confirmRetryMs);
+            return true;
+        }
+
+        private bool HasUnresolvedSalvageWorkForEarlyCompletion(int now)
+        {
+            if (HasUnresolvedClickedOrConfirmWork(now)) return true;
+
+            if (_state == State.ConfirmIfNeeded) return true;
+            if (_state == State.WaitForItemGone) return true;
+            if (_state == State.TurboAwaitLegendaryConfirm) return true;
+            if (_state == State.TurboSettle) return true;
+            if (_state == State.TurboFinalCleanupValidate) return true;
+
+            return false;
+        }
+
+        private bool HasUnresolvedClickedOrConfirmWork(int now)
+        {
+            return HasUnresolvedClickedOrConfirmWork(now, true);
+        }
+
+        private bool HasUnresolvedClickedOrConfirmWork(int now, bool includeRecentGrace)
+        {
+            if (IsSalvageConfirmVisible()) return true;
+            if (!string.IsNullOrEmpty(_activeItemKey)) return true;
+            if (_pendingItemKeys.Count > 0) return true;
+
+            foreach (string key in _turboClickedKeys)
+            {
+                if (string.IsNullOrEmpty(key)) continue;
+                if (_turboGoneKeys.Contains(key)) continue;
+                return true;
+            }
+
+            if (includeRecentGrace)
+            {
+                if (IsRecentTick(now, _lastItemClickTick, 300)) return true;
+                if (IsRecentTick(now, _lastConfirmTick, 300)) return true;
+                if (IsRecentTick(now, _confirmStartTick, 300)) return true;
+            }
+
+            return false;
+        }
+
+        private bool CompleteRunWithOptionalCursorPark(string reason)
+        {
+            int now = Environment.TickCount;
+
+            if (IsSalvageConfirmVisible() || HasUnresolvedClickedOrConfirmWork(now, false))
+            {
+                _nextStepTick = unchecked(now + Math.Max(1, GetActiveTurboSettleDelay()));
+                return false;
+            }
+
+            _runEndReason = reason;
+
+            if (_parkCursorOnCompletionPending || ParkCursorAtPlayerFeetAfterFinalSalvage)
+                ParkCursorAtPlayerFeetAfterFinalSalvageOnce();
+
+            CancelRun(false, true);
             return true;
         }
 
@@ -1031,13 +1159,6 @@ namespace Turbo.Plugins.s7o
             {
                 _state = State.TurboClickItem;
                 _nextStepTick = now + GetActiveTurboClickDelay();
-                return;
-            }
-
-            if (_releaseCursorAfterFinalItemClick && _pendingItemKeys.Count == 0)
-            {
-                _runEndReason = "Item Salvage completed";
-                CancelRun(false, true);
                 return;
             }
 
@@ -1073,7 +1194,7 @@ namespace Turbo.Plugins.s7o
                 }
 
                 if (_pendingItemKeys.Count == 0)
-                    MarkFinalItemClickedAndParkCursor();
+                    MarkFinalItemClickedForCompletionPark();
 
                 _lastItemClickTick = now;
                 _runClickedCount++;
@@ -1236,22 +1357,6 @@ namespace Turbo.Plugins.s7o
                     + "ms.");
             }
 
-            if (_releaseCursorAfterFinalItemClick)
-            {
-                if (remaining.Count > 0)
-                {
-                    _runTimeoutSkipCount += remaining.Count;
-                    LogDebug("Final turbo item release active; stopping without retry/final cleanup. remaining="
-                        + remaining.Count
-                        + ".");
-                }
-
-                _turboFinalCleanupActive = false;
-                _runEndReason = "Item Salvage completed";
-                CancelRun(false, true);
-                return;
-            }
-
             if (remaining.Count > 0 && _turboRetryPass < GetActiveTurboMaxRetryPasses())
             {
                 _turboRetryPass++;
@@ -1308,8 +1413,7 @@ namespace Turbo.Plugins.s7o
             }
 
             _turboFinalCleanupActive = false;
-            _runEndReason = "Item Salvage completed";
-            CancelRun(false, true);
+            CompleteRunWithOptionalCursorPark("Item Salvage completed");
         }
 
         private bool ShouldStartTurboFinalCleanup(int remainingCount)
@@ -1367,14 +1471,6 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
-            if (_releaseCursorAfterFinalItemClick)
-            {
-                _turboFinalCleanupActive = false;
-                _runEndReason = "Item Salvage completed";
-                CancelRun(false, true);
-                return;
-            }
-
             BuildCandidateQueue(true);
 
             if (_pendingItemKeys.Count == 0)
@@ -1398,8 +1494,7 @@ namespace Turbo.Plugins.s7o
 
                 LogDebug("Turbo final cleanup found no remaining candidates after validation retries.");
                 _turboFinalCleanupActive = false;
-                _runEndReason = "Item Salvage completed";
-                CancelRun(false, true);
+                CompleteRunWithOptionalCursorPark("Item Salvage completed");
                 return;
             }
 
@@ -1424,7 +1519,7 @@ namespace Turbo.Plugins.s7o
             _originalCursorX = Hud.Window.CursorX;
             _originalCursorY = Hud.Window.CursorY;
             _activeItemKey = null;
-            _releaseCursorAfterFinalItemClick = false;
+            _parkCursorOnCompletionPending = false;
             _finalCursorParked = false;
             _pendingItemKeys.Clear();
             _turboClickedKeys.Clear();
@@ -1455,6 +1550,9 @@ namespace Turbo.Plugins.s7o
             _lastItemClickTick = 0;
             _lastConfirmTick = 0;
             _lastGoneTick = 0;
+            _confirmVisibleSinceTick = NoTick;
+            _lastConfirmPressTick = NoTick;
+            _confirmPressAttempts = 0;
             _cancelRequested = false;
             _salvageTabClickSent = false;
             _repairTabClickSent = false;
@@ -1493,15 +1591,16 @@ namespace Turbo.Plugins.s7o
                 + Math.Max(1, TurboLegendaryConfirmPollMs)
                 + "ms, postConfirmSettle="
                 + Math.Max(0, TurboPostConfirmSettleMs)
+                + "ms, confirmRetryThrottle="
+                + Math.Max(10, ConfirmRetryThrottleMs)
                 + "ms, failedItemCooldown="
                 + Math.Max(0, FailedItemRetryCooldownMs)
                 + "ms.");
         }
 
-        private void MarkFinalItemClickedAndParkCursor()
+        private void MarkFinalItemClickedForCompletionPark()
         {
-            _releaseCursorAfterFinalItemClick = true;
-            ParkCursorAtPlayerFeetAfterFinalSalvageOnce();
+            _parkCursorOnCompletionPending = true;
         }
 
         private void ParkCursorAtPlayerFeetAfterFinalSalvageOnce()
@@ -1536,7 +1635,7 @@ namespace Turbo.Plugins.s7o
             _turboItemNextRetryTick.Clear();
             _turboItemKeysSkippedForRun.Clear();
             _activeItemKey = null;
-            _releaseCursorAfterFinalItemClick = false;
+            _parkCursorOnCompletionPending = false;
             _finalCursorParked = false;
             _turboFinalCleanupActive = false;
             _turboFinalCleanupPass = 0;
@@ -1544,6 +1643,12 @@ namespace Turbo.Plugins.s7o
             _activeRetryCount = 0;
             _confirmStartTick = 0;
             _itemStartTick = 0;
+            _lastItemClickTick = 0;
+            _lastConfirmTick = 0;
+            _lastGoneTick = 0;
+            _confirmVisibleSinceTick = NoTick;
+            _lastConfirmPressTick = NoTick;
+            _confirmPressAttempts = 0;
             _cancelRequested = false;
             _salvageTabClickSent = false;
             _repairCheckedThisRun = false;
@@ -3175,14 +3280,31 @@ namespace Turbo.Plugins.s7o
             _buttonFont.DrawText(layout, tx, ty);
         }
 
+        private static bool TickSet(int tick)
+        {
+            return tick != 0 && tick != NoTick;
+        }
+
         private static bool TickReachedOrUnset(int now, int tick)
         {
-            return tick == 0 || tick == NoTick || unchecked(now - tick) >= 0;
+            return !TickSet(tick) || unchecked(now - tick) >= 0;
         }
 
         private static bool TickIsFuture(int now, int untilTick)
         {
-            return untilTick != 0 && untilTick != NoTick && unchecked(now - untilTick) < 0;
+            return TickSet(untilTick) && unchecked(now - untilTick) < 0;
+        }
+
+        private static bool ElapsedAtLeast(int now, int sinceTick, int ms)
+        {
+            if (!TickSet(sinceTick)) return true;
+            return unchecked(now - sinceTick) >= Math.Max(0, ms);
+        }
+
+        private static bool IsRecentTick(int now, int sinceTick, int ms)
+        {
+            if (!TickSet(sinceTick)) return false;
+            return unchecked(now - sinceTick) < Math.Max(0, ms);
         }
 
         private static bool PointInRect(RectangleF rect, int x, int y)
@@ -3272,9 +3394,23 @@ namespace Turbo.Plugins.s7o
             return true;
         }
 
+        private bool ClickUiDirectNoCompletionCheck(IUiElement element)
+        {
+            try
+            {
+                if (element == null) return false;
+                element.Refresh();
+                if (!element.Visible) return false;
+                return ClickRect(element.Rectangle);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         private bool ClickUi(IUiElement element)
         {
-            if (_releaseCursorAfterFinalItemClick) return false;
             if (CompleteIfNoLiveSalvageCandidates("pre-ui-click")) return false;
             if (element == null) return false;
             element.Refresh();
@@ -3284,7 +3420,6 @@ namespace Turbo.Plugins.s7o
 
         private bool ClickInventoryItem(IItem item)
         {
-            if (_releaseCursorAfterFinalItemClick) return false;
             if (CompleteIfNoLiveSalvageCandidates("pre-item-click")) return false;
             if (item == null) return false;
             var rect = Hud.Inventory.GetItemRect(item);
