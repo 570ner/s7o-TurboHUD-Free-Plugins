@@ -50,7 +50,6 @@ namespace Turbo.Plugins.s7o
         private const int LateRefreshDownTicks = 4;
         private const int LotdPulseDownTicks = 6;
         private const int BossPulseDownTicks = 6;
-        private const int CapTargetNoCorpses = 10;
         private const int CorpseScanIntervalTicks = 10;
         private const int SiphonAssistPauseTicks = 10;
         private const int CursorRestoreShortEngageTicks = 120; // HUD_MENU AutoSnap restore window (~2s at 60 tps)
@@ -60,6 +59,9 @@ namespace Turbo.Plugins.s7o
         private const float SnapRangeYards = 90f;
         private const float CorpseScanRangeYards = 120f;
         private const float JuggerLockCircleYards = 10f;
+        private const int JuggerLockDashCount = 28;
+        private const float JuggerLockDashFill = 0.46f;
+        private const double JuggerLockRotationSeconds = 6.5d;
         private const int NoTargetAnchorPulseMs = 100;
         private const int NoTargetAnchorDownTicks = 2;
         private const int NoTargetAnchorPulsesPerBurst = 3;
@@ -77,10 +79,14 @@ namespace Turbo.Plugins.s7o
         private const float BaseChestPx = 35f;
         private const float BaseAbdomenPx = 18f;
         private const float BaseShoulderXPx = 25f;
-        private const double BigTrashMinRiftProgression = 0.95d;
+        private const double HighValueTrashMinRiftProgression = 0.85d;
+        private const double MediumValueTrashMinRiftProgression = 0.60d;
+        private const double BigTrashMinRiftProgression = HighValueTrashMinRiftProgression; // compatibility for existing occlusion/probe code
+        private const float MediumValueTrashPreferRangeYards = 22.0f;
 
         private const int AdaptiveBinCount = 8;
         private const int AdaptiveCandidateCapacity = 96;
+        private const int ProbeZoneCount = 9;
         private const int MinTicksBetweenMouseMoves = 1;
         private const int StableLockTicks = 16;
         private const int SoftLockTicks = 12;
@@ -142,6 +148,9 @@ namespace Turbo.Plugins.s7o
         private int _nextPulseTick;
         private bool _lateRefreshPulseConsumed;
         private int _siphonAssistUntilTick;
+        private int _fastBuildStartTick;
+        private int _fastBuildPulseCount;
+        private int _fastBuildTarget;
 
         private uint _lockedTargetAcdId;
         private int _lockedTargetKeepUntilTick;
@@ -166,13 +175,21 @@ namespace Turbo.Plugins.s7o
         private readonly float[] _rankedProbeDx = new float[AdaptiveCandidateCapacity];
         private readonly float[] _rankedProbeDy = new float[AdaptiveCandidateCapacity];
         private readonly int[] _rankedProbeBin = new int[AdaptiveCandidateCapacity];
+        private readonly int[] _rankedProbeZone = new int[AdaptiveCandidateCapacity];
         private readonly float[] _rankedProbeScore = new float[AdaptiveCandidateCapacity];
         private readonly float[] _adaptiveBinGood = new float[AdaptiveBinCount];
         private readonly float[] _adaptiveBinBad = new float[AdaptiveBinCount];
         private int _rankedProbeCount;
         private uint _lastSnapAttemptAcd;
         private int _lastSnapAttemptBin = -1;
+        private int _lastSnapAttemptZone = -1;
         private int _lastSnapAttemptTick;
+        private uint _probeZoneAcdId;
+        private readonly int[] _probeZoneLastTryTick = new int[ProbeZoneCount];
+        private readonly int[] _probeZoneTryCount = new int[ProbeZoneCount];
+        private uint _probeZoneSuccessAcdId;
+        private int _lastSuccessProbeZone = -1;
+        private int _lastSuccessProbeZoneTick;
         private uint _stableLockAcdId;
         private float _stableLockDx;
         private float _stableLockDy;
@@ -257,8 +274,8 @@ namespace Turbo.Plugins.s7o
             try { _chatEditLine = Hud.Render.GetUiElement("Root.NormalLayer.chatentry_dialog_backgroundScreen.chatentry_content.chat_editline"); } catch { }
             try
             {
-                _juggerCircleOutlineBrush = Hud.Render.CreateBrush(220, 0, 0, 0, 6.0f);
-                _juggerCircleBrush = Hud.Render.CreateBrush(245, 255, 220, 0, 3.0f);
+                _juggerCircleOutlineBrush = Hud.Render.CreateBrush(235, 0, 0, 0, 7.0f);
+                _juggerCircleBrush = Hud.Render.CreateBrush(245, 255, 132, 0, 3.4f);
             }
             catch { }
         }
@@ -474,12 +491,43 @@ namespace Turbo.Plugins.s7o
 
             try
             {
-                if (_juggerCircleOutlineBrush != null)
-                    _juggerCircleOutlineBrush.DrawWorldEllipse(JuggerLockCircleYards, -1, jugg.FloorCoordinate);
-                if (_juggerCircleBrush != null)
-                    _juggerCircleBrush.DrawWorldEllipse(JuggerLockCircleYards, -1, jugg.FloorCoordinate);
+                DrawJuggerLockCircle(jugg.FloorCoordinate);
             }
             catch { }
+        }
+
+        private void DrawJuggerLockCircle(IWorldCoordinate center)
+        {
+            if (center == null)
+                return;
+
+            double tick = Hud.Game != null ? Hud.Game.CurrentGameTick : 0.0d;
+            double secondsPerTurn = Math.Max(1.0d, JuggerLockRotationSeconds);
+            double phase = (tick / (secondsPerTurn * 60.0d)) * Math.PI * 2.0d;
+
+            DrawDashedWorldCircle(center, JuggerLockCircleYards, JuggerLockDashCount, JuggerLockDashFill, phase, _juggerCircleOutlineBrush);
+            DrawDashedWorldCircle(center, JuggerLockCircleYards, JuggerLockDashCount, JuggerLockDashFill, phase, _juggerCircleBrush);
+        }
+
+        private void DrawDashedWorldCircle(IWorldCoordinate center, float radius, int dashCount, float dashFill, double phase, IBrush brush)
+        {
+            if (center == null || brush == null || radius <= 0f || dashCount <= 0)
+                return;
+
+            double full = Math.PI * 2.0d;
+            double step = full / dashCount;
+            double dashAngle = step * Math.Max(0.10d, Math.Min(0.90d, dashFill));
+
+            for (int i = 0; i < dashCount; i++)
+            {
+                double a0 = phase + i * step;
+                double a1 = a0 + dashAngle;
+
+                var p0 = center.Offset(radius * (float)Math.Cos(a0), radius * (float)Math.Sin(a0), 0);
+                var p1 = center.Offset(radius * (float)Math.Cos(a1), radius * (float)Math.Sin(a1), 0);
+
+                brush.DrawLineWorld(p0, p1);
+            }
         }
 
         private bool DetectStaleSessionReset(int tick)
@@ -626,14 +674,20 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
-            int buildTarget = powerActive ? PowerStackTarget : NormalStackTarget;
-            bool reachedConfiguredTarget = havePowerShift && stacks >= buildTarget;
-            bool wantCap10 = !corpsesAvailable && reachedConfiguredTarget;
-            int desired = wantCap10 ? CapTargetNoCorpses : buildTarget;
+            int activeTarget = ClampStackTarget(powerActive ? PowerStackTarget : NormalStackTarget);
+            bool reachedConfiguredTarget = havePowerShift && stacks >= activeTarget;
 
-            bool needBuild = !havePowerShift || stacks < desired;
+            // Fast cadence is only for the configured HUD Menu target.
+            // If the user wants 10 stacks, they set 10; do not silently escalate lower targets to 10.
+            bool needBuild = fullAuto && (!havePowerShift || stacks < activeTarget);
             bool needRefresh = LateRefreshAssist && havePowerShift && stacks > 0 && timeLeft > 0f && corpsesAvailable && (timeLeft * 1000f) <= LateRefreshWindowMsDefault;
-            bool needMaintain = wantCap10 && havePowerShift && stacks >= CapTargetNoCorpses;
+            bool needMaintain = fullAuto && havePowerShift && reachedConfiguredTarget;
+
+            if (needBuild && FastBuildFuseTripped(tick, activeTarget, havePowerShift, stacks))
+            {
+                needBuild = false;
+                needMaintain = havePowerShift && stacks > 0;
+            }
 
             int intervalTicks;
             int downTicks = PulseDownTicks;
@@ -643,30 +697,60 @@ namespace Turbo.Plugins.s7o
                 intervalTicks = MsToTicks(lotdActive ? LotdBuildPulseMs : BuildPulseMs);
                 downTicks = lotdActive ? LotdPulseDownTicks : PulseDownTicks;
 
-                if (havePowerShift && stacks >= desired - 1)
+                if (havePowerShift && stacks >= activeTarget - 1)
                     downTicks = lotdActive ? Math.Max(1, Math.Min(LotdPulseDownTicks, 3)) : 1;
             }
             else if (needRefresh)
             {
                 intervalTicks = MsToTicks(lotdActive ? LotdBuildPulseMs : BuildPulseMs);
                 downTicks = GetLateRefreshDownTicks(lotdActive);
+                ClearFastBuildGuard();
             }
             else if (needMaintain)
             {
                 intervalTicks = MsToTicks(MaintainPulseMs);
+                ClearFastBuildGuard();
             }
             else
             {
+                ClearFastBuildGuard();
                 return;
             }
 
             _pulseWasBuild = needBuild;
-            _pulseBuildTarget = needBuild ? desired : 0;
+            _pulseBuildTarget = needBuild ? activeTarget : 0;
 
-            if (PulseSiphon(tick, intervalTicks, downTicks, true) && needRefresh)
+            bool pulsed = PulseSiphon(tick, intervalTicks, downTicks, true);
+            if (pulsed && needBuild)
+                _fastBuildPulseCount++;
+
+            if (pulsed && needRefresh)
                 _lateRefreshPulseConsumed = true;
         }
 
+
+        private bool FastBuildFuseTripped(int tick, int activeTarget, bool havePowerShift, int stacks)
+        {
+            if (_fastBuildTarget != activeTarget || _fastBuildStartTick <= 0)
+            {
+                _fastBuildStartTick = tick;
+                _fastBuildPulseCount = 0;
+                _fastBuildTarget = activeTarget;
+                return false;
+            }
+
+            if (havePowerShift && stacks >= activeTarget)
+                return false;
+
+            return unchecked(tick - _fastBuildStartTick) > MsToTicks(4000) || _fastBuildPulseCount > 45;
+        }
+
+        private void ClearFastBuildGuard()
+        {
+            _fastBuildStartTick = 0;
+            _fastBuildPulseCount = 0;
+            _fastBuildTarget = 0;
+        }
 
         private bool TryAnchorSiphonWithoutTarget(int tick)
         {
@@ -860,10 +944,14 @@ namespace Turbo.Plugins.s7o
             _pulseWasBuild = false;
             _pulseBuildTarget = 0;
 
-            if (PulseSiphon(tick, MsToTicks(lotdActive ? LotdBuildPulseMs : BuildPulseMs), GetLateRefreshDownTicks(lotdActive), true))
+            int refreshIntervalTicks = _lateRefreshIntentAttempts <= 0
+                ? MsToTicks(lotdActive ? LotdBuildPulseMs : BuildPulseMs)
+                : MsToTicks(MaintainPulseMs);
+
+            if (PulseSiphon(tick, refreshIntervalTicks, GetLateRefreshDownTicks(lotdActive), true))
             {
                 _lateRefreshIntentAttempts++;
-                _lateRefreshIntentNextAttemptTick = tick + LateRefreshIntentRetryTicks;
+                _lateRefreshIntentNextAttemptTick = tick + Math.Max(LateRefreshIntentRetryTicks, refreshIntervalTicks);
 
                 uint acd = GetMonsterAcdId(target);
                 if (acd != 0)
@@ -1522,6 +1610,16 @@ namespace Turbo.Plugins.s7o
 
             if (IncludeTrashTargets)
             {
+                // Old LM-style policy restored: after elites/minions are gone,
+                // kill high-progression trash before filler trash.
+                IMonster highTrash = PickHighValueTrash(monsters, false);
+                if (highTrash != null)
+                    return highTrash;
+
+                IMonster mediumTrash = PickHighValueTrash(monsters, true);
+                if (mediumTrash != null)
+                    return mediumTrash;
+
                 if (bestTrashClose != null) return bestTrashClose;
                 if (bestOnScreenAny != null) return bestOnScreenAny;
             }
@@ -1773,6 +1871,95 @@ namespace Turbo.Plugins.s7o
                     {
                         bestDist = d;
                         best = monster;
+                    }
+                }
+            }
+            catch { }
+
+            return best;
+        }
+
+        private double GetMonsterRiftProgression(IMonster monster)
+        {
+            try { return monster != null && monster.SnoMonster != null ? monster.SnoMonster.RiftProgression : 0d; }
+            catch { return 0d; }
+        }
+
+        private double GetBigTrashProgressionScore(float distance, double progression)
+        {
+            // High-value trash can win over nearby filler, but do not over-chase the edge of the ring.
+            if (distance <= TrashPenaltyStart)
+                return progression;
+
+            float denom = Math.Max(0.1f, PestiPick() - TrashPenaltyStart);
+            float t = (distance - TrashPenaltyStart) / denom;
+            if (t < 0f) t = 0f;
+            else if (t > 1f) t = 1f;
+
+            return progression - (t * 0.12d);
+        }
+
+        private IMonster PickHighValueTrash(IEnumerable<IMonster> monsters, bool includeMedium)
+        {
+            if (monsters == null)
+                return null;
+
+            IMonster best = null;
+            double bestScore = double.NegativeInfinity;
+            float bestRadius = -1f;
+            float bestDistanceScore = float.MaxValue;
+
+            try
+            {
+                foreach (var monster in monsters)
+                {
+                    if (!IsAliveTarget(monster))
+                        continue;
+
+                    if (IsLeader(monster) || IsEliteMinionLike(monster))
+                        continue;
+
+                    if (IsInvulnerable(monster) || IsIllusionOrClone(monster) || IsJuggernautPack(monster))
+                        continue;
+
+                    if (IsShockTowerThreat(monster))
+                        continue;
+
+                    float distance = SafeDistance(monster);
+                    float radius = 0f;
+                    try { radius = monster.RadiusBottom; } catch { }
+
+                    float bonus = HitboxRangeBonus(monster);
+                    if (distance > PestiPick() + bonus)
+                        continue;
+
+                    double progression = GetMonsterRiftProgression(monster);
+
+                    bool highValue = progression >= HighValueTrashMinRiftProgression;
+                    bool mediumValue = includeMedium && progression >= MediumValueTrashMinRiftProgression && distance <= MediumValueTrashPreferRangeYards;
+
+                    if (!highValue && !mediumValue)
+                        continue;
+
+                    double score = GetBigTrashProgressionScore(distance, progression);
+
+                    // Medium-value trash is useful, but it must not beat true 0.85+ big trash.
+                    if (!highValue)
+                        score -= 0.18d;
+
+                    float distanceScore = GetTrashCloseBucketScore(distance);
+
+                    bool better =
+                        score > bestScore + 0.02d
+                        || (Math.Abs(score - bestScore) <= 0.02d && radius > bestRadius + 0.20f)
+                        || (Math.Abs(score - bestScore) <= 0.02d && Math.Abs(radius - bestRadius) <= 0.20f && distanceScore < bestDistanceScore);
+
+                    if (better)
+                    {
+                        best = monster;
+                        bestScore = score;
+                        bestRadius = radius;
+                        bestDistanceScore = distanceScore;
                     }
                 }
             }
@@ -2402,17 +2589,14 @@ namespace Turbo.Plugins.s7o
 
         private float GetTrashPriorityScore(IMonster monster, float distance)
         {
+            // Normal trash fallback should mostly mean "closest to me".
+            // High/medium progression trash is handled by PickHighValueTrash().
             float score = GetTrashCloseBucketScore(distance);
-
-            double progression = 0d;
-            try { progression = monster.SnoMonster == null ? 0d : monster.SnoMonster.RiftProgression; } catch { }
-            if (progression >= BigTrashMinRiftProgression)
-                score -= Math.Min(1.25f, (float)((progression - BigTrashMinRiftProgression) * 5.0d));
 
             float radius = 0f;
             try { radius = monster.RadiusBottom; } catch { }
             if (radius > BaselineRadiusBottom)
-                score -= Math.Min(0.75f, (radius - BaselineRadiusBottom) * 0.25f);
+                score -= Math.Min(0.35f, (radius - BaselineRadiusBottom) * 0.12f);
 
             return score;
         }
@@ -2481,6 +2665,49 @@ namespace Turbo.Plugins.s7o
             return false;
         }
 
+
+        private bool IsActuallySelectedTarget(uint acd)
+        {
+            if (acd == 0)
+                return false;
+
+            try
+            {
+                var selected = Hud.Game.SelectedMonster2;
+                return selected != null && selected.IsAlive && selected.AcdId == acd;
+            }
+            catch { return false; }
+        }
+
+        private bool TryMoveCachedHover(uint acd, float x, float y, int tick, bool force)
+        {
+            if (acd == 0)
+                return false;
+
+            if (_cachedHoverAcdId == acd && tick < _cachedHoverUntilTick)
+            {
+                float px = x + _cachedHoverDx;
+                float py = y + _cachedHoverDy;
+                if (IsHardSafeScreenTarget(px, py) && SafeMouseMove(px, py, tick))
+                {
+                    _lastMouseMoveTick = tick;
+                    return true;
+                }
+            }
+
+            if (force && _stableLockAcdId == acd && tick < _stableLockUntilTick)
+            {
+                float px = x + _stableLockDx;
+                float py = y + _stableLockDy;
+                if (IsHardSafeScreenTarget(px, py) && SafeMouseMove(px, py, tick))
+                {
+                    _lastMouseMoveTick = tick;
+                    return true;
+                }
+            }
+
+            return false;
+        }
         private void TrySnap(IMonster monster, int tick)
         {
             if (monster == null || !monster.IsAlive || !monster.IsOnScreen)
@@ -2500,15 +2727,22 @@ namespace Turbo.Plugins.s7o
             if (_lastMouseMoveTick > 0 && tick - _lastMouseMoveTick < minTicks)
                 return;
 
-            if (_unhoverableUntilTick > tick && acd == _unhoverableAcdId && SafeDistance(monster) <= PestiPick() + 3f)
-                return;
-
             float x, y;
             if (!TryGetMonsterScreen(monster, out x, out y))
                 return;
 
-            bool eliteLike = IsLeader(monster) || IsEliteMinionLike(monster);
+            bool eliteLike = IsLeader(monster) || IsEliteMinionLike(monster) || IsBossLike(monster);
             bool cheapFarTarget = SafeDistance(monster) > PestiPick() + 2f;
+
+            if (eliteLike && IsActuallySelectedTarget(acd))
+            {
+                RegisterHoverSuccess(acd, tick, _lastHoverDx, _lastHoverDy, _lastSnapAttemptBin);
+                _snapPhase = 0;
+                return;
+            }
+
+            if (_unhoverableUntilTick > tick && acd == _unhoverableAcdId && SafeDistance(monster) <= PestiPick() + 3f)
+                return;
 
             if (!eliteLike)
             {
@@ -2523,19 +2757,9 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
-            try
-            {
-                var selected = Hud.Game.SelectedMonster2;
-                if (selected != null && selected.IsAlive && selected.AcdId == acd)
-                {
-                    RegisterHoverSuccess(acd, tick, _lastHoverDx, _lastHoverDy, _lastSnapAttemptBin);
-                    SafeMouseMove(x + _lastHoverDx, y + _lastHoverDy, tick);
-                    _lastMouseMoveTick = tick;
-                    _snapPhase = 0;
-                    return;
-                }
-            }
-            catch { }
+            bool pulseOrAssist = _pulseActive || tick < _siphonAssistUntilTick;
+            if ((pulseOrAssist || reacquireQuick) && TryMoveCachedHover(acd, x, y, tick, true))
+                return;
 
             if (_stableLockAcdId == acd && tick < _stableLockUntilTick)
             {
@@ -2544,7 +2768,7 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
-            bool softWindow = _pulseActive || tick < _siphonAssistUntilTick || reacquireQuick;
+            bool softWindow = pulseOrAssist || reacquireQuick;
             if (_softLockAcdId == acd && tick < _softLockUntilTick && softWindow)
             {
                 if (SafeMouseMove(x + _softLockDx, y + _softLockDy, tick))
@@ -2572,27 +2796,49 @@ namespace Turbo.Plugins.s7o
             float bestScore = float.MinValue;
             float bestDx = 0f, bestDy = 0f;
             int bestBin = -1;
+            int bestZone = -1;
             int bestIndex = start;
+            bool hadHardSafeProbe = false;
 
-            int probesThisTick = AggressiveScanMode || alternateScan || reacquireQuick ? Math.Min(maxProbes, 18) : Math.Min(maxProbes, 10);
-            for (int i = 0; i < probesThisTick; i++)
+            int probesThisTick = AggressiveScanMode
+                ? Math.Min(maxProbes, 30)
+                : ((alternateScan || reacquireQuick) ? Math.Min(maxProbes, 22) : Math.Min(maxProbes, 10));
+
+            for (int pass = 0; pass < 2 && bestScore == float.MinValue; pass++)
             {
-                int idx = (start + i) % maxProbes;
-                float dx = _rankedProbeDx[idx];
-                float dy = _rankedProbeDy[idx];
-                int bin = _rankedProbeBin[idx];
-                float score = _rankedProbeScore[idx];
+                bool allowSoftSkillbar = pass == 1;
 
-                if (!IsSafeScreenTarget(x + dx, y + dy))
-                    continue;
-
-                if (score > bestScore)
+                for (int i = 0; i < probesThisTick; i++)
                 {
-                    bestScore = score;
-                    bestDx = dx;
-                    bestDy = dy;
-                    bestBin = bin;
-                    bestIndex = idx;
+                    int idx = (start + i) % maxProbes;
+                    float dx = _rankedProbeDx[idx];
+                    float dy = _rankedProbeDy[idx];
+                    int bin = _rankedProbeBin[idx];
+                    int zone = _rankedProbeZone[idx];
+                    float px = x + dx;
+                    float py = y + dy;
+
+                    if (!IsHardSafeScreenTarget(px, py))
+                        continue;
+
+                    hadHardSafeProbe = true;
+                    bool softSkillbar = IsInsideSoftSkillbarMask(px, py);
+                    if (softSkillbar && !allowSoftSkillbar)
+                        continue;
+
+                    float score = _rankedProbeScore[idx];
+                    if (softSkillbar)
+                        score -= 2.5f;
+
+                    if (score > bestScore)
+                    {
+                        bestScore = score;
+                        bestDx = dx;
+                        bestDy = dy;
+                        bestBin = bin;
+                        bestZone = zone;
+                        bestIndex = idx;
+                    }
                 }
             }
 
@@ -2603,13 +2849,15 @@ namespace Turbo.Plugins.s7o
                 _softLockAcdId = acd;
                 _softLockDx = bestDx;
                 _softLockDy = bestDy;
-                _softLockUntilTick = tick + SoftLockTicks + ((_pulseActive || tick < _siphonAssistUntilTick) ? 4 : 0);
+                _softLockUntilTick = tick + SoftLockTicks + (pulseOrAssist ? 4 : 0);
                 _lastSnapAttemptAcd = acd;
                 _lastSnapAttemptBin = bestBin;
+                _lastSnapAttemptZone = bestZone;
                 _lastSnapAttemptTick = tick;
 
                 if (bestBin >= 0 && bestBin < AdaptiveBinCount)
                     RecordAdaptiveAttempt(bestBin);
+                RecordProbeZoneAttempt(acd, bestZone, tick);
 
                 if (SafeMouseMove(x + bestDx, y + bestDy, tick))
                 {
@@ -2619,6 +2867,13 @@ namespace Turbo.Plugins.s7o
                         _snapPhase = 0;
                     return;
                 }
+            }
+            else if (hadHardSafeProbe)
+            {
+                _alternateScanAcdId = acd;
+                _alternateScanUntilTick = tick + AlternateScanWindowTicks;
+                _snapPhase = 0;
+                return;
             }
 
             if (SafeDistance(monster) <= PestiPick() + 3f)
@@ -2678,10 +2933,14 @@ namespace Turbo.Plugins.s7o
                 _adaptiveBinBad[bin] = Math.Max(0f, _adaptiveBinBad[bin] - 0.25f);
             }
 
+            if (_lastSnapAttemptAcd == acd && _lastSnapAttemptZone >= 0)
+                RecordProbeZoneSuccess(acd, _lastSnapAttemptZone, tick);
+
             if (_reacquireAcdId == acd) { _reacquireAcdId = 0; _reacquireUntilTick = 0; }
             if (_alternateScanAcdId == acd) { _alternateScanAcdId = 0; _alternateScanUntilTick = 0; }
             if (_skipLeaderAcdId == acd) { _skipLeaderAcdId = 0; _skipLeaderUntilTick = 0; }
             if (_lastFailedLeaderAcdId == acd) { _lastFailedLeaderAcdId = 0; _lastFailedLeaderCount = 0; }
+            if (_unhoverableAcdId == acd) { _unhoverableAcdId = 0; _unhoverableUntilTick = 0; }
         }
 
         private void BuildAdaptiveProbeOrder(IMonster monster, float fx, float fy, bool cheapFarTarget, bool alternateScan)
@@ -2754,6 +3013,18 @@ namespace Turbo.Plugins.s7o
                 AddMicroProbeCluster(shoulderX * 1.25f, headLowY, 8f * scale, 8f * scale, 7, monster, fx, fy, cheapFarTarget);
             }
 
+            if (AggressiveScanMode || alternateScan)
+            {
+                AddRankedProbeCandidate(-shoulderX * 1.35f, shoulderY, 0, monster, fx, fy, cheapFarTarget);
+                AddRankedProbeCandidate(shoulderX * 1.35f, shoulderY, 1, monster, fx, fy, cheapFarTarget);
+                AddRankedProbeCandidate(-torsoEdgeX * 1.45f, torsoMidY, 2, monster, fx, fy, cheapFarTarget);
+                AddRankedProbeCandidate(torsoEdgeX * 1.45f, torsoMidY, 3, monster, fx, fy, cheapFarTarget);
+                AddRankedProbeCandidate(-hipX * 1.40f, hipY, 4, monster, fx, fy, cheapFarTarget);
+                AddRankedProbeCandidate(hipX * 1.40f, hipY, 5, monster, fx, fy, cheapFarTarget);
+                AddRankedProbeCandidate(-footX * 1.55f, kneeY, 6, monster, fx, fy, cheapFarTarget);
+                AddRankedProbeCandidate(footX * 1.55f, kneeY, 7, monster, fx, fy, cheapFarTarget);
+            }
+
             SortRankedProbes();
         }
 
@@ -2765,21 +3036,33 @@ namespace Turbo.Plugins.s7o
             AddRankedProbeCandidate(dx, dy - jitterY, bin, monster, fx, fy, cheapFarTarget);
             AddRankedProbeCandidate(dx, dy + jitterY, bin, monster, fx, fy, cheapFarTarget);
         }
-
         private void AddRankedProbeCandidate(float dx, float dy, int bin, IMonster monster, float fx, float fy, bool cheapFarTarget)
         {
             if (_rankedProbeCount >= AdaptiveCandidateCapacity)
                 return;
 
-            if (!IsSafeScreenTarget(fx + dx, fy + dy))
+            if (!IsHardSafeScreenTarget(fx + dx, fy + dy))
                 return;
+
+            int safeBin = Math.Max(0, Math.Min(AdaptiveBinCount - 1, bin));
+            int zone = GetProbeZone(monster, dx, dy);
+            float score = ScoreAdaptiveProbe(monster, fx, fy, dx, dy, safeBin, cheapFarTarget);
+
+            uint acd = 0;
+            int tick = 0;
+            try { acd = monster != null ? monster.AcdId : 0u; } catch { }
+            try { tick = Hud.Game.CurrentGameTick; } catch { }
+            if (acd != 0 && tick > 0)
+                score += GetProbeZoneCoverageBonus(acd, zone, tick) * 0.45f;
 
             _rankedProbeDx[_rankedProbeCount] = dx;
             _rankedProbeDy[_rankedProbeCount] = dy;
-            _rankedProbeBin[_rankedProbeCount] = Math.Max(0, Math.Min(AdaptiveBinCount - 1, bin));
-            _rankedProbeScore[_rankedProbeCount] = ScoreAdaptiveProbe(monster, fx, fy, dx, dy, _rankedProbeBin[_rankedProbeCount], cheapFarTarget);
+            _rankedProbeBin[_rankedProbeCount] = safeBin;
+            _rankedProbeZone[_rankedProbeCount] = zone;
+            _rankedProbeScore[_rankedProbeCount] = score;
             _rankedProbeCount++;
         }
+
 
         private void SortRankedProbes()
         {
@@ -2803,6 +3086,7 @@ namespace Turbo.Plugins.s7o
                 float dx = _rankedProbeDx[i]; _rankedProbeDx[i] = _rankedProbeDx[best]; _rankedProbeDx[best] = dx;
                 float dy = _rankedProbeDy[i]; _rankedProbeDy[i] = _rankedProbeDy[best]; _rankedProbeDy[best] = dy;
                 int b = _rankedProbeBin[i]; _rankedProbeBin[i] = _rankedProbeBin[best]; _rankedProbeBin[best] = b;
+                int z = _rankedProbeZone[i]; _rankedProbeZone[i] = _rankedProbeZone[best]; _rankedProbeZone[best] = z;
             }
         }
 
@@ -3095,6 +3379,117 @@ namespace Turbo.Plugins.s7o
             _adaptiveBinBad[bin] = Math.Min(20f, _adaptiveBinBad[bin] + 0.10f);
         }
 
+        private int GetProbeZone(IMonster monster, float dx, float dy)
+        {
+            float rb = 0f;
+            try { rb = monster != null ? (float)monster.RadiusBottom : 0f; } catch { }
+            if (rb <= 0f) rb = BaselineRadiusBottom;
+            float scale = Math.Max(0.5f, Math.Min(rb / BaselineRadiusBottom, 3.0f));
+            float headLowY = -(BaseHeadPx * 0.84f * scale);
+            float chestTopY = -(BaseChestPx * scale);
+            float abdomenY = -(BaseAbdomenPx * scale);
+            float torsoMidY = (chestTopY + abdomenY) * 0.5f;
+            return GetProbeZone(dx, dy, scale, torsoMidY, headLowY);
+        }
+
+        private int GetProbeZone(float dx, float dy, float scale, float torsoMidY, float headLowY)
+        {
+            float centerHalfX = Math.Max(8f, BaseShoulderXPx * 0.42f * scale);
+            int col = dx < -centerHalfX ? 0 : (dx > centerHalfX ? 2 : 1);
+
+            float topCut = (headLowY + torsoMidY) * 0.5f;
+            float bottomCut = torsoMidY + Math.Max(6f, BaseAbdomenPx * 0.42f * scale);
+            int row = dy <= topCut ? 0 : (dy >= bottomCut ? 2 : 1);
+
+            return row * 3 + col;
+        }
+
+        private void ClearProbeZoneState()
+        {
+            _probeZoneAcdId = 0;
+            _probeZoneSuccessAcdId = 0;
+            _lastSuccessProbeZone = -1;
+            _lastSuccessProbeZoneTick = 0;
+            for (int i = 0; i < ProbeZoneCount; i++)
+            {
+                _probeZoneLastTryTick[i] = 0;
+                _probeZoneTryCount[i] = 0;
+            }
+        }
+
+        private void EnsureProbeZoneState(uint acd)
+        {
+            if (_probeZoneAcdId == acd)
+                return;
+
+            _probeZoneAcdId = acd;
+            for (int i = 0; i < ProbeZoneCount; i++)
+            {
+                _probeZoneLastTryTick[i] = 0;
+                _probeZoneTryCount[i] = 0;
+            }
+        }
+
+        private float GetProbeZoneCoverageBonus(uint acd, int zone, int tick)
+        {
+            if (acd == 0 || zone < 0 || zone >= ProbeZoneCount)
+                return 0f;
+
+            EnsureProbeZoneState(acd);
+
+            int last = _probeZoneLastTryTick[zone];
+            int age = last > 0 ? tick - last : 9999;
+            int tries = _probeZoneTryCount[zone];
+            float bonus = 0f;
+
+            if (last == 0)
+                bonus += 0.95f;
+            else if (age >= 10)
+                bonus += 0.55f;
+            else if (age >= 5)
+                bonus += 0.25f;
+
+            bonus -= Math.Min(1.10f, tries * 0.16f);
+
+            if (_probeZoneSuccessAcdId == acd && _lastSuccessProbeZone >= 0)
+            {
+                if (zone == _lastSuccessProbeZone)
+                    bonus += 0.80f;
+                else if (ProbeZonesAdjacent(zone, _lastSuccessProbeZone))
+                    bonus += 0.32f;
+            }
+
+            return bonus;
+        }
+
+        private bool ProbeZonesAdjacent(int a, int b)
+        {
+            if (a < 0 || b < 0) return false;
+            int ar = a / 3, ac = a % 3;
+            int br = b / 3, bc = b % 3;
+            return Math.Abs(ar - br) <= 1 && Math.Abs(ac - bc) <= 1;
+        }
+
+        private void RecordProbeZoneAttempt(uint acd, int zone, int tick)
+        {
+            if (acd == 0 || zone < 0 || zone >= ProbeZoneCount)
+                return;
+
+            EnsureProbeZoneState(acd);
+            _probeZoneLastTryTick[zone] = tick;
+            _probeZoneTryCount[zone] = Math.Min(99, _probeZoneTryCount[zone] + 1);
+        }
+
+        private void RecordProbeZoneSuccess(uint acd, int zone, int tick)
+        {
+            if (acd == 0 || zone < 0 || zone >= ProbeZoneCount)
+                return;
+
+            _probeZoneSuccessAcdId = acd;
+            _lastSuccessProbeZone = zone;
+            _lastSuccessProbeZoneTick = tick;
+        }
+
         private void GetProbeOffset(IMonster monster, int phase, out float dx, out float dy)
         {
             dx = 0f;
@@ -3140,11 +3535,11 @@ namespace Turbo.Plugins.s7o
                 if (x > w - 1f) x = w - 1f;
                 if (y > h - 1f) y = h - 1f;
 
-                if (!IsSafeScreenTarget(x, y))
+                if (!IsHardSafeScreenTarget(x, y))
                     return false;
 
                 BeginCursorOwnershipIfNeeded(tick);
-                SetCursorPos((int)Math.Round(x), (int)Math.Round(y));
+                SetCursorPos((int)Math.Round((double)x), (int)Math.Round((double)y));
                 _cursorWasMovedByPlugin = true;
                 return true;
             }
@@ -3226,8 +3621,8 @@ namespace Turbo.Plugins.s7o
 
             try
             {
-                if (Hud != null && Hud.Window != null && Hud.Window.IsForeground && IsSafeScreenTarget(_pendingRestoreX, _pendingRestoreY))
-                    SetCursorPos((int)Math.Round(_pendingRestoreX), (int)Math.Round(_pendingRestoreY));
+                if (Hud != null && Hud.Window != null && Hud.Window.IsForeground && IsHardSafeScreenTarget(_pendingRestoreX, _pendingRestoreY))
+                    SetCursorPos((int)Math.Round((double)_pendingRestoreX), (int)Math.Round((double)_pendingRestoreY));
             }
             catch { }
 
@@ -3238,7 +3633,7 @@ namespace Turbo.Plugins.s7o
             _engageStartTick = 0;
         }
 
-        private bool IsSafeScreenTarget(float x, float y)
+        private bool IsHardSafeScreenTarget(float x, float y)
         {
             try
             {
@@ -3254,7 +3649,7 @@ namespace Turbo.Plugins.s7o
                 if (IsInsidePlayerPortraitFace(x, y))
                     return false;
 
-                if (IsInsideExplicitNoClickMask(x, y))
+                if (IsInsideHardExplicitNoClickMask(x, y))
                     return false;
 
                 return true;
@@ -3262,7 +3657,28 @@ namespace Turbo.Plugins.s7o
             catch { return true; }
         }
 
-        private bool IsInsideExplicitNoClickMask(float x, float y)
+        private bool IsPreferredAutoSnapScreenTarget(float x, float y)
+        {
+            if (!IsHardSafeScreenTarget(x, y))
+                return false;
+
+            return !IsInsideSoftSkillbarMask(x, y);
+        }
+
+        private bool IsSafeScreenTarget(float x, float y)
+        {
+            return IsHardSafeScreenTarget(x, y);
+        }
+
+        private bool IsLargeLowerSkillbarMaskSource(RectangleF src)
+        {
+            return src.Top >= 850f
+                && src.Left <= 400f
+                && src.Width >= 900f
+                && src.Height >= 120f;
+        }
+
+        private bool IsInsideScaledMask(RectangleF src, float x, float y)
         {
             try
             {
@@ -3272,22 +3688,63 @@ namespace Turbo.Plugins.s7o
                 float sx = Hud.Window.Size.Width / UiMaskReferenceWidth;
                 float sy = Hud.Window.Size.Height / UiMaskReferenceHeight;
 
+                RectangleF r = new RectangleF(
+                    (src.Left * sx) - UiMaskPaddingPx,
+                    (src.Top * sy) - UiMaskPaddingPx,
+                    (src.Width * sx) + (UiMaskPaddingPx * 2f),
+                    (src.Height * sy) + (UiMaskPaddingPx * 2f));
+
+                return r.Width > 0f
+                    && r.Height > 0f
+                    && x >= r.Left
+                    && x <= r.Right
+                    && y >= r.Top
+                    && y <= r.Bottom;
+            }
+            catch { return false; }
+        }
+
+        private bool IsInsideHardExplicitNoClickMask(float x, float y)
+        {
+            try
+            {
                 for (int i = 0; i < NoClickMaskRects1920x1080.Length; i++)
                 {
                     RectangleF src = NoClickMaskRects1920x1080[i];
-                    RectangleF r = new RectangleF(
-                        (src.Left * sx) - UiMaskPaddingPx,
-                        (src.Top * sy) - UiMaskPaddingPx,
-                        (src.Width * sx) + (UiMaskPaddingPx * 2f),
-                        (src.Height * sy) + (UiMaskPaddingPx * 2f));
+                    if (IsLargeLowerSkillbarMaskSource(src))
+                        continue;
 
-                    if (r.Width > 0f && r.Height > 0f && x >= r.Left && x <= r.Right && y >= r.Top && y <= r.Bottom)
+                    if (IsInsideScaledMask(src, x, y))
                         return true;
                 }
 
                 return false;
             }
             catch { return false; }
+        }
+
+        private bool IsInsideSoftSkillbarMask(float x, float y)
+        {
+            try
+            {
+                for (int i = 0; i < NoClickMaskRects1920x1080.Length; i++)
+                {
+                    RectangleF src = NoClickMaskRects1920x1080[i];
+                    if (!IsLargeLowerSkillbarMaskSource(src))
+                        continue;
+
+                    if (IsInsideScaledMask(src, x, y))
+                        return true;
+                }
+
+                return false;
+            }
+            catch { return false; }
+        }
+
+        private bool IsInsideExplicitNoClickMask(float x, float y)
+        {
+            return IsInsideHardExplicitNoClickMask(x, y) || IsInsideSoftSkillbarMask(x, y);
         }
 
         private bool IsInsidePlayerPortraitFace(float x, float y)
@@ -3435,7 +3892,9 @@ namespace Turbo.Plugins.s7o
             _rankedProbeCount = 0;
             _lastSnapAttemptAcd = 0;
             _lastSnapAttemptBin = -1;
+            _lastSnapAttemptZone = -1;
             _lastSnapAttemptTick = 0;
+            ClearProbeZoneState();
             _stableLockAcdId = 0;
             _stableLockDx = 0f;
             _stableLockDy = 0f;
@@ -3473,6 +3932,7 @@ namespace Turbo.Plugins.s7o
             _lastSiphonTargetAcdId = 0;
             _targetSwitchRefreshAcdId = 0;
             ClearLateRefreshIntent();
+            ClearFastBuildGuard();
             ClearNoTargetAnchorLimiter(false);
             _lastPulseWasNoTargetAnchor = false;
             _lastCorpseScanTick = 0;
