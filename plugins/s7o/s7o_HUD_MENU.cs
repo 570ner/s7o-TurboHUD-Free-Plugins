@@ -386,6 +386,7 @@ namespace Turbo.Plugins.s7o
         private int _tipsAncientDurationSec = 5;
         private bool _tipsHealthGlobes = true;
         private bool _tipsProgressOrbs = true;
+        private bool _tipsBloodIsPowerTracker = true;
         private float _tipsHealthDotSize = 0.80f;
         private float _tipsProgressDotSize = 1.05f;
         private bool _tipsPlayerMarkers = true;
@@ -4407,6 +4408,7 @@ namespace Turbo.Plugins.s7o
 
                 tips.ShowHealthGlobeDots = _tipsHealthGlobes;
                 tips.ShowRiftProgressOrbDots = _tipsProgressOrbs;
+                tips.ShowBloodIsPowerTracker = _tipsBloodIsPowerTracker;
                 tips.HealthGlobeDotRadius = _tipsHealthDotSize;
                 tips.RiftOrbDotRadius = _tipsProgressDotSize;
 
@@ -8132,6 +8134,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 case "ancienttext": _tipsAncientText = !_tipsAncientText; break;
                 case "healthglobes": _tipsHealthGlobes = !_tipsHealthGlobes; break;
                 case "progressorbs": _tipsProgressOrbs = !_tipsProgressOrbs; break;
+                case "bloodispower": _tipsBloodIsPowerTracker = !_tipsBloodIsPowerTracker; break;
                 case "playermarkers": _tipsPlayerMarkers = !_tipsPlayerMarkers; break;
             }
         }
@@ -8425,7 +8428,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 private int GetCustomVisualExpandedRowCount(string feature)
         {
             if (feature == "tipshelper")
-                return 12;
+                return 13;
 
             if (feature == "dangeraffixes")
                 return 26;
@@ -8836,7 +8839,25 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
         private void DrawTipsSingleToggleRow(RectangleF r, int rowIdx, string title, string desc, bool enabled, string action)
         {
-            DrawSingleToggleOptionRow(r, rowIdx, title, desc, enabled, action, string.Empty);
+            if (string.IsNullOrWhiteSpace(title))
+                return;
+
+            (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
+
+            const float btnW = 74f;
+            RectangleF btn = new RectangleF(r.Right - btnW - 8f, r.Top + 8f, btnW, r.Height - 16f);
+
+            float textX = r.Left + 14f;
+            float textW = Math.Max(30f, btn.Left - textX - 12f);
+
+            DrawOutlinedTextAt(_fRowTitle, _fRowTitleShadow, Trim(title, ApproxCharsForWidth(textW, 5.8f)), textX, r.Top + 7f);
+
+            string[] lines = WrapToggleDescription(desc, ApproxCharsForToggleDescription(textW), 2);
+            if (lines.Length > 0) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[0], textX, r.Top + 29f);
+            if (lines.Length > 1) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[1], textX, r.Top + 47f);
+
+            DrawGlossButton(btn, enabled ? "ON" : "OFF", enabled || IsVisualButtonFlashActive(action), false, true);
+            RegisterToggleHit(action, btn);
         }
 
         private void DrawTipsColorRow(RectangleF r, int rowIdx, string title, string feature, int colorIdx, int tone)
@@ -8893,21 +8914,24 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     DrawTipsToggleSizeRow(r, rowIdx, "Progress Orbs", "Purple dots on Greater Rift progress orbs.", _tipsProgressOrbs, "visual:tipstoggle:progressorbs", "tipsprogressdot", _tipsProgressDotSize);
                     return;
                 case 6:
-                    DrawTipsPlayerMarkerRow(r, rowIdx);
+                    DrawTipsSingleToggleRow(r, rowIdx, "Blood is Power Tracker", "Shows Blood is Power health-loss progress on Land of the Dead while it can still receive the passive cooldown reduction.", _tipsBloodIsPowerTracker, "visual:tipstoggle:bloodispower");
                     return;
                 case 7:
-                    DrawTipsColorRow(r, rowIdx, "1st Player Color", "tipsplayer1", _tipsPlayer1ColorIdx, _tipsPlayer1Tone);
+                    DrawTipsPlayerMarkerRow(r, rowIdx);
                     return;
                 case 8:
-                    DrawTipsColorRow(r, rowIdx, "2nd Player Color", "tipsplayer2", _tipsPlayer2ColorIdx, _tipsPlayer2Tone);
+                    DrawTipsColorRow(r, rowIdx, "1st Player Color", "tipsplayer1", _tipsPlayer1ColorIdx, _tipsPlayer1Tone);
                     return;
                 case 9:
-                    DrawTipsColorRow(r, rowIdx, "3rd Player Color", "tipsplayer3", _tipsPlayer3ColorIdx, _tipsPlayer3Tone);
+                    DrawTipsColorRow(r, rowIdx, "2nd Player Color", "tipsplayer2", _tipsPlayer2ColorIdx, _tipsPlayer2Tone);
                     return;
                 case 10:
-                    DrawTipsColorRow(r, rowIdx, "4th Player Color", "tipsplayer4", _tipsPlayer4ColorIdx, _tipsPlayer4Tone);
+                    DrawTipsColorRow(r, rowIdx, "3rd Player Color", "tipsplayer3", _tipsPlayer3ColorIdx, _tipsPlayer3Tone);
                     return;
                 case 11:
+                    DrawTipsColorRow(r, rowIdx, "4th Player Color", "tipsplayer4", _tipsPlayer4ColorIdx, _tipsPlayer4Tone);
+                    return;
+                case 12:
                     DrawTipsPlayerSizeRow(r, rowIdx);
                     return;
             }
@@ -14850,7 +14874,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     _tipsPlayer4ColorIdx.ToString(CultureInfo.InvariantCulture) + "|" +
                     _tipsPlayer4Tone.ToString(CultureInfo.InvariantCulture) + "|" +
                     _tipsPlayerGroundSize.ToString(CultureInfo.InvariantCulture) + "|" +
-                    _tipsPlayerMinimapDotSize.ToString(CultureInfo.InvariantCulture));
+                    _tipsPlayerMinimapDotSize.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _tipsBloodIsPowerTracker.ToString(CultureInfo.InvariantCulture));
 
                 lines.Add("VIS_DANGEROUS_AFFIX_VISUALS=" + _visDangerousAffixVisualsEnabled.ToString(CultureInfo.InvariantCulture));
                 lines.Add("VIS_DANGEROUS_AFFIX_VISUALS_EXPANDED=" + _visDangerousAffixVisualsExpanded.ToString(CultureInfo.InvariantCulture));
@@ -15017,6 +15042,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             TryParseInt(p[28], ref _tipsPlayer4Tone);
             TryParseFloat(p[29], ref _tipsPlayerGroundSize);
             TryParseFloat(p[30], ref _tipsPlayerMinimapDotSize);
+            if (p.Length > 31)
+                _tipsBloodIsPowerTracker = ParseBool(p[31], _tipsBloodIsPowerTracker);
 
             _tipsPrimalTextColorIdx = ViClamp(_tipsPrimalTextColorIdx, 0, 7);
             _tipsPrimalTextTone = ViClamp(_tipsPrimalTextTone, 0, 10);
