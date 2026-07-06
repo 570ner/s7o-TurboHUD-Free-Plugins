@@ -50,6 +50,9 @@ namespace Turbo.Plugins.s7o
         private int _boughtCount;
         private string _lastStatus;
         private int _statusUntilTick = NoTick;
+        private int _restoreCursorX;
+        private int _restoreCursorY;
+        private bool _restoreCursorPending;
 
         private RectangleF _panelRect = RectangleF.Empty;
         private RectangleF _selectHotkeyRect = RectangleF.Empty;
@@ -239,6 +242,10 @@ namespace Turbo.Plugins.s7o
                 _runItems.Add(hovered);
             }
 
+            _restoreCursorX = Hud.Window.CursorX;
+            _restoreCursorY = Hud.Window.CursorY;
+            _restoreCursorPending = true;
+
             _rotationIndex = 0;
             _lastClickedItemId = 0;
             _boughtCount = 0;
@@ -389,12 +396,19 @@ namespace Turbo.Plugins.s7o
 
         private void StopRun(string status)
         {
+            bool restoreCursor = _running && _restoreCursorPending;
+
             _running = false;
             _nextActionTick = 0;
             _rotationIndex = 0;
             _lastClickedItemId = 0;
             _runItems.Clear();
             _singleHoverItemId = 0;
+
+            if (restoreCursor)
+                s7o_KadalaInput.MoveCursor(_restoreCursorX, _restoreCursorY);
+
+            _restoreCursorPending = false;
             if (!string.IsNullOrEmpty(status)) ShowStatus(status, StatusHoldMs);
         }
 
@@ -1130,6 +1144,11 @@ namespace Turbo.Plugins.s7o
 
         [DllImport("user32.dll")] private static extern bool SetCursorPos(int x, int y);
         [DllImport("user32.dll", SetLastError = true)] private static extern uint SendInput(uint inputCount, INPUT[] inputs, int inputSize);
+
+        public static bool MoveCursor(int x, int y)
+        {
+            return SetCursorPos(x, y);
+        }
 
         public static bool LeftClickRect(RectangleF rect)
         {
