@@ -46,7 +46,7 @@ namespace Turbo.Plugins.s7o
         // while avoiding the old overly large +4f inflated hit test.
         private const float ProfileCloseMaskPaddingPx = 3f;
 
-        private const int SettingsVersion = 16;
+        private const int SettingsVersion = 19;
 
         // Default menu-dot placement target:
         // lower-right skill-bar area on 1920x1080, away from chat and other overlays.
@@ -460,6 +460,7 @@ namespace Turbo.Plugins.s7o
         private bool _autoLootTrash = false;
         private bool _autoLootMaterials = true;
         private bool _autoLootDeathsBreath = false;
+        private bool _autoLootTalkToUrshi = false;
         private bool _inventoryDropExpanded = false;
         private bool _inventoryDropEnabled = true;
         private bool _inventoryDropNonAccountLegendaries = false;
@@ -470,6 +471,7 @@ namespace Turbo.Plugins.s7o
         private bool _pestilenceRgkExpanded = false;
         private int _pestilenceRgkNormalStacks = 8;
         private int _pestilenceRgkPowerStacks = 6;
+        private bool _pestilenceRgkAutoSnap = true;
         private bool _pestilenceRgkAutoSiphon = true;
         private bool _pestilenceRgkLateRefreshAssist = true;
         private bool _pestilenceRgkPrioritizeDebuffed = true;
@@ -481,6 +483,11 @@ namespace Turbo.Plugins.s7o
         private ushort _pestilenceRgkJuggerHotkeyVk = 0x20;
         private bool _pestilenceRgkJuggerHotkeyCapture = false;
         private bool _pestilenceRgkRgAssist = false;
+        private bool _pestilenceRgkZeiCircle = false;
+        private bool _pestilenceRgkZeiExpanded = false;
+        private int _pestilenceRgkZeiColorIdx = 5;
+        private int _pestilenceRgkZeiTone = 2;
+        private float _pestilenceRgkZeiThickness = 2.4f;
         private readonly ActionKey[] _autoSkillBindActions =
         {
             ActionKey.Skill1,
@@ -897,6 +904,7 @@ namespace Turbo.Plugins.s7o
         public override void Load(IController hud)
         {
             base.Load(hud);
+            ResetTurboHudLogsDirectory();
             LoadSettings();
             ApplyGlobalTtsSettings();
             ClaimAutoGemUiOwnership();
@@ -2261,6 +2269,9 @@ namespace Turbo.Plugins.s7o
             if (action == "main:plugin:itemsalvage" || action == "toggles:plugin:itemsalvage")
                 return TogglePluginByTypeName("ITEM SALVAGE", "s7o_ItemSalvage");
 
+            if (action == "toggles:plugin:armorybugfix")
+                return TogglePluginByTypeName("ARMORY BUG FIX", "s7o_ArmoryBugFix");
+
             if (action == "main:plugin:mystic" || action == "toggles:plugin:mystic")
                 return TogglePluginByTypeName("MYSTIC ENCHANT", "s7o_MysticEnchantPlugin");
 
@@ -2827,7 +2838,9 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
-            if (action.Equals("pestilence:expand", StringComparison.OrdinalIgnoreCase) || action.StartsWith("pestilence:option:", StringComparison.OrdinalIgnoreCase))
+            if (action.Equals("pestilence:expand", StringComparison.OrdinalIgnoreCase)
+                || action.StartsWith("pestilence:option:", StringComparison.OrdinalIgnoreCase)
+                || action.StartsWith("pestilence:zei:", StringComparison.OrdinalIgnoreCase))
             {
                 HandlePestilenceRgkOptionAction(action);
                 return;
@@ -6163,7 +6176,8 @@ namespace Turbo.Plugins.s7o
                     _autoLootScreams,
                     _autoLootTrash,
                     _autoLootMaterials,
-                    _autoLootDeathsBreath);
+                    _autoLootDeathsBreath,
+                    _autoLootTalkToUrshi);
                 plugin.SetPaused(_autoLootEnabled && _autoLootPaused);
             }
             catch { }
@@ -6277,6 +6291,7 @@ namespace Turbo.Plugins.s7o
                 case 7: _autoLootTrash = !_autoLootTrash; _status = "AUTO LOOT TRASH ITEMS: " + (_autoLootTrash ? "ON" : "OFF"); break;
                 case 8: _autoLootMaterials = !_autoLootMaterials; _status = "AUTO LOOT MATERIALS: " + (_autoLootMaterials ? "ON" : "OFF"); break;
                 case 9: _autoLootDeathsBreath = !_autoLootDeathsBreath; _status = "AUTO LOOT DEATH'S BREATH: " + (_autoLootDeathsBreath ? "ON" : "OFF"); break;
+                case 10: _autoLootTalkToUrshi = !_autoLootTalkToUrshi; _status = "AUTO LOOT TALK TO URSHI: " + (_autoLootTalkToUrshi ? "ON" : "OFF"); break;
                 default: return;
             }
 
@@ -6308,6 +6323,7 @@ namespace Turbo.Plugins.s7o
                 case 7: return _autoLootTrash;
                 case 8: return _autoLootMaterials;
                 case 9: return _autoLootDeathsBreath;
+                case 10: return _autoLootTalkToUrshi;
                 default: return false;
             }
         }
@@ -6400,6 +6416,7 @@ namespace Turbo.Plugins.s7o
                 plugin.Configure(
                     _pestilenceRgkNormalStacks,
                     _pestilenceRgkPowerStacks,
+                    _pestilenceRgkAutoSnap,
                     _pestilenceRgkAutoSiphon,
                     _pestilenceRgkLateRefreshAssist,
                     _pestilenceRgkPrioritizeDebuffed,
@@ -6410,6 +6427,12 @@ namespace Turbo.Plugins.s7o
                     _pestilenceRgkJuggerHotkeyEnabled,
                     _pestilenceRgkJuggerHotkeyVk,
                     _pestilenceRgkRgAssist);
+
+                plugin.ConfigureZeiCircle(
+                    _pestilenceRgkZeiCircle,
+                    _pestilenceRgkZeiColorIdx,
+                    _pestilenceRgkZeiTone,
+                    _pestilenceRgkZeiThickness);
             }
             catch { }
         }
@@ -6425,6 +6448,18 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
+            if (string.Equals(action, "pestilence:zei:expand", StringComparison.OrdinalIgnoreCase))
+            {
+                _pestilenceRgkZeiExpanded = !_pestilenceRgkZeiExpanded;
+                _macroToggleFlashTicks["pestilence_rgk_plugin"] = Environment.TickCount;
+                _status = _pestilenceRgkZeiExpanded ? "ZEI 50Y CIRCLE OPTIONS: EXPANDED" : "ZEI 50Y CIRCLE OPTIONS: COLLAPSED";
+                SaveSettings();
+                return;
+            }
+
+            if (HandlePestilenceZeiStyleAction(action))
+                return;
+
             const string prefix = "pestilence:option:";
             if (!action.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
                 return;
@@ -6435,6 +6470,10 @@ namespace Turbo.Plugins.s7o
 
             switch (kind)
             {
+                case 15:
+                    _pestilenceRgkAutoSnap = !_pestilenceRgkAutoSnap;
+                    _status = "PESTILENCE AUTOSNAP: " + (_pestilenceRgkAutoSnap ? "ON" : "OFF");
+                    break;
                 case 1:
                     _pestilenceRgkAutoSiphon = !_pestilenceRgkAutoSiphon;
                     _status = "PESTILENCE AUTOSIPHON: " + (_pestilenceRgkAutoSiphon ? "ON" : "OFF");
@@ -6473,7 +6512,7 @@ namespace Turbo.Plugins.s7o
                     break;
                 case 10:
                     _pestilenceRgkJuggerHotkeyEnabled = !_pestilenceRgkJuggerHotkeyEnabled;
-                    _status = "PESTILENCE JUGGER LOCK: " + (_pestilenceRgkJuggerHotkeyEnabled ? "ON" : "OFF");
+                    _status = "PESTILENCE ELITE CYCLING: " + (_pestilenceRgkJuggerHotkeyEnabled ? "ON" : "OFF");
                     break;
                 case 11:
                     BeginPestilenceJuggerHotkeyCapture();
@@ -6482,6 +6521,10 @@ namespace Turbo.Plugins.s7o
                     _pestilenceRgkRgAssist = !_pestilenceRgkRgAssist;
                     _status = "PESTILENCE RG ASSIST: " + (_pestilenceRgkRgAssist ? "ON" : "OFF");
                     break;
+                case 16:
+                    _pestilenceRgkZeiCircle = !_pestilenceRgkZeiCircle;
+                    _status = "ZEI 50Y CIRCLE: " + (_pestilenceRgkZeiCircle ? "ON" : "OFF");
+                    break;
             }
 
             _macroToggleFlashTicks["pestilence_rgk_plugin"] = Environment.TickCount;
@@ -6489,6 +6532,41 @@ namespace Turbo.Plugins.s7o
             SaveSettings();
         }
 
+
+        private bool HandlePestilenceZeiStyleAction(string action)
+        {
+            const string colorPrefix = "pestilence:zei:color:";
+            if (action.StartsWith(colorPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                int idx;
+                if (!int.TryParse(action.Substring(colorPrefix.Length), NumberStyles.Integer, CultureInfo.InvariantCulture, out idx))
+                    return false;
+
+                _pestilenceRgkZeiColorIdx = ViClamp(idx, 0, 7);
+                _status = "ZEI CIRCLE COLOR: " + PestilenceZeiColorLabel(_pestilenceRgkZeiColorIdx);
+            }
+            else if (action.StartsWith("pestilence:zei:tone:", StringComparison.OrdinalIgnoreCase))
+            {
+                int delta = action.EndsWith(":-1", StringComparison.OrdinalIgnoreCase) ? -1 : 1;
+                _pestilenceRgkZeiTone = ViClamp(_pestilenceRgkZeiTone + delta, 0, 10);
+                _status = "ZEI CIRCLE TONE: " + _pestilenceRgkZeiTone.ToString(CultureInfo.InvariantCulture);
+            }
+            else if (action.StartsWith("pestilence:zei:thickness:", StringComparison.OrdinalIgnoreCase))
+            {
+                int delta = action.EndsWith(":-1", StringComparison.OrdinalIgnoreCase) ? -1 : 1;
+                _pestilenceRgkZeiThickness = ViClampF(_pestilenceRgkZeiThickness + delta * 0.2f, 0.5f, 8.0f);
+                _status = "ZEI CIRCLE THICKNESS: " + FormatVisualFloat(_pestilenceRgkZeiThickness);
+            }
+            else
+            {
+                return false;
+            }
+
+            _macroToggleFlashTicks["pestilence_rgk_plugin"] = Environment.TickCount;
+            ApplyPestilenceRgkSettingsToPlugin();
+            SaveSettings();
+            return true;
+        }
 
         private void BeginPestilenceJuggerHotkeyCapture()
         {
@@ -6499,7 +6577,7 @@ namespace Turbo.Plugins.s7o
             }
 
             _pestilenceRgkJuggerHotkeyCapture = true;
-            _status = "PRESS PESTILENCE JUGGER LOCK HOTKEY";
+            _status = "PRESS PESTILENCE ELITE CYCLING HOTKEY";
         }
 
         private string GetInventoryDropOptionLabel(int kind, bool installed)
@@ -6529,6 +6607,7 @@ namespace Turbo.Plugins.s7o
 
             switch (kind)
             {
+                case 15: return _pestilenceRgkAutoSnap ? "ON" : "OFF";
                 case 1: return _pestilenceRgkAutoSiphon ? "ON" : "OFF";
                 case 2: return _pestilenceRgkNormalStacks.ToString(CultureInfo.InvariantCulture);
                 case 3: return _pestilenceRgkPowerStacks.ToString(CultureInfo.InvariantCulture);
@@ -6541,15 +6620,36 @@ namespace Turbo.Plugins.s7o
                 case 10: return _pestilenceRgkJuggerHotkeyEnabled ? "ON" : "OFF";
                 case 11: return _pestilenceRgkJuggerHotkeyCapture ? "PRESS" : AutoSkillVirtualKeyLabel(_pestilenceRgkJuggerHotkeyVk);
                 case 12: return _pestilenceRgkRgAssist ? "ON" : "OFF";
+                case 16: return _pestilenceRgkZeiCircle ? "ON" : "OFF";
+                case 17: return PestilenceZeiColorLabel(_pestilenceRgkZeiColorIdx);
+                case 18: return _pestilenceRgkZeiTone.ToString(CultureInfo.InvariantCulture);
+                case 19: return FormatVisualFloat(_pestilenceRgkZeiThickness);
             }
 
             return "";
+        }
+
+        private string PestilenceZeiColorLabel(int idx)
+        {
+            switch (ViClamp(idx, 0, 7))
+            {
+                case 0: return "Red";
+                case 1: return "Orange";
+                case 2: return "Yellow";
+                case 3: return "Green";
+                case 4: return "Blue";
+                case 5: return "Purple";
+                case 6: return "White";
+                case 7: return "Black";
+            }
+            return "Purple";
         }
 
         private bool GetPestilenceOptionEnabled(int kind)
         {
             switch (kind)
             {
+                case 15: return _pestilenceRgkAutoSnap;
                 case 1: return _pestilenceRgkAutoSiphon;
                 case 4: return _pestilenceRgkLateRefreshAssist;
                 case 5: return _pestilenceRgkPrioritizeDebuffed;
@@ -6559,6 +6659,10 @@ namespace Turbo.Plugins.s7o
                 case 10: return _pestilenceRgkJuggerHotkeyEnabled;
                 case 11: return _pestilenceRgkJuggerHotkeyCapture;
                 case 12: return _pestilenceRgkRgAssist;
+                case 16: return _pestilenceRgkZeiCircle;
+                case 17:
+                case 18:
+                case 19: return true;
             }
             return true;
         }
@@ -8914,7 +9018,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     DrawTipsToggleSizeRow(r, rowIdx, "Progress Orbs", "Purple dots on Greater Rift progress orbs.", _tipsProgressOrbs, "visual:tipstoggle:progressorbs", "tipsprogressdot", _tipsProgressDotSize);
                     return;
                 case 6:
-                    DrawTipsSingleToggleRow(r, rowIdx, "Blood is Power Tracker", "Shows Blood is Power health-loss progress on Land of the Dead while it can still receive the passive cooldown reduction.", _tipsBloodIsPowerTracker, "visual:tipstoggle:bloodispower");
+                    DrawTipsSingleToggleRow(r, rowIdx, "Blood is Power Tracker", "Shows Blood is Power progress on Land of the Dead and Simulacrum.", _tipsBloodIsPowerTracker, "visual:tipstoggle:bloodispower");
                     return;
                 case 7:
                     DrawTipsPlayerMarkerRow(r, rowIdx);
@@ -9855,6 +9959,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
         private void AddAutoLootChildEntries(List<MacroEntry> entries)
         {
             AddAutoLootChildEntry(entries, "Pause Hotkey", "Click the key button to change the temporary Auto Loot pause/resume hotkey. Click the status dot or press the hotkey to pause/resume.", "auto_loot_pause", 0);
+            AddAutoLootChildEntry(entries, "Talk to Urshi", "After post-rift loot cleanup, talk to Urshi so Auto Gem Upgrade can start.", "auto_loot_urshi", 10);
             AddAutoLootChildEntry(entries, "Primals", "Pick up primal ancient legendary/set items.", "auto_loot_primals", 1);
             AddAutoLootChildEntry(entries, "Ancients", "Pick up ancient legendary/set items.", "auto_loot_ancients", 2);
             AddAutoLootChildEntry(entries, "Legendaries", "Pick up normal legendary/set items and legendary potions.", "auto_loot_legendaries", 3);
@@ -9881,6 +9986,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
         private void AddAutoLootChildItems(List<MacroListItem> items, bool favoriteDisplay)
         {
             AddAutoLootChildItem(items, favoriteDisplay, "Pause Hotkey", "Click the key button to change the temporary Auto Loot pause/resume hotkey. Click the status dot or press the hotkey to pause/resume.", "auto_loot_pause", 0);
+            AddAutoLootChildItem(items, favoriteDisplay, "Talk to Urshi", "After post-rift loot cleanup, talk to Urshi so Auto Gem Upgrade can start.", "auto_loot_urshi", 10);
             AddAutoLootChildItem(items, favoriteDisplay, "Primals", "Pick up primal ancient legendary/set items.", "auto_loot_primals", 1);
             AddAutoLootChildItem(items, favoriteDisplay, "Ancients", "Pick up ancient legendary/set items.", "auto_loot_ancients", 2);
             AddAutoLootChildItem(items, favoriteDisplay, "Legendaries", "Pick up normal legendary/set items and legendary potions.", "auto_loot_legendaries", 3);
@@ -9958,6 +10064,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
         private void AddPestilenceChildItems(List<MacroListItem> items, bool favoriteDisplay)
         {
+            AddPestilenceChildItem(items, favoriteDisplay, "AutoSnap", "Move cursor to the selected elite/RG target while Corpse Lance is held.", "pestilence_rgk_autosnap", 15);
             AddPestilenceChildItem(items, favoriteDisplay, "AutoSiphon", "Pulse Siphon Blood while Corpse Lance is held.", "pestilence_rgk_autosiphon", 1);
             AddPestilenceChildItem(items, favoriteDisplay, "Normal stacks", "Power Shift target without Power pylon.", "pestilence_rgk_normal_stacks", 2);
             AddPestilenceChildItem(items, favoriteDisplay, "Power stacks", "Power Shift target while Power pylon is active.", "pestilence_rgk_power_stacks", 3);
@@ -9967,9 +10074,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             AddPestilenceChildItem(items, favoriteDisplay, "Trash fallback", "Target close trash/high-value trash only after elite leaders are gone.", "pestilence_rgk_trash_fallback", 7);
             AddPestilenceChildItem(items, favoriteDisplay, "Target range", "Target selection range in yards.", "pestilence_rgk_target_range", 8);
             AddPestilenceChildItem(items, favoriteDisplay, "Cursor restore", "Restore cursor after short Pestilence target-assist holds.", "pestilence_rgk_cursor_restore", 9);
-            AddPestilenceChildItem(items, favoriteDisplay, "Jugger lock", "Hotkey locks the closest Juggernaut and shows a 10-yard yellow circle.", "pestilence_rgk_jugger_lock", 10);
-            AddPestilenceChildItem(items, favoriteDisplay, "Jugger hotkey", "Click to change the Juggernaut lock hotkey.", "pestilence_rgk_jugger_hotkey", 11);
-            AddPestilenceChildItem(items, favoriteDisplay, "RG AutoSnap/Siphon", "Treat the Rift Guardian as highest priority and build/maintain Siphon stacks.", "pestilence_rgk_rg_assist", 12);
+            AddPestilenceChildItem(items, favoriteDisplay, "Juggernaut / Elite cycling", "Hotkey locks/cycles elites by lowest HP first; orange 10y Juggernaut ring, green 5y elite ring.", "pestilence_rgk_jugger_lock", 10);
+            AddPestilenceChildItem(items, favoriteDisplay, "Elite cycle hotkey", "Click to change the Juggernaut / Elite cycling hotkey.", "pestilence_rgk_jugger_hotkey", 11);
+            AddPestilenceChildItem(items, favoriteDisplay, "RG AutoSnap/Siphon", "Boss assist obeys AutoSnap and AutoSiphon toggles independently.", "pestilence_rgk_rg_assist", 12);
+            AddPestilenceChildItem(items, favoriteDisplay, "Zei's 50 Yard Circle", "Draw a 50 yard Zei range reference around your hero.", "pestilence_rgk_zei_circle", 16);
+            if (_pestilenceRgkZeiExpanded)
+                AddPestilenceChildItem(items, favoriteDisplay, "Zei style", "Adjust Zei circle color, tone, and line thickness.", "pestilence_rgk_zei_style", 17);
         }
 
         private void AddPestilenceChildItem(List<MacroListItem> items, bool favoriteDisplay, string title, string description, string code, int kind)
@@ -10128,21 +10238,111 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
 
             bool installed = GetPestilenceRgkPlugin() != null;
-            string label = GetPestilenceOptionLabel(entry.PestilenceOptionKind, installed);
-            bool on = GetPestilenceOptionEnabled(entry.PestilenceOptionKind);
-            bool hotkeyRow = entry.PestilenceOptionKind == 11;
+            int kind = entry.PestilenceOptionKind;
+            string label = GetPestilenceOptionLabel(kind, installed);
+            bool on = GetPestilenceOptionEnabled(kind);
+            bool hotkeyRow = kind == 11;
 
             float pad = 44f;
-            float stateW = 120f;
-            RectangleF stateR = new RectangleF(r.Right - stateW - 8f, r.Top + 5f, stateW, r.Height - 10f);
             float textX = r.Left + pad;
-            float textW = Math.Max(40f, stateR.Left - textX - 10f);
 
-            DrawOutlinedTextAt(_fRowText, _fRowTextShadow, Trim("• " + entry.Title, ApproxCharsForWidth(textW, 5.4f)), textX, r.Top + 10f);
-            DrawGlossButton(stateR, FitButtonLabel(label, stateR.Width), hotkeyRow ? _pestilenceRgkJuggerHotkeyCapture : on, false, hotkeyRow);
+            if (kind == 17)
+            {
+                DrawPestilenceZeiStyleRow(r, rowIdx, installed);
+                return;
+            }
+
+            float stateWDefault = kind == 16 ? 84f : 120f;
+            RectangleF stateRDefault = new RectangleF(r.Right - stateWDefault - 8f, r.Top + 5f, stateWDefault, r.Height - 10f);
+            RectangleF expandR = RectangleF.Empty;
+
+            if (kind == 16)
+            {
+                expandR = new RectangleF(stateRDefault.Left - 34f - 6f, r.Top + 5f, 34f, r.Height - 10f);
+            }
+
+            float textRightDefault = kind == 16 ? expandR.Left : stateRDefault.Left;
+            float textWDefault = Math.Max(40f, textRightDefault - textX - 10f);
+            DrawOutlinedTextAt(_fRowText, _fRowTextShadow, Trim("• " + entry.Title, ApproxCharsForWidth(textWDefault, 5.4f)), textX, r.Top + 10f);
+
+            if (kind == 16)
+                DrawGlossButton(expandR, _pestilenceRgkZeiExpanded ? "-" : "+", _pestilenceRgkZeiExpanded, false, false);
+
+            DrawGlossButton(stateRDefault, FitButtonLabel(label, stateRDefault.Width), hotkeyRow ? _pestilenceRgkJuggerHotkeyCapture : on, false, hotkeyRow);
 
             if (installed)
-                RegisterToggleHit("pestilence:option:" + entry.PestilenceOptionKind.ToString(CultureInfo.InvariantCulture), stateR);
+            {
+                if (kind == 16)
+                    RegisterToggleHit("pestilence:zei:expand", expandR);
+                RegisterToggleHit("pestilence:option:" + kind.ToString(CultureInfo.InvariantCulture), stateRDefault);
+            }
+        }
+
+        private void DrawPestilenceZeiStyleRow(RectangleF r, int rowIdx, bool installed)
+        {
+            (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
+
+            const float colorW = 172f;
+            const float stepW = 126f;
+            const float gap = 10f;
+            const float stepH = 30f;
+
+            float totalW = colorW + gap + stepW + gap + stepW;
+            float x = r.Left + Math.Max(51f, (r.Width - totalW) * 0.5f);
+            if (x + totalW > r.Right - 8f)
+                x = r.Right - totalW - 8f;
+
+            float midY = r.Top + r.Height * 0.5f;
+            RectangleF colorR = new RectangleF(x, midY - 10f, colorW, 22f);
+            RectangleF toneR = new RectangleF(colorR.Right + gap, midY - stepH * 0.5f, stepW, stepH);
+            RectangleF lineR = new RectangleF(toneR.Right + gap, midY - stepH * 0.5f, stepW, stepH);
+
+            DrawPestilenceZeiColorPickerInline(colorR);
+
+            DrawVisualStepperWide(
+                toneR,
+                "Tone",
+                _pestilenceRgkZeiTone.ToString(CultureInfo.InvariantCulture),
+                "pestilence:zei:tone:-1",
+                "pestilence:zei:tone:+1");
+
+            DrawVisualStepperWide(
+                lineR,
+                "Line",
+                FormatVisualFloat(_pestilenceRgkZeiThickness),
+                "pestilence:zei:thickness:-1",
+                "pestilence:zei:thickness:+1");
+        }
+
+        private void DrawPestilenceZeiColorPickerInline(RectangleF r)
+        {
+            const float box = 18f;
+            const float gap = 4f;
+
+            int colorIdx = ViClamp(_pestilenceRgkZeiColorIdx, 0, 7);
+            int tone = ViClamp(_pestilenceRgkZeiTone, 0, 10);
+
+            EnsureVisualPickerBrushes();
+
+            float x = r.Left;
+            float y = r.Top + (r.Height - box) * 0.5f;
+
+            for (int i = 0; i < 8; i++)
+            {
+                RectangleF sw = new RectangleF(x, y, box, box);
+
+                IBrush fill = _visualPickerFillBrushes[i, tone];
+                if (fill != null)
+                    fill.DrawRectangle(sw.Left, sw.Top, sw.Width, sw.Height);
+
+                IBrush edge = (i == colorIdx) ? _visualPickerEdgeSelected : _visualPickerEdgeNormal;
+                if (edge != null)
+                    edge.DrawRectangle(sw.Left, sw.Top, sw.Width, sw.Height);
+
+                RegisterToggleHit("pestilence:zei:color:" + i.ToString(CultureInfo.InvariantCulture), sw);
+
+                x += box + gap;
+            }
         }
 
         private void DrawToggleMacrosCategory(RectangleF detail)
@@ -10197,6 +10397,16 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             if (_inventoryDropExpanded)
                 AddInventoryDropChildEntries(allEntries);
+
+            allEntries.Add(new MacroEntry
+            {
+                Title="Armory Bug Fix",
+                Description="Validates Armory swaps and retries Equip when Diablo drops the weapon swap.",
+                Code="armory_bug_fix_plugin",
+                IsPlugin=true,
+                PluginTypeNames=new[]{"s7o_ArmoryBugFix"},
+                PluginAction="toggles:plugin:armorybugfix"
+            });
 
             allEntries.Add(new MacroEntry
             {
@@ -14923,6 +15133,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 lines.Add("AUTO_LOOT_TRASH=" + _autoLootTrash.ToString(CultureInfo.InvariantCulture));
                 lines.Add("AUTO_LOOT_MATERIALS=" + _autoLootMaterials.ToString(CultureInfo.InvariantCulture));
                 lines.Add("AUTO_LOOT_DEATHS_BREATH=" + _autoLootDeathsBreath.ToString(CultureInfo.InvariantCulture));
+                lines.Add("AUTO_LOOT_TALK_TO_URSHI=" + _autoLootTalkToUrshi.ToString(CultureInfo.InvariantCulture));
 
 
                 lines.Add("TOGGLE_CATEGORY=" + _activeToggleCategory);
@@ -14957,6 +15168,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 lines.Add("PESTILENCE_RGK_EXPANDED=" + _pestilenceRgkExpanded.ToString(CultureInfo.InvariantCulture));
                 lines.Add("PESTILENCE_RGK_NORMAL_STACKS=" + _pestilenceRgkNormalStacks.ToString(CultureInfo.InvariantCulture));
                 lines.Add("PESTILENCE_RGK_POWER_STACKS=" + _pestilenceRgkPowerStacks.ToString(CultureInfo.InvariantCulture));
+                lines.Add("PESTILENCE_RGK_AUTOSNAP=" + _pestilenceRgkAutoSnap.ToString(CultureInfo.InvariantCulture));
                 lines.Add("PESTILENCE_RGK_AUTOSIPHON=" + _pestilenceRgkAutoSiphon.ToString(CultureInfo.InvariantCulture));
                 lines.Add("PESTILENCE_RGK_LATE_REFRESH=" + _pestilenceRgkLateRefreshAssist.ToString(CultureInfo.InvariantCulture));
                 lines.Add("PESTILENCE_RGK_DEBUFF_PRIORITY=" + _pestilenceRgkPrioritizeDebuffed.ToString(CultureInfo.InvariantCulture));
@@ -14967,6 +15179,11 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 lines.Add("PESTILENCE_RGK_JUGGER_LOCK=" + _pestilenceRgkJuggerHotkeyEnabled.ToString(CultureInfo.InvariantCulture));
                 lines.Add("PESTILENCE_RGK_JUGGER_HOTKEY=" + _pestilenceRgkJuggerHotkeyVk.ToString(CultureInfo.InvariantCulture));
                 lines.Add("PESTILENCE_RGK_RG_ASSIST=" + _pestilenceRgkRgAssist.ToString(CultureInfo.InvariantCulture));
+                lines.Add("PESTILENCE_RGK_ZEI_CIRCLE=" + _pestilenceRgkZeiCircle.ToString(CultureInfo.InvariantCulture));
+                lines.Add("PESTILENCE_RGK_ZEI_EXPANDED=" + _pestilenceRgkZeiExpanded.ToString(CultureInfo.InvariantCulture));
+                lines.Add("PESTILENCE_RGK_ZEI_COLOR=" + _pestilenceRgkZeiColorIdx.ToString(CultureInfo.InvariantCulture));
+                lines.Add("PESTILENCE_RGK_ZEI_TONE=" + _pestilenceRgkZeiTone.ToString(CultureInfo.InvariantCulture));
+                lines.Add("PESTILENCE_RGK_ZEI_THICKNESS=" + _pestilenceRgkZeiThickness.ToString(CultureInfo.InvariantCulture));
                 lines.Add("AUTOSKILL_KEYBINDS_EXPANDED=" + _autoSkillKeybindsExpanded.ToString(CultureInfo.InvariantCulture));
 
                 // AutoSnap
@@ -15481,6 +15698,10 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     {
                         _autoLootDeathsBreath = ParseBool(val, _autoLootDeathsBreath);
                     }
+                    else if (string.Equals(key, "AUTO_LOOT_TALK_TO_URSHI", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _autoLootTalkToUrshi = ParseBool(val, _autoLootTalkToUrshi);
+                    }
                     else if (key == "TOGGLE_CATEGORY")
                     {
                         ToggleCategory cat;
@@ -15598,6 +15819,11 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                         if (int.TryParse(val, NumberStyles.Integer, CultureInfo.InvariantCulture, out tmp))
                             _pestilenceRgkPowerStacks = ClampPestilenceRgkStackTarget(tmp);
                     }
+                    else if (string.Equals(key, "PESTILENCE_RGK_AUTOSNAP", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool tmp;
+                        if (bool.TryParse(val, out tmp)) _pestilenceRgkAutoSnap = tmp;
+                    }
                     else if (string.Equals(key, "PESTILENCE_RGK_AUTOSIPHON", StringComparison.OrdinalIgnoreCase))
                     {
                         bool tmp;
@@ -15649,6 +15875,31 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     {
                         bool tmp;
                         if (bool.TryParse(val, out tmp)) _pestilenceRgkRgAssist = tmp;
+                    }
+                    else if (string.Equals(key, "PESTILENCE_RGK_ZEI_CIRCLE", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool tmp;
+                        if (bool.TryParse(val, out tmp)) _pestilenceRgkZeiCircle = tmp;
+                    }
+                    else if (string.Equals(key, "PESTILENCE_RGK_ZEI_EXPANDED", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool tmp;
+                        if (bool.TryParse(val, out tmp)) _pestilenceRgkZeiExpanded = tmp;
+                    }
+                    else if (string.Equals(key, "PESTILENCE_RGK_ZEI_COLOR", StringComparison.OrdinalIgnoreCase))
+                    {
+                        int tmp;
+                        if (int.TryParse(val, NumberStyles.Integer, CultureInfo.InvariantCulture, out tmp)) _pestilenceRgkZeiColorIdx = ViClamp(tmp, 0, 7);
+                    }
+                    else if (string.Equals(key, "PESTILENCE_RGK_ZEI_TONE", StringComparison.OrdinalIgnoreCase))
+                    {
+                        int tmp;
+                        if (int.TryParse(val, NumberStyles.Integer, CultureInfo.InvariantCulture, out tmp)) _pestilenceRgkZeiTone = ViClamp(tmp, 0, 10);
+                    }
+                    else if (string.Equals(key, "PESTILENCE_RGK_ZEI_THICKNESS", StringComparison.OrdinalIgnoreCase))
+                    {
+                        float tmp;
+                        if (float.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out tmp)) _pestilenceRgkZeiThickness = ViClampF(tmp, 0.5f, 8.0f);
                     }
                     else if (key == "AUTOSKILL_KEYBINDS_EXPANDED")
                     {
@@ -15870,6 +16121,52 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             {
                 return ".";
             }
+        }
+
+        private void ResetTurboHudLogsDirectory()
+        {
+            try
+            {
+                string baseDir = Path.GetFullPath(AppDomain.CurrentDomain.BaseDirectory ?? ".");
+                string logsDir = Path.GetFullPath(Path.Combine(baseDir, "logs"));
+
+                if (!string.Equals(new DirectoryInfo(logsDir).Name, "logs", StringComparison.OrdinalIgnoreCase))
+                    return;
+
+                if (!logsDir.StartsWith(baseDir.TrimEnd('\\', '/') + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                    return;
+
+                if (Directory.Exists(logsDir))
+                {
+                    try { Directory.Delete(logsDir, true); }
+                    catch { ClearTurboHudLogsDirectory(logsDir); }
+                }
+
+                Directory.CreateDirectory(logsDir);
+            }
+            catch
+            {
+                // Log cleanup must never block HUD startup.
+            }
+        }
+
+        private void ClearTurboHudLogsDirectory(string logsDir)
+        {
+            try
+            {
+                foreach (string file in Directory.GetFiles(logsDir, "*", SearchOption.AllDirectories))
+                {
+                    try { File.SetAttributes(file, FileAttributes.Normal); File.Delete(file); }
+                    catch { }
+                }
+
+                foreach (string dir in Directory.GetDirectories(logsDir, "*", SearchOption.AllDirectories).OrderByDescending(x => x.Length))
+                {
+                    try { Directory.Delete(dir, true); }
+                    catch { }
+                }
+            }
+            catch { }
         }
 
         private string SettingsPath()
