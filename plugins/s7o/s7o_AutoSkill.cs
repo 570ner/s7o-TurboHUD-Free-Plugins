@@ -18,6 +18,9 @@ namespace Turbo.Plugins.s7o
         private const uint NayrsBlackDeathBuffSno = 476587u;
         private const uint SiphonBloodPowerSno = 453563u;
         private const uint CrusaderSteedChargePowerSno = 243853u;
+        private const uint NecromancerDevourPowerSno = 460757u;
+        private const uint NecromancerLandOfTheDeadPowerSno = 465839u;
+        private const int HealSlotIndex = 6;
         private const string CommandSkeletonsProfileCode = "Necro_CommandSkeletons_Elite";
         private const string DevourProfileCode = "Necro_Devour_CorpseOrLotD";
         private const string NayrsBlackDeathProfileCode = "Necro_NayrsBlackDeath";
@@ -302,6 +305,15 @@ namespace Turbo.Plugins.s7o
             RefreshSkillCacheIfNeeded(now);
             UpdateNayrsSiphonBloodCue(now);
             UpdateHoverToggle(now);
+
+            string healBlockedReason;
+            if (EnableManualSlotAutoCast
+                && _enabledSlots[HealSlotIndex]
+                && IsValidAutomationContext(false, out healBlockedReason)
+                && TryRunHealSlotAutoCast(now))
+            {
+                return;
+            }
 
             if (EnableAutomaticBuffUpkeep && IsTickReached(now, _nextBuffCheckTick))
             {
@@ -622,7 +634,7 @@ namespace Turbo.Plugins.s7o
             {
                 var potion = powers.HealthPotionSkill;
                 if (potion != null && potion.SnoPower != null)
-                    AddOrUpdateSkillSlot(6, ActionKey.Heal, potion);
+                    AddOrUpdateSkillSlot(HealSlotIndex, ActionKey.Heal, potion);
             }
             catch
             {
@@ -694,7 +706,7 @@ namespace Turbo.Plugins.s7o
                 if (slot == null || !slot.IsValid || slot.Skill == null || slot.Skill.SnoPower == null)
                     continue;
 
-                if (slot.SlotIndex == 6)
+                if (slot.SlotIndex == HealSlotIndex)
                     continue;
 
                 if (slot.Skill.SnoPower.Sno == sno)
@@ -714,7 +726,7 @@ namespace Turbo.Plugins.s7o
                 case ActionKey.Skill2: return 3;
                 case ActionKey.Skill3: return 4;
                 case ActionKey.Skill4: return 5;
-                case ActionKey.Heal: return 6;
+                case ActionKey.Heal: return HealSlotIndex;
                 default: return -1;
             }
         }
@@ -729,7 +741,7 @@ namespace Turbo.Plugins.s7o
                 case 3: return ActionKey.Skill2;
                 case 4: return ActionKey.Skill3;
                 case 5: return ActionKey.Skill4;
-                case 6: return ActionKey.Heal;
+                case HealSlotIndex: return ActionKey.Heal;
                 default: return ActionKey.Unknown;
             }
         }
@@ -750,12 +762,28 @@ namespace Turbo.Plugins.s7o
 
         #region Manual Slot Auto Cast
 
+        private bool TryRunHealSlotAutoCast(int now)
+        {
+            var slot = FindSlotState(HealSlotIndex);
+            if (slot == null || !slot.IsValid || slot.Skill == null)
+                return false;
+
+            var skill = ResolveSkillForSlot(HealSlotIndex);
+            if (skill == null || skill.SnoPower == null)
+                return false;
+
+            return TryManualCastSlot(HealSlotIndex, slot, skill, now);
+        }
+
         private bool TryRunManualSlotAutoCast(int now)
         {
             bool deferredSteedCharge = false;
 
             for (int slotIndex = 0; slotIndex < _enabledSlots.Length; slotIndex++)
             {
+                if (slotIndex == HealSlotIndex)
+                    continue;
+
                 if (!_enabledSlots[slotIndex])
                     continue;
 
@@ -782,6 +810,9 @@ namespace Turbo.Plugins.s7o
 
             for (int slotIndex = 0; slotIndex < _enabledSlots.Length; slotIndex++)
             {
+                if (slotIndex == HealSlotIndex)
+                    continue;
+
                 if (!_enabledSlots[slotIndex])
                     continue;
 
@@ -813,7 +844,7 @@ namespace Turbo.Plugins.s7o
 
             if (DoAction(slot.ActionKey, UseForceStandstillForCasts))
             {
-                MarkSkillCast(skill, now);
+                MarkSkillCast(skill, now, slot.ActionKey);
                 LogDebug("Manual auto-cast: slot=" + slotIndex.ToString(CultureInfo.InvariantCulture) + ", skill=" + SafeSkillCode(skill));
                 return true;
             }
@@ -897,7 +928,7 @@ namespace Turbo.Plugins.s7o
 
                 if (DoAction(slot.ActionKey, UseForceStandstillForCasts))
                 {
-                    MarkSkillCast(slot.Skill, now);
+                    MarkSkillCast(slot.Skill, now, slot.ActionKey);
                     _nextBuffCheckTick = now + GetBuffCheckIntervalAfterCast(now, missing);
                     LogDebug("Buff upkeep cast: " + profile.Code
                         + ", missing=" + missing.ToString(CultureInfo.InvariantCulture)
@@ -1143,7 +1174,7 @@ namespace Turbo.Plugins.s7o
 
                     if (DoAction(slot.ActionKey, profile.UseStandstill && UseForceStandstillForCasts))
                     {
-                        MarkSkillCast(slot.Skill, now);
+                        MarkSkillCast(slot.Skill, now, slot.ActionKey);
                         _lastConditionalProfileCastTickByCode[profile.Code] = now;
                         if (IsCommandSkeletonsProfile(profile))
                             _lastCommandSkeletonsRequestTick = now;
@@ -1425,8 +1456,8 @@ namespace Turbo.Plugins.s7o
             AddConditionalProfile(Hud.Sno.SnoPowers.Necromancer_BoneArmor, 466857, "Necro_BoneArmor_NearEnemies", "Bone Armor: Near Enemies", "Necromancer", "Buff", "Casts Bone Armor near enemies when missing/expiring.", true, ctx => CountAliveMonstersWithin(25) >= 1 && SkillBuffRemainingBelow(ctx.Skill, 1000, 2000), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
             AddConditionalProfile(Hud.Sno.SnoPowers.Necromancer_Simulacrum, 465350, "Necro_Simulacrum_EliteOrDensity", "Simulacrum: Elite/Density", "Necromancer", "Cooldown", "Casts Simulacrum near elites or dense packs.", true, ctx => IsEliteOrBossNearby(80, true) || CountAliveMonstersWithin(60) >= 10, ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
             // Default false until we add a proper menu toggle and more build-specific guards.
-            AddConditionalProfile(Hud.Sno.SnoPowers.Necromancer_LandOfTheDead, 465839, "Necro_LandOfTheDead_EliteOrDensity", "Land of the Dead: Elite/Density", "Necromancer", "Cooldown", "Casts Land of the Dead on elites or dense packs.", false, ctx => IsEliteOrBossNearby(80, true) || CountAliveMonstersWithin(60) >= 12, ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
-            AddConditionalProfile(Hud.Sno.SnoPowers.Necromancer_Devour, 460757, DevourProfileCode, "Devour: Corpses/LotD", "Necromancer", "Resource", "Maintains Devour buffs/resources; fast-casts while Land of the Dead is active.", true, ShouldCastDevour, 100, 150, 25, 0, 0, 0, 0, false);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Necromancer_LandOfTheDead, NecromancerLandOfTheDeadPowerSno, "Necro_LandOfTheDead_EliteOrDensity", "Land of the Dead: Elite/Density", "Necromancer", "Cooldown", "Casts Land of the Dead on elites or dense packs.", false, ctx => IsEliteOrBossNearby(80, true) || CountAliveMonstersWithin(60) >= 12, ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Necromancer_Devour, NecromancerDevourPowerSno, DevourProfileCode, "Devour: Corpses/LotD", "Necromancer", "Resource", "Maintains Devour buffs/resources; fast-casts while Land of the Dead is active.", true, ShouldCastDevour, 100, 150, 25, 0, 0, 0, 0, false);
             AddConditionalProfile(Hud.Sno.SnoPowers.Necromancer_CommandSkeletons, 453801, "Necro_CommandSkeletons_Elite", "Command Skeletons: Active Target", "Necromancer", "Targeting", "Maintains Command Skeletons/Jesseth on your selected target without moving the cursor.", true, ShouldCastCommandSkeletons, 350, 700, 250);
             AddNayrsBlackDeathProfiles();
             // Default false until we add a proper menu toggle and more build-specific guards.
@@ -2241,7 +2272,9 @@ namespace Turbo.Plugins.s7o
                 return false;
             }
 
-            if (!HasEnoughPrimaryResource(skill, 0, 0))
+            bool isPotionCast = actionKey == ActionKey.Heal;
+
+            if (!isPotionCast && !HasEnoughPrimaryResource(skill, 0, 0))
             {
                 reason = "resource";
                 return false;
@@ -2271,13 +2304,13 @@ namespace Turbo.Plugins.s7o
             }
 
             int globalDelayMs = globalDelayOverrideMs >= 0 ? globalDelayOverrideMs : GlobalCastDelayMs;
-            if ((uint)(now - _lastGlobalCastTick) < (uint)Math.Max(0, globalDelayMs))
+            if (!isPotionCast && (uint)(now - _lastGlobalCastTick) < (uint)Math.Max(0, globalDelayMs))
             {
                 reason = "global delay";
                 return false;
             }
 
-            if (!allowChannelingSkill && IsChannelingSkill(skill))
+            if (!allowChannelingSkill && !IsChannelSafeInstantCast(skill, actionKey) && IsChannelingSkill(skill))
             {
                 reason = "channeling unsupported";
                 return false;
@@ -2439,6 +2472,26 @@ namespace Turbo.Plugins.s7o
             }
         }
 
+        private bool IsChannelSafeInstantCast(IPlayerSkill skill, ActionKey actionKey)
+        {
+            if (actionKey == ActionKey.Heal)
+                return true;
+
+            try
+            {
+                if (skill == null || skill.SnoPower == null)
+                    return false;
+
+                uint sno = skill.SnoPower.Sno;
+                return sno == GetSno(Hud.Sno.SnoPowers.Necromancer_Devour, NecromancerDevourPowerSno)
+                    || sno == GetSno(Hud.Sno.SnoPowers.Necromancer_LandOfTheDead, NecromancerLandOfTheDeadPowerSno);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         private bool IsChannelingSkill(IPlayerSkill skill)
         {
             if (skill == null)
@@ -2491,12 +2544,13 @@ namespace Turbo.Plugins.s7o
                 _channelingPowerSnos.Add(power.Sno);
         }
 
-        private void MarkSkillCast(IPlayerSkill skill, int now)
+        private void MarkSkillCast(IPlayerSkill skill, int now, ActionKey actionKey)
         {
             if (skill != null && skill.SnoPower != null)
                 _lastCastTickByPower[skill.SnoPower.Sno] = now;
 
-            _lastGlobalCastTick = now;
+            if (actionKey != ActionKey.Heal)
+                _lastGlobalCastTick = now;
         }
 
         public ushort GetCastVirtualKey(ActionKey actionKey)
