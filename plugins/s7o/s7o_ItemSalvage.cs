@@ -95,6 +95,13 @@ namespace Turbo.Plugins.s7o
         // safety does not turn turbo legendary salvage into strict per-item verification.
         public int ConfirmRetryThrottleMs = 15;
 
+        // Chat safety: confirmation Enter can occasionally be observed again while the OK dialog is
+        // fading, so allow only one Enter per visible confirmation before using a click fallback.
+        public int ConfirmEnterRepeatDelayMs = 90;
+        public int ConfirmClickFallbackDelayMs = 140;
+        public bool CloseChatIfOpenedDuringSalvage = true;
+        public int ChatCloseSettleMs = 90;
+
         // If a clicked item is still present, give Diablo III a short stale/pending cooldown
         // before retrying it. This avoids hammering greyed items and preserves cleanup retries.
         public int FailedItemRetryCooldownMs = 200;
@@ -276,6 +283,7 @@ namespace Turbo.Plugins.s7o
         private IUiElement _salvageSelectedButton1;
         private IUiElement _salvageSelectedButton2;
         private IUiElement _okButton;
+        private IUiElement _chatEditLine;
 
         private IFont _yellowFont;
         private IFont _buttonFont;
@@ -387,6 +395,7 @@ namespace Turbo.Plugins.s7o
         private const uint LeftUp = 0x0004;
         private const uint KeyUp = 0x0002;
         private const ushort VkEnter = 0x0D;
+        private const ushort VkEscape = 0x1B;
         private const int BlacksmithActorLatchMs = 1500;
 
         public s7o_ItemSalvage()
@@ -449,6 +458,18 @@ namespace Turbo.Plugins.s7o
                 "Root.TopLayer.confirmation.subdlg.stack.wrap.button_ok",
                 _salvageDialog,
                 null);
+
+            try
+            {
+                _chatEditLine = Hud.Render.RegisterUiElement(
+                    "Root.NormalLayer.chatentry_dialog_backgroundScreen.chatentry_content.chat_editline",
+                    null,
+                    null);
+            }
+            catch
+            {
+                _chatEditLine = null;
+            }
 
             _yellowFont = Hud.Render.CreateFont("tahoma", 8.5f, 255, 255, 220, 0, true, false, 255, 0, 0, 0, true);
             _buttonFont = Hud.Render.CreateFont("tahoma", 8.0f, 255, 235, 235, 235, true, false, 255, 0, 0, 0, true);
@@ -562,6 +583,12 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
+            if (IsChatEntryOpen())
+            {
+                LogDebug("Salvage hotkey ignored: chat entry is active.");
+                return;
+            }
+
             QueueRun();
         }
 
@@ -584,6 +611,9 @@ namespace Turbo.Plugins.s7o
                 CancelRun(!ShouldRestoreCursorOnCancel(), true);
                 return;
             }
+
+            if (TryCloseChatEntryDuringRun(now, "after collect"))
+                return;
 
             // Confirmation popups are authoritative: do not complete/cancel/park/click another item while OK is visible.
             if (HandleVisibleSalvageConfirmFirst(now, "after collect"))
@@ -832,19 +862,12 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
-            if (_okButton != null)
+            if (TryConfirmSalvageDialogWithEnter(now, "strict confirm"))
             {
-                _okButton.Refresh();
-                if (_okButton.Visible)
-                {
-                    PressEnter();
-                    _lastConfirmTick = now;
-                    _itemStartTick = now;
-                    LogDebug("Confirmation accepted. clickToConfirm=" + (now - _lastItemClickTick) + "ms.");
-                    _state = State.WaitForItemGone;
-                    _nextStepTick = now + GetStepDelay();
-                    return;
-                }
+                _itemStartTick = now;
+                _state = State.WaitForItemGone;
+                _nextStepTick = now + GetStepDelay();
+                return;
             }
 
             if ((uint)(now - _confirmStartTick) < (uint)GetConfirmWindow())
@@ -996,11 +1019,26 @@ namespace Turbo.Plugins.s7o
         {
             if (!IsSalvageConfirmVisible()) return false;
 
-            PressEnter();
+            if (TryCloseChatEntryDuringRun(now, "confirm " + source))
+                return true;
+
+            int enterRepeatDelayMs = Math.Max(Math.Max(10, ConfirmRetryThrottleMs), Math.Max(10, ConfirmEnterRepeatDelayMs));
+            if (!ElapsedAtLeast(now, _lastConfirmPressTick, enterRepeatDelayMs))
+                return true;
+
+            if (!TickSet(_confirmVisibleSinceTick))
+                _confirmVisibleSinceTick = now;
+
+            _confirmPressAttempts++;
+            _lastConfirmPressTick = now;
             _lastConfirmTick = now;
+
+            PressEnter();
 
             LogDebug("Confirmation accepted with Enter. source="
                 + source
+                + ", attempt="
+                + _confirmPressAttempts
                 + ", tick="
                 + now
                 + (TickSet(_lastItemClickTick) ? ", clickToConfirm=" + unchecked(now - _lastItemClickTick) + "ms" : string.Empty)
@@ -1020,6 +1058,31 @@ namespace Turbo.Plugins.s7o
             {
                 return false;
             }
+        }
+
+        private bool IsChatEntryOpen()
+        {
+            try
+            {
+                if (_chatEditLine == null) return false;
+                _chatEditLine.Refresh();
+                return _chatEditLine.Visible;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private bool TryCloseChatEntryDuringRun(int now, string source)
+        {
+            if (!CloseChatIfOpenedDuringSalvage || !IsChatEntryOpen())
+                return false;
+
+            PressEscape();
+            _nextStepTick = unchecked(now + Math.Max(0, ChatCloseSettleMs));
+            LogDebug("Chat entry detected during salvage; Escape sent. source=" + source + ".");
+            return true;
         }
 
         private bool IsConfirmationSensitiveState()
@@ -1048,11 +1111,16 @@ namespace Turbo.Plugins.s7o
                 return false;
             }
 
+            if (TryCloseChatEntryDuringRun(now, "visible confirm " + source))
+                return true;
+
             if (!TickSet(_confirmVisibleSinceTick))
                 _confirmVisibleSinceTick = now;
 
             int confirmRetryMs = Math.Max(10, ConfirmRetryThrottleMs);
-            if (!ElapsedAtLeast(now, _lastConfirmPressTick, confirmRetryMs))
+            int fallbackDelayMs = Math.Max(confirmRetryMs, Math.Max(10, ConfirmClickFallbackDelayMs));
+            int nextActionDelayMs = _confirmPressAttempts <= 0 ? confirmRetryMs : fallbackDelayMs;
+            if (!ElapsedAtLeast(now, _lastConfirmPressTick, nextActionDelayMs))
                 return true;
 
             bool turboAwait = _state == State.TurboAwaitLegendaryConfirm;
@@ -1061,7 +1129,7 @@ namespace Turbo.Plugins.s7o
             _lastConfirmPressTick = now;
             _lastConfirmTick = now;
 
-            if (_confirmPressAttempts <= 3)
+            if (_confirmPressAttempts == 1)
             {
                 PressEnter();
                 LogDebug("Confirmation visible; pressed Enter. source="
@@ -1089,7 +1157,7 @@ namespace Turbo.Plugins.s7o
                 return true;
             }
 
-            _nextStepTick = unchecked(now + confirmRetryMs);
+            _nextStepTick = unchecked(now + (_confirmPressAttempts == 1 ? Math.Max(20, TurboPostConfirmSettleMs) : fallbackDelayMs));
             return true;
         }
 
@@ -3442,6 +3510,12 @@ namespace Turbo.Plugins.s7o
         {
             SendKey(VkEnter, false);
             SendKey(VkEnter, true);
+        }
+
+        private static void PressEscape()
+        {
+            SendKey(VkEscape, false);
+            SendKey(VkEscape, true);
         }
 
         private static bool SendMouse(uint flags)
