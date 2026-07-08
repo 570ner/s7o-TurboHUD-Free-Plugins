@@ -2142,7 +2142,7 @@ namespace Turbo.Plugins.s7o
                 return;
 
             int tick = Hud.Game.CurrentGameTick;
-            if (!HasBloodIsPowerPassive() && !_bipWasDead && tick > _bipReviveRebaseUntilTick)
+            if (!HasBloodIsPowerPassive())
                 return;
 
             var trackedSkills = GetBloodIsPowerTrackedSkills();
