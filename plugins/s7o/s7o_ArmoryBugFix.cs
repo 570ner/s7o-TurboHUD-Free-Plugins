@@ -12,10 +12,14 @@ namespace Turbo.Plugins.s7o
         private const int AssistClickIntervalMs = 10;
         private const int AssistBurstDurationMs = 30;
         private const int AssistLockoutMs = 700;
-        private const int FastRetryMs = 120;
+        private const int FirstValidateMs = 350;
+        private const int RetryValidateMs = 180;
+        private const int UnknownRescanMs = 100;
+        private const int MinPrimalizedNotNeededConfirmMs = 550;
         private const int CooldownRetryMs = 1050;
         private const int VerifyWindowMs = 3600;
-        private const int MaxVerifyRetries = 6;
+        private const int MaxVerifyRetries = 4;
+        private const int MinTargetSetItemMatches = 4;
 
         private const float EquipRelX = 0.481008f;
         private const float EquipRelY = 0.773148f;
@@ -24,7 +28,25 @@ namespace Turbo.Plugins.s7o
         private const float EquipPadX = 0.020000f;
         private const float EquipPadY = 0.010000f;
 
+        private enum SmartDecision
+        {
+            Unknown,
+            NotNeeded,
+            RetryNeeded
+        }
+
+        private sealed class ArmorySetScan
+        {
+            public int MatchCount;
+            public int SavedItemCount;
+            public bool HasPrimalizedItem;
+            public bool NeedsRetry;
+        }
+
         private IUiElement _armory;
+        private IUiElement _confirmationDialog;
+        private IUiElement _confirmationOk;
+        private IUiElement _confirmationCancel;
 
         private bool _leftDownLast;
         private bool _pending;
@@ -38,8 +60,9 @@ namespace Turbo.Plugins.s7o
         private int _verifyUntilTick = int.MinValue;
         private int _retryAtTick = int.MinValue;
         private int _verifyRetries;
-        private ulong _startSignature;
         private bool _cooldownSeen;
+        private int _verifyStartTick = int.MinValue;
+        private bool _prePrimalizedSeen;
 
         public s7o_ArmoryBugFix()
         {
@@ -51,6 +74,9 @@ namespace Turbo.Plugins.s7o
         {
             base.Load(hud);
             _armory = RegisterUi("Root.NormalLayer.equipmentManager_mainPage", null);
+            _confirmationDialog = RegisterUi("Root.TopLayer.confirmation.subdlg", null);
+            _confirmationOk = RegisterUi("Root.TopLayer.confirmation.subdlg.stack.wrap.button_ok", null);
+            _confirmationCancel = RegisterUi("Root.TopLayer.confirmation.subdlg.stack.wrap.button_cancel", null);
         }
 
         public void AfterCollect()
@@ -66,8 +92,16 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
+            if (IsArmoryConfirmationVisible())
+            {
+                ClearPending();
+                ClearVerify();
+                _leftDownLast = leftDown;
+                return;
+            }
+
             if (leftDown && !_leftDownLast)
-                TryArm(now);
+                HandleArmoryClick(now);
 
             _leftDownLast = leftDown;
 
@@ -90,11 +124,35 @@ namespace Turbo.Plugins.s7o
             _verifyUntilTick = MaxTick(_verifyUntilTick, unchecked(now + VerifyWindowMs));
         }
 
-        private void TryArm(int now)
+        private void HandleArmoryClick(int now)
         {
-            if (!CanRun())
+            if (!CanRun() || IsArmoryConfirmationVisible())
             {
                 ClearPending();
+                ClearVerify();
+                return;
+            }
+
+            RectangleF hit = GetEquipHitRect();
+            if (Inside(hit, Hud.Window.CursorX, Hud.Window.CursorY))
+            {
+                TryArm(now);
+                return;
+            }
+
+            if (_pending || _verifying)
+            {
+                ClearPending();
+                ClearVerify();
+            }
+        }
+
+        private void TryArm(int now)
+        {
+            if (!CanRun() || IsArmoryConfirmationVisible())
+            {
+                ClearPending();
+                ClearVerify();
                 return;
             }
 
@@ -104,17 +162,13 @@ namespace Turbo.Plugins.s7o
 
             _clickX = Hud.Window.CursorX;
             _clickY = Hud.Window.CursorY;
-            _startSignature = GetLoadoutSignature();
+            _verifyStartTick = now;
+            CapturePreClickPrimalizedState();
             _verifying = true;
             _verifyRetries = 0;
             _verifyUntilTick = unchecked(now + VerifyWindowMs);
-            _retryAtTick = unchecked(now + FastRetryMs);
+            _retryAtTick = unchecked(now + FirstValidateMs);
             _cooldownSeen = false;
-
-            if (_lastAssistTick != int.MinValue && unchecked(now - _lastAssistTick) < AssistLockoutMs)
-                return;
-
-            StartBurst(now);
         }
 
         private void ProcessPending(int now)
@@ -122,9 +176,10 @@ namespace Turbo.Plugins.s7o
             if (!_pending)
                 return;
 
-            if (!CanRun())
+            if (!CanRun() || IsArmoryConfirmationVisible())
             {
                 ClearPending();
+                ClearVerify();
                 return;
             }
 
@@ -148,29 +203,41 @@ namespace Turbo.Plugins.s7o
             if (!_verifying)
                 return;
 
-            ulong currentSignature = GetLoadoutSignature();
-            if (currentSignature != _startSignature && LoadoutMatchesAnyArmorySet())
-            {
-                ClearVerify();
-                return;
-            }
-
-            if (currentSignature != _startSignature && !HasUsableArmorySetData())
-            {
-                ClearVerify();
-                return;
-            }
-
             if (unchecked(now - _verifyUntilTick) > 0)
             {
                 ClearVerify();
                 return;
             }
 
-            if (_pending || _verifyRetries >= MaxVerifyRetries || unchecked(now - _retryAtTick) < 0)
+            if (_pending || unchecked(now - _retryAtTick) < 0)
                 return;
 
-            if (!CanRun())
+            if (!CanRun() || IsArmoryConfirmationVisible())
+            {
+                ClearVerify();
+                return;
+            }
+
+            SmartDecision decision = GetPrimalizedRetryDecision();
+            if (decision == SmartDecision.Unknown)
+            {
+                _retryAtTick = unchecked(now + UnknownRescanMs);
+                return;
+            }
+
+            if (decision == SmartDecision.NotNeeded)
+            {
+                if (_prePrimalizedSeen && unchecked(now - _verifyStartTick) < MinPrimalizedNotNeededConfirmMs)
+                {
+                    _retryAtTick = unchecked(now + UnknownRescanMs);
+                    return;
+                }
+
+                ClearVerify();
+                return;
+            }
+
+            if (_verifyRetries >= MaxVerifyRetries)
             {
                 ClearVerify();
                 return;
@@ -183,6 +250,12 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
+            if (_lastAssistTick != int.MinValue && _verifyRetries == 0 && unchecked(now - _lastAssistTick) < AssistLockoutMs)
+            {
+                _retryAtTick = unchecked(now + RetryValidateMs);
+                return;
+            }
+
             _verifyRetries++;
             _retryAtTick = unchecked(now + GetNextRetryDelayMs());
             _verifyUntilTick = MaxTick(_verifyUntilTick, unchecked(now + VerifyWindowMs));
@@ -190,13 +263,247 @@ namespace Turbo.Plugins.s7o
             StartBurst(now);
         }
 
+        private SmartDecision GetPrimalizedRetryDecision()
+        {
+            try
+            {
+                var me = Hud.Game.Me;
+                var sets = me.ArmorySets;
+                if (sets == null || sets.Length == 0)
+                    return SmartDecision.NotNeeded;
+
+                Dictionary<uint, IItem> itemsByAnnId = GetItemsByAnnId();
+                if (itemsByAnnId.Count == 0 || !HasAnyPrimalizedItem(itemsByAnnId))
+                    return SmartDecision.NotNeeded;
+
+                Dictionary<uint, ItemLocation> equippedLocations = GetEquippedLocationsByAnnId();
+                if (equippedLocations.Count == 0)
+                    return SmartDecision.Unknown;
+
+                List<ArmorySetScan> scans = new List<ArmorySetScan>();
+                int bestScore = 0;
+
+                for (int i = 0; i < sets.Length; i++)
+                {
+                    ArmorySetScan scan = ScanArmorySet(sets[i], itemsByAnnId, equippedLocations);
+                    if (scan == null || scan.SavedItemCount == 0)
+                        continue;
+
+                    scans.Add(scan);
+                    if (scan.MatchCount > bestScore)
+                        bestScore = scan.MatchCount;
+                }
+
+                if (bestScore < MinTargetSetItemMatches)
+                    return SmartDecision.Unknown;
+
+                int bestPrimalizedCandidates = 0;
+                bool anyNeedsRetry = false;
+                bool anyNotNeeded = false;
+
+                for (int i = 0; i < scans.Count; i++)
+                {
+                    ArmorySetScan scan = scans[i];
+                    if (scan.MatchCount != bestScore)
+                        continue;
+
+                    if (!scan.HasPrimalizedItem)
+                        continue;
+
+                    bestPrimalizedCandidates++;
+                    if (scan.NeedsRetry)
+                        anyNeedsRetry = true;
+                    else
+                        anyNotNeeded = true;
+                }
+
+                if (bestPrimalizedCandidates == 0)
+                    return SmartDecision.NotNeeded;
+
+                if (anyNeedsRetry)
+                    return SmartDecision.RetryNeeded;
+
+                if (anyNotNeeded)
+                    return SmartDecision.NotNeeded;
+
+                return SmartDecision.Unknown;
+            }
+            catch { return SmartDecision.Unknown; }
+        }
+
+        private ArmorySetScan ScanArmorySet(IPlayerArmorySet set, Dictionary<uint, IItem> itemsByAnnId, Dictionary<uint, ItemLocation> equippedLocations)
+        {
+            if (set == null || set.ItemAnnIds == null)
+                return null;
+
+            ArmorySetScan scan = new ArmorySetScan();
+            int itemIndex = 0;
+
+            foreach (uint annId in set.ItemAnnIds)
+            {
+                ItemLocation targetSlot = ArmorySlotFromIndex(itemIndex);
+                itemIndex++;
+
+                if (annId == 0 || !IsEquipmentSlot(targetSlot))
+                    continue;
+
+                scan.SavedItemCount++;
+                if (equippedLocations.ContainsKey(annId))
+                    scan.MatchCount++;
+
+                IItem item;
+                if (!itemsByAnnId.TryGetValue(annId, out item) || !IsPrimalized(item))
+                    continue;
+
+                scan.HasPrimalizedItem = true;
+
+                ItemLocation currentLocation;
+                if (!equippedLocations.TryGetValue(annId, out currentLocation) || currentLocation != targetSlot)
+                    scan.NeedsRetry = true;
+            }
+
+            return scan;
+        }
+
+        private Dictionary<uint, IItem> GetItemsByAnnId()
+        {
+            Dictionary<uint, IItem> items = new Dictionary<uint, IItem>();
+            try
+            {
+                foreach (var item in Hud.Game.Items)
+                {
+                    if (item == null || item.AnnId == 0)
+                        continue;
+                    if (!items.ContainsKey(item.AnnId))
+                        items.Add(item.AnnId, item);
+                }
+            }
+            catch { }
+            return items;
+        }
+
+        private Dictionary<uint, ItemLocation> GetEquippedLocationsByAnnId()
+        {
+            Dictionary<uint, ItemLocation> equipped = new Dictionary<uint, ItemLocation>();
+            try
+            {
+                foreach (var item in Hud.Game.Items)
+                {
+                    if (item == null || item.AnnId == 0 || !IsEquipmentSlot(item.Location))
+                        continue;
+                    if (!equipped.ContainsKey(item.AnnId))
+                        equipped.Add(item.AnnId, item.Location);
+                }
+            }
+            catch { }
+            return equipped;
+        }
+
+        private bool HasAnyPrimalizedItem(Dictionary<uint, IItem> itemsByAnnId)
+        {
+            try
+            {
+                foreach (var pair in itemsByAnnId)
+                {
+                    if (IsPrimalized(pair.Value))
+                        return true;
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        private void CapturePreClickPrimalizedState()
+        {
+            _prePrimalizedSeen = false;
+
+            try
+            {
+                foreach (var item in Hud.Game.Items)
+                {
+                    if (item == null || item.AnnId == 0 || !IsEquipmentSlot(item.Location) || !IsPrimalized(item))
+                        continue;
+
+                    _prePrimalizedSeen = true;
+                    return;
+                }
+            }
+            catch { }
+        }
+
+        private bool IsPrimalized(IItem item)
+        {
+            if (item == null)
+                return false;
+
+            try
+            {
+                var stats = item.StatList;
+                if (stats != null)
+                {
+                    foreach (var stat in stats)
+                    {
+                        if (stat == null || !IsPrimalizedStat(stat))
+                            continue;
+
+                        if (stat.IntegerValue.HasValue && stat.IntegerValue.Value != 0)
+                            return true;
+                        if (Math.Abs(stat.DoubleValue) > 0.0001d)
+                            return true;
+                    }
+                }
+            }
+            catch { }
+
+            try
+            {
+                var attr = Hud == null || Hud.Sno == null || Hud.Sno.Attributes == null ? null : Hud.Sno.Attributes.Itemwasprimalized;
+                if (attr != null)
+                {
+                    if (item.GetAttributeValueAsInt(attr, 0u, 0) != 0)
+                        return true;
+                    if (item.GetAttributeValueAsInt(attr, 1048575u, 0) != 0)
+                        return true;
+                    if (item.GetAttributeValueAsInt(attr, 2147483647u, 0) != 0)
+                        return true;
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        private bool IsPrimalizedStat(IItemStat stat)
+        {
+            try
+            {
+                string id = stat.Id ?? string.Empty;
+                string code = stat.Attribute == null ? string.Empty : (stat.Attribute.Code ?? string.Empty);
+                return id.IndexOf("primalized", StringComparison.OrdinalIgnoreCase) >= 0
+                    || code.IndexOf("primalized", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+            catch { return false; }
+        }
+
+        private ItemLocation ArmorySlotFromIndex(int index)
+        {
+            int slot = index + (int)ItemLocation.Head;
+            if (slot < (int)ItemLocation.Head || slot > (int)ItemLocation.Neck)
+                return ItemLocation.Floor;
+            return (ItemLocation)slot;
+        }
+
+        private bool IsEquipmentSlot(ItemLocation location)
+        {
+            return (int)location >= (int)ItemLocation.Head && (int)location <= (int)ItemLocation.Neck;
+        }
+
         private int GetNextRetryDelayMs()
         {
             if (_cooldownSeen)
                 return CooldownRetryMs;
 
-            int delay = FastRetryMs + _verifyRetries * 90;
-            return Math.Max(FastRetryMs, Math.Min(500, delay));
+            return RetryValidateMs;
         }
 
         private void StartBurst(int now)
@@ -215,6 +522,18 @@ namespace Turbo.Plugins.s7o
                 if (Hud.Game == null || !Hud.Game.IsInGame || Hud.Game.IsLoading || Hud.Game.Me == null || !Hud.Game.IsInTown)
                     return false;
                 return IsVisible(_armory);
+            }
+            catch { return false; }
+        }
+
+        private bool IsArmoryConfirmationVisible()
+        {
+            try
+            {
+                if (!IsVisible(_armory))
+                    return false;
+
+                return IsVisible(_confirmationOk) || IsVisible(_confirmationCancel) || IsVisible(_confirmationDialog);
             }
             catch { return false; }
         }
@@ -255,254 +574,6 @@ namespace Turbo.Plugins.s7o
             catch { try { return Hud.Render.GetUiElement(path); } catch { return null; } }
         }
 
-        private ulong GetLoadoutSignature()
-        {
-            ulong hash = 1469598103934665603UL;
-            try
-            {
-                if (Hud == null || Hud.Game == null || Hud.Game.Me == null)
-                    return hash;
-
-                ulong[] equipped = new ulong[14];
-                foreach (var item in Hud.Game.Items)
-                {
-                    if (item == null || (int)item.Location < (int)ItemLocation.Head || (int)item.Location > (int)ItemLocation.Neck)
-                        continue;
-
-                    int slot = (int)item.Location;
-                    ulong itemHash = 1469598103934665603UL;
-                    Mix(ref itemHash, item.AnnId);
-                    Mix(ref itemHash, item.SnoItem == null ? 0u : item.SnoItem.Sno);
-                    Mix(ref itemHash, (uint)item.InventoryX);
-                    Mix(ref itemHash, (uint)item.InventoryY);
-                    equipped[slot] = itemHash;
-                }
-
-                for (int i = 1; i < equipped.Length; i++)
-                {
-                    Mix(ref hash, (uint)i);
-                    Mix(ref hash, (uint)equipped[i]);
-                    Mix(ref hash, (uint)(equipped[i] >> 32));
-                }
-
-                var powers = Hud.Game.Me.Powers;
-                if (powers != null)
-                {
-                    var skills = powers.SkillSlots;
-                    if (skills != null)
-                    {
-                        for (int i = 0; i < skills.Length; i++)
-                        {
-                            var skill = skills[i];
-                            Mix(ref hash, (uint)(100 + i));
-                            Mix(ref hash, skill == null || skill.SnoPower == null ? 0u : skill.SnoPower.Sno);
-                            Mix(ref hash, skill == null ? 0u : skill.Rune);
-                        }
-                    }
-
-                    var passives = powers.PassiveSlots;
-                    if (passives != null)
-                    {
-                        for (int i = 0; i < passives.Length; i++)
-                        {
-                            Mix(ref hash, (uint)(200 + i));
-                            Mix(ref hash, passives[i] == null ? 0u : passives[i].Sno);
-                        }
-                    }
-                }
-
-                var me = Hud.Game.Me;
-                Mix(ref hash, me.CubeSnoItem1 == null ? 0u : me.CubeSnoItem1.Sno);
-                Mix(ref hash, me.CubeSnoItem2 == null ? 0u : me.CubeSnoItem2.Sno);
-                Mix(ref hash, me.CubeSnoItem3 == null ? 0u : me.CubeSnoItem3.Sno);
-                Mix(ref hash, me.CubeSnoItem4 == null ? 0u : me.CubeSnoItem4.Sno);
-            }
-            catch { }
-            return hash;
-        }
-
-
-        private bool HasUsableArmorySetData()
-        {
-            try
-            {
-                var sets = Hud.Game.Me.ArmorySets;
-                if (sets == null || sets.Length == 0)
-                    return false;
-
-                for (int i = 0; i < sets.Length; i++)
-                {
-                    if (sets[i] == null)
-                        continue;
-                    if (sets[i].ItemAnnIds != null || sets[i].LeftSkillSnoPower != null || sets[i].RightSkillSnoPower != null)
-                        return true;
-                }
-            }
-            catch { }
-            return false;
-        }
-
-        private bool LoadoutMatchesAnyArmorySet()
-        {
-            try
-            {
-                var me = Hud.Game.Me;
-                var sets = me.ArmorySets;
-                if (sets == null || sets.Length == 0)
-                    return false;
-
-                HashSet<uint> equipped = GetEquippedAnnIds();
-                for (int i = 0; i < sets.Length; i++)
-                {
-                    var set = sets[i];
-                    if (set == null)
-                        continue;
-                    if (ItemsMatch(set, equipped) && SkillsMatch(set) && PassivesMatch(set) && CubeMatch(set))
-                        return true;
-                }
-            }
-            catch { }
-            return false;
-        }
-
-        private HashSet<uint> GetEquippedAnnIds()
-        {
-            var equipped = new HashSet<uint>();
-            try
-            {
-                foreach (var item in Hud.Game.Items)
-                {
-                    if (item == null || (int)item.Location < (int)ItemLocation.Head || (int)item.Location > (int)ItemLocation.Neck)
-                        continue;
-                    if (item.AnnId != 0)
-                        equipped.Add(item.AnnId);
-                }
-            }
-            catch { }
-            return equipped;
-        }
-
-        private bool ItemsMatch(IPlayerArmorySet set, HashSet<uint> equipped)
-        {
-            HashSet<uint> saved = new HashSet<uint>();
-            try
-            {
-                if (set.ItemAnnIds != null)
-                {
-                    foreach (uint annId in set.ItemAnnIds)
-                    {
-                        if (annId != 0)
-                            saved.Add(annId);
-                    }
-                }
-            }
-            catch { return false; }
-
-            if (saved.Count == 0)
-                return false;
-            if (saved.Count != equipped.Count)
-                return false;
-
-            foreach (uint annId in saved)
-            {
-                if (!equipped.Contains(annId))
-                    return false;
-            }
-            return true;
-        }
-
-        private bool SkillsMatch(IPlayerArmorySet set)
-        {
-            try
-            {
-                var skills = Hud.Game.Me.Powers == null ? null : Hud.Game.Me.Powers.SkillSlots;
-                if (skills == null || skills.Length < 6)
-                    return true;
-
-                return SkillMatches(skills[0], set.LeftSkillSnoPower, set.LeftSkillRune)
-                    && SkillMatches(skills[1], set.RightSkillSnoPower, set.RightSkillRune)
-                    && SkillMatches(skills[2], set.Skill1SnoPower, set.Skill1Rune)
-                    && SkillMatches(skills[3], set.Skill2SnoPower, set.Skill2Rune)
-                    && SkillMatches(skills[4], set.Skill3SnoPower, set.Skill3Rune)
-                    && SkillMatches(skills[5], set.Skill4SnoPower, set.Skill4Rune);
-            }
-            catch { return false; }
-        }
-
-        private bool SkillMatches(IPlayerSkill current, ISnoPower savedPower, byte savedRune)
-        {
-            uint currentSno = current == null || current.SnoPower == null ? 0u : current.SnoPower.Sno;
-            uint savedSno = savedPower == null ? 0u : savedPower.Sno;
-            uint currentRune = current == null ? 0u : current.Rune;
-            return currentSno == savedSno && currentRune == savedRune;
-        }
-
-        private bool PassivesMatch(IPlayerArmorySet set)
-        {
-            try
-            {
-                var passives = Hud.Game.Me.Powers == null ? null : Hud.Game.Me.Powers.PassiveSlots;
-                if (passives == null)
-                    return true;
-
-                var current = new HashSet<uint>();
-                for (int i = 0; i < passives.Length; i++)
-                {
-                    if (passives[i] != null && passives[i].Sno != 0)
-                        current.Add(passives[i].Sno);
-                }
-
-                var saved = new HashSet<uint>();
-                AddPassive(saved, set.PassiveSnoPower1);
-                AddPassive(saved, set.PassiveSnoPower2);
-                AddPassive(saved, set.PassiveSnoPower3);
-                AddPassive(saved, set.PassiveSnoPower4);
-
-                if (current.Count != saved.Count)
-                    return false;
-                foreach (uint sno in saved)
-                {
-                    if (!current.Contains(sno))
-                        return false;
-                }
-                return true;
-            }
-            catch { return false; }
-        }
-
-        private void AddPassive(HashSet<uint> passives, ISnoPower power)
-        {
-            if (power != null && power.Sno != 0)
-                passives.Add(power.Sno);
-        }
-
-        private bool CubeMatch(IPlayerArmorySet set)
-        {
-            try
-            {
-                var me = Hud.Game.Me;
-                return Sno(me.CubeSnoItem1) == Sno(set.CubeSnoItem1)
-                    && Sno(me.CubeSnoItem2) == Sno(set.CubeSnoItem2)
-                    && Sno(me.CubeSnoItem3) == Sno(set.CubeSnoItem3)
-                    && Sno(me.CubeSnoItem4) == Sno(set.CubeSnoItem4);
-            }
-            catch { return false; }
-        }
-
-        private uint Sno(ISnoItem item)
-        {
-            return item == null ? 0u : item.Sno;
-        }
-
-        private static void Mix(ref ulong hash, uint value)
-        {
-            unchecked
-            {
-                hash ^= value;
-                hash *= 1099511628211UL;
-            }
-        }
-
         private void ClearPending()
         {
             _pending = false;
@@ -526,8 +597,9 @@ namespace Turbo.Plugins.s7o
             _verifyUntilTick = int.MinValue;
             _retryAtTick = int.MinValue;
             _verifyRetries = 0;
-            _startSignature = 0;
             _cooldownSeen = false;
+            _verifyStartTick = int.MinValue;
+            _prePrimalizedSeen = false;
         }
 
         private static bool Inside(RectangleF r, int x, int y)
