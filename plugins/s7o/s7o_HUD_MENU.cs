@@ -326,6 +326,17 @@ namespace Turbo.Plugins.s7o
         private const float VisualValleyOfDeathYards = 15f;
         private const float VisualValleyOfDeathSeconds = 15f;
 
+        // VISUAL / standalone s7o_Simulacrum_HP_Bars controls.
+        // Drawing/color ramp stays in the standalone plugin so it remains shareable.
+        private bool  _visSimHpBarsEnabled = true;
+        private bool  _visSimHpBarsExpanded = false;
+        private bool  _simHpShowOwn = true;
+        private bool  _simHpShowOther = true;
+        private float _simHpOwnWidthScale = 0.80f;
+        private float _simHpOwnHeightScale = 1.50f;
+        private float _simHpOtherWidthScale = 0.80f;
+        private float _simHpOtherHeightScale = 1.50f;
+
         private const uint VisualSiphonDebuffSno = 453563u;
 
         // ── HUD-controlled default monster visual toggles ─────────────────────────────
@@ -4125,6 +4136,27 @@ namespace Turbo.Plugins.s7o
             {
             }
         }
+
+        private static void SetPluginFloatProperty(IPlugin plugin, string propertyName, float value)
+        {
+            if (plugin == null || string.IsNullOrWhiteSpace(propertyName))
+                return;
+
+            try
+            {
+                var prop = plugin.GetType().GetProperty(
+                    propertyName,
+                    BindingFlags.Instance | BindingFlags.Public);
+
+                if (prop == null || !prop.CanWrite || prop.PropertyType != typeof(float))
+                    return;
+
+                prop.SetValue(plugin, value, null);
+            }
+            catch
+            {
+            }
+        }
                 private void ApplyMonsterVisualToggles()
         {
             bool master = _visDangerousAffixVisualsEnabled;
@@ -4374,6 +4406,40 @@ namespace Turbo.Plugins.s7o
             }
         }
 
+        private IPlugin GetSimHpBarsPlugin()
+        {
+            return FindPluginByTypeName("s7o_Simulacrum_HP_Bars");
+        }
+
+        private bool IsSimHpBarsFeatureEnabled()
+        {
+            IPlugin plugin = GetSimHpBarsPlugin();
+            return plugin != null && _visSimHpBarsEnabled && SafePluginEnabled(plugin);
+        }
+
+        private void ApplySimHpBarsSettingsToPlugin()
+        {
+            try
+            {
+                IPlugin plugin = GetSimHpBarsPlugin();
+                if (plugin == null)
+                    return;
+
+                if (SafePluginEnabled(plugin) != _visSimHpBarsEnabled)
+                    SetPluginEnabledPersistent(plugin, _visSimHpBarsEnabled);
+
+                SetPluginBoolProperty(plugin, "ShowOwnSimulacrums", _simHpShowOwn);
+                SetPluginBoolProperty(plugin, "ShowOtherSimulacrums", _simHpShowOther);
+                SetPluginFloatProperty(plugin, "OwnWidthScale", _simHpOwnWidthScale);
+                SetPluginFloatProperty(plugin, "OwnHeightScale", _simHpOwnHeightScale);
+                SetPluginFloatProperty(plugin, "OtherWidthScale", _simHpOtherWidthScale);
+                SetPluginFloatProperty(plugin, "OtherHeightScale", _simHpOtherHeightScale);
+            }
+            catch
+            {
+            }
+        }
+
         private s7o_TipsHelper GetTipsHelperPlugin()
         {
             _tipsHelperPlugin = FindPluginByTypeName("s7o_TipsHelper") as s7o_TipsHelper;
@@ -4457,6 +4523,7 @@ namespace Turbo.Plugins.s7o
             ApplyRiftFishingMapSettings();
             ApplyPartyInspectorHotkeyToPlugin();
             ApplyTipsHelperSettingsToPlugin();
+            ApplySimHpBarsSettingsToPlugin();
             ApplyAutoLootSettingsToPlugin();
             ApplyInventoryDropSettingsToPlugin();
             ApplyPestilenceRgkSettingsToPlugin();
@@ -5976,6 +6043,7 @@ namespace Turbo.Plugins.s7o
                 action.StartsWith("visual:size:", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("visual:dot:", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("visual:seconds:", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("visual:simhp:", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("visual:tipstoggle:", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("visual:reset:partyinspector", StringComparison.OrdinalIgnoreCase);
         }
@@ -7986,6 +8054,7 @@ namespace Turbo.Plugins.s7o
                 if (!_visualFavorites.Remove(feature)) _visualFavorites.Add(feature);
                 SaveSettings(); return;
             }
+            if (cmd == "simhp") { HandleSimHpVisualAction(p); return; }
             if (cmd == "toggle") { ToggleVisualFeature(feature); ApplyTipsHelperSettingsToPlugin(); SaveSettings(); return; }
             if (cmd == "expand") { ToggleVisualExpanded(feature); SaveSettings(); return; }
             if (cmd == "tipstoggle") { ToggleTipsHelperOption(feature); ApplyTipsHelperSettingsToPlugin(); SaveSettings(); return; }
@@ -8029,6 +8098,52 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             }
         }
 
+        private void HandleSimHpVisualAction(string[] p)
+        {
+            if (p == null || p.Length < 4)
+                return;
+
+            string sub = p[2];
+            string who = p[3];
+
+            if (string.Equals(sub, "toggle", StringComparison.OrdinalIgnoreCase))
+            {
+                if (string.Equals(who, "own", StringComparison.OrdinalIgnoreCase))
+                    _simHpShowOwn = !_simHpShowOwn;
+                else if (string.Equals(who, "other", StringComparison.OrdinalIgnoreCase))
+                    _simHpShowOther = !_simHpShowOther;
+
+                ApplySimHpBarsSettingsToPlugin();
+                SaveSettings();
+                return;
+            }
+
+            if ((string.Equals(sub, "width", StringComparison.OrdinalIgnoreCase) || string.Equals(sub, "height", StringComparison.OrdinalIgnoreCase)) && p.Length >= 5)
+            {
+                int delta = p[4] == "-1" ? -1 : 1;
+                float step = 0.10f * delta;
+
+                if (string.Equals(who, "own", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (string.Equals(sub, "width", StringComparison.OrdinalIgnoreCase))
+                        _simHpOwnWidthScale = ViClampF(_simHpOwnWidthScale + step, 0.30f, 2.50f);
+                    else
+                        _simHpOwnHeightScale = ViClampF(_simHpOwnHeightScale + step, 0.50f, 3.00f);
+                }
+                else if (string.Equals(who, "other", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (string.Equals(sub, "width", StringComparison.OrdinalIgnoreCase))
+                        _simHpOtherWidthScale = ViClampF(_simHpOtherWidthScale + step, 0.30f, 2.50f);
+                    else
+                        _simHpOtherHeightScale = ViClampF(_simHpOtherHeightScale + step, 0.50f, 3.00f);
+                }
+
+                ApplySimHpBarsSettingsToPlugin();
+                SaveSettings();
+                return;
+            }
+        }
+
         private void ToggleVisualFeature(string feature)
         {
             if (feature == "tipshelper")
@@ -8045,6 +8160,22 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 _visDangerousAffixVisualsExpanded = _visDangerousAffixVisualsEnabled;
                 ApplyMonsterVisualToggles();
                 RequestPluginCacheRefresh();
+                return;
+            }
+
+            if (feature == "simhp")
+            {
+                if (GetSimHpBarsPlugin() == null)
+                {
+                    _status = "SIMULACRUM HP BARS NOT INSTALLED";
+                    return;
+                }
+
+                _visSimHpBarsEnabled = !_visSimHpBarsEnabled;
+                _visSimHpBarsExpanded = _visSimHpBarsEnabled;
+                ApplySimHpBarsSettingsToPlugin();
+                RequestPluginCacheRefresh();
+                _status = _visSimHpBarsEnabled ? "SIMULACRUM HP BARS ON" : "SIMULACRUM HP BARS OFF";
                 return;
             }
 
@@ -8149,6 +8280,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             if (feature == "dangeraffixes")
             {
                 _visDangerousAffixVisualsExpanded = !_visDangerousAffixVisualsExpanded;
+                return;
+            }
+
+            if (feature == "simhp")
+            {
+                _visSimHpBarsExpanded = !_visSimHpBarsExpanded;
                 return;
             }
 
@@ -8525,7 +8662,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
                 private static bool IsCustomVisualFeature(string feature)
         {
-            return feature == "tipshelper" || feature == "dangeraffixes" || feature == "menubutton" || feature == "partyinspector";
+            return feature == "tipshelper" || feature == "dangeraffixes" || feature == "simhp" || feature == "menubutton" || feature == "partyinspector";
         }
 
 
@@ -8536,6 +8673,9 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             if (feature == "dangeraffixes")
                 return 26;
+
+            if (feature == "simhp")
+                return 2;
 
             if (feature == "menubutton")
                 return 2;
@@ -8763,6 +8903,130 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 return s.Substring(1);
 
             return CompactKeyName(s);
+        }
+
+        private void DrawSimHpBarsOptionsRow(RectangleF r, int rowIdx, bool own)
+        {
+            (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
+
+            const float btnW = 82f;
+            const float stepW = 136f;
+            const float gap = 10f;
+            const float stepH = 30f;
+
+            string who = own ? "own" : "other";
+            string title = own ? "Own Simulacrums" : "Other Simulacrums";
+            bool enabled = own ? _simHpShowOwn : _simHpShowOther;
+            float width = own ? _simHpOwnWidthScale : _simHpOtherWidthScale;
+            float height = own ? _simHpOwnHeightScale : _simHpOtherHeightScale;
+
+            float totalW = stepW + gap + stepW + gap + btnW;
+            float x = r.Right - totalW - 8f;
+            if (x < r.Left + 51f)
+                x = r.Left + 51f;
+
+            RectangleF labelR = new RectangleF(x, r.Top + 7f, stepW * 2f + gap, 22f);
+            RectangleF widthR = new RectangleF(x, r.Top + 37f, stepW, stepH);
+            RectangleF heightR = new RectangleF(widthR.Right + gap, r.Top + 37f, stepW, stepH);
+            RectangleF btnR = new RectangleF(heightR.Right + gap, r.Top + 37f, btnW, stepH);
+
+            RectangleF previewR = new RectangleF(r.Left + 14f, r.Top + 9f, Math.Max(1f, x - r.Left - 26f), r.Height - 18f);
+            DrawSimHpPreviewBar(previewR, own, enabled, width, height);
+
+            DrawCenteredOutlinedTextExact(_fSection, _fRowTitleShadow, title, labelR);
+
+            DrawVisualStepperWide(widthR, "Width", FormatVisualFloat(width),
+                "visual:simhp:width:" + who + ":-1",
+                "visual:simhp:width:" + who + ":+1");
+
+            DrawVisualStepperWide(heightR, "Height", FormatVisualFloat(height),
+                "visual:simhp:height:" + who + ":-1",
+                "visual:simhp:height:" + who + ":+1");
+
+            string toggleAction = "visual:simhp:toggle:" + who;
+            DrawGlossButton(btnR, enabled ? "ON" : "OFF", enabled || IsVisualButtonFlashActive(toggleAction), false, true);
+            RegisterToggleHit(toggleAction, btnR);
+        }
+
+        private void DrawSimHpPreviewBar(RectangleF area, bool own, bool enabled, float widthScale, float heightScale)
+        {
+            if (area.Width <= 10f || area.Height <= 8f)
+                return;
+
+            float w = ViClampF(135f * ViClampF(widthScale, 0.30f, 2.50f), 18f, area.Width - 6f);
+            float h = ViClampF(10f * ViClampF(heightScale, 0.30f, 2.50f), 4f, Math.Min(26f, area.Height - 6f));
+            float outline = h >= 12f ? 2f : 1.5f;
+            float x = area.Left + Math.Max(0f, (area.Width - w) * 0.5f);
+            float y = area.Top + Math.Max(0f, (area.Height - h) * 0.5f);
+            float fillX = x + outline;
+            float fillY = y + outline;
+            float fillW = Math.Max(1f, w - outline * 2f);
+            float fillH = Math.Max(1f, h - outline * 2f);
+            float hp = 1.0f;
+            float hpW = fillW;
+
+            int alpha = enabled ? (own ? 245 : 205) : 150;
+            IBrush outlineBrush = GetVisualBrush(alpha, 0, 0, 0, 0f);
+            IBrush bgBrush = GetVisualBrush(Math.Max(70, (int)(alpha * 0.72f)), 0, 0, 0, 0f);
+            if (outlineBrush != null) outlineBrush.DrawRectangle(x, y, w, h);
+            if (bgBrush != null) bgBrush.DrawRectangle(fillX, fillY, fillW, fillH);
+
+            int r, g, b;
+            if (enabled)
+                GetSimHpPreviewColor(hp, own ? 5 : 0, out r, out g, out b);
+            else
+            {
+                r = 58;
+                g = 62;
+                b = 58;
+            }
+
+            IBrush fillBrush = GetVisualBrush(alpha, r, g, b, 0f);
+            if (fillBrush != null) fillBrush.DrawRectangle(fillX, fillY, hpW, fillH);
+
+            if (fillH >= 5f)
+            {
+                int lr = ViClamp( r + (int)((255 - r) * 0.28f), 0, 255);
+                int lg = ViClamp( g + (int)((255 - g) * 0.28f), 0, 255);
+                int lb = ViClamp( b + (int)((255 - b) * 0.28f), 0, 255);
+                IBrush hi = GetVisualBrush(alpha, lr, lg, lb, 0f);
+                if (hi != null) hi.DrawRectangle(fillX, fillY, hpW, fillH * 0.45f);
+
+                int sr = ViClamp((int)(r * 0.65f), 0, 255);
+                int sg = ViClamp((int)(g * 0.65f), 0, 255);
+                int sb = ViClamp((int)(b * 0.65f), 0, 255);
+                IBrush shade = GetVisualBrush(alpha, sr, sg, sb, 0f);
+                if (shade != null) shade.DrawRectangle(fillX, fillY + fillH * 0.72f, hpW, fillH * 0.28f);
+            }
+        }
+
+        private void GetSimHpPreviewColor(float hp, int tone, out int r, out int g, out int b)
+        {
+            hp = ViClampF(hp, 0f, 1f);
+
+            if (hp >= 0.50f)
+            {
+                float t = (1.0f - hp) / 0.50f;
+                r = (int)(55f  + (245f - 55f)  * t);
+                g = (int)(235f + (220f - 235f) * t);
+                b = (int)(65f  + (35f  - 65f)  * t);
+            }
+            else if (hp >= 0.30f)
+            {
+                float t = (0.50f - hp) / 0.20f;
+                r = (int)(245f + (235f - 245f) * t);
+                g = (int)(220f + (45f  - 220f) * t);
+                b = (int)(35f  + (45f  - 35f)  * t);
+            }
+            else
+            {
+                r = 235; g = 45; b = 45;
+            }
+
+            float factor = 0.45f + ViClamp(tone, 0, 10) * 0.11f;
+            r = ViClamp((int)(r * factor), 0, 255);
+            g = ViClamp((int)(g * factor), 0, 255);
+            b = ViClamp((int)(b * factor), 0, 255);
         }
 
         private void DrawMenuButtonOptionsRow(RectangleF r, int rowIdx, bool openState)
@@ -9055,6 +9319,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 return;
             }
 
+            if (feature == "simhp")
+            {
+                DrawSimHpBarsOptionsRow(r, rowIdx, part == 0);
+                return;
+            }
+
             if (feature == "menubutton")
             {
                 DrawMenuButtonOptionsRow(r, rowIdx, part != 0);
@@ -9193,6 +9463,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             {
                 "tipshelper",
                 "dangeraffixes",
+                "simhp",
                 "guardiansentry",
                 "valleyofdeath",
                 "menubutton",
@@ -9211,6 +9482,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             {
                 "Visual Helpers",
                 "Elite/Dangerous Affix Visuals",
+                "Simulacrum Health Bars",
                 "Guardian Sentry Circle",
                 "Valley of Death Circle",
                 "Menu Button",
@@ -9229,6 +9501,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             {
                 "Ancient/primal alerts, globe dots, and party markers.",
                 "Enable or disable elite affix/danger visual effects.",
+                "Small elite-style HP bars under own and party Simulacrums.",
                 "Draws Guardian Sentry turret circles.",
                 "Draws Marked for Death - Valley of Death ground circles.",
                 "Show/hide and customize the HUD Menu open/close button.",
@@ -9247,6 +9520,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             {
                 _visTipsHelperEnabled,
                 _visDangerousAffixVisualsEnabled,
+                IsSimHpBarsFeatureEnabled(),
                 _visGuardianSentryEnabled,
                 _visValleyOfDeathEnabled,
                 _showDot,
@@ -9265,6 +9539,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             {
                 _visTipsHelperExpanded,
                 _visDangerousAffixVisualsExpanded,
+                _visSimHpBarsExpanded,
                 _visGuardianSentryExpanded,
                 _visValleyOfDeathExpanded,
                 _visMenuButtonExpanded,
@@ -9283,6 +9558,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             {
                 0,
                 0,
+                0,
                 _visGuardianSentryColorIdx,
                 _visValleyOfDeathColorIdx,
                 0,
@@ -9299,6 +9575,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             int[] ftone =
             {
+                0,
                 0,
                 0,
                 _visGuardianSentryTone,
@@ -15087,6 +15364,16 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     _tipsPlayerMinimapDotSize.ToString(CultureInfo.InvariantCulture) + "|" +
                     _tipsBloodIsPowerTracker.ToString(CultureInfo.InvariantCulture));
 
+                lines.Add("VIS_SIMULACRUM_HP_BARS=" +
+                    _visSimHpBarsEnabled.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _visSimHpBarsExpanded.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _simHpShowOwn.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _simHpShowOther.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _simHpOwnWidthScale.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _simHpOwnHeightScale.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _simHpOtherWidthScale.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _simHpOtherHeightScale.ToString(CultureInfo.InvariantCulture));
+
                 lines.Add("VIS_DANGEROUS_AFFIX_VISUALS=" + _visDangerousAffixVisualsEnabled.ToString(CultureInfo.InvariantCulture));
                 lines.Add("VIS_DANGEROUS_AFFIX_VISUALS_EXPANDED=" + _visDangerousAffixVisualsExpanded.ToString(CultureInfo.InvariantCulture));
                 lines.Add("AFFIX_PLAGUED=" + _affixPlagued.ToString(CultureInfo.InvariantCulture));
@@ -15282,6 +15569,27 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             _tipsPlayer4Tone = ViClamp(_tipsPlayer4Tone, 0, 10);
             _tipsPlayerGroundSize = ViClampF(_tipsPlayerGroundSize, 12f, 60f);
             _tipsPlayerMinimapDotSize = ViClampF(_tipsPlayerMinimapDotSize, 3f, 14f);
+        }
+
+        private void ParseSimHpBarsVisualLine(string val)
+        {
+            string[] p = (val ?? string.Empty).Split('|');
+            if (p.Length < 8)
+                return;
+
+            _visSimHpBarsEnabled = ParseBool(p[0], _visSimHpBarsEnabled);
+            _visSimHpBarsExpanded = ParseBool(p[1], _visSimHpBarsExpanded);
+            _simHpShowOwn = ParseBool(p[2], _simHpShowOwn);
+            _simHpShowOther = ParseBool(p[3], _simHpShowOther);
+            TryParseFloat(p[4], ref _simHpOwnWidthScale);
+            TryParseFloat(p[5], ref _simHpOwnHeightScale);
+            TryParseFloat(p[6], ref _simHpOtherWidthScale);
+            TryParseFloat(p[7], ref _simHpOtherHeightScale);
+
+            _simHpOwnWidthScale = ViClampF(_simHpOwnWidthScale, 0.30f, 2.50f);
+            _simHpOwnHeightScale = ViClampF(_simHpOwnHeightScale, 0.50f, 3.00f);
+            _simHpOtherWidthScale = ViClampF(_simHpOtherWidthScale, 0.30f, 2.50f);
+            _simHpOtherHeightScale = ViClampF(_simHpOtherHeightScale, 0.50f, 3.00f);
         }
 
         private static void TryParseInt(string raw, ref int value)
@@ -15489,6 +15797,10 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     else if (key == "VIS_TIPS_HELPER")
                     {
                         ParseTipsHelperVisualLine(val);
+                    }
+                    else if (key == "VIS_SIMULACRUM_HP_BARS")
+                    {
+                        ParseSimHpBarsVisualLine(val);
                     }
                     else if (key == "VIS_DANGEROUS_AFFIX_VISUALS")
                     {
