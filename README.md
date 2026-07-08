@@ -54,6 +54,7 @@ Use the HUD Menu to toggle plugins, change visual options, manage TTS alerts, se
 | **s7o_Pylon_Alerts_TTS**       | TTS alerts for pylons/shrines and related GR timing.                                                                                                                    |
 | **s7o_RiftFishing**            | Helps fish GR maps. Bad maps can be skipped/restarted, good maps can be announced and paused based on your map settings.                                                |
 | **s7o_RiftInfo**               | Greater Rift info: timer/progress helpers, boss/push info, pylon/party status, and Stricken-related target info.                                                        |
+| **s7o_Simulacrum_HP_Bars**     | Simulacrum health bars with green/yellow/red HP color cues, own/party Sim toggles, and HUD Menu size controls.                                                          |
 | **s7o_TipsHelper**             | Visual helper for ancient/primal drops, health globes, progress orbs, player markers, and Blood is Power progress on Land of the Dead/Simulacrum.                       |
 | **s7o_TTS_Broadcast**          | Type `.tts your message here` to speak a custom TTS message.                                                                                                            |
 | **s7o_TTS_EnablePlugin**       | Small TTS helper/cleanup plugin. Leave it installed if using TTS alerts.                                                                                                |
@@ -63,6 +64,5 @@ Use the HUD Menu to toggle plugins, change visual options, manage TTS alerts, se
 
 * This plugin pack is built for **TurboHUD Free**.
 * Most options can be toggled or adjusted from the **F8 HUD Menu**.
-* Input-automation helpers should be tested with your own keybinds and build setup.
 * Some plugins were created, borrowed, ported, or modified to work together with the HUD Menu.
-* If you find any bug, please report it.
+* If you find any bugs, please report them.
