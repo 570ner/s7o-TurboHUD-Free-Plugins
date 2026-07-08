@@ -19,6 +19,9 @@ namespace Turbo.Plugins.s7o
         private const uint SiphonBloodPowerSno = 453563u;
         private const uint CrusaderSteedChargePowerSno = 243853u;
         private const uint NecromancerDevourPowerSno = 460757u;
+        private const uint NecromancerSimulacrumPowerSno = 465350u;
+        private const uint HauntedVisionsPowerSno = 484309u;
+        private const uint MasqueradeOfTheBurningCarnival2PBuffSno = 484301u;
         private const uint NecromancerLandOfTheDeadPowerSno = 465839u;
         private const int HealSlotIndex = 6;
         private const string CommandSkeletonsProfileCode = "Necro_CommandSkeletons_Elite";
@@ -1454,7 +1457,7 @@ namespace Turbo.Plugins.s7o
         private void BuildNecromancerConditionalProfiles()
         {
             AddConditionalProfile(Hud.Sno.SnoPowers.Necromancer_BoneArmor, 466857, "Necro_BoneArmor_NearEnemies", "Bone Armor: Near Enemies", "Necromancer", "Buff", "Casts Bone Armor near enemies when missing/expiring.", true, ctx => CountAliveMonstersWithin(25) >= 1 && SkillBuffRemainingBelow(ctx.Skill, 1000, 2000), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
-            AddConditionalProfile(Hud.Sno.SnoPowers.Necromancer_Simulacrum, 465350, "Necro_Simulacrum_EliteOrDensity", "Simulacrum: Elite/Density", "Necromancer", "Cooldown", "Casts Simulacrum near elites or dense packs.", true, ctx => IsEliteOrBossNearby(80, true) || CountAliveMonstersWithin(60) >= 10, ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Necromancer_Simulacrum, NecromancerSimulacrumPowerSno, "Necro_Simulacrum_EliteOrDensity", "Simulacrum: Haunted Visions Missing", "Necromancer", "Cooldown", "Casts Simulacrum only with Haunted Visions when one or both Simulacrums are missing.", true, ShouldCastSimulacrum, ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
             // Default false until we add a proper menu toggle and more build-specific guards.
             AddConditionalProfile(Hud.Sno.SnoPowers.Necromancer_LandOfTheDead, NecromancerLandOfTheDeadPowerSno, "Necro_LandOfTheDead_EliteOrDensity", "Land of the Dead: Elite/Density", "Necromancer", "Cooldown", "Casts Land of the Dead on elites or dense packs.", false, ctx => IsEliteOrBossNearby(80, true) || CountAliveMonstersWithin(60) >= 12, ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
             AddConditionalProfile(Hud.Sno.SnoPowers.Necromancer_Devour, NecromancerDevourPowerSno, DevourProfileCode, "Devour: Corpses/LotD", "Necromancer", "Resource", "Maintains Devour buffs/resources; fast-casts while Land of the Dead is active.", true, ShouldCastDevour, 100, 150, 25, 0, 0, 0, 0, false);
@@ -1632,6 +1635,94 @@ namespace Turbo.Plugins.s7o
                     || name.IndexOf("Treasure", StringComparison.OrdinalIgnoreCase) >= 0;
             }
             catch { return false; }
+        }
+
+        private bool ShouldCastSimulacrum(ConditionalCastContext ctx)
+        {
+            try
+            {
+                if (ctx == null || ctx.Skill == null || ctx.Skill.SnoPower == null)
+                    return false;
+
+                if (!IsHauntedVisionsActive())
+                    return false;
+
+                int desiredCount = UsesTwoSimulacrums(ctx.Skill) ? 2 : 1;
+                int activeCount = CountOwnSimulacrumActors();
+
+                if (activeCount < desiredCount)
+                    return true;
+
+                return !IsOwnBuffActive(ctx.Skill.SnoPower.Sno) && !IsOwnBuffActive(NecromancerSimulacrumPowerSno);
+            }
+            catch { return false; }
+        }
+
+        private bool IsHauntedVisionsActive()
+        {
+            try
+            {
+                if (IsOwnBuffActive(HauntedVisionsPowerSno))
+                    return true;
+
+                var powers = Hud != null && Hud.Game != null && Hud.Game.Me != null ? Hud.Game.Me.Powers : null;
+                var used = powers != null ? powers.UsedLegendaryPowers : null;
+                return used != null && used.HauntedVisions != null && used.HauntedVisions.Active;
+            }
+            catch { return false; }
+        }
+
+        private bool UsesTwoSimulacrums(IPlayerSkill skill)
+        {
+            try
+            {
+                return (skill != null && skill.Rune == 3)
+                    || IsOwnBuffActive(MasqueradeOfTheBurningCarnival2PBuffSno);
+            }
+            catch { return false; }
+        }
+
+        private int CountOwnSimulacrumActors()
+        {
+            try
+            {
+                var actors = Hud != null && Hud.Game != null ? Hud.Game.Actors : null;
+                var me = Hud != null && Hud.Game != null ? Hud.Game.Me : null;
+                if (actors == null || me == null)
+                    return 0;
+
+                uint ownerId = me.SummonerId;
+                int count = 0;
+
+                foreach (var actor in actors)
+                {
+                    if (actor == null || actor.SnoActor == null)
+                        continue;
+
+                    if (!IsSimulacrumActorSno(actor.SnoActor.Sno))
+                        continue;
+
+                    if (ownerId != 0 && actor.SummonerAcdDynamicId != ownerId)
+                        continue;
+
+                    if (actor.IsDisabled || actor.Hitpoints <= 0f)
+                        continue;
+
+                    count++;
+                }
+
+                return count;
+            }
+            catch { return 0; }
+        }
+
+        private static bool IsSimulacrumActorSno(ActorSnoEnum sno)
+        {
+            return sno == ActorSnoEnum._p6_necro_simulacrum_male
+                || sno == ActorSnoEnum._p6_necro_simulacrum_female
+                || sno == ActorSnoEnum._p6_necro_simulacrum_norune
+                || sno == ActorSnoEnum._p6_necro_simulacrum_a
+                || sno == ActorSnoEnum._p6_necro_simulacrum_a_set;
         }
 
         private bool HealthPctBelow(float pct)
@@ -2607,12 +2698,10 @@ namespace Turbo.Plugins.s7o
 
         private bool DoAction(ActionKey actionKey, bool standStill)
         {
-            // Force Standstill (Shift) is only meaningful for LeftSkill: without it, a simulated LMB
-            // click moves the character to the cursor instead of casting in place.  Every other slot
-            // (RMB, keyboard 1-4, Heal) fires directly from a key press and has no movement behavior
-            // to suppress, so injecting Shift around them serves no purpose and risks interfering with
-            // whatever modifier keys the user is physically holding.
-            bool shouldStandStill = standStill && actionKey == ActionKey.LeftSkill && ForceStandstillVirtualKey != 0;
+            // LightningMOD used DoActionAutoShift() for normal autocasts.  The FreeHUD SendInput
+            // replacement must honor that same standstill request for all skill slots, not only LMB,
+            // otherwise cursor-targeted keyboard skills can make the character path toward the cursor.
+            bool shouldStandStill = standStill && IsSkillActionKey(actionKey) && ForceStandstillVirtualKey != 0;
 
             // If the user is already physically holding the standstill key (e.g. Shift), do NOT inject
             // a synthetic key-down/key-up pair around our cast.  Sending a synthetic KeyUp would stomp
@@ -2680,6 +2769,23 @@ namespace Turbo.Plugins.s7o
                 // If the user was already holding it when we entered, leave the state alone.
                 if (shouldStandStill && !userAlreadyHolding)
                     SendKeyUp(ForceStandstillVirtualKey);
+            }
+        }
+
+        private static bool IsSkillActionKey(ActionKey actionKey)
+        {
+            switch (actionKey)
+            {
+                case ActionKey.LeftSkill:
+                case ActionKey.RightSkill:
+                case ActionKey.Skill1:
+                case ActionKey.Skill2:
+                case ActionKey.Skill3:
+                case ActionKey.Skill4:
+                    return true;
+
+                default:
+                    return false;
             }
         }
 
