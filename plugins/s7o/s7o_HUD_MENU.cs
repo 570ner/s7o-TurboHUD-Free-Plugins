@@ -15,8 +15,8 @@ using Turbo.Plugins.Default;
 
 namespace Turbo.Plugins.s7o
 {
-    // s7o HUD MENU - FREEHUD In-Game Manager  (Phase 2: MAIN | TOGGLES | PLUGINS)
-    // Revision: Settings tab removed; TTS TEST removed; persistent plugin toggles; macro favorites; plugins-style scrollbars.
+    // s7o HUD MENU - FREEHUD in-game manager for plugin controls,
+    // macros, visual helpers, hotkeys, and persistent global plugin states.
     public class s7o_HUD_MENU : BasePlugin, IKeyEventHandler, IAfterCollectHandler, IInGameWorldPainter, IInGameTopPainter, IMouseClickHandler
     {
         private const string SettingsFileName = "s7o_HUD_MENU.ini";
@@ -254,6 +254,11 @@ namespace Turbo.Plugins.s7o
         private readonly HashSet<string> _visualFavorites = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private Key _zbarbAutoSnapHotkey = Key.Space;
         private bool _zbarbAutoSnapHotkeyCapture = false;
+        private bool _zbarbAutoSnapExpanded = false;
+        private int _zbarbAutoSnapConeDegrees = 30;
+        private const int ZBarbAutoSnapConeMin = 8;
+        private const int ZBarbAutoSnapConeMax = 45;
+        private const int ZBarbAutoSnapConeDefault = 30;
         private static readonly string[] ZBarbAutoSnapPluginTypeNames =
         {
             "s7o_ZB_AutoSnap",
@@ -442,6 +447,7 @@ namespace Turbo.Plugins.s7o
         {
             "PlayerBottomBuffListPlugin",
             "s7o_Pestilence_RGK",
+            "s7o_Inarius_RGK",
         };
 
         private readonly Dictionary<string, bool> _pluginEnabledOverrides =
@@ -449,6 +455,7 @@ namespace Turbo.Plugins.s7o
         private readonly Dictionary<string, int> _macroToggleFlashTicks = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         private s7o_AutoSkill _autoSkillPlugin = null;
         private s7o_Pestilence_RGK _pestilenceRgkPlugin = null;
+        private s7o_Inarius_RGK _inariusRgkPlugin = null;
         private s7o_InventoryAdjustments _inventoryPlugin = null;
         private s7o_AutoLoot _autoLootPlugin = null;
         private s7o_TipsHelper _tipsHelperPlugin = null;
@@ -494,11 +501,28 @@ namespace Turbo.Plugins.s7o
         private ushort _pestilenceRgkJuggerHotkeyVk = 0x20;
         private bool _pestilenceRgkJuggerHotkeyCapture = false;
         private bool _pestilenceRgkRgAssist = false;
+        private bool _pestilenceRgkShowTargetLineReticle = true;
         private bool _pestilenceRgkZeiCircle = false;
         private bool _pestilenceRgkZeiExpanded = false;
         private int _pestilenceRgkZeiColorIdx = 5;
         private int _pestilenceRgkZeiTone = 2;
         private float _pestilenceRgkZeiThickness = 2.4f;
+        private bool _inariusRgkExpanded = false;
+        private int _inariusRgkNormalStacks = 8;
+        private int _inariusRgkPowerStacks = 6;
+        private bool _inariusRgkAutoSnap = true;
+        private bool _inariusRgkAutoSiphon = true;
+        private bool _inariusRgkLateRefreshAssist = true;
+        private bool _inariusRgkPrioritizeDebuffed = true;
+        private bool _inariusRgkAggressiveScan = false;
+        private bool _inariusRgkIncludeTrash = true;
+        private bool _inariusRgkCursorRestore = true;
+        private bool _inariusRgkShowRangeIndicator = true;
+        private bool _inariusRgkShowTargetLineReticle = true;
+        private bool _inariusRgkJuggerHotkeyEnabled = true;
+        private ushort _inariusRgkJuggerHotkeyVk = 0x20;
+        private bool _inariusRgkJuggerHotkeyCapture = false;
+        private bool _inariusRgkRgAssist = false;
         private readonly ActionKey[] _autoSkillBindActions =
         {
             ActionKey.Skill1,
@@ -1214,7 +1238,7 @@ namespace Turbo.Plugins.s7o
                 _zbarbAutoSnapHotkey = keyEvent.Key;
                 _zbarbAutoSnapHotkeyCapture = false;
 
-                ApplyZBarbAutoSnapHotkeyToPlugin();
+                ApplyZBarbAutoSnapSettingsToPlugin();
                 RequestPluginCacheRefresh();
 
                 _status = "Z-BARB AUTOSNAP HOTKEY SET TO " + CaptureKeyLabel(_zbarbAutoSnapHotkey);
@@ -1310,6 +1334,31 @@ namespace Turbo.Plugins.s7o
                 _pestilenceRgkJuggerHotkeyCapture = false;
                 ApplyPestilenceRgkSettingsToPlugin();
                 _status = "PESTILENCE JUGGER HOTKEY SET TO " + AutoSkillVirtualKeyLabel(vk);
+                SaveSettings();
+                return;
+            }
+
+            if (_inariusRgkJuggerHotkeyCapture)
+            {
+                if (IsCaptureCancelKey(keyEvent.Key))
+                {
+                    _inariusRgkJuggerHotkeyCapture = false;
+                    _status = "INARIUS ELITE HOTKEY CAPTURE CANCELLED";
+                    return;
+                }
+
+                ushort vk;
+                if (!TryGetVirtualKeyFromDirectInputKey(keyEvent.Key, out vk))
+                {
+                    _inariusRgkJuggerHotkeyCapture = false;
+                    _status = "UNSUPPORTED INARIUS ELITE HOTKEY";
+                    return;
+                }
+
+                _inariusRgkJuggerHotkeyVk = vk;
+                _inariusRgkJuggerHotkeyCapture = false;
+                ApplyInariusRgkSettingsToPlugin();
+                _status = "INARIUS ELITE HOTKEY SET TO " + AutoSkillVirtualKeyLabel(vk);
                 SaveSettings();
                 return;
             }
@@ -2061,6 +2110,63 @@ namespace Turbo.Plugins.s7o
             }
         }
 
+        private void ApplyZBarbAutoSnapSettingsToPlugin()
+        {
+            ApplyZBarbAutoSnapHotkeyToPlugin();
+            ApplyZBarbAutoSnapConeToPlugin();
+        }
+
+        private void ApplyZBarbAutoSnapConeToPlugin()
+        {
+            try
+            {
+                IPlugin plugin = GetZBarbAutoSnapPlugin();
+                if (plugin == null)
+                    return;
+
+                _zbarbAutoSnapConeDegrees = ClampZBarbAutoSnapCone(_zbarbAutoSnapConeDegrees);
+
+                var type = plugin.GetType();
+                var method = type.GetMethod(
+                    "ConfigureAimCone",
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                    null,
+                    new[] { typeof(float) },
+                    null);
+
+                if (method != null)
+                {
+                    method.Invoke(plugin, new object[] { (float)_zbarbAutoSnapConeDegrees });
+                    return;
+                }
+
+                SetFloatPluginProperty(type, plugin, "MaxSnapAngleDegrees", _zbarbAutoSnapConeDegrees);
+                SetFloatPluginProperty(type, plugin, "LinearTrashMaxAngleDegrees", Math.Max(ZBarbAutoSnapConeMin, _zbarbAutoSnapConeDegrees - 2));
+            }
+            catch { }
+        }
+
+        private void SetFloatPluginProperty(Type type, object plugin, string propertyName, float value)
+        {
+            try
+            {
+                if (type == null || plugin == null || string.IsNullOrWhiteSpace(propertyName))
+                    return;
+
+                var prop = type.GetProperty(propertyName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (prop != null && prop.CanWrite && prop.PropertyType == typeof(float))
+                    prop.SetValue(plugin, value, null);
+            }
+            catch { }
+        }
+
+        private int ClampZBarbAutoSnapCone(int value)
+        {
+            if (value < ZBarbAutoSnapConeMin) return ZBarbAutoSnapConeMin;
+            if (value > ZBarbAutoSnapConeMax) return ZBarbAutoSnapConeMax;
+            return value;
+        }
+
         private string GetZBarbAutoSnapHotkeyLabel()
         {
             return CaptureKeyLabel(_zbarbAutoSnapHotkey);
@@ -2283,6 +2389,9 @@ namespace Turbo.Plugins.s7o
             if (action == "toggles:plugin:armorybugfix")
                 return TogglePluginByTypeName("ARMORY BUG FIX", "s7o_ArmoryBugFix");
 
+            if (action == "toggles:plugin:paragonbuilds")
+                return TogglePluginByTypeName("PARAGON BUILDS", "s7o_Paragon_Builds");
+
             if (action == "main:plugin:mystic" || action == "toggles:plugin:mystic")
                 return TogglePluginByTypeName("MYSTIC ENCHANT", "s7o_MysticEnchantPlugin");
 
@@ -2299,13 +2408,20 @@ namespace Turbo.Plugins.s7o
                 return ok;
             }
 
+            if (action == "toggles:plugin:inariusrgk")
+            {
+                bool ok = TogglePluginByTypeName("INARIUS RGK", "s7o_Inarius_RGK");
+                ApplyInariusRgkSettingsToPlugin();
+                return ok;
+            }
+
             if (action == "main:plugin:dhstrafe" || action == "toggles:plugin:dhstrafe")
                 return TogglePluginByTypeName("DH STRAFE", "s7o_DHStrafePrimaryPlugin", "s7o_DHStrafe");
 
             if (action == "toggles:plugin:zbarbautosnap")
             {
                 bool ok = TogglePluginByTypeName("Z-BARB AUTOSNAP", ZBarbAutoSnapPluginTypeNames);
-                ApplyZBarbAutoSnapHotkeyToPlugin();
+                ApplyZBarbAutoSnapSettingsToPlugin();
                 return ok;
             }
 
@@ -2825,6 +2941,13 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
+            if (action.Equals("zbarb:expand", StringComparison.OrdinalIgnoreCase)
+                || action.StartsWith("zbarb:cone:", StringComparison.OrdinalIgnoreCase))
+            {
+                HandleZBarbAutoSnapOptionAction(action);
+                return;
+            }
+
             if (action == "macro:hotkey:zbarbautosnap")
             {
                 _zbarbAutoSnapHotkeyCapture = true;
@@ -2854,6 +2977,13 @@ namespace Turbo.Plugins.s7o
                 || action.StartsWith("pestilence:zei:", StringComparison.OrdinalIgnoreCase))
             {
                 HandlePestilenceRgkOptionAction(action);
+                return;
+            }
+
+            if (action.Equals("inarius:expand", StringComparison.OrdinalIgnoreCase)
+                || action.StartsWith("inarius:option:", StringComparison.OrdinalIgnoreCase))
+            {
+                HandleInariusRgkOptionAction(action);
                 return;
             }
 
@@ -3554,7 +3684,7 @@ namespace Turbo.Plugins.s7o
                 ApplyPersistedPluginStates();
                 ApplyBoundPluginStatesFromPrimary();
                 ApplyGlobalTtsSettings();
-                ApplyZBarbAutoSnapHotkeyToPlugin();
+                ApplyZBarbAutoSnapSettingsToPlugin();
                 ApplyHudMenuRuntimeControlledSettings(force);
                 MarkRowsDirty();
                 ClampScroll();
@@ -3686,7 +3816,7 @@ namespace Turbo.Plugins.s7o
             // Rift content
             if (ContainsAny(s, "rift", "greatrift", "urshi", "gem", "pylon", "boss", "timer", "progress")) return ManagerTab.Rift;
             // Combat + world overlays (oculus, triune merged here)
-            if (ContainsAny(s, "autoskill", "autocast", "skill", "snap", "zbarb", "barb", "monster", "elite", "healthbar", "buff", "cooldown", "sentry", "archon", "strafe", "oculus", "triune", "pestilence", "rgk")) return ManagerTab.Combat;
+            if (ContainsAny(s, "autoskill", "autocast", "skill", "snap", "zbarb", "barb", "monster", "elite", "healthbar", "buff", "cooldown", "sentry", "archon", "strafe", "oculus", "triune", "pestilence", "inarius", "rgk")) return ManagerTab.Combat;
             return ManagerTab.Other;
         }
 
@@ -4527,6 +4657,7 @@ namespace Turbo.Plugins.s7o
             ApplyAutoLootSettingsToPlugin();
             ApplyInventoryDropSettingsToPlugin();
             ApplyPestilenceRgkSettingsToPlugin();
+            ApplyInariusRgkSettingsToPlugin();
         }
 
 
@@ -6496,6 +6627,8 @@ namespace Turbo.Plugins.s7o
                     _pestilenceRgkJuggerHotkeyVk,
                     _pestilenceRgkRgAssist);
 
+                plugin.ShowTargetLineReticle = _pestilenceRgkShowTargetLineReticle;
+
                 plugin.ConfigureZeiCircle(
                     _pestilenceRgkZeiCircle,
                     _pestilenceRgkZeiColorIdx,
@@ -6504,6 +6637,41 @@ namespace Turbo.Plugins.s7o
             }
             catch { }
         }
+
+        private void HandleZBarbAutoSnapOptionAction(string action)
+        {
+            if (string.Equals(action, "zbarb:expand", StringComparison.OrdinalIgnoreCase))
+            {
+                _zbarbAutoSnapExpanded = !_zbarbAutoSnapExpanded;
+                _macroToggleFlashTicks["zbarb_autosnap_plugin"] = Environment.TickCount;
+                _status = _zbarbAutoSnapExpanded ? "Z-BARB AUTOSNAP OPTIONS: EXPANDED" : "Z-BARB AUTOSNAP OPTIONS: COLLAPSED";
+                SaveSettings();
+                return;
+            }
+
+            if (string.Equals(action, "zbarb:cone:-1", StringComparison.OrdinalIgnoreCase))
+            {
+                _zbarbAutoSnapConeDegrees = ClampZBarbAutoSnapCone(_zbarbAutoSnapConeDegrees - 1);
+            }
+            else if (string.Equals(action, "zbarb:cone:+1", StringComparison.OrdinalIgnoreCase))
+            {
+                _zbarbAutoSnapConeDegrees = ClampZBarbAutoSnapCone(_zbarbAutoSnapConeDegrees + 1);
+            }
+            else if (string.Equals(action, "zbarb:cone:reset", StringComparison.OrdinalIgnoreCase))
+            {
+                _zbarbAutoSnapConeDegrees = ZBarbAutoSnapConeDefault;
+            }
+            else
+            {
+                return;
+            }
+
+            _macroToggleFlashTicks["zbarb_autosnap_plugin"] = Environment.TickCount;
+            _status = "Z-BARB AUTOSNAP CONE: " + _zbarbAutoSnapConeDegrees.ToString(CultureInfo.InvariantCulture) + "°";
+            ApplyZBarbAutoSnapSettingsToPlugin();
+            SaveSettings();
+        }
+
 
         private void HandlePestilenceRgkOptionAction(string action)
         {
@@ -6588,6 +6756,10 @@ namespace Turbo.Plugins.s7o
                 case 12:
                     _pestilenceRgkRgAssist = !_pestilenceRgkRgAssist;
                     _status = "PESTILENCE RG ASSIST: " + (_pestilenceRgkRgAssist ? "ON" : "OFF");
+                    break;
+                case 13:
+                    _pestilenceRgkShowTargetLineReticle = !_pestilenceRgkShowTargetLineReticle;
+                    _status = "PESTILENCE TARGET LINE: " + (_pestilenceRgkShowTargetLineReticle ? "ON" : "OFF");
                     break;
                 case 16:
                     _pestilenceRgkZeiCircle = !_pestilenceRgkZeiCircle;
@@ -6688,6 +6860,7 @@ namespace Turbo.Plugins.s7o
                 case 10: return _pestilenceRgkJuggerHotkeyEnabled ? "ON" : "OFF";
                 case 11: return _pestilenceRgkJuggerHotkeyCapture ? "PRESS" : AutoSkillVirtualKeyLabel(_pestilenceRgkJuggerHotkeyVk);
                 case 12: return _pestilenceRgkRgAssist ? "ON" : "OFF";
+                case 13: return _pestilenceRgkShowTargetLineReticle ? "ON" : "OFF";
                 case 16: return _pestilenceRgkZeiCircle ? "ON" : "OFF";
                 case 17: return PestilenceZeiColorLabel(_pestilenceRgkZeiColorIdx);
                 case 18: return _pestilenceRgkZeiTone.ToString(CultureInfo.InvariantCulture);
@@ -6727,6 +6900,7 @@ namespace Turbo.Plugins.s7o
                 case 10: return _pestilenceRgkJuggerHotkeyEnabled;
                 case 11: return _pestilenceRgkJuggerHotkeyCapture;
                 case 12: return _pestilenceRgkRgAssist;
+                case 13: return _pestilenceRgkShowTargetLineReticle;
                 case 16: return _pestilenceRgkZeiCircle;
                 case 17:
                 case 18:
@@ -6766,6 +6940,183 @@ namespace Turbo.Plugins.s7o
             if (value < 15) return 15;
             if (value > 90) return 90;
             return ((value + 2) / 5) * 5;
+        }
+
+        private s7o_Inarius_RGK GetInariusRgkPlugin()
+        {
+            if (_inariusRgkPlugin != null) return _inariusRgkPlugin;
+            _inariusRgkPlugin = FindPluginByTypeName("s7o_Inarius_RGK") as s7o_Inarius_RGK;
+            return _inariusRgkPlugin;
+        }
+
+        private void ApplyInariusRgkSettingsToPlugin()
+        {
+            var plugin = GetInariusRgkPlugin();
+            if (plugin == null)
+                return;
+
+            try
+            {
+                plugin.Configure(
+                    _inariusRgkNormalStacks,
+                    _inariusRgkPowerStacks,
+                    _inariusRgkAutoSnap,
+                    _inariusRgkAutoSiphon,
+                    _inariusRgkLateRefreshAssist,
+                    _inariusRgkPrioritizeDebuffed,
+                    _inariusRgkAggressiveScan,
+                    _inariusRgkIncludeTrash,
+                    _inariusRgkCursorRestore,
+                    17,
+                    _inariusRgkJuggerHotkeyEnabled,
+                    _inariusRgkJuggerHotkeyVk,
+                    _inariusRgkRgAssist);
+
+                plugin.ShowRangeIndicator = _inariusRgkShowRangeIndicator;
+                plugin.ShowTargetLineReticle = _inariusRgkShowTargetLineReticle;
+            }
+            catch { }
+        }
+
+        private void HandleInariusRgkOptionAction(string action)
+        {
+            if (string.Equals(action, "inarius:expand", StringComparison.OrdinalIgnoreCase))
+            {
+                _inariusRgkExpanded = !_inariusRgkExpanded;
+                _macroToggleFlashTicks["inarius_rgk_plugin"] = Environment.TickCount;
+                _status = _inariusRgkExpanded ? "INARIUS RGK OPTIONS: EXPANDED" : "INARIUS RGK OPTIONS: COLLAPSED";
+                SaveSettings();
+                return;
+            }
+
+            const string prefix = "inarius:option:";
+            if (!action.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                return;
+
+            int kind;
+            if (!int.TryParse(action.Substring(prefix.Length), NumberStyles.Integer, CultureInfo.InvariantCulture, out kind))
+                return;
+
+            switch (kind)
+            {
+                case 15:
+                    _inariusRgkAutoSnap = !_inariusRgkAutoSnap;
+                    _status = "INARIUS AUTOSNAP: " + (_inariusRgkAutoSnap ? "ON" : "OFF");
+                    break;
+                case 1:
+                    _inariusRgkAutoSiphon = !_inariusRgkAutoSiphon;
+                    _status = "INARIUS AUTOSIPHON: " + (_inariusRgkAutoSiphon ? "ON" : "OFF");
+                    break;
+                case 2:
+                    _inariusRgkNormalStacks = CyclePestilenceRgkStackTarget(_inariusRgkNormalStacks);
+                    _status = "INARIUS NORMAL STACKS: " + _inariusRgkNormalStacks.ToString(CultureInfo.InvariantCulture);
+                    break;
+                case 3:
+                    _inariusRgkPowerStacks = CyclePestilenceRgkStackTarget(_inariusRgkPowerStacks);
+                    _status = "INARIUS POWER STACKS: " + _inariusRgkPowerStacks.ToString(CultureInfo.InvariantCulture);
+                    break;
+                case 4:
+                    _inariusRgkLateRefreshAssist = !_inariusRgkLateRefreshAssist;
+                    _status = "INARIUS LATE REFRESH: " + (_inariusRgkLateRefreshAssist ? "ON" : "OFF");
+                    break;
+                case 5:
+                    _inariusRgkPrioritizeDebuffed = !_inariusRgkPrioritizeDebuffed;
+                    _status = "INARIUS DEBUFF PRIORITY: " + (_inariusRgkPrioritizeDebuffed ? "ON" : "OFF");
+                    break;
+                case 6:
+                    _inariusRgkAggressiveScan = !_inariusRgkAggressiveScan;
+                    _status = "INARIUS AGGRESSIVE SCAN: " + (_inariusRgkAggressiveScan ? "ON" : "OFF");
+                    break;
+                case 7:
+                    _inariusRgkIncludeTrash = !_inariusRgkIncludeTrash;
+                    _status = "INARIUS TRASH FALLBACK: " + (_inariusRgkIncludeTrash ? "ON" : "OFF");
+                    break;
+                case 9:
+                    _inariusRgkCursorRestore = !_inariusRgkCursorRestore;
+                    _status = "INARIUS CURSOR RESTORE: " + (_inariusRgkCursorRestore ? "ON" : "OFF");
+                    break;
+                case 13:
+                    _inariusRgkShowRangeIndicator = !_inariusRgkShowRangeIndicator;
+                    _status = "INARIUS RANGE INDICATOR: " + (_inariusRgkShowRangeIndicator ? "ON" : "OFF");
+                    break;
+                case 14:
+                    _inariusRgkShowTargetLineReticle = !_inariusRgkShowTargetLineReticle;
+                    _status = "INARIUS TARGET LINE: " + (_inariusRgkShowTargetLineReticle ? "ON" : "OFF");
+                    break;
+                case 10:
+                    _inariusRgkJuggerHotkeyEnabled = !_inariusRgkJuggerHotkeyEnabled;
+                    _status = "INARIUS ELITE CYCLING: " + (_inariusRgkJuggerHotkeyEnabled ? "ON" : "OFF");
+                    break;
+                case 11:
+                    BeginInariusJuggerHotkeyCapture();
+                    return;
+                case 12:
+                    _inariusRgkRgAssist = !_inariusRgkRgAssist;
+                    _status = "INARIUS RG ASSIST: " + (_inariusRgkRgAssist ? "ON" : "OFF");
+                    break;
+            }
+
+            _macroToggleFlashTicks["inarius_rgk_plugin"] = Environment.TickCount;
+            ApplyInariusRgkSettingsToPlugin();
+            SaveSettings();
+        }
+
+        private void BeginInariusJuggerHotkeyCapture()
+        {
+            if (GetInariusRgkPlugin() == null)
+            {
+                _status = "INARIUS RGK PLUGIN NOT FOUND";
+                return;
+            }
+
+            _inariusRgkJuggerHotkeyCapture = true;
+            _status = "PRESS INARIUS ELITE CYCLING HOTKEY";
+        }
+
+        private string GetInariusOptionLabel(int kind, bool installed)
+        {
+            if (!installed)
+                return "NOT INSTALLED";
+
+            switch (kind)
+            {
+                case 15: return _inariusRgkAutoSnap ? "ON" : "OFF";
+                case 1: return _inariusRgkAutoSiphon ? "ON" : "OFF";
+                case 2: return _inariusRgkNormalStacks.ToString(CultureInfo.InvariantCulture);
+                case 3: return _inariusRgkPowerStacks.ToString(CultureInfo.InvariantCulture);
+                case 4: return _inariusRgkLateRefreshAssist ? "ON" : "OFF";
+                case 5: return _inariusRgkPrioritizeDebuffed ? "ON" : "OFF";
+                case 6: return _inariusRgkAggressiveScan ? "ON" : "OFF";
+                case 7: return _inariusRgkIncludeTrash ? "ON" : "OFF";
+                case 9: return _inariusRgkCursorRestore ? "ON" : "OFF";
+                case 13: return _inariusRgkShowRangeIndicator ? "ON" : "OFF";
+                case 14: return _inariusRgkShowTargetLineReticle ? "ON" : "OFF";
+                case 10: return _inariusRgkJuggerHotkeyEnabled ? "ON" : "OFF";
+                case 11: return _inariusRgkJuggerHotkeyCapture ? "PRESS" : AutoSkillVirtualKeyLabel(_inariusRgkJuggerHotkeyVk);
+                case 12: return _inariusRgkRgAssist ? "ON" : "OFF";
+            }
+
+            return "";
+        }
+
+        private bool GetInariusOptionEnabled(int kind)
+        {
+            switch (kind)
+            {
+                case 15: return _inariusRgkAutoSnap;
+                case 1: return _inariusRgkAutoSiphon;
+                case 4: return _inariusRgkLateRefreshAssist;
+                case 5: return _inariusRgkPrioritizeDebuffed;
+                case 6: return _inariusRgkAggressiveScan;
+                case 7: return _inariusRgkIncludeTrash;
+                case 9: return _inariusRgkCursorRestore;
+                case 13: return _inariusRgkShowRangeIndicator;
+                case 14: return _inariusRgkShowTargetLineReticle;
+                case 10: return _inariusRgkJuggerHotkeyEnabled;
+                case 11: return _inariusRgkJuggerHotkeyCapture;
+                case 12: return _inariusRgkRgAssist;
+            }
+            return true;
         }
 
         private s7o_AutoSkill GetAutoSkillPlugin()
@@ -9767,6 +10118,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             public int    PestilenceOptionKind;
             public bool   IsPestilenceStackTarget;
             public int    PestilenceStackKind;
+            public bool   IsInariusSelector;
+            public bool   IsInariusChild;
+            public int    InariusOptionKind;
+            public bool   IsZBarbSelector;
+            public bool   IsZBarbChild;
+            public int    ZBarbOptionKind;
             public RiftMapGroup RiftGroup;
             public RiftMapGroup RiftGroupRight;
             public string[] PluginTypeNames;
@@ -9846,6 +10203,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
         private const float OpenGrMapChildSlotH = 22f;
         private const float AutoSkillKeybindChildSlotH = 58f;
         private const float PestilenceChildSlotH = 36f;
+        private const float ZBarbConeChildSlotH = 84f;
         private const float MacroEntryH = 76f;
         private const float MacroHeaderH = 36f;
 
@@ -9863,8 +10221,11 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             if (item.Entry.IsInventoryDropChild)
                 return PestilenceChildSlotH;
 
-            if (item.Entry.IsPestilenceChild)
+            if (item.Entry.IsPestilenceChild || item.Entry.IsInariusChild)
                 return PestilenceChildSlotH;
+
+            if (item.Entry.IsZBarbChild)
+                return ZBarbConeChildSlotH;
 
             return MacroListSlotH;
         }
@@ -9901,6 +10262,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 return;
             }
 
+            if (entry.IsZBarbChild)
+            {
+                DrawZBarbAutoSnapChildRow(slot, entry, rowIdx);
+                return;
+            }
+
             if (entry.IsAutoLootChild)
             {
                 DrawAutoLootChildRow(slot, entry, rowIdx);
@@ -9919,10 +10286,17 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 return;
             }
 
+            if (entry.IsInariusChild)
+            {
+                DrawInariusChildRow(slot, entry, rowIdx);
+                return;
+            }
+
             const float starW  = 32f;
             const float stateW = 138f;
             const float hotkeyW = 86f;
             const float buttonGap = 8f;
+            const float hotkeyExpandGap = 10f;
 
             RectangleF rr = new RectangleF(slot.Left, slot.Top + 3f, slot.Width, MacroEntryH);
 
@@ -9955,6 +10329,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 installed = GetInventoryPlugin() != null;
                 enabled = installed && _inventoryDropEnabled;
             }
+            else if (entry.IsZBarbSelector)
+            {
+                IPlugin plugin = GetZBarbAutoSnapPlugin();
+                installed = plugin != null;
+                enabled = installed && SafePluginEnabled(plugin);
+            }
             else if (entry.IsPlugin)
             {
                 IPlugin plugin = FindPluginByTypeName(entry.PluginTypeNames);
@@ -9974,17 +10354,22 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             RectangleF stateR = new RectangleF(rr.Right - stateW - 8f, rr.Top + 6f, stateW, rr.Height - 12f);
             RectangleF expandR = RectangleF.Empty;
-            if (entry.IsPestilenceSelector || entry.IsAutoLootSelector || entry.IsInventoryDropSelector)
+            if (entry.IsPestilenceSelector || entry.IsInariusSelector || entry.IsAutoLootSelector || entry.IsInventoryDropSelector || entry.IsZBarbSelector)
             {
                 expandR = new RectangleF(stateR.Left - 34f - buttonGap, rr.Top + 6f, 34f, rr.Height - 12f);
             }
 
             RectangleF hotkeyR = RectangleF.Empty;
             if (entry.HasHotkeyButton)
-                hotkeyR = new RectangleF(stateR.Left - hotkeyW - buttonGap, rr.Top + 6f, hotkeyW, rr.Height - 12f);
+            {
+                float hotkeyLeft = ((entry.IsPestilenceSelector || entry.IsInariusSelector || entry.IsAutoLootSelector || entry.IsInventoryDropSelector || entry.IsZBarbSelector) && expandR != RectangleF.Empty)
+                    ? (expandR.Left - hotkeyW - hotkeyExpandGap)
+                    : (stateR.Left - hotkeyW - buttonGap);
+                hotkeyR = new RectangleF(hotkeyLeft, rr.Top + 6f, hotkeyW, rr.Height - 12f);
+            }
 
             float textX = starR.Right + 10f;
-            float textRight = entry.HasHotkeyButton ? hotkeyR.Left - 10f : ((entry.IsPestilenceSelector || entry.IsAutoLootSelector || entry.IsInventoryDropSelector) ? expandR.Left - 10f : stateR.Left - 10f);
+            float textRight = entry.HasHotkeyButton ? hotkeyR.Left - 10f : ((entry.IsPestilenceSelector || entry.IsInariusSelector || entry.IsAutoLootSelector || entry.IsInventoryDropSelector) ? expandR.Left - 10f : stateR.Left - 10f);
             float textW = Math.Max(40f, textRight - textX);
 
             DrawOutlinedTextAt(_fRowTitle, _fRowTitleShadow,
@@ -10018,7 +10403,20 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             else
                 stateLabel = enabled ? "ON" : "OFF";
 
-            bool canToggle = entry.IsOpenGrMapSelector ? installed : (entry.IsAutoSkillKeybindSelector ? installed : (entry.IsAutoLootSelector ? installed : (entry.IsInventoryDropSelector ? installed : (entry.IsPestilenceStackTarget ? installed : (entry.IsPlugin ? installed : GetAutoSkillPlugin() != null)))));
+            bool canToggle;
+            if (entry.IsOpenGrMapSelector ||
+                entry.IsAutoSkillKeybindSelector ||
+                entry.IsAutoLootSelector ||
+                entry.IsInventoryDropSelector ||
+                entry.IsPestilenceStackTarget ||
+                entry.IsPlugin)
+            {
+                canToggle = installed;
+            }
+            else
+            {
+                canToggle = GetAutoSkillPlugin() != null;
+            }
 
             int flashTk;
             _macroToggleFlashTicks.TryGetValue(entry.Code, out flashTk);
@@ -10048,6 +10446,18 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             {
                 DrawGlossButton(expandR, _pestilenceRgkExpanded ? "-" : "+", _pestilenceRgkExpanded, false, false);
                 RegisterToggleHit("pestilence:expand", expandR);
+            }
+
+            if (entry.IsInariusSelector)
+            {
+                DrawGlossButton(expandR, _inariusRgkExpanded ? "-" : "+", _inariusRgkExpanded, false, false);
+                RegisterToggleHit("inarius:expand", expandR);
+            }
+
+            if (entry.IsZBarbSelector)
+            {
+                DrawGlossButton(expandR, _zbarbAutoSnapExpanded ? "-" : "+", _zbarbAutoSnapExpanded, false, false);
+                RegisterToggleHit("zbarb:expand", expandR);
             }
 
             // Persistent enabled-state color.
@@ -10166,6 +10576,11 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                         });
                     }
 
+                    if (entry.IsZBarbSelector && _zbarbAutoSnapExpanded)
+                    {
+                        AddZBarbAutoSnapChildItems(items, true);
+                    }
+
                     if (entry.IsAutoLootSelector && _autoLootExpanded)
                     {
                         AddAutoLootChildItems(items, true);
@@ -10179,6 +10594,11 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     if (entry.IsPestilenceSelector && _pestilenceRgkExpanded)
                     {
                         AddPestilenceChildItems(items, true);
+                    }
+
+                    if (entry.IsInariusSelector && _inariusRgkExpanded)
+                    {
+                        AddInariusChildItems(items, true);
                     }
                 }
             }
@@ -10221,9 +10641,19 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                         IsCompactOpenGrMapRow = entry.IsOpenGrMapChild
                     });
 
+                    if (entry.IsZBarbSelector && _zbarbAutoSnapExpanded)
+                    {
+                        AddZBarbAutoSnapChildItems(items, false);
+                    }
+
                     if (entry.IsPestilenceSelector && _pestilenceRgkExpanded)
                     {
                         AddPestilenceChildItems(items, false);
+                    }
+
+                    if (entry.IsInariusSelector && _inariusRgkExpanded)
+                    {
+                        AddInariusChildItems(items, false);
                     }
                 }
             }
@@ -10231,6 +10661,24 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             return items;
         }
 
+
+
+        private void AddZBarbAutoSnapChildItems(List<MacroListItem> items, bool favoriteDisplay)
+        {
+            items.Add(new MacroListItem
+            {
+                Kind = MacroListItemKind.Entry,
+                Entry = new MacroEntry
+                {
+                    Title = "Aim cone",
+                    Description = "Adjust allowed spear drift from your cursor aim.",
+                    Code = "zbarb_autosnap_cone",
+                    IsZBarbChild = true,
+                    ZBarbOptionKind = 1
+                },
+                IsFavoriteDisplay = favoriteDisplay
+            });
+        }
 
 
         private void AddAutoLootChildEntries(List<MacroEntry> entries)
@@ -10354,6 +10802,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             AddPestilenceChildItem(items, favoriteDisplay, "Juggernaut / Elite cycling", "Hotkey locks/cycles elites by lowest HP first; orange 10y Juggernaut ring, green 5y elite ring.", "pestilence_rgk_jugger_lock", 10);
             AddPestilenceChildItem(items, favoriteDisplay, "Elite cycle hotkey", "Click to change the Juggernaut / Elite cycling hotkey.", "pestilence_rgk_jugger_hotkey", 11);
             AddPestilenceChildItem(items, favoriteDisplay, "RG AutoSnap/Siphon", "Boss assist obeys AutoSnap and AutoSiphon toggles independently.", "pestilence_rgk_rg_assist", 12);
+            AddPestilenceChildItem(items, favoriteDisplay, "Target line / reticle", "Draw a red target line and pulsing reticle dot while engaged.", "pestilence_rgk_target_line", 13);
             AddPestilenceChildItem(items, favoriteDisplay, "Zei's 50 Yard Circle", "Draw a 50 yard Zei range reference around your hero.", "pestilence_rgk_zei_circle", 16);
             if (_pestilenceRgkZeiExpanded)
                 AddPestilenceChildItem(items, favoriteDisplay, "Zei style", "Adjust Zei circle color, tone, and line thickness.", "pestilence_rgk_zei_style", 17);
@@ -10463,6 +10912,93 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
         }
 
 
+        private void DrawZBarbAutoSnapChildRow(RectangleF r, MacroEntry entry, int rowIdx)
+        {
+            (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
+
+            bool installed = GetZBarbAutoSnapPlugin() != null;
+            float pad = 44f;
+            float stepW = 128f;
+            float resetW = 58f;
+            float gap = 8f;
+            float previewW = Math.Max(150f, r.Width - pad - stepW - resetW - gap * 4f - 16f);
+
+            RectangleF previewR = new RectangleF(r.Left + pad, r.Top + 5f, previewW, r.Height - 10f);
+            float buttonY = r.Top + (r.Height - 30f) * 0.5f;
+            RectangleF stepR = new RectangleF(previewR.Right + gap, buttonY, stepW, 30f);
+            RectangleF resetR = new RectangleF(stepR.Right + gap, buttonY, resetW, 30f);
+
+            DrawZBarbConePreview(previewR, installed);
+
+            DrawVisualStepperWide(
+                stepR,
+                "Cone",
+                _zbarbAutoSnapConeDegrees.ToString(CultureInfo.InvariantCulture) + "°",
+                "zbarb:cone:-1",
+                "zbarb:cone:+1");
+
+            DrawGlossButton(resetR, "RESET", false, false, installed);
+            if (installed)
+                RegisterToggleHit("zbarb:cone:reset", resetR);
+        }
+
+        private void DrawZBarbConePreview(RectangleF r, bool installed)
+        {
+            if (_bPreviewBlack != null)
+                _bPreviewBlack.DrawRectangle(r.Left, r.Top, r.Width, r.Height);
+            if (_bPreviewBorder != null)
+                _bPreviewBorder.DrawRectangle(r.Left, r.Top, r.Width, r.Height);
+
+            float angle = ClampZBarbAutoSnapCone(_zbarbAutoSnapConeDegrees);
+            float t = (angle - ZBarbAutoSnapConeMin) / (float)Math.Max(1, ZBarbAutoSnapConeMax - ZBarbAutoSnapConeMin);
+            float originX = r.Right - 12f;
+            float centerY = r.Top + r.Height * 0.5f;
+            float farX = r.Left + 12f;
+            float halfH = Math.Max(4f, (r.Height * 0.10f) + (r.Height * 0.34f * t));
+            float maxHalfH = Math.Max(4f, r.Height * 0.5f - 6f);
+            if (halfH > maxHalfH)
+                halfH = maxHalfH;
+
+            IBrush coneEdge = installed ? _bPrevBlueDash : _bPrevGrey;
+            IBrush coneInner = _bPreviewBorder ?? _bPrevGrey;
+            IBrush center = installed ? _bPrevGreenDash : _bPrevGrey;
+            IBrush dot = installed ? _bPrevYellow : _bPrevGrey;
+
+            if (coneInner != null)
+            {
+                for (int i = -5; i <= 5; i++)
+                {
+                    if (i == 0 || i == -5 || i == 5) continue;
+                    float yy = centerY + halfH * (i / 5.0f);
+                    coneInner.DrawLine(originX, centerY, farX, yy);
+                }
+            }
+
+            if (coneEdge != null)
+            {
+                coneEdge.DrawLine(originX, centerY, farX, centerY - halfH);
+                coneEdge.DrawLine(originX, centerY, farX, centerY + halfH);
+            }
+
+            if (center != null)
+                center.DrawLine(originX, centerY, farX, centerY);
+
+            float targetX = originX + (farX - originX) * 0.94f;
+            if (dot != null)
+            {
+                if (installed && _bPrevRedDash != null)
+                    _bPrevRedDash.DrawEllipse(targetX, centerY, 7.0f, 7.0f);
+                dot.DrawEllipse(targetX, centerY, 5.4f, 5.4f);
+                if (_bPreviewBlack != null)
+                    _bPreviewBlack.DrawEllipse(targetX, centerY, 3.2f, 3.2f);
+                dot.DrawEllipse(targetX, centerY, 2.6f, 2.6f);
+            }
+
+            string label = angle <= 16f ? "precision" : (angle >= 36f ? "aggressive" : "balanced");
+            DrawOutlinedTextAt(_fSmall, _fSmallShadow, label, r.Right - 72f, r.Bottom - 15f);
+        }
+
+
         private void DrawAutoLootChildRow(RectangleF r, MacroEntry entry, int rowIdx)
         {
             (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
@@ -10508,6 +11044,64 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             if (installed)
                 RegisterToggleHit("inventorydrop:option:" + entry.InventoryDropOptionKind.ToString(CultureInfo.InvariantCulture), stateR);
+        }
+
+        private void AddInariusChildItems(List<MacroListItem> items, bool favoriteDisplay)
+        {
+            AddInariusChildItem(items, favoriteDisplay, "AutoSnap", "Move cursor to the selected in-range target, or red guide target when no ring target exists.", "inarius_rgk_autosnap", 15);
+            AddInariusChildItem(items, favoriteDisplay, "AutoSiphon", "Pulse Siphon Blood while Corpse Lance is held.", "inarius_rgk_autosiphon", 1);
+            AddInariusChildItem(items, favoriteDisplay, "Normal stacks", "Power Shift target without Power pylon.", "inarius_rgk_normal_stacks", 2);
+            AddInariusChildItem(items, favoriteDisplay, "Power stacks", "Power Shift target while Power pylon is active.", "inarius_rgk_power_stacks", 3);
+            AddInariusChildItem(items, favoriteDisplay, "Late refresh assist", "Allow late refresh pulses when AutoSiphon is off.", "inarius_rgk_late_refresh", 4);
+            AddInariusChildItem(items, favoriteDisplay, "Debuffed elite priority", "Prefer Siphon-debuffed elites inside the same close-range priority bucket.", "inarius_rgk_debuff_priority", 5);
+            AddInariusChildItem(items, favoriteDisplay, "Aggressive scan", "Use faster target hover probing for awkward elite hitboxes.", "inarius_rgk_aggressive_scan", 6);
+            AddInariusChildItem(items, favoriteDisplay, "Trash fallback", "Target close trash/high-value trash only after elite leaders are gone.", "inarius_rgk_trash_fallback", 7);
+            AddInariusChildItem(items, favoriteDisplay, "Cursor restore", "Restore cursor after short Inarius target-assist holds.", "inarius_rgk_cursor_restore", 9);
+            AddInariusChildItem(items, favoriteDisplay, "Range indicator", "Show the Inarius green/orange/red range ring while engaged.", "inarius_rgk_range_indicator", 13);
+            AddInariusChildItem(items, favoriteDisplay, "Target line / reticle", "Draw the target line and red pulsing reticle dot while engaged.", "inarius_rgk_target_line", 14);
+            AddInariusChildItem(items, favoriteDisplay, "Juggernaut / Elite cycling", "Hotkey locks/cycles elites by lowest HP first; uses the copied Pestilence cycling behavior.", "inarius_rgk_jugger_lock", 10);
+            AddInariusChildItem(items, favoriteDisplay, "Elite cycle hotkey", "Click to change the Juggernaut / Elite cycling hotkey.", "inarius_rgk_jugger_hotkey", 11);
+            AddInariusChildItem(items, favoriteDisplay, "RG AutoSnap/Siphon", "Boss assist obeys AutoSnap and AutoSiphon toggles independently.", "inarius_rgk_rg_assist", 12);
+        }
+
+        private void AddInariusChildItem(List<MacroListItem> items, bool favoriteDisplay, string title, string description, string code, int kind)
+        {
+            items.Add(new MacroListItem
+            {
+                Kind = MacroListItemKind.Entry,
+                Entry = new MacroEntry
+                {
+                    Title = title,
+                    Description = description,
+                    Code = code,
+                    IsInariusChild = true,
+                    InariusOptionKind = kind
+                },
+                IsFavoriteDisplay = favoriteDisplay
+            });
+        }
+
+        private void DrawInariusChildRow(RectangleF r, MacroEntry entry, int rowIdx)
+        {
+            (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
+
+            bool installed = GetInariusRgkPlugin() != null;
+            int kind = entry.InariusOptionKind;
+            string label = GetInariusOptionLabel(kind, installed);
+            bool on = GetInariusOptionEnabled(kind);
+            bool hotkeyRow = kind == 11;
+
+            float pad = 44f;
+            float textX = r.Left + pad;
+            const float stateW = 120f;
+            RectangleF stateR = new RectangleF(r.Right - stateW - 8f, r.Top + 5f, stateW, r.Height - 10f);
+            float textW = Math.Max(40f, stateR.Left - textX - 10f);
+
+            DrawOutlinedTextAt(_fRowText, _fRowTextShadow, Trim("• " + entry.Title, ApproxCharsForWidth(textW, 5.4f)), textX, r.Top + 10f);
+            DrawGlossButton(stateR, FitButtonLabel(label, stateR.Width), hotkeyRow ? _inariusRgkJuggerHotkeyCapture : on, false, hotkeyRow);
+
+            if (installed)
+                RegisterToggleHit("inarius:option:" + kind.ToString(CultureInfo.InvariantCulture), stateR);
         }
 
         private void DrawPestilenceChildRow(RectangleF r, MacroEntry entry, int rowIdx)
@@ -10677,6 +11271,16 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             allEntries.Add(new MacroEntry
             {
+                Title="Paragon Builds",
+                Description="Globally enables Paragon Builds. Use the Armory control for per-hero ON/OFF.",
+                Code="paragon_builds_plugin",
+                IsPlugin=true,
+                PluginTypeNames=new[]{"s7o_Paragon_Builds"},
+                PluginAction="toggles:plugin:paragonbuilds"
+            });
+
+            allEntries.Add(new MacroEntry
+            {
                 Title="Armory Bug Fix",
                 Description="Validates Armory swaps and retries Equip when Diablo drops the weapon swap.",
                 Code="armory_bug_fix_plugin",
@@ -10711,9 +11315,10 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 // ── Barbarian ──────────────────────────────────────────────────
                 new MacroEntry {
                     Title="Z-Barb Autosnap",
-                    Description="Experimental spear-pull assist.\nPrefers elites aligned near the cursor.",
+                    Description="Spear-pull assist.\nCone controls drift from aim.",
                     Code="zbarb_autosnap_plugin",
                     IsPlugin=true,
+                    IsZBarbSelector=true,
                     PluginTypeNames=ZBarbAutoSnapPluginTypeNames,
                     PluginAction="toggles:plugin:zbarbautosnap",
                     HasHotkeyButton=true,
@@ -10759,6 +11364,10 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     Code="pestilence_rgk_plugin", IsPlugin=true, IsPestilenceSelector=true,
                     PluginTypeNames=new[]{"s7o_Pestilence_RGK"},
                     PluginAction="toggles:plugin:pestilencergk" },
+                new MacroEntry { Title="Inarius RGK",       Description="AutoSiphon Power Shift + 17-yard Inarius target assist. Expand for options.",
+                    Code="inarius_rgk_plugin", IsPlugin=true, IsInariusSelector=true,
+                    PluginTypeNames=new[]{"s7o_Inarius_RGK"},
+                    PluginAction="toggles:plugin:inariusrgk" },
                 new MacroEntry { Title="Bone Armor",           Description="Casts Bone Armor near enemies when missing or expiring.",            Code="Necro_BoneArmor_NearEnemies",       IsBuff=false },
                 new MacroEntry { Title="Simulacrum",           Description="Casts Simulacrum near elites or dense packs.",                       Code="Necro_Simulacrum_EliteOrDensity",   IsBuff=false },
                 new MacroEntry { Title="Land of the Dead",     Description="Casts LotD on elites or dense packs (disabled by default).",         Code="Necro_LandOfTheDead_EliteOrDensity",IsBuff=false },
@@ -11964,6 +12573,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 _autoSkillKeybindCaptureSlot = -1;
                 _tipsPlayerMarkerHotkeyCapture = false;
                 _pestilenceRgkJuggerHotkeyCapture = false;
+                _inariusRgkJuggerHotkeyCapture = false;
                 ClearAnySnapHotkeyCapture();
                 _draggingWindow = false;
                 _draggingDot = false;
@@ -11997,6 +12607,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             _autoSkillKeybindCaptureSlot = -1;
             _tipsPlayerMarkerHotkeyCapture = false;
             _pestilenceRgkJuggerHotkeyCapture = false;
+            _inariusRgkJuggerHotkeyCapture = false;
             _draggingWindow = false;
             _draggingDot = false;
             _draggingScrollThumb = false;
@@ -15428,6 +16039,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 lines.Add("GLOBAL_TTS_ENABLED=" + _globalTtsEnabled);
                 lines.Add("GLOBAL_TTS_VOLUME=" + _globalTtsVolume.ToString(CultureInfo.InvariantCulture));
                 lines.Add("ZBARB_AUTOSNAP_HOTKEY=" + _zbarbAutoSnapHotkey);
+                lines.Add("ZBARB_AUTOSNAP_EXPANDED=" + _zbarbAutoSnapExpanded.ToString(CultureInfo.InvariantCulture));
+                lines.Add("ZBARB_AUTOSNAP_CONE_DEGREES=" + _zbarbAutoSnapConeDegrees.ToString(CultureInfo.InvariantCulture));
                 TrimTtsCustomMessages();
                 lines.Add("TTS_BROADCAST_EXPANDED=" + _ttsBroadcastExpanded);
                 lines.Add("TTS_CUSTOM_DEFAULTS_SEEDED=" + _ttsCustomDefaultsSeeded.ToString(CultureInfo.InvariantCulture));
@@ -15466,11 +16079,27 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 lines.Add("PESTILENCE_RGK_JUGGER_LOCK=" + _pestilenceRgkJuggerHotkeyEnabled.ToString(CultureInfo.InvariantCulture));
                 lines.Add("PESTILENCE_RGK_JUGGER_HOTKEY=" + _pestilenceRgkJuggerHotkeyVk.ToString(CultureInfo.InvariantCulture));
                 lines.Add("PESTILENCE_RGK_RG_ASSIST=" + _pestilenceRgkRgAssist.ToString(CultureInfo.InvariantCulture));
+                lines.Add("PESTILENCE_RGK_TARGET_LINE_RETICLE=" + _pestilenceRgkShowTargetLineReticle.ToString(CultureInfo.InvariantCulture));
                 lines.Add("PESTILENCE_RGK_ZEI_CIRCLE=" + _pestilenceRgkZeiCircle.ToString(CultureInfo.InvariantCulture));
                 lines.Add("PESTILENCE_RGK_ZEI_EXPANDED=" + _pestilenceRgkZeiExpanded.ToString(CultureInfo.InvariantCulture));
                 lines.Add("PESTILENCE_RGK_ZEI_COLOR=" + _pestilenceRgkZeiColorIdx.ToString(CultureInfo.InvariantCulture));
                 lines.Add("PESTILENCE_RGK_ZEI_TONE=" + _pestilenceRgkZeiTone.ToString(CultureInfo.InvariantCulture));
                 lines.Add("PESTILENCE_RGK_ZEI_THICKNESS=" + _pestilenceRgkZeiThickness.ToString(CultureInfo.InvariantCulture));
+                lines.Add("INARIUS_RGK_EXPANDED=" + _inariusRgkExpanded.ToString(CultureInfo.InvariantCulture));
+                lines.Add("INARIUS_RGK_NORMAL_STACKS=" + _inariusRgkNormalStacks.ToString(CultureInfo.InvariantCulture));
+                lines.Add("INARIUS_RGK_POWER_STACKS=" + _inariusRgkPowerStacks.ToString(CultureInfo.InvariantCulture));
+                lines.Add("INARIUS_RGK_AUTOSNAP=" + _inariusRgkAutoSnap.ToString(CultureInfo.InvariantCulture));
+                lines.Add("INARIUS_RGK_AUTOSIPHON=" + _inariusRgkAutoSiphon.ToString(CultureInfo.InvariantCulture));
+                lines.Add("INARIUS_RGK_LATE_REFRESH=" + _inariusRgkLateRefreshAssist.ToString(CultureInfo.InvariantCulture));
+                lines.Add("INARIUS_RGK_DEBUFF_PRIORITY=" + _inariusRgkPrioritizeDebuffed.ToString(CultureInfo.InvariantCulture));
+                lines.Add("INARIUS_RGK_AGGRESSIVE_SCAN=" + _inariusRgkAggressiveScan.ToString(CultureInfo.InvariantCulture));
+                lines.Add("INARIUS_RGK_INCLUDE_TRASH=" + _inariusRgkIncludeTrash.ToString(CultureInfo.InvariantCulture));
+                lines.Add("INARIUS_RGK_CURSOR_RESTORE=" + _inariusRgkCursorRestore.ToString(CultureInfo.InvariantCulture));
+                lines.Add("INARIUS_RGK_RANGE_INDICATOR=" + _inariusRgkShowRangeIndicator.ToString(CultureInfo.InvariantCulture));
+                lines.Add("INARIUS_RGK_TARGET_LINE_RETICLE=" + _inariusRgkShowTargetLineReticle.ToString(CultureInfo.InvariantCulture));
+                lines.Add("INARIUS_RGK_JUGGER_LOCK=" + _inariusRgkJuggerHotkeyEnabled.ToString(CultureInfo.InvariantCulture));
+                lines.Add("INARIUS_RGK_JUGGER_HOTKEY=" + _inariusRgkJuggerHotkeyVk.ToString(CultureInfo.InvariantCulture));
+                lines.Add("INARIUS_RGK_RG_ASSIST=" + _inariusRgkRgAssist.ToString(CultureInfo.InvariantCulture));
                 lines.Add("AUTOSKILL_KEYBINDS_EXPANDED=" + _autoSkillKeybindsExpanded.ToString(CultureInfo.InvariantCulture));
 
                 // AutoSnap
@@ -16045,6 +16674,16 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                         if (Enum.TryParse<Key>(val, true, out k) && k != Key.Unknown)
                             _zbarbAutoSnapHotkey = k;
                     }
+                    else if (key == "ZBARB_AUTOSNAP_EXPANDED")
+                    {
+                        _zbarbAutoSnapExpanded = ParseBool(val, _zbarbAutoSnapExpanded);
+                    }
+                    else if (key == "ZBARB_AUTOSNAP_CONE_DEGREES")
+                    {
+                        int iv;
+                        if (int.TryParse(val, NumberStyles.Integer, CultureInfo.InvariantCulture, out iv))
+                            _zbarbAutoSnapConeDegrees = ClampZBarbAutoSnapCone(iv);
+                    }
                     else if (key == "TTS_BROADCAST_EXPANDED")
                     {
                         _ttsBroadcastExpanded = ParseBool(val, _ttsBroadcastExpanded);
@@ -16087,7 +16726,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     }
                     else if (string.Equals(key, "INVENTORY_DROP_ALL", StringComparison.OrdinalIgnoreCase))
                     {
-                        // Legacy REV06 setting. Shift+F2 is now always the drop-all hotkey.
+                        // Legacy setting. Shift+F2 is now always the drop-all hotkey.
                     }
                     else if (string.Equals(key, "INVENTORY_DROP_NONBOUND_LEGENDARY", StringComparison.OrdinalIgnoreCase))
                     {
@@ -16188,6 +16827,11 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                         bool tmp;
                         if (bool.TryParse(val, out tmp)) _pestilenceRgkRgAssist = tmp;
                     }
+                    else if (string.Equals(key, "PESTILENCE_RGK_TARGET_LINE_RETICLE", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool tmp;
+                        if (bool.TryParse(val, out tmp)) _pestilenceRgkShowTargetLineReticle = tmp;
+                    }
                     else if (string.Equals(key, "PESTILENCE_RGK_ZEI_CIRCLE", StringComparison.OrdinalIgnoreCase))
                     {
                         bool tmp;
@@ -16212,6 +16856,84 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     {
                         float tmp;
                         if (float.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out tmp)) _pestilenceRgkZeiThickness = ViClampF(tmp, 0.5f, 8.0f);
+                    }
+                    else if (string.Equals(key, "INARIUS_RGK_EXPANDED", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool tmp;
+                        if (bool.TryParse(val, out tmp)) _inariusRgkExpanded = tmp;
+                    }
+                    else if (key == "INARIUS_RGK_NORMAL_STACKS")
+                    {
+                        int tmp;
+                        if (int.TryParse(val, NumberStyles.Integer, CultureInfo.InvariantCulture, out tmp))
+                            _inariusRgkNormalStacks = ClampPestilenceRgkStackTarget(tmp);
+                    }
+                    else if (key == "INARIUS_RGK_POWER_STACKS")
+                    {
+                        int tmp;
+                        if (int.TryParse(val, NumberStyles.Integer, CultureInfo.InvariantCulture, out tmp))
+                            _inariusRgkPowerStacks = ClampPestilenceRgkStackTarget(tmp);
+                    }
+                    else if (string.Equals(key, "INARIUS_RGK_AUTOSNAP", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool tmp;
+                        if (bool.TryParse(val, out tmp)) _inariusRgkAutoSnap = tmp;
+                    }
+                    else if (string.Equals(key, "INARIUS_RGK_AUTOSIPHON", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool tmp;
+                        if (bool.TryParse(val, out tmp)) _inariusRgkAutoSiphon = tmp;
+                    }
+                    else if (string.Equals(key, "INARIUS_RGK_LATE_REFRESH", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool tmp;
+                        if (bool.TryParse(val, out tmp)) _inariusRgkLateRefreshAssist = tmp;
+                    }
+                    else if (string.Equals(key, "INARIUS_RGK_DEBUFF_PRIORITY", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool tmp;
+                        if (bool.TryParse(val, out tmp)) _inariusRgkPrioritizeDebuffed = tmp;
+                    }
+                    else if (string.Equals(key, "INARIUS_RGK_AGGRESSIVE_SCAN", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool tmp;
+                        if (bool.TryParse(val, out tmp)) _inariusRgkAggressiveScan = tmp;
+                    }
+                    else if (string.Equals(key, "INARIUS_RGK_INCLUDE_TRASH", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool tmp;
+                        if (bool.TryParse(val, out tmp)) _inariusRgkIncludeTrash = tmp;
+                    }
+                    else if (string.Equals(key, "INARIUS_RGK_CURSOR_RESTORE", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool tmp;
+                        if (bool.TryParse(val, out tmp)) _inariusRgkCursorRestore = tmp;
+                    }
+                    else if (string.Equals(key, "INARIUS_RGK_RANGE_INDICATOR", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool tmp;
+                        if (bool.TryParse(val, out tmp)) _inariusRgkShowRangeIndicator = tmp;
+                    }
+                    else if (string.Equals(key, "INARIUS_RGK_TARGET_LINE_RETICLE", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool tmp;
+                        if (bool.TryParse(val, out tmp)) _inariusRgkShowTargetLineReticle = tmp;
+                    }
+                    else if (string.Equals(key, "INARIUS_RGK_JUGGER_LOCK", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool tmp;
+                        if (bool.TryParse(val, out tmp)) _inariusRgkJuggerHotkeyEnabled = tmp;
+                    }
+                    else if (string.Equals(key, "INARIUS_RGK_JUGGER_HOTKEY", StringComparison.OrdinalIgnoreCase))
+                    {
+                        int tmp;
+                        if (int.TryParse(val, NumberStyles.Integer, CultureInfo.InvariantCulture, out tmp) && tmp > 0 && tmp <= ushort.MaxValue)
+                            _inariusRgkJuggerHotkeyVk = (ushort)tmp;
+                    }
+                    else if (string.Equals(key, "INARIUS_RGK_RG_ASSIST", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool tmp;
+                        if (bool.TryParse(val, out tmp)) _inariusRgkRgAssist = tmp;
                     }
                     else if (key == "AUTOSKILL_KEYBINDS_EXPANDED")
                     {
