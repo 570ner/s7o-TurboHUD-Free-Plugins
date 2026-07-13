@@ -11,6 +11,9 @@ namespace Turbo.Plugins.s7o
     // Pestilence RGK helper: AutoSnap, selected-target rings, and Siphon Blood Power Shift automation.
     public class s7o_Pestilence_RGK : BasePlugin, IAfterCollectHandler, INewAreaHandler, IInGameWorldPainter
     {
+        private const uint PestilenceSetSno = 740282;
+        private const int RequiredSetPieces = 6;
+
         #region Settings
 
         public int NormalStackTarget { get; private set; }
@@ -27,6 +30,7 @@ namespace Turbo.Plugins.s7o
         public bool JuggerHotkeyEnabled = true;
         public ushort JuggerHotkeyVirtualKey = 0x20; // Space
         public bool RgAutoSnapSiphonAssist = false;
+        public bool ShowTargetLineReticle = true;
         public bool ZeiCircleEnabled = false;
         public int ZeiCircleColorIndex = 5;
         public int ZeiCircleTone = 2;
@@ -44,6 +48,10 @@ namespace Turbo.Plugins.s7o
         private const int LateRefreshWindowMsDefault = 800;
         private const int BossLateRefreshPulseMs = 800;
         private const int ProactiveRefreshWindowMs = 1200;
+        private const int RicochetLateRefreshWindowMs = 1100;
+        private const int RicochetProactiveRefreshWindowMs = 1500;
+        private const int RicochetLateRefreshDownTicks = 6;
+        private const int RicochetFirstEngageSiphonDelayTicks = 0;
         private const int PowerShiftBuffIconIndex = 10;
         private const int FirstEngageSiphonDelayTicks = 2;
         private const int LateRefreshIntentExpireTicks = 30;
@@ -88,8 +96,12 @@ namespace Turbo.Plugins.s7o
         private const float ElitePackDensityPriorityMax = 3.0f;
         private const float EliteNearDistanceWeight = 0.70f;
         private const float EliteFarDistanceWeight = 0.36f;
-        private const float LockedEliteStickinessBonus = 4.2f;
+        private const float LockedEliteStickinessBonus = 16.0f;
         private const float SiphonAnchorTrashPenalty = 8.0f;
+        private const float EliteLastBluePackFinishBonus = 7.0f;
+        private const float EliteLowHpYellowFinishBonus = 4.0f;
+        private const float EliteSwitchForceMargin = 10.0f;
+        private const int ForcedRetargetTicks = 10;
         private const float BaselineRadiusBottom = 3.15f;
         private const float BaselineHitboxYards = 0.9f;
         private const float HitboxBonusCap = 2.0f;
@@ -215,6 +227,10 @@ namespace Turbo.Plugins.s7o
         private ActionKey _siphonKey = ActionKey.Unknown;
         private bool _lanceKeyKnown;
         private bool _siphonKeyKnown;
+        private bool _corpseLanceRuneKnown;
+        private byte _corpseLanceRune;
+        private bool _corpseLanceRicochet;
+        private string _corpseLanceRuneNameEnglish;
 
         private bool _pulseActive;
         private bool _siphonPulseOwned;
@@ -319,6 +335,8 @@ namespace Turbo.Plugins.s7o
         private uint _badHoverAcdId;
         private int _badHoverCount;
         private int _badHoverLastTick;
+        private uint _forcedSnapAcdId;
+        private int _forcedSnapUntilTick;
         private int _movementDisengageUntilTick;
         private int _manualCursorOverrideUntilTick;
         private int _lastMovementStopSiphonTick;
@@ -332,6 +350,10 @@ namespace Turbo.Plugins.s7o
         private IBrush _juggerCircleOutlineBrush;
         private IBrush _eliteCircleBrush;
         private IBrush _eliteCircleOutlineBrush;
+        private IBrush _targetLineOutlineBrush;
+        private IBrush _targetLineBrush;
+        private IBrush _targetReticleDotBrush;
+        private IBrush _targetReticleOutlineBrush;
         private IBrush _zeiCircleBrush;
         private IBrush _zeiCircleOutlineBrush;
         private int _zeiCircleCachedColor = int.MinValue;
@@ -385,6 +407,10 @@ namespace Turbo.Plugins.s7o
                 _juggerCircleBrush = Hud.Render.CreateBrush(245, 255, 132, 0, 3.4f);
                 _eliteCircleOutlineBrush = Hud.Render.CreateBrush(230, 0, 0, 0, 6.0f);
                 _eliteCircleBrush = Hud.Render.CreateBrush(245, 0, 255, 90, 3.0f);
+                _targetLineOutlineBrush = Hud.Render.CreateBrush(205, 0, 0, 0, 5.0f);
+                _targetLineBrush = Hud.Render.CreateBrush(245, 40, 255, 80, 2.4f);
+                _targetReticleDotBrush = Hud.Render.CreateBrush(248, 255, 45, 35, 5.0f);
+                _targetReticleOutlineBrush = Hud.Render.CreateBrush(235, 40, 255, 80, 1.45f);
                 RebuildZeiCircleBrushes();
             }
             catch { }
@@ -580,6 +606,12 @@ namespace Turbo.Plugins.s7o
                 }
                 _forceMoveWasDown = false;
 
+                if (newLanceEngagement)
+                {
+                    RefreshCursorRestoreWindowForFreshEngagement(tick);
+                    ResumeAutosnapControlOnEngagement(tick);
+                }
+
                 if (ApplyPostEliteClearPause(tick, newLanceEngagement))
                     return;
 
@@ -661,6 +693,71 @@ namespace Turbo.Plugins.s7o
             {
                 ResetRuntime(true);
             }
+        }
+
+
+        private void ResumeAutosnapControlOnEngagement(int tick)
+        {
+            // A fresh Corpse Lance press is an explicit request to resume autosnap control.
+            // This must clear stale post-teleport/manual-cursor pauses without weakening the
+            // disengaged cursor-protection path while the hotkey is not held.
+            _manualCursorOverrideUntilTick = 0;
+            _movementDisengageUntilTick = 0;
+            _lastMouseMoveTick = 0;
+
+            IMonster target = PickImmediateReengageTarget();
+            if (!IsAliveTarget(target))
+                return;
+
+            uint acd = GetMonsterAcdId(target);
+            if (acd == 0)
+                return;
+
+            PrepareImmediateRetarget(target, tick);
+            LockTarget(target, tick);
+            _reacquireAcdId = acd;
+            _reacquireUntilTick = Math.Max(_reacquireUntilTick, tick + ReacquireWindowTicks);
+            TrySnap(target, tick);
+        }
+
+        private IMonster PickImmediateReengageTarget()
+        {
+            IMonster target = GetManualJuggerLockTarget();
+            if (IsPestilenceImmediateReengageTarget(target))
+                return target;
+
+            target = FindAliveMonsterByAcdId(_lockedTargetAcdId);
+            if (IsPestilenceImmediateReengageTarget(target))
+                return target;
+
+            target = FindAliveMonsterByAcdId(_reacquireAcdId);
+            if (IsPestilenceImmediateReengageTarget(target))
+                return target;
+
+            target = FindAliveMonsterByAcdId(_stableLockAcdId);
+            if (IsPestilenceImmediateReengageTarget(target))
+                return target;
+
+            target = FindAliveMonsterByAcdId(_cachedHoverAcdId);
+            if (IsPestilenceImmediateReengageTarget(target))
+                return target;
+
+            try { target = Hud.Game.SelectedMonster2; } catch { target = null; }
+            if (IsPestilenceImmediateReengageTarget(target))
+                return target;
+
+            return null;
+        }
+
+        private bool IsPestilenceImmediateReengageTarget(IMonster monster)
+        {
+            if (!IsAliveTarget(monster) || !IsWithinPestilenceTargetRange(monster))
+                return false;
+
+            if (IsBossLike(monster))
+                return RgAutoSnapSiphonAssist;
+
+            return IsLeader(monster) || IsEliteMinionLike(monster);
         }
 
         private void DisengageOnLanceRelease(int tick, bool forceMoving, bool pulseWasActiveAtStart)
@@ -763,7 +860,16 @@ namespace Turbo.Plugins.s7o
             if (me == null || me.IsDead || me.Powers == null || me.HeroClassDefinition == null)
                 return false;
 
-            return me.HeroClassDefinition.HeroClass == HeroClass.Necromancer;
+            if (me.HeroClassDefinition.HeroClass != HeroClass.Necromancer)
+                return false;
+
+            return HasRequiredSet(me);
+        }
+
+        private bool HasRequiredSet(IPlayer me)
+        {
+            try { return me != null && me.GetSetItemCount(PestilenceSetSno) >= RequiredSetPieces; }
+            catch { return false; }
         }
 
         private bool IsUiVisible(IUiElement element)
@@ -779,6 +885,7 @@ namespace Turbo.Plugins.s7o
                 return;
 
             try { DrawZeiCircle(); } catch { }
+            try { DrawTargetLineReticle(); } catch { }
 
             IMonster locked = GetManualJuggerLockTarget();
             if (!IsAliveTarget(locked) || locked.FloorCoordinate == null)
@@ -787,6 +894,112 @@ namespace Turbo.Plugins.s7o
             try
             {
                 DrawManualLockCircle(locked);
+            }
+            catch { }
+        }
+
+        private void DrawTargetLineReticle()
+        {
+            if (!ShowTargetLineReticle || Hud == null || Hud.Game == null || Hud.Game.Me == null || Hud.Game.Me.FloorCoordinate == null)
+                return;
+
+            if (!IsTargetLineReticleEngaged())
+                return;
+
+            IMonster target = GetTargetLineReticleTarget();
+            if (!IsAliveTarget(target) || target.FloorCoordinate == null)
+                return;
+
+            IWorldCoordinate me = Hud.Game.Me.FloorCoordinate;
+            if (_targetLineOutlineBrush != null)
+                _targetLineOutlineBrush.DrawLineWorld(me, target.FloorCoordinate);
+            if (_targetLineBrush != null)
+                _targetLineBrush.DrawLineWorld(me, target.FloorCoordinate);
+
+            DrawTargetReticleDot(target);
+        }
+
+        private bool IsTargetLineReticleEngaged()
+        {
+            if (!Enabled)
+                return false;
+
+            try
+            {
+                int tick = Hud.Game != null ? Hud.Game.CurrentGameTick : 0;
+                if (_lanceWasDown || _pulseActive || _lateRefreshIntentActive || tick < _siphonAssistUntilTick)
+                    return true;
+
+                return _lanceKeyKnown && IsActionPhysicallyDown(_lanceKey);
+            }
+            catch { return false; }
+        }
+
+        private IMonster GetTargetLineReticleTarget()
+        {
+            IMonster manual = GetManualJuggerLockTarget();
+            if (IsAliveTarget(manual))
+                return manual;
+
+            IMonster selected = null;
+            try { selected = Hud.Game.SelectedMonster2; } catch { }
+            if (IsAliveTarget(selected))
+                return selected;
+
+            IMonster target = FindAliveMonsterByAcdId(_lastSiphonTargetAcdId);
+            if (IsAliveTarget(target))
+                return target;
+
+            target = FindAliveMonsterByAcdId(_lockedTargetAcdId);
+            if (IsAliveTarget(target))
+                return target;
+
+            target = FindAliveMonsterByAcdId(_stableLockAcdId);
+            if (IsAliveTarget(target))
+                return target;
+
+            target = FindAliveMonsterByAcdId(_cachedHoverAcdId);
+            if (IsAliveTarget(target))
+                return target;
+
+            target = FindAliveMonsterByAcdId(_lastHoverAcdId);
+            if (IsAliveTarget(target))
+                return target;
+
+            target = FindAliveMonsterByAcdId(_reacquireAcdId);
+            if (IsAliveTarget(target))
+                return target;
+
+            target = FindAliveMonsterByAcdId(_snapPhaseAcdId);
+            if (IsAliveTarget(target))
+                return target;
+
+            return null;
+        }
+
+        private void DrawTargetReticleDot(IMonster target)
+        {
+            if (!IsAliveTarget(target) || target.FloorCoordinate == null)
+                return;
+
+            try
+            {
+                var screen = target.FloorCoordinate.ToScreenCoordinate();
+                float cx = screen.X;
+                float cy = screen.Y - 4f;
+                float pulse = (float)Math.Sin(Hud.Game.CurrentGameTick * 0.34f) * 1.2f;
+                float radius = 5.0f + pulse;
+                if (radius < 2.5f) radius = 2.5f;
+
+                if (_targetReticleDotBrush != null)
+                {
+                    _targetReticleDotBrush.DrawEllipse(cx, cy, radius, radius);
+                    _targetReticleDotBrush.DrawEllipse(cx, cy, radius * 0.72f, radius * 0.72f);
+                    _targetReticleDotBrush.DrawEllipse(cx, cy, radius * 0.46f, radius * 0.46f);
+                }
+
+                if (_targetReticleOutlineBrush != null)
+                    _targetReticleOutlineBrush.DrawEllipse(cx, cy, radius + 4.2f, radius + 4.2f);
             }
             catch { }
         }
@@ -882,11 +1095,15 @@ namespace Turbo.Plugins.s7o
 
         private bool ResolveSkillKeys()
         {
-            if (_lanceKeyKnown && _siphonKeyKnown)
+            if (_lanceKeyKnown && _siphonKeyKnown && _corpseLanceRuneKnown)
                 return true;
 
             _lanceKeyKnown = false;
             _siphonKeyKnown = false;
+            _corpseLanceRuneKnown = false;
+            _corpseLanceRune = 0;
+            _corpseLanceRicochet = false;
+            _corpseLanceRuneNameEnglish = null;
             _lanceKey = ActionKey.Unknown;
             _siphonKey = ActionKey.Unknown;
 
@@ -907,6 +1124,17 @@ namespace Turbo.Plugins.s7o
                     {
                         _lanceKey = skill.Key;
                         _lanceKeyKnown = true;
+                        _corpseLanceRuneKnown = true;
+
+                        try { _corpseLanceRune = skill.Rune; } catch { _corpseLanceRune = 0; }
+                        try { _corpseLanceRuneNameEnglish = skill.RuneNameEnglish; } catch { _corpseLanceRuneNameEnglish = null; }
+
+                        string runeNameLocalized = null;
+                        try { runeNameLocalized = skill.RuneNameLocalized; } catch { runeNameLocalized = null; }
+
+                        _corpseLanceRicochet =
+                            (!string.IsNullOrEmpty(_corpseLanceRuneNameEnglish) && _corpseLanceRuneNameEnglish.IndexOf("Ricochet", StringComparison.OrdinalIgnoreCase) >= 0)
+                            || (!string.IsNullOrEmpty(runeNameLocalized) && runeNameLocalized.IndexOf("Ricochet", StringComparison.OrdinalIgnoreCase) >= 0);
                     }
                     else if (sno == _snoSiphonBlood)
                     {
@@ -1011,7 +1239,7 @@ namespace Turbo.Plugins.s7o
                     return;
 
 
-                if ((timeLeft * 1000f) <= LateRefreshWindowMsDefault)
+                if ((timeLeft * 1000f) <= GetActiveLateRefreshWindowMs())
                 {
                     if (!EnsureSiphonPulseAnchor(currentTarget, tick))
                         return;
@@ -1028,7 +1256,7 @@ namespace Turbo.Plugins.s7o
                     return;
 
 
-                if ((timeLeft * 1000f) <= LateRefreshWindowMsDefault)
+                if ((timeLeft * 1000f) <= GetActiveLateRefreshWindowMs())
                 {
                     if (!EnsureSiphonPulseAnchor(currentTarget, tick))
                         return;
@@ -1045,8 +1273,8 @@ namespace Turbo.Plugins.s7o
             // Fast cadence is only for the configured HUD Menu target.
             // If the user wants 10 stacks, they set 10; do not silently escalate lower targets to 10.
             bool needBuild = fullAuto && (!havePowerShift || stacks < activeTarget);
-            bool needRefresh = LateRefreshAssist && havePowerShift && stacks > 0 && timeLeft > 0f && corpsesAvailable && (timeLeft * 1000f) <= LateRefreshWindowMsDefault;
-            bool needMaintain = fullAuto && havePowerShift && reachedConfiguredTarget;
+            bool needRefresh = LateRefreshAssist && havePowerShift && stacks > 0 && timeLeft > 0f && corpsesAvailable && (timeLeft * 1000f) <= GetActiveLateRefreshWindowMs();
+            bool needMaintain = fullAuto && havePowerShift && reachedConfiguredTarget && !corpsesAvailable;
 
             if (needBuild && FastBuildFuseTripped(tick, activeTarget, havePowerShift, stacks))
             {
@@ -1129,7 +1357,7 @@ namespace Turbo.Plugins.s7o
             int stacks;
             float timeLeft;
             bool havePowerShift = TryGetPowerShift(out stacks, out timeLeft);
-            if (havePowerShift && stacks > 0 && timeLeft > 0f && (timeLeft * 1000f) > ProactiveRefreshWindowMs)
+            if (havePowerShift && stacks > 0 && timeLeft > 0f && (timeLeft * 1000f) > GetActiveProactiveRefreshWindowMs())
                 return false;
 
             return PulseNoTargetAnchor(tick);
@@ -1218,6 +1446,26 @@ namespace Turbo.Plugins.s7o
             return null;
         }
 
+        private bool IsCorpseLanceRicochetRune()
+        {
+            return _corpseLanceRicochet;
+        }
+
+        private int GetActiveLateRefreshWindowMs()
+        {
+            return IsCorpseLanceRicochetRune() ? RicochetLateRefreshWindowMs : LateRefreshWindowMsDefault;
+        }
+
+        private int GetActiveProactiveRefreshWindowMs()
+        {
+            return IsCorpseLanceRicochetRune() ? RicochetProactiveRefreshWindowMs : ProactiveRefreshWindowMs;
+        }
+
+        private int GetFirstEngageSiphonDelayTicks()
+        {
+            return IsCorpseLanceRicochetRune() ? RicochetFirstEngageSiphonDelayTicks : FirstEngageSiphonDelayTicks;
+        }
+
         private bool ShouldDelayInitialAutosnapForLateRefresh(bool newLanceEngagement, bool manualSiphonDown)
         {
             if (!newLanceEngagement || manualSiphonDown || _engageRefreshConsumed || _pulseActive)
@@ -1231,7 +1479,11 @@ namespace Turbo.Plugins.s7o
             if (!TryGetPowerShift(out stacks, out timeLeft) || stacks <= 0 || timeLeft <= 0f)
                 return false;
 
-            return (timeLeft * 1000f) <= ProactiveRefreshWindowMs;
+            float timeLeftMs = timeLeft * 1000f;
+            if (IsCorpseLanceRicochetRune() && timeLeftMs <= GetActiveLateRefreshWindowMs())
+                return false;
+
+            return timeLeftMs <= GetActiveProactiveRefreshWindowMs();
         }
 
         private void QueueLateRefreshIntent(int tick, bool fromEngage)
@@ -1241,12 +1493,12 @@ namespace Turbo.Plugins.s7o
 
             int stacks;
             float timeLeft;
-            if (!TryGetPowerShift(out stacks, out timeLeft) || stacks <= 0 || timeLeft <= 0f || (timeLeft * 1000f) > ProactiveRefreshWindowMs)
+            if (!TryGetPowerShift(out stacks, out timeLeft) || stacks <= 0 || timeLeft <= 0f || (timeLeft * 1000f) > GetActiveProactiveRefreshWindowMs())
                 return;
 
             _lateRefreshIntentActive = true;
             _lateRefreshIntentFromEngage = fromEngage;
-            _lateRefreshIntentReadyTick = tick + (fromEngage ? FirstEngageSiphonDelayTicks : 0);
+            _lateRefreshIntentReadyTick = tick + (fromEngage ? GetFirstEngageSiphonDelayTicks() : 0);
             _lateRefreshIntentExpireTick = tick + LateRefreshIntentExpireTicks;
             _lateRefreshIntentAttempts = 0;
             _lateRefreshIntentNextAttemptTick = _lateRefreshIntentReadyTick;
@@ -1262,7 +1514,7 @@ namespace Turbo.Plugins.s7o
             float timeLeft;
             bool havePowerShift = TryGetPowerShift(out stacks, out timeLeft);
 
-            if (!havePowerShift || stacks <= 0 || timeLeft <= 0f || (timeLeft * 1000f) > ProactiveRefreshWindowMs || timeLeft > _lateRefreshIntentStartTimeLeft + LateRefreshIntentRefreshGainSeconds)
+            if (!havePowerShift || stacks <= 0 || timeLeft <= 0f || (timeLeft * 1000f) > GetActiveProactiveRefreshWindowMs() || timeLeft > _lateRefreshIntentStartTimeLeft + LateRefreshIntentRefreshGainSeconds)
             {
                 if (_lateRefreshIntentFromEngage)
                     _engageRefreshConsumed = true;
@@ -1386,7 +1638,10 @@ namespace Turbo.Plugins.s7o
 
         private int GetLateRefreshDownTicks(bool lotdActive)
         {
-            return lotdActive ? LotdPulseDownTicks : LateRefreshDownTicks;
+            if (lotdActive)
+                return LotdPulseDownTicks;
+
+            return IsCorpseLanceRicochetRune() ? RicochetLateRefreshDownTicks : LateRefreshDownTicks;
         }
 
         private bool TryGetPowerShift(out int stacksOut, out float timeLeftOut)
@@ -1443,7 +1698,11 @@ namespace Turbo.Plugins.s7o
             if (!LateRefreshAssist || !havePowerShift || stacks <= 0 || timeLeft <= 0f)
                 return false;
 
-            if ((timeLeft * 1000f) > ProactiveRefreshWindowMs)
+            float timeLeftMs = timeLeft * 1000f;
+            if (timeLeftMs > GetActiveProactiveRefreshWindowMs())
+                return false;
+
+            if (IsCorpseLanceRicochetRune() && timeLeftMs <= GetActiveLateRefreshWindowMs())
                 return false;
 
             if (newLanceEngagement)
@@ -1455,7 +1714,7 @@ namespace Turbo.Plugins.s7o
                 return _lateRefreshIntentActive;
             }
 
-            if (!_lateRefreshIntentActive && (timeLeft * 1000f) <= LateRefreshWindowMsDefault)
+            if (!_lateRefreshIntentActive && (timeLeft * 1000f) <= GetActiveLateRefreshWindowMs())
             {
                 QueueLateRefreshIntent(tick, false);
                 return _lateRefreshIntentActive;
@@ -1485,7 +1744,7 @@ namespace Turbo.Plugins.s7o
 
         private void ResetLateRefreshSinglePulseGate(bool havePowerShift, int stacks, float timeLeft)
         {
-            if (!havePowerShift || stacks <= 0 || timeLeft <= 0f || (timeLeft * 1000f) > LateRefreshWindowMsDefault)
+            if (!havePowerShift || stacks <= 0 || timeLeft <= 0f || (timeLeft * 1000f) > GetActiveLateRefreshWindowMs())
                 _lateRefreshPulseConsumed = false;
         }
 
@@ -1548,6 +1807,10 @@ namespace Turbo.Plugins.s7o
             IMonster picked = PickTarget(tick);
             if (IsAliveTarget(picked))
             {
+                IMonster selectedBeforePick = null;
+                try { selectedBeforePick = Hud.Game.SelectedMonster2; } catch { }
+                if (ShouldForceTargetTurnover(selectedBeforePick, picked, tick))
+                    PrepareImmediateRetarget(picked, tick);
                 LockTarget(picked, tick);
                 return picked;
             }
@@ -1560,6 +1823,10 @@ namespace Turbo.Plugins.s7o
                 try { preferred = FindNearestOnScreenPreferred(Hud.Game.AliveMonsters); } catch { }
                 if (IsAliveTarget(preferred) && (IsLeader(preferred) || IsEliteMinionLike(preferred)))
                 {
+                    IMonster selectedBeforePreferred = null;
+                    try { selectedBeforePreferred = Hud.Game.SelectedMonster2; } catch { }
+                    if (ShouldForceTargetTurnover(selectedBeforePreferred, preferred, tick))
+                        PrepareImmediateRetarget(preferred, tick);
                     LockTarget(preferred, tick);
                     return preferred;
                 }
@@ -2113,7 +2380,7 @@ namespace Turbo.Plugins.s7o
                 {
                     float lockedScore = GetElitePriorityScore(locked, SafeDistance(locked), SafeIsOnScreen(locked), scanList);
                     float preferredScore = preferredClose == bestDebuffedLeaderClose ? bestDebuffedLeaderCloseScore : bestLeaderCloseScore;
-                    return lockedScore - preferredScore > 3.0f ? preferredClose : locked;
+                    return lockedScore - preferredScore > EliteSwitchForceMargin ? preferredClose : locked;
                 }
 
                 return preferredClose;
@@ -2128,7 +2395,7 @@ namespace Turbo.Plugins.s7o
                 {
                     float lockedScore = GetElitePriorityScore(locked, SafeDistance(locked), SafeIsOnScreen(locked), scanList);
                     float preferredScore = preferredAny == bestDebuffedLeaderAny ? bestDebuffedLeaderAnyDist : bestLeaderAnyDist;
-                    return lockedScore - preferredScore > 4.0f ? preferredAny : locked;
+                    return lockedScore - preferredScore > EliteSwitchForceMargin ? preferredAny : locked;
                 }
 
                 return IsWithinPestilenceTargetRange(preferredAny) ? preferredAny : null;
@@ -2712,7 +2979,8 @@ namespace Turbo.Plugins.s7o
             try
             {
                 var hovered = Hud.Game.SelectedMonster2;
-                if (!IsAliveTarget(hovered) || (!IsLeader(hovered) && !IsBossLike(hovered)))
+                bool eliteLikeHover = IsLeader(hovered) || IsEliteMinionLike(hovered) || IsBossLike(hovered);
+                if (!IsAliveTarget(hovered) || !eliteLikeHover)
                     return;
 
                 if (IsInvulnerable(hovered) || IsIllusionOrClone(hovered))
@@ -2748,7 +3016,7 @@ namespace Turbo.Plugins.s7o
                 _softLockDx = dx;
                 _softLockDy = dy;
                 _softLockUntilTick = Math.Max(_softLockUntilTick, tick + 8);
-                RememberTargetRestoreAnchor(acd, true, sx + dx, sy + dy, tick);
+                RememberTargetRestoreAnchor(acd, eliteLikeHover, sx + dx, sy + dy, tick);
                 ClearBadHoverState(acd);
                 LockTarget(hovered, tick);
             }
@@ -3282,6 +3550,19 @@ namespace Turbo.Plugins.s7o
 
             try
             {
+                if (IsLastAliveBluePackElite(monster))
+                    score -= EliteLastBluePackFinishBonus;
+                else if (monster != null && monster.Rarity == ActorRarity.Rare)
+                {
+                    double hp = SafeHitPoints(monster);
+                    if (hp >= 0.0d && hp <= 0.35d)
+                        score -= EliteLowHpYellowFinishBonus;
+                }
+            }
+            catch { }
+
+            try
+            {
                 if (PrioritizeDebuffedElites && HasAnySiphonDebuff(monster))
                     score -= EliteDebuffPriorityBonus;
             }
@@ -3348,6 +3629,114 @@ namespace Turbo.Plugins.s7o
             catch { }
 
             return count;
+        }
+
+        private bool IsLastAliveBluePackElite(IMonster monster)
+        {
+            if (monster == null)
+                return false;
+
+            try
+            {
+                if (monster.Rarity != ActorRarity.Champion)
+                    return false;
+
+                object pack = GetPackObject(monster);
+                if (pack == null)
+                    return false;
+
+                int aliveChampions = 0;
+                foreach (var other in Hud.Game.AliveMonsters)
+                {
+                    if (other == null || !IsAliveForScan(other))
+                        continue;
+
+                    if (other.Rarity != ActorRarity.Champion || IsIllusionOrClone(other) || IsInvulnerable(other))
+                        continue;
+
+                    if (!SamePack(other, pack))
+                        continue;
+
+                    if (!IsWithinPestilenceTargetRange(other))
+                        continue;
+
+                    aliveChampions++;
+                    if (aliveChampions > 1)
+                        return false;
+                }
+
+                return aliveChampions == 1;
+            }
+            catch { return false; }
+        }
+
+        private int GetPestilenceSelectionRank(IMonster monster)
+        {
+            if (!IsAliveTarget(monster) || !IsWithinPestilenceTargetRange(monster))
+                return 99;
+
+            if (IsBossLike(monster))
+                return RgAutoSnapSiphonAssist ? 0 : 99;
+
+            if (IsLeader(monster))
+                return 1;
+
+            if (IsEliteMinionLike(monster))
+                return 2;
+
+            return IncludeTrashTargets ? 3 : 99;
+        }
+
+        private bool ShouldForceTargetTurnover(IMonster selected, IMonster replacement, int tick)
+        {
+            if (!IsAliveTarget(replacement) || !IsWithinPestilenceTargetRange(replacement))
+                return false;
+
+            uint replacementAcd = GetMonsterAcdId(replacement);
+            if (replacementAcd == 0)
+                return false;
+
+            if (!IsAliveTarget(selected))
+                return true;
+
+            if (IsSameAcd(selected, replacementAcd))
+                return false;
+
+            int selectedRank = GetPestilenceSelectionRank(selected);
+            int replacementRank = GetPestilenceSelectionRank(replacement);
+
+            // Hard correction: do not park on trash/minions/empty state while a stronger elite target exists.
+            if (replacementRank < selectedRank)
+                return true;
+
+            if (replacementRank > selectedRank)
+                return false;
+
+            // Same-category switches are handled by scoring and sticky locks to avoid churn.
+            return false;
+        }
+
+        private void PrepareImmediateRetarget(IMonster target, int tick)
+        {
+            uint acd = GetMonsterAcdId(target);
+            if (acd == 0)
+                return;
+
+            _forcedSnapAcdId = acd;
+            _forcedSnapUntilTick = tick + ForcedRetargetTicks;
+            _manualCursorOverrideUntilTick = 0;
+            _movementDisengageUntilTick = 0;
+            _lastMouseMoveTick = 0;
+            _unhoverableAcdId = 0;
+            _unhoverableUntilTick = 0;
+            _skipLeaderAcdId = 0;
+            _skipLeaderUntilTick = 0;
+            if (_lastFailedLeaderAcdId == acd)
+            {
+                _lastFailedLeaderAcdId = 0;
+                _lastFailedLeaderCount = 0;
+                _lastFailedLeaderTick = 0;
+            }
         }
 
         private float SafeWorldDistance(IMonster a, IMonster b)
@@ -3537,6 +3926,8 @@ namespace Turbo.Plugins.s7o
             if (acd == 0)
                 return;
 
+            bool forcedSnap = acd == _forcedSnapAcdId && tick < _forcedSnapUntilTick;
+
             if (_normalScanParkAcdId != acd)
             {
                 _normalScanParkAcdId = acd;
@@ -3553,13 +3944,15 @@ namespace Turbo.Plugins.s7o
             try { selected = Hud.Game.SelectedMonster2; } catch { }
             bool selectedSame = eliteLike && IsSameAcd(selected, acd);
 
-            int minTicks = (reacquireQuick || alternateScan || AggressiveScanMode || selectedSame || _stableLockAcdId == acd || _cachedHoverAcdId == acd)
-                ? 1
-                : MinTicksBetweenMouseMoves;
-            if ((_pulseActive || tick < _siphonAssistUntilTick) && !selectedSame && _stableLockAcdId != acd && _cachedHoverAcdId != acd)
+            int minTicks = forcedSnap
+                ? 0
+                : (reacquireQuick || alternateScan || AggressiveScanMode || selectedSame || _stableLockAcdId == acd || _cachedHoverAcdId == acd)
+                    ? 1
+                    : MinTicksBetweenMouseMoves;
+            if (!forcedSnap && (_pulseActive || tick < _siphonAssistUntilTick) && !selectedSame && _stableLockAcdId != acd && _cachedHoverAcdId != acd)
                 minTicks = Math.Max(1, minTicks + 1);
 
-            if (_lastMouseMoveTick > 0 && tick - _lastMouseMoveTick < minTicks)
+            if (!forcedSnap && _lastMouseMoveTick > 0 && tick - _lastMouseMoveTick < minTicks)
                 return;
 
             float x, y;
@@ -3602,7 +3995,7 @@ namespace Turbo.Plugins.s7o
                 ClearBadHoverState(acd);
             }
 
-            if (_unhoverableUntilTick > tick && acd == _unhoverableAcdId && SafeDistance(monster) <= PestiPick() + 3f)
+            if (!forcedSnap && _unhoverableUntilTick > tick && acd == _unhoverableAcdId && SafeDistance(monster) <= PestiPick() + 3f)
                 return;
 
             if (!eliteLike)
@@ -3674,9 +4067,11 @@ namespace Turbo.Plugins.s7o
                 _snapPhase = 0;
             }
 
-            int probesThisTick = AggressiveScanMode
+            int probesThisTick = forcedSnap
                 ? Math.Min(maxProbes, 24)
-                : ((alternateScan || reacquireQuick) ? Math.Min(maxProbes, 18) : Math.Min(maxProbes, 8));
+                : AggressiveScanMode
+                    ? Math.Min(maxProbes, 24)
+                    : ((alternateScan || reacquireQuick) ? Math.Min(maxProbes, 18) : Math.Min(maxProbes, 8));
 
             int start = Math.Max(0, Math.Min(_snapPhase, maxProbes - 1));
             for (int i = 0; i < probesThisTick; i++)
@@ -4697,6 +5092,20 @@ namespace Turbo.Plugins.s7o
             _pendingRestoreTick = tick;
         }
 
+        private void RefreshCursorRestoreWindowForFreshEngagement(int tick)
+        {
+            if (!RestoreCursorOnReleaseOrMove)
+                return;
+
+            // Keep the original pre-snap cursor anchor across rapid short taps.
+            // Reset only the short-engage timer so separate quick presses do not accumulate into long-press behavior.
+            if (_cursorOwned && _cursorWasMovedByPlugin && _haveSavedCursor)
+            {
+                _pendingRestoreTick = 0;
+                _engageStartTick = tick;
+            }
+        }
+
         private void ReleaseCursorOwnershipWithoutRestore()
         {
             _pendingRestoreTick = 0;
@@ -5527,6 +5936,8 @@ namespace Turbo.Plugins.s7o
             _badHoverAcdId = 0;
             _badHoverCount = 0;
             _badHoverLastTick = 0;
+            _forcedSnapAcdId = 0;
+            _forcedSnapUntilTick = 0;
             _movementDisengageUntilTick = 0;
             _manualCursorOverrideUntilTick = 0;
             _lastMovementStopSiphonTick = 0;
@@ -5560,6 +5971,10 @@ namespace Turbo.Plugins.s7o
             _siphonAssistUntilTick = 0;
             _lanceKeyKnown = false;
             _siphonKeyKnown = false;
+            _corpseLanceRuneKnown = false;
+            _corpseLanceRune = 0;
+            _corpseLanceRicochet = false;
+            _corpseLanceRuneNameEnglish = null;
             _lanceKey = ActionKey.Unknown;
             _siphonKey = ActionKey.Unknown;
         }
