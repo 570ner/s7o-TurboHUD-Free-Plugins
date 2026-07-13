@@ -112,7 +112,8 @@ namespace Turbo.Plugins.s7o
         private static bool SendMouse(uint flags) { var input = new Input[1]; input[0].Type = InputMouse; input[0].U.Mouse.Flags = flags; input[0].U.Mouse.Dx = 0; input[0].U.Mouse.Dy = 0; input[0].U.Mouse.MouseData = 0; input[0].U.Mouse.Time = 0; input[0].U.Mouse.ExtraInfo = IntPtr.Zero; return SendInput(1, input, Marshal.SizeOf(typeof(Input))) == 1; }
     }
 
-    /// Kanai Cube speed helper — install at TurboHUD\plugins\s7o\s7o_KanaiCube.cs
+    /// Kanai Cube native instance-level eligibility correction.
+    /// Load this source as the only file defining s7o_KanaiCube.
     ///
     /// Architecture (do not regress):
     ///   AfterCollect Running guard MUST precede page validation. The intentional
@@ -122,10 +123,21 @@ namespace Turbo.Plugins.s7o
     ///   _p is frozen at run start so mid-run UI speed changes have no effect.
     ///   Skip recovery: after the snapshot queue finishes, a live cleanup pass
     ///   re-queries inventory and processes any items the queue pass missed.
+    ///   Page 3 overlaps transaction settlement with gated page repair, then
+    ///   verifies the result from live material/target evidence. Automation
+    ///   failures never become recipe-ineligible marks.
     public class s7o_KanaiCube : s7o_KanaiCubePluginBase,
         IKeyEventHandler, IInGameTopPainter, IAfterCollectHandler,
         IMouseClickHandler, INewAreaHandler
     {
+        public string UpgradeRareEligibilityRevisionId
+        {
+            get
+            {
+                return "REV08-INSTANCE-REQUIREMENT-LEVEL";
+            }
+        }
+
         private const int NoTick = int.MinValue;
 
         // ── Speed 1 base — intentionally slow/LightningMod-style normal speed ─
@@ -152,15 +164,15 @@ namespace Turbo.Plugins.s7o
         public int MinPostTransmuteExtraMs    { get; set; } = 8;
         public int MinPageArrowReadyTimeoutMs { get; set; } = 105; // observed slot-clear up to 88ms; 105 gives safe margin
         public int MinPageRightConfirmTimeoutMs  { get; set; } = 220;
-        public int MinPageRightToLeftMs       { get; set; } = 8;
+        public int MinPageRightToLeftMs       { get; set; } = 0;
         public int MinPageReturnConfirmTimeoutMs { get; set; } = 330;
         public int MinPageReturnRetryWaitMs   { get; set; } = 5;
-        public int MinPageArrowMouseDownMs    { get; set; } = 2;
+        public int MinPageArrowMouseDownMs    { get; set; } = 0;
         public int MinPageArrowPostClickMs    { get; set; } = 0;
         public int MinPageOpenClickWaitMs     { get; set; } = 5;
 
         // ── Kanai Cube UI ─────────────────────────────────────────────────────
-        public int   SpeedLevel               { get; set; } = 8;      // 1–10
+        public int   SpeedLevel               { get; set; } = 10;     // 1–10
         public bool  ShowSpeedControl          { get; set; } = true;
 
         // ── Kanai Cube fixed header UI ───────────────────────────────────────────────
@@ -206,6 +218,38 @@ namespace Turbo.Plugins.s7o
         public bool RestoreCursorAfterRun        { get; set; } = false;
         public int  Mode                         { get; set; } = 0;   // 0=stop at ancient/primal, 1=primal only
 
+        private const int MaxUpgradeAttemptsPerItemPerRun = 2;
+        private const int MaxInsertAttemptsPerTarget = 2;
+
+        private const int InsertConfirmTimeoutMs = 400;
+        private const int InsertRetryDelayMs = 45;
+
+        private const int UpgradeFailureConfirmSamples = 3;
+        private const int UpgradeRetryDelayMs = 35;
+
+        // Page 3 timing endpoints. Speed 10 uses the validated gated fast path;
+        // lower speed levels interpolate linearly toward the conservative Speed 1
+        // values so the control remains predictable and natural.
+        public int BasePage3InsertConfirmPollMs { get; set; } = 30;
+        public int MinPage3InsertConfirmPollMs { get; set; } = 0;
+        public int BasePage3PostInsertSettleMs { get; set; } = 60;
+        public int MinPage3PostInsertSettleMs { get; set; } = 0;
+        public int BasePage3PostFillSettleMs { get; set; } = 90;
+        public int MinPage3PostFillSettleMs { get; set; } = 0;
+        public int BasePage3TransmuteToRepairMs { get; set; } = 120;
+        public int MinPage3TransmuteToRepairMs { get; set; } = 0;
+        public int BasePage3FailureConfirmMs { get; set; } = 240;
+        public int MinPage3FailureConfirmMs { get; set; } = 120;
+        public int BasePage3FailureSampleMs { get; set; } = 70;
+        public int MinPage3FailureSampleMs { get; set; } = 30;
+        public int BasePage3SuccessSettleMs { get; set; } = 20;
+        public int MinPage3SuccessSettleMs { get; set; } = 0;
+
+        private const int Page3TransmutePollMs = 15;
+        private const int Page3TransmuteConfirmTimeoutMs = 900;
+        private const int Page3TransmuteRetryDelayMs = 35;
+        private const int MaxPage3TransmuteClicksPerCycle = 2;
+
         // ── Diagnostics ───────────────────────────────────────────────────────
         public bool   DebugLogEnabled             { get; set; } = false;
         public bool   VerboseDebugLogging         { get; set; } = false; // gates per-click detail logs
@@ -220,11 +264,15 @@ namespace Turbo.Plugins.s7o
             public string Label;
             public int Sleep, PostTrans, ArrowReady, RightConfirm, RightToLeft;
             public int ReturnConfirm, RetryWait, MaxRetries, ArrowDown, PostClick, OpenWait;
+            public int P3InsertPoll, P3InsertToFill, P3FillToTransmute;
+            public int P3TransmuteToRepair, P3FailureConfirm, P3FailureSample, P3SuccessSettle;
             public override string ToString() =>
                 Label + "{sleep=" + Sleep + ",postTrans=" + PostTrans
                 + ",arrowReady=" + ArrowReady + ",rightToLeft=" + RightToLeft
                 + ",retryWait=" + RetryWait + ",arrowDown=" + ArrowDown
-                + ",postClick=" + PostClick + "}";
+                + ",postClick=" + PostClick
+                + ",p3=" + P3InsertPoll + "/" + P3InsertToFill + "/"
+                + P3FillToTransmute + "/" + P3TransmuteToRepair + "}";
         }
 
         private class Slot { public RectangleF Rect; public int X, Y; public ItemQuality Quality; public string Uid; }
@@ -241,7 +289,6 @@ namespace Turbo.Plugins.s7o
         private RectangleF _lastProcessedRect;
         private readonly List<string> _startAncientIds = new List<string>();
         private List<RectangleF> _lastHighlightRects = new List<RectangleF>();
-        private readonly System.Collections.Generic.HashSet<string> _rejectedItemKeys = new System.Collections.Generic.HashSet<string>();
         private int _toggleTick;
 
         private RectangleF _hotkeyButtonRect = RectangleF.Empty;
@@ -260,7 +307,9 @@ namespace Turbo.Plugins.s7o
         private IBrush _pillOrangeBorderBrush;
         private IBrush _pillOrangeSeparatorBrush;
 
-        private IBrush _rejectedBrush;
+        private IBrush _ineligibleOutlineBrush;
+        private IBrush _ineligibleBodyBrush;
+        private IBrush _ineligibleHighlightBrush;
 
         private bool _capturingHotkey;
         private bool _overlayControlsVisible;
@@ -271,7 +320,16 @@ namespace Turbo.Plugins.s7o
         private int _plusFlashUntilTick = NoTick;
 
         private string _header, _info, _noItem, _running, _lockMissing;
-        private enum CubeStage { Idle, EnsurePage, AcquireTarget, InsertTarget, Fill1, Fill2, Transmute, FlipWaitReadyNext, FlipClickNext, FlipWaitNextConfirm, FlipRightToLeftDelay, FlipWaitReadyPrev, FlipClickPrev, FlipWaitPrevConfirm, OpenPageRecovery, PostCycleEvaluate, Finish, PageArrowDown, PageArrowUp }
+        private enum CubeStage { Idle, EnsurePage, AcquireTarget, InsertTarget, ConfirmInsert, Fill1, Fill2, WaitPage3FillSettle, Transmute, ConfirmPage3Transmute, FlipWaitReadyNext, FlipClickNext, FlipWaitNextConfirm, FlipRightToLeftDelay, FlipWaitReadyPrev, FlipClickPrev, FlipWaitPrevConfirm, OpenPageRecovery, PostCycleEvaluate, Finish, PageArrowDown, PageArrowUp }
+
+        private enum UpgradeRareEligibility
+        {
+            Eligible,
+            IneligibleLevel,
+            IneligibleType,
+            UnknownLevel
+        }
+
         private sealed class CubeTarget { public RectangleF Rect; public string Uid; public string Key; public IItem Item; }
         private CubeStage _stage = CubeStage.Idle, _afterArrowStage = CubeStage.Idle;
         private int _nextActionTick, _deadlineTick, _afterArrowDelayMs, _runPage, _doneThisRun, _snapshotIndex, _snapshotLimit, _openPageClicks, _flipPrevAttempts, _savedCursorX, _savedCursorY, _cachedOverlayPage = -1, _cachedCandidateCount;
@@ -283,6 +341,22 @@ namespace Turbo.Plugins.s7o
         private CubeTarget _target;
         private List<Slot> _snapshotQueue;
         private System.Collections.Generic.HashSet<string> _skippedThisRun;
+        private Dictionary<string, int> _upgradeFailuresThisRun;
+        private HashSet<string> _eligibilityLoggedThisRun;
+
+        private int _insertAttemptsForTarget;
+
+        private int _page3TransmuteClicks;
+        private int _page3TransmuteClickTick = NoTick;
+        private bool _page3SawOccupiedSlot;
+        private long _page3BeforeDeathsBreath;
+        private long _page3BeforeReusableParts;
+        private long _page3BeforeArcaneDust;
+        private long _page3BeforeVeiledCrystal;
+
+        private string _postFailureKey = string.Empty;
+        private int _postFailureSinceTick = NoTick;
+        private int _postFailureSamples;
 
         // ── Constructor ───────────────────────────────────────────────────────
         public s7o_KanaiCube() : base(2, 3, 7, 8, 9) { Enabled = true; }
@@ -306,7 +380,9 @@ namespace Turbo.Plugins.s7o
             _pillOrangeBorderBrush = Hud.Render.CreateBrush(225, 105, 55, 10, 0);
             _pillOrangeSeparatorBrush = Hud.Render.CreateBrush(190, 120, 65, 15, 1);
 
-            _rejectedBrush = Hud.Render.CreateBrush(210, 220, 50, 50, 4f);
+            _ineligibleOutlineBrush = Hud.Render.CreateBrush(245, 0, 0, 0, 6.0f);
+            _ineligibleBodyBrush = Hud.Render.CreateBrush(245, 165, 24, 24, 3.6f);
+            _ineligibleHighlightBrush = Hud.Render.CreateBrush(225, 255, 125, 100, 1.25f);
 
             try
             {
@@ -411,15 +487,30 @@ namespace Turbo.Plugins.s7o
         // Painter
         // =========================================================
 
-        public void PaintTopInGame(ClipState clipState)
+        public void PaintTopInGame(
+            ClipState clipState)
         {
-            if (!ShowOverlay || clipState != ClipState.Inventory)
+            if (clipState != ClipState.Inventory)
                 return;
 
-            if (!Hud.Game.IsInGame || vendorPage == null || transmuteDialog == null)
+            if (!Hud.Game.IsInGame ||
+                vendorPage == null ||
+                transmuteDialog == null)
+            {
                 return;
+            }
 
             if (!IsVisible(transmuteDialog))
+                return;
+
+            int visiblePage = PageNumDirect();
+
+            // The eligibility mark is independent of the optional header/status
+            // overlay and should appear as soon as page 3 becomes readable.
+            if (visiblePage == 3)
+                DrawUpgradeIneligibleMarks();
+
+            if (!ShowOverlay)
                 return;
 
             if (!UpdateOverlayLayoutRects())
@@ -430,15 +521,23 @@ namespace Turbo.Plugins.s7o
 
             _overlayControlsVisible = true;
 
-            var pane = vendorPage.Rectangle;
-            if (pane.Width <= 0 || pane.Height <= 0)
+            RectangleF pane = vendorPage.Rectangle;
+
+            if (pane.Width <= 0 ||
+                pane.Height <= 0)
+            {
                 return;
+            }
 
             DrawHeaderHotkey();
             DrawHeaderSpeedControl();
 
-            var page = PageNumDirect();
-            var supported = pageNumber != null && IsVisible(pageNumber) && SupportedPage(page);
+            int page = visiblePage;
+
+            bool supported =
+                pageNumber != null &&
+                IsVisible(pageNumber) &&
+                SupportedPage(page);
 
             float x0 = pane.X + OverlayTextLeftOffset;
             float y = pane.Y + HeaderTopOffset + OverlayTextTopGap;
@@ -451,38 +550,131 @@ namespace Turbo.Plugins.s7o
                 y += h.Metrics.Height * 1.25f;
             }
 
-            if (_rejectedBrush != null && _rejectedItemKeys.Count > 0)
-            {
-                foreach (var inv in Hud.Inventory.ItemsInInventory)
-                {
-                    if (inv == null) continue;
-                    if (!_rejectedItemKeys.Contains(StableItemKey(inv.ItemUniqueId))) continue;
-
-                    var r = Hud.Inventory.GetItemRect(inv);
-                    if (r.Width <= 0 || r.Height <= 0) continue;
-
-                    _rejectedBrush.DrawLine(r.X, r.Y, r.X + r.Width, r.Y + r.Height);
-                    _rejectedBrush.DrawLine(r.X + r.Width, r.Y, r.X, r.Y + r.Height);
-                }
-            }
-
             if (!supported)
                 return;
 
-            if (page == 2 && InventoryLockForUpgradeToAncient && Hud.Inventory.InventoryLockArea.Width <= 0)
+            if (page == 2 &&
+                InventoryLockForUpgradeToAncient &&
+                Hud.Inventory.InventoryLockArea.Width <= 0)
             {
-                InfoFont.DrawText(InfoFont.GetTextLayout(_lockMissing), x0, y);
+                InfoFont.DrawText(
+                    InfoFont.GetTextLayout(_lockMissing),
+                    x0,
+                    y);
+
                 return;
             }
 
-            foreach (var r in _lastHighlightRects)
-                ItemHighlighBrush.DrawRectangle(r);
+            foreach (var rect in _lastHighlightRects)
+                ItemHighlighBrush.DrawRectangle(rect);
 
-            var txt = string.IsNullOrEmpty(_cachedStatusText)
-                ? (Running ? _running : _info)
-                : _cachedStatusText;
+            var txt = string.IsNullOrEmpty(
+                _cachedStatusText)
+                    ? (Running ? _running : _info)
+                    : _cachedStatusText;
 
-            InfoFont.DrawText(InfoFont.GetTextLayout(txt), x0, y);
+            InfoFont.DrawText(
+                InfoFont.GetTextLayout(txt),
+                x0,
+                y);
+        }
+
+        private void DrawUpgradeIneligibleMarks()
+        {
+            if (_ineligibleOutlineBrush == null ||
+                _ineligibleBodyBrush == null ||
+                _ineligibleHighlightBrush == null)
+            {
+                return;
+            }
+
+            foreach (var item in
+                Hud.Inventory.ItemsInInventory)
+            {
+                if (!ShouldDrawUpgradeIneligibleX(item))
+                    continue;
+
+                RectangleF rect =
+                    Hud.Inventory.GetItemRect(item);
+
+                if (rect.Width <= 0 ||
+                    rect.Height <= 0)
+                {
+                    continue;
+                }
+
+                DrawUpgradeIneligibleX(rect);
+            }
+        }
+
+        private void DrawUpgradeIneligibleX(
+            RectangleF rect)
+        {
+            float size =
+                Math.Min(rect.Width, rect.Height);
+
+            // Shorten the X so it does not cover the whole item.
+            float inset = size * 0.24f;
+
+            float left = rect.Left + inset;
+            float right = rect.Right - inset;
+            float top = rect.Top + inset;
+            float bottom = rect.Bottom - inset;
+
+            // Thick black contrast outline.
+            DrawXLayer(
+                _ineligibleOutlineBrush,
+                left,
+                top,
+                right,
+                bottom,
+                0.0f,
+                0.0f);
+
+            // Main deep-red body.
+            DrawXLayer(
+                _ineligibleBodyBrush,
+                left,
+                top,
+                right,
+                bottom,
+                0.0f,
+                0.0f);
+
+            // Thin upper-left lighting line.
+            DrawXLayer(
+                _ineligibleHighlightBrush,
+                left,
+                top,
+                right,
+                bottom,
+                -0.7f,
+                -0.7f);
+        }
+
+        private void DrawXLayer(
+            IBrush brush,
+            float left,
+            float top,
+            float right,
+            float bottom,
+            float offsetX,
+            float offsetY)
+        {
+            if (brush == null)
+                return;
+
+            brush.DrawLine(
+                left + offsetX,
+                top + offsetY,
+                right + offsetX,
+                bottom + offsetY);
+
+            brush.DrawLine(
+                right + offsetX,
+                top + offsetY,
+                left + offsetX,
+                bottom + offsetY);
         }
 
         // =========================================================
@@ -585,6 +777,12 @@ namespace Turbo.Plugins.s7o
             _target = null;
             _snapshotQueue = null;
             _skippedThisRun = new System.Collections.Generic.HashSet<string>();
+            _upgradeFailuresThisRun = new Dictionary<string, int>();
+            _eligibilityLoggedThisRun = new HashSet<string>();
+
+            _insertAttemptsForTarget = 0;
+            ResetPage3TransactionState();
+            ResetPostFailureConfirmation();
 
             _pendingArrowButton = null;
             _pendingArrowLabel = null;
@@ -637,6 +835,11 @@ namespace Turbo.Plugins.s7o
             _target = null;
             _snapshotQueue = null;
             _skippedThisRun = null;
+            _upgradeFailuresThisRun = null;
+            _eligibilityLoggedThisRun = null;
+            _insertAttemptsForTarget = 0;
+            ResetPage3TransactionState();
+            ResetPostFailureConfirmation();
 
             _pendingArrowButton = null;
             _pendingArrowLabel = null;
@@ -665,6 +868,11 @@ namespace Turbo.Plugins.s7o
             _target = null;
             _snapshotQueue = null;
             _skippedThisRun = null;
+            _upgradeFailuresThisRun = null;
+            _eligibilityLoggedThisRun = null;
+            _insertAttemptsForTarget = 0;
+            ResetPage3TransactionState();
+            ResetPostFailureConfirmation();
 
             _pendingArrowButton = null;
             _pendingArrowLabel = null;
@@ -786,6 +994,10 @@ namespace Turbo.Plugins.s7o
                     AdvanceInsertTarget(now);
                     return;
 
+                case CubeStage.ConfirmInsert:
+                    AdvanceConfirmInsert(now);
+                    return;
+
                 case CubeStage.Fill1:
                     if (!ClickUi(fillButton, "FILL"))
                     {
@@ -793,7 +1005,12 @@ namespace Turbo.Plugins.s7o
                         return;
                     }
 
-                    if (DoubleClickFillButton)
+                    if (_runPage == 3)
+                    {
+                        _stage = CubeStage.WaitPage3FillSettle;
+                        Delay(now, _p.P3FillToTransmute);
+                    }
+                    else if (DoubleClickFillButton)
                     {
                         _stage = CubeStage.Fill2;
                         Delay(now, 10);
@@ -816,7 +1033,15 @@ namespace Turbo.Plugins.s7o
                     Delay(now, _p.Sleep);
                     return;
 
+                case CubeStage.WaitPage3FillSettle:
+                    _stage = CubeStage.Transmute;
+                    Delay(now, 0);
+                    return;
+
                 case CubeStage.Transmute:
+                    if (_runPage == 3)
+                        SnapshotPage3Materials();
+
                     if (!ClickUi(transmuteButton, "TRANSMUTE"))
                     {
                         Delay(now, 30);
@@ -825,7 +1050,14 @@ namespace Turbo.Plugins.s7o
 
                     ClearDeadline();
 
-                    if (UsePageFlipReset)
+                    if (_runPage == 3)
+                    {
+                        _page3TransmuteClicks++;
+                        _page3TransmuteClickTick = now;
+                        _stage = CubeStage.ConfirmPage3Transmute;
+                        Delay(now, 0);
+                    }
+                    else if (UsePageFlipReset)
                     {
                         _stage = CubeStage.FlipWaitReadyNext;
                         Delay(now, _p.Sleep + _p.PostTrans);
@@ -835,6 +1067,10 @@ namespace Turbo.Plugins.s7o
                         _stage = CubeStage.OpenPageRecovery;
                         Delay(now, _p.Sleep + _p.PostTrans);
                     }
+                    return;
+
+                case CubeStage.ConfirmPage3Transmute:
+                    AdvanceConfirmPage3Transmute(now);
                     return;
 
                 case CubeStage.FlipWaitReadyNext:
@@ -1105,6 +1341,24 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
+            if (_p.ArrowDown <= 0)
+            {
+                s7o_KanaiCubeInput.MouseUp(MouseButtons.Left);
+                LogV("PAGECLK " + _pendingArrowLabel);
+
+                _pendingArrowButton = null;
+                _pendingArrowLabel = null;
+
+                var next = _afterArrowStage;
+                var delay = _afterArrowDelayMs;
+
+                _afterArrowStage = CubeStage.Idle;
+                _afterArrowDelayMs = 0;
+                _stage = next;
+                Delay(now, delay);
+                return;
+            }
+
             Delay(now, _p.ArrowDown);
             _stage = CubeStage.PageArrowUp;
         }
@@ -1130,6 +1384,7 @@ namespace Turbo.Plugins.s7o
 
         private void AdvanceAcquireTarget(int now)
         {
+
             if (!ValidateTurnedOn(_runPage))
             {
                 EndRun("validation failed");
@@ -1162,21 +1417,48 @@ namespace Turbo.Plugins.s7o
             {
                 while (_snapshotIndex < _snapshotLimit)
                 {
-                    var slot = _snapshotQueue[_snapshotIndex++];
-                    var key = StableItemKey(slot.Uid);
+                    Slot slot = _snapshotQueue[_snapshotIndex++];
+                    string key = StableItemKey(slot.Uid);
 
-                    if (_skippedThisRun != null && _skippedThisRun.Contains(key))
+                    if (_skippedThisRun != null &&
+                        _skippedThisRun.Contains(key))
+                    {
+                        continue;
+                    }
+
+                    IItem liveItem =
+                        FindInventoryItemByStableKey(key);
+
+                    if (liveItem == null)
                         continue;
 
-                    if (!StableKeyExistsInInventory(key))
+                    if (_runPage == 3 &&
+                        !IsUpgradeRareEligible(liveItem))
+                    {
+                        // Static preflight rejection. Do not click and do not
+                        // add this item to the runtime retry mechanism.
+                        LogUpgradeEligibilityOnce(
+                            liveItem,
+                            key);
+
                         continue;
+                    }
+
+                    RectangleF liveRect =
+                        Hud.Inventory.GetItemRect(liveItem);
+
+                    if (liveRect.Width <= 0 ||
+                        liveRect.Height <= 0)
+                    {
+                        continue;
+                    }
 
                     _target = new CubeTarget
                     {
-                        Rect = slot.Rect,
-                        Uid = slot.Uid,
+                        Rect = liveRect,
+                        Uid = liveItem.ItemUniqueId,
                         Key = key,
-                        Item = null
+                        Item = liveItem
                     };
 
                     break;
@@ -1232,6 +1514,10 @@ namespace Turbo.Plugins.s7o
                 };
             }
 
+            _insertAttemptsForTarget = 0;
+            ResetPage3TransactionState();
+            ResetPostFailureConfirmation();
+
             _stage = CubeStage.InsertTarget;
             Delay(now, 0);
         }
@@ -1245,9 +1531,69 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
+            if (_runPage == 3)
+            {
+                IItem liveItem =
+                    FindInventoryItemByStableKey(
+                        _target.Key);
+
+                int detectedLevel;
+                string levelSource;
+
+                UpgradeRareEligibility eligibility =
+                    GetUpgradeRareEligibility(
+                        liveItem,
+                        out detectedLevel,
+                        out levelSource);
+
+                if (eligibility !=
+                    UpgradeRareEligibility.Eligible)
+                {
+                    LogUpgradeEligibilityOnce(
+                        liveItem,
+                        _target.Key);
+
+                    Log(
+                        "UPGRADE preflight skip key=" +
+                        _target.Key +
+                        " result=" +
+                        eligibility +
+                        " level=" +
+                        detectedLevel +
+                        " source=" +
+                        levelSource);
+
+                    // Static ineligibility receives zero insertion attempts.
+                    // Unknown data also fails closed rather than being clicked.
+                    _target = null;
+                    _insertAttemptsForTarget = 0;
+                    ResetPage3TransactionState();
+                    ResetPostFailureConfirmation();
+
+                    _stage = CubeStage.AcquireTarget;
+                    Delay(now, 0);
+                    return;
+                }
+
+                RectangleF liveRect =
+                    Hud.Inventory.GetItemRect(liveItem);
+
+                if (liveRect.Width <= 0 ||
+                    liveRect.Height <= 0)
+                {
+                    Delay(now, 30);
+                    return;
+                }
+
+                _target.Item = liveItem;
+                _target.Rect = liveRect;
+                _target.Uid = liveItem.ItemUniqueId;
+            }
+
             if (!StableKeyExistsInInventory(_target.Key))
             {
                 _target = null;
+                ResetPage3TransactionState();
                 _stage = CubeStage.AcquireTarget;
                 Delay(now, 0);
                 return;
@@ -1279,43 +1625,538 @@ namespace Turbo.Plugins.s7o
 
             _lastProcessedRect = rect;
 
-            _stage = CubeStage.Fill1;
-            Delay(now, _p.Sleep);
+            if (_runPage != 3)
+            {
+                _stage = CubeStage.Fill1;
+                Delay(now, _p.Sleep);
+                return;
+            }
+
+            _insertAttemptsForTarget++;
+            ClearDeadline();
+
+            _stage = CubeStage.ConfirmInsert;
+            Delay(now, _p.P3InsertPoll);
+        }
+
+        private void AdvanceConfirmInsert(int now)
+        {
+            if (_target == null ||
+                string.IsNullOrEmpty(_target.Key))
+            {
+                _stage = CubeStage.AcquireTarget;
+                Delay(now, 0);
+                return;
+            }
+
+            // The existing item1/item2 elements are already used by SlotsClear().
+            // A nonempty Cube slot confirms that the right-click insertion reached
+            // the Cube UI.
+            if (!SlotsClear())
+            {
+                ClearDeadline();
+                _page3SawOccupiedSlot = true;
+
+                _stage = CubeStage.Fill1;
+                Delay(now, _p.P3InsertToFill);
+                return;
+            }
+
+            EnsureDeadline(
+                now,
+                InsertConfirmTimeoutMs);
+
+            if (!DeadlineExpired(now))
+            {
+                Delay(now, 30);
+                return;
+            }
+
+            ClearDeadline();
+
+            if (_insertAttemptsForTarget <
+                    MaxInsertAttemptsPerTarget &&
+                RefreshUpgradeTarget(_target.Key))
+            {
+                Log(
+                    "UPGRADE insert not confirmed; retrying key=" +
+                    _target.Key +
+                    " attempt=" +
+                    (_insertAttemptsForTarget + 1));
+
+                _stage = CubeStage.InsertTarget;
+                Delay(now, InsertRetryDelayMs);
+                return;
+            }
+
+            string failedKey = _target.Key;
+
+            if (_skippedThisRun != null)
+                _skippedThisRun.Add(failedKey);
+
+            Log(
+                "UPGRADE insert failed; skipping for this run key=" +
+                failedKey);
+
+            // This is an automation failure, not recipe ineligibility.
+            // Do not draw an X and do not create persistent rejection state.
+            _target = null;
+            _insertAttemptsForTarget = 0;
+            ResetPage3TransactionState();
+
+            _stage = CubeStage.AcquireTarget;
+            Delay(now, 0);
+        }
+
+        private void ResetPage3TransactionState()
+        {
+            _page3TransmuteClicks = 0;
+            _page3TransmuteClickTick = NoTick;
+            _page3SawOccupiedSlot = false;
+            _page3BeforeDeathsBreath = -1;
+            _page3BeforeReusableParts = -1;
+            _page3BeforeArcaneDust = -1;
+            _page3BeforeVeiledCrystal = -1;
+        }
+
+        private void SnapshotPage3Materials()
+        {
+            if (Hud.Game.Me == null)
+                return;
+
+            _page3BeforeDeathsBreath =
+                Hud.Game.Me.Materials.DeathsBreath;
+            _page3BeforeReusableParts =
+                Hud.Game.Me.Materials.ReusableParts;
+            _page3BeforeArcaneDust =
+                Hud.Game.Me.Materials.ArcaneDust;
+            _page3BeforeVeiledCrystal =
+                Hud.Game.Me.Materials.VeiledCrystal;
+        }
+
+        private bool Page3MaterialsWereSpent()
+        {
+            if (Hud.Game.Me == null ||
+                _page3BeforeDeathsBreath < 0 ||
+                _page3BeforeReusableParts < 0 ||
+                _page3BeforeArcaneDust < 0 ||
+                _page3BeforeVeiledCrystal < 0)
+            {
+                return false;
+            }
+
+            return
+                Hud.Game.Me.Materials.DeathsBreath <=
+                    _page3BeforeDeathsBreath - 25 &&
+                Hud.Game.Me.Materials.ReusableParts <=
+                    _page3BeforeReusableParts - 50 &&
+                Hud.Game.Me.Materials.ArcaneDust <=
+                    _page3BeforeArcaneDust - 50 &&
+                Hud.Game.Me.Materials.VeiledCrystal <=
+                    _page3BeforeVeiledCrystal - 50;
+        }
+
+        private bool Page3TransactionSucceeded(
+            int now,
+            out string evidence)
+        {
+            evidence = string.Empty;
+
+            if (Page3MaterialsWereSpent())
+            {
+                evidence = "materials-spent";
+                return true;
+            }
+
+            if (_page3SawOccupiedSlot &&
+                SlotsClear() &&
+                _target != null &&
+                !CandidateKeyStillPresent(
+                    3,
+                    _target.Key) &&
+                _page3TransmuteClickTick != NoTick &&
+                unchecked(
+                    now - _page3TransmuteClickTick) >= 90)
+            {
+                evidence = "slots-clear+rare-gone";
+                return true;
+            }
+
+            return false;
+        }
+
+        private void AdvanceConfirmPage3Transmute(
+            int now)
+        {
+            if (_target == null ||
+                string.IsNullOrEmpty(_target.Key))
+            {
+                ClearDeadline();
+                _stage = CubeStage.AcquireTarget;
+                Delay(now, 0);
+                return;
+            }
+
+            string evidence;
+
+            if (Page3TransactionSucceeded(
+                now,
+                out evidence))
+            {
+                Log(
+                    "UPGRADE transmute confirmed key=" +
+                    _target.Key +
+                    " evidence=" +
+                    evidence +
+                    " clicks=" +
+                    _page3TransmuteClicks);
+
+                ClearDeadline();
+
+                if (UsePageFlipReset)
+                {
+                    _stage = CubeStage.FlipWaitReadyNext;
+                    Delay(now, _p.P3SuccessSettle);
+                }
+                else
+                {
+                    _stage = CubeStage.OpenPageRecovery;
+                    Delay(now, _p.P3SuccessSettle);
+                }
+
+                return;
+            }
+
+            // Fast path: overlap the roughly 160-190 ms transaction settlement
+            // with page repair, then verify the real result after repair.
+            if (UsePageFlipReset &&
+                _page3TransmuteClickTick != NoTick &&
+                unchecked(
+                    now - _page3TransmuteClickTick) >=
+                    _p.P3TransmuteToRepair)
+            {
+                ClearDeadline();
+                _stage = CubeStage.FlipWaitReadyNext;
+                Delay(now, 0);
+                return;
+            }
+
+            EnsureDeadline(
+                now,
+                Page3TransmuteConfirmTimeoutMs);
+
+            if (!DeadlineExpired(now))
+            {
+                Delay(now, Page3TransmutePollMs);
+                return;
+            }
+
+            ClearDeadline();
+
+            if (_page3TransmuteClicks <
+                    MaxPage3TransmuteClicksPerCycle &&
+                !SlotsClear())
+            {
+                Log(
+                    "UPGRADE transmute not confirmed; retrying Fill/Transmute key=" +
+                    _target.Key +
+                    " click=" +
+                    (_page3TransmuteClicks + 1));
+
+                _stage = CubeStage.Fill1;
+                Delay(now, Page3TransmuteRetryDelayMs);
+                return;
+            }
+
+            Log(
+                "UPGRADE transmute not confirmed; repairing page before final evaluation key=" +
+                _target.Key +
+                " clicks=" +
+                _page3TransmuteClicks +
+                " slotsClear=" +
+                SlotsClear());
+
+            if (UsePageFlipReset)
+            {
+                _stage = CubeStage.FlipWaitReadyNext;
+                Delay(now, 0);
+            }
+            else
+            {
+                _stage = CubeStage.OpenPageRecovery;
+                Delay(now, 0);
+            }
+        }
+
+        private void ResetPostFailureConfirmation()
+        {
+            _postFailureKey = string.Empty;
+            _postFailureSinceTick = NoTick;
+            _postFailureSamples = 0;
+        }
+
+        private bool ConfirmUpgradeFailureSample(
+            int now,
+            string key)
+        {
+            if (string.IsNullOrEmpty(key))
+            {
+                ResetPostFailureConfirmation();
+                return false;
+            }
+
+            if (!string.Equals(
+                _postFailureKey,
+                key,
+                StringComparison.Ordinal))
+            {
+                _postFailureKey = key;
+                _postFailureSinceTick = now;
+                _postFailureSamples = 1;
+                return false;
+            }
+
+            _postFailureSamples++;
+
+            return _postFailureSamples >=
+                    UpgradeFailureConfirmSamples &&
+                _postFailureSinceTick != NoTick &&
+                unchecked(
+                    now - _postFailureSinceTick) >=
+                    _p.P3FailureConfirm;
         }
 
         private void AdvancePostCycleEvaluate(int now)
         {
-            if (_target != null && _runPage == 3 && CandidateKeyStillPresent(_runPage, _target.Key))
+            string page3Evidence = string.Empty;
+            bool page3Succeeded =
+                _target != null &&
+                _runPage == 3 &&
+                Page3TransactionSucceeded(
+                    now,
+                    out page3Evidence);
+
+            bool page3TargetStillEligible =
+                _target != null &&
+                _runPage == 3 &&
+                CandidateKeyStillPresent(
+                    3,
+                    _target.Key);
+
+            if (page3TargetStillEligible &&
+                !page3Succeeded)
             {
-                Log("CYCLE #" + _cycleId + " transmute rejected; key=" + _target.Key);
+                if (!ConfirmUpgradeFailureSample(
+                    now,
+                    _target.Key))
+                {
+                    Delay(
+                        now,
+                        _p.P3FailureSample);
+
+                    return;
+                }
+
+                string failedKey = _target.Key;
+
+                int failures = 0;
+
+                if (_upgradeFailuresThisRun != null)
+                    _upgradeFailuresThisRun.TryGetValue(
+                        failedKey,
+                        out failures);
+
+                failures++;
+                if (_upgradeFailuresThisRun != null)
+                    _upgradeFailuresThisRun[failedKey] =
+                        failures;
+
+                Log(
+                    "CYCLE #" +
+                    _cycleId +
+                    " upgrade attempt failed; key=" +
+                    failedKey +
+                    " failures=" +
+                    failures);
+
+                ResetPostFailureConfirmation();
+
+                if (failures <
+                        MaxUpgradeAttemptsPerItemPerRun &&
+                    RefreshUpgradeTarget(failedKey))
+                {
+                    // Retry the same statically eligible item once. This is a
+                    // transaction retry, not an eligibility reclassification.
+                    _insertAttemptsForTarget = 0;
+                    ResetPage3TransactionState();
+
+                    _stage = CubeStage.InsertTarget;
+                    Delay(now, UpgradeRetryDelayMs);
+                    return;
+                }
 
                 if (_skippedThisRun != null)
-                    _skippedThisRun.Add(_target.Key);
+                    _skippedThisRun.Add(failedKey);
 
-                _rejectedItemKeys.Add(_target.Key);
+                Log(
+                    "UPGRADE skipped for current run after " +
+                    failures +
+                    " failed attempts; key=" +
+                    failedKey);
+
+                // Never add an X here. The item remains recipe-eligible even if
+                // the automation failed to process it.
+                _target = null;
+                _insertAttemptsForTarget = 0;
+                ResetPage3TransactionState();
+
+                _stage = CubeStage.AcquireTarget;
+                Delay(now, 0);
+                return;
             }
-            else
+
+            ResetPostFailureConfirmation();
+
+            _doneThisRun++;
+
+            if (_runPage == 2 &&
+                _target != null)
             {
-                _doneThisRun++;
+                _startAncientIds.Remove(
+                    _target.Uid);
+            }
 
-                if (_runPage == 2 && _target != null)
-                    _startAncientIds.Remove(_target.Uid);
+            if (_runPage == 3 &&
+                _target != null &&
+                _upgradeFailuresThisRun != null)
+            {
+                _upgradeFailuresThisRun.Remove(
+                    _target.Key);
+            }
 
-                if (_cycleId == 1 || _cycleId % 5 == 0)
-                    Log("CYCLE #" + _cycleId + " ok");
+            if (_cycleId == 1 ||
+                _cycleId % 5 == 0)
+            {
+                Log(
+                    "CYCLE #" +
+                    _cycleId +
+                    " ok");
             }
 
             if (_cycleStartTick != 0)
             {
-                _lastCycleElapsedMs = unchecked(now - _cycleStartTick);
+                _lastCycleElapsedMs =
+                    unchecked(
+                        now - _cycleStartTick);
 
-                if (DebugLogEnabled && (_cycleId == 1 || _cycleId % 10 == 0))
-                    Log("CYCLE #" + _cycleId + " elapsed=" + _lastCycleElapsedMs + "ms profile=" + _p);
+                if (DebugLogEnabled &&
+                    (_cycleId == 1 ||
+                     _cycleId % 10 == 0))
+                {
+                    Log(
+                        "CYCLE #" +
+                        _cycleId +
+                        " elapsed=" +
+                        _lastCycleElapsedMs +
+                        "ms profile=" +
+                        _p);
+                }
             }
 
             _target = null;
+            _insertAttemptsForTarget = 0;
+            ResetPage3TransactionState();
+
             _stage = CubeStage.AcquireTarget;
             Delay(now, 0);
+        }
+
+        private IItem FindInventoryItemByStableKey(
+            string key)
+        {
+            if (string.IsNullOrEmpty(key))
+                return null;
+
+            foreach (var item in
+                Hud.Inventory.ItemsInInventory)
+            {
+                if (item == null)
+                    continue;
+
+                if (StableItemKey(item.ItemUniqueId) == key)
+                    return item;
+            }
+
+            return null;
+        }
+
+        private bool RefreshUpgradeTarget(
+            string key)
+        {
+            IItem item =
+                FindInventoryItemByStableKey(key);
+
+            if (!IsUpgradeRareEligible(item))
+                return false;
+
+            RectangleF rect =
+                Hud.Inventory.GetItemRect(item);
+
+            if (rect.Width <= 0 ||
+                rect.Height <= 0)
+            {
+                return false;
+            }
+
+            _target = new CubeTarget
+            {
+                Item = item,
+                Rect = rect,
+                Uid = item.ItemUniqueId,
+                Key = key
+            };
+
+            return true;
+        }
+
+        private void LogUpgradeEligibilityOnce(
+            IItem item,
+            string key)
+        {
+            if (!DebugLogEnabled ||
+                item == null ||
+                item.SnoItem == null ||
+                string.IsNullOrEmpty(key) ||
+                _eligibilityLoggedThisRun == null ||
+                !_eligibilityLoggedThisRun.Add(key))
+            {
+                return;
+            }
+
+            int level;
+            string source;
+
+            UpgradeRareEligibility result =
+                GetUpgradeRareEligibility(
+                    item,
+                    out level,
+                    out source);
+
+            Log(
+                "UPGRADE eligibility key=" +
+                key +
+                " name=" +
+                (item.FullNameEnglish ?? "?") +
+                " result=" +
+                result +
+                " detectedLevel=" +
+                level +
+                " source=" +
+                source +
+                " snoLevel=" +
+                item.SnoItem.Level +
+                " requiredLevel=" +
+                item.SnoItem.RequiredLevel);
         }
 
         private bool StableKeyExistsInInventory(string key)
@@ -1781,17 +2622,20 @@ namespace Turbo.Plugins.s7o
         // =========================================================
         // Timing Profile — lerp from LightningMod-style Speed 1 to fastest Speed 10
         //
-        // Speed table after slow-scale polish:
-        //   timing     | spd1 | spd5 | spd10
-        //   Sleep      |  60  |  40  |  15
-        //   PostTrans  | 125  |  73  |   8
-        //   ArrowReady | 220  | 169  | 105
-        //   RightConfirm|360  | 298  | 220
-        //   RightToLeft| 120  |  70  |   8
-        //   ReturnConf | 650  | 508  | 330
-        //   RetryWait  |  90  |  52  |   5
-        //   ArrowDown  |  35  |  20  |   2
-        //   PostClick  |  20  |  11  |   0
+        // Timings interpolate linearly from Speed 1 to Speed 10:
+        //   timing       | spd1 | spd10
+        //   Sleep        |  60  |  15
+        //   PostTrans    | 125  |   8
+        //   ArrowReady   | 220  | 105
+        //   RightConfirm | 360  | 220
+        //   RightToLeft  | 120  |   0
+        //   ReturnConf   | 650  | 330
+        //   RetryWait    |  90  |   5
+        //   ArrowDown    |  35  |   0
+        //   PostClick    |  20  |   0
+        //   Page 3 action floors at Speed 10 are zero; the native slot-clear
+        //   gate and 105 ms ArrowReady timeout remain the transaction barrier.
+        //   Page 3 failure confirmation scales from 240 ms to 120 ms.
         // =========================================================
 
         private TimingProfile CurrentProfile() =>
@@ -1814,6 +2658,13 @@ namespace Turbo.Plugins.s7o
                 ArrowDown     = Lerp(BasePageArrowMouseDownMs,     MinPageArrowMouseDownMs,    t),
                 PostClick     = Lerp(BasePageArrowPostClickMs,     MinPageArrowPostClickMs,    t),
                 OpenWait      = Lerp(BasePageOpenClickWaitMs,      MinPageOpenClickWaitMs,     t),
+                P3InsertPoll = Lerp(BasePage3InsertConfirmPollMs, MinPage3InsertConfirmPollMs, t),
+                P3InsertToFill = Lerp(BasePage3PostInsertSettleMs, MinPage3PostInsertSettleMs, t),
+                P3FillToTransmute = Lerp(BasePage3PostFillSettleMs, MinPage3PostFillSettleMs, t),
+                P3TransmuteToRepair = Lerp(BasePage3TransmuteToRepairMs, MinPage3TransmuteToRepairMs, t),
+                P3FailureConfirm = Lerp(BasePage3FailureConfirmMs, MinPage3FailureConfirmMs, t),
+                P3FailureSample = Lerp(BasePage3FailureSampleMs, MinPage3FailureSampleMs, t),
+                P3SuccessSettle = Lerp(BasePage3SuccessSettleMs, MinPage3SuccessSettleMs, t),
             };
         }
 
@@ -1848,16 +2699,16 @@ namespace Turbo.Plugins.s7o
 
         private List<IItem> Candidates(int page)
         {
-            List<IItem> r;
-            if (page == 2)                      r = ReforgeItems();
-            else if (page == 3)                 r = RareItems();
-            else if (page >= 7 && page <= 9)    r = ConvertItems(Qualities(page));
-            else return new List<IItem>();
-            // Exclude items flagged as ineligible (red X). Rejection marking is page-3-only;
-            // rejected keys persist until HUD restarts; the X only draws while a matching item is in inventory.
-            if (_rejectedItemKeys.Count > 0)
-                r.RemoveAll(x => _rejectedItemKeys.Contains(StableItemKey(x.ItemUniqueId)));
-            return r;
+            if (page == 2)
+                return ReforgeItems();
+
+            if (page == 3)
+                return RareItems();
+
+            if (page >= 7 && page <= 9)
+                return ConvertItems(Qualities(page));
+
+            return new List<IItem>();
         }
 
         private bool CandidateKeyStillPresent(int page, string key)
@@ -1893,17 +2744,269 @@ namespace Turbo.Plugins.s7o
             && !item.SnoItem.Code.StartsWith("P72_Soulshard")
             && item.SnoItem.NameEnglish != "Hellforge Ember";
 
+        private const uint UpgradeRareRequirementModifier =
+            57u;
+
+        private bool TryReadUpgradeRareRequirementStat(
+            IItem item,
+            out int level)
+        {
+            level = -1;
+
+            if (item == null ||
+                item.StatList == null)
+            {
+                return false;
+            }
+
+            try
+            {
+                foreach (IItemStat stat in
+                    item.StatList)
+                {
+                    if (stat == null ||
+                        stat.Attribute == null ||
+                        stat.Modifier !=
+                            UpgradeRareRequirementModifier ||
+                        !string.Equals(
+                            stat.Attribute.Code,
+                            "Requirement",
+                            StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    double raw =
+                        stat.DoubleValue;
+
+                    if (double.IsNaN(raw) ||
+                        double.IsInfinity(raw))
+                    {
+                        continue;
+                    }
+
+                    int candidate =
+                        (int)Math.Round(
+                            raw,
+                            MidpointRounding
+                                .AwayFromZero);
+
+                    if (candidate >= 1 &&
+                        candidate <= 100 &&
+                        Math.Abs(
+                            raw -
+                            candidate) <= 0.001d)
+                    {
+                        level = candidate;
+                        return true;
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            return false;
+        }
+
+        private int ReadUpgradeRareRequirementAttribute(
+            IItem item)
+        {
+            if (item == null)
+                return -1;
+
+            try
+            {
+                int value =
+                    item.GetAttributeValueAsInt(
+                        Hud.Sno.Attributes
+                            .Requirement,
+                        UpgradeRareRequirementModifier,
+                        -1);
+
+                if (value >= 1 &&
+                    value <= 100)
+                {
+                    return value;
+                }
+            }
+            catch
+            {
+            }
+
+            return -1;
+        }
+
+        private int GetUpgradeRareItemLevel(
+            IItem item,
+            out string source)
+        {
+            source = "none";
+
+            if (item == null ||
+                item.SnoItem == null)
+            {
+                return -1;
+            }
+
+            int instanceLevel;
+
+            if (TryReadUpgradeRareRequirementStat(
+                    item,
+                    out instanceLevel))
+            {
+                source =
+                    "StatList.Requirement#57";
+
+                return instanceLevel;
+            }
+
+            instanceLevel =
+                ReadUpgradeRareRequirementAttribute(
+                    item);
+
+            if (instanceLevel > 0)
+            {
+                source =
+                    "Attribute.Requirement#57";
+
+                return instanceLevel;
+            }
+
+            // LightningMOD's template test is retained only as a definite
+            // lower-tier rejection. A template level of 65 can represent
+            // either a generated level-70 item or a genuinely lower-level
+            // item, so it cannot positively classify the live instance.
+            if (item.SnoItem.Level > 0 &&
+                item.SnoItem.Level < 65)
+            {
+                source =
+                    "SnoItem.LevelBelow65";
+
+                return item.SnoItem.Level;
+            }
+
+            // Do not substitute Item_Quality_Level, RequiredLevel, or the
+            // 65+ template convention. None of them distinguishes the two
+            // same-SNO items proven by the diagnostic log.
+            source =
+                "InstanceRequirementUnavailable";
+
+            return -1;
+        }
+
+        private UpgradeRareEligibility GetUpgradeRareEligibility(
+            IItem item,
+            out int detectedLevel,
+            out string levelSource)
+        {
+            detectedLevel = -1;
+            levelSource = "none";
+
+            if (item == null ||
+                item.SnoItem == null ||
+                item.SnoItem.Kind !=
+                    ItemKind.loot ||
+                !item.IsRare ||
+                item.Quantity > 1)
+            {
+                return UpgradeRareEligibility
+                    .IneligibleType;
+            }
+
+            string group =
+                item.SnoItem.MainGroupCode ??
+                string.Empty;
+
+            if (group == "gems_unique" ||
+                group == "riftkeystone" ||
+                group == "horadriccache" ||
+                group == "-" ||
+                group == "pony")
+            {
+                return UpgradeRareEligibility
+                    .IneligibleType;
+            }
+
+            detectedLevel =
+                GetUpgradeRareItemLevel(
+                    item,
+                    out levelSource);
+
+            if (detectedLevel < 0)
+            {
+                // Unknown instance metadata is neither clicked nor painted as
+                // definitively ineligible. The next collection can classify it
+                // once the live Requirement stat becomes available.
+                return UpgradeRareEligibility
+                    .UnknownLevel;
+            }
+
+            if (detectedLevel < 70)
+            {
+                return UpgradeRareEligibility
+                    .IneligibleLevel;
+            }
+
+            return UpgradeRareEligibility
+                .Eligible;
+        }
+
+        private bool IsUpgradeRareEligible(
+            IItem item)
+        {
+            int level;
+            string source;
+
+            return GetUpgradeRareEligibility(
+                item,
+                out level,
+                out source) ==
+                UpgradeRareEligibility.Eligible;
+        }
+
+        private bool ShouldDrawUpgradeIneligibleX(
+            IItem item)
+        {
+            if (item == null ||
+                item.SnoItem == null ||
+                item.SnoItem.Kind !=
+                    ItemKind.loot ||
+                !item.IsRare ||
+                item.Quantity > 1)
+            {
+                return false;
+            }
+
+            int level;
+            string source;
+
+            UpgradeRareEligibility result =
+                GetUpgradeRareEligibility(
+                    item,
+                    out level,
+                    out source);
+
+            return result ==
+                    UpgradeRareEligibility
+                        .IneligibleLevel ||
+                result ==
+                    UpgradeRareEligibility
+                        .IneligibleType;
+        }
+
         private List<IItem> RareItems()
         {
-            var r = new List<IItem>();
-            foreach (var item in Hud.Inventory.ItemsInInventory)
-                if (item.SnoItem.Kind == ItemKind.loot && item.IsRare && item.Quantity <= 1
-                    && item.SnoItem.Level >= 65
-                    && item.SnoItem.MainGroupCode != "gems_unique"
-                    && item.SnoItem.MainGroupCode != "riftkeystone"
-                    && item.SnoItem.MainGroupCode != "horadriccache")
-                    r.Add(item);
-            return r;
+            var result = new List<IItem>();
+
+            foreach (var item in
+                Hud.Inventory.ItemsInInventory)
+            {
+                if (IsUpgradeRareEligible(item))
+                    result.Add(item);
+            }
+
+            return result;
         }
 
         private List<IItem> ConvertItems(List<ItemQuality> qualities)
@@ -2252,7 +3355,7 @@ namespace Turbo.Plugins.s7o
         // TurboHUD's ItemUniqueId for inventory items can encode slot position in the prefix:
         //   "Inventory{position_prefix}-{stable_game_actor_id}"
         // The suffix after the last '-' is the stable item/actor key that survives inventory
-        // moves, so rejected-item X marks are anchored to this suffix rather than the slot.
+        // moves and supports run-local retry tracking without storing inventory coordinates.
         private static string StableItemKey(string uid)
         {
             if (string.IsNullOrEmpty(uid)) return uid ?? "";
@@ -2286,7 +3389,7 @@ namespace Turbo.Plugins.s7o
             // This keeps Kanai Cube independent from ItemSalvage even if both default to F3.
             p.MaxPageNavigationClicks = 12; p.ToggleDebounceMs = 750;
             p.BaseGlobalSleepMs = 60; p.BasePostTransmuteExtraMs = 125; p.BasePageArrowReadyTimeoutMs = 220; p.BasePageRightConfirmTimeoutMs = 360; p.BasePageRightToLeftMinWaitMs = 120; p.BasePageReturnConfirmTimeoutMs = 650; p.BasePageReturnRetryWaitMs = 90; p.BasePageReturnMaxRetries = 4; p.BasePageArrowMouseDownMs = 35; p.BasePageArrowPostClickMs = 20; p.BasePageOpenClickWaitMs = 100;
-            p.MinGlobalSleepMs = 15; p.MinPostTransmuteExtraMs = 8; p.MinPageArrowReadyTimeoutMs = 105; p.MinPageRightConfirmTimeoutMs = 220; p.MinPageRightToLeftMs = 8; p.MinPageReturnConfirmTimeoutMs = 330; p.MinPageReturnRetryWaitMs = 5; p.MinPageArrowMouseDownMs = 2; p.MinPageArrowPostClickMs = 0; p.MinPageOpenClickWaitMs = 5;
+            p.MinGlobalSleepMs = 15; p.MinPostTransmuteExtraMs = 8; p.MinPageArrowReadyTimeoutMs = 105; p.MinPageRightConfirmTimeoutMs = 220; p.MinPageRightToLeftMs = 0; p.MinPageReturnConfirmTimeoutMs = 330; p.MinPageReturnRetryWaitMs = 5; p.MinPageArrowMouseDownMs = 0; p.MinPageArrowPostClickMs = 0; p.MinPageOpenClickWaitMs = 5;
             p.ShowSpeedControl = true;
             p.MaxTransmutesPerRun = 250; p.UseRightClickInsert = true; p.UsePageFlipReset = true; p.DoubleClickFillButton = false; p.UseSnapshotQueueForFastPages = true; p.EnableReforgePage2 = true; p.Mode = 0; p.RestoreCursorAfterRun = true;
             p.DebugLogEnabled = false; p.VerboseDebugLogging = false; p.DebugLogManualClicks = false; p.DebugLogUiRectsOnPageClicks = false; p.ShowCycleTimingOverlay = false; p.DebugLogFileName = "KanaiCubeDebug.log";
