@@ -52,7 +52,7 @@ namespace Turbo.Plugins.s7o
         // Default speed if no saved settings file exists.
         // UI changes are saved to plugins/s7o/settings/s7o_ItemSalvage.ini when PersistUserSettings is true.
         // All speeds use turbo mode. Speed 1 is already very fast; speed 10 is near-burst.
-        public int SalvageSpeed = 8;
+        public int SalvageSpeed = 10;
         public int MaxItemClickRetries = 1;
         public int DebounceMs = 150;
 
@@ -73,7 +73,7 @@ namespace Turbo.Plugins.s7o
         // Failure fallback: do not hammer a greyed/stuck item for the whole run.
         // 2 = initial click + one retry, then that ItemUniqueId is skipped until the user presses F3 again.
         public int MaxTotalTurboClicksPerItem = 2;
-        public int TurboRetryBackoffDelayMs = 35;
+        public int TurboRetryBackoffDelayMs = 30;
 
         // All speeds use turbo mode. Speed 1 is fast; speed 10 is very fast but still paced.
         public bool UseTurboMode = true;
@@ -81,15 +81,21 @@ namespace Turbo.Plugins.s7o
         public int PacedTurboMinimumSpeed = 2;
         public int TurboMaxRetryPasses = 1;
 
+        // Lightning-style fast-path: hold each inventory click briefly, then
+        // verify the whole pass and retry only the items that remain.
+        // On the supplied test system, a 1 ms sleep produced the stable
+        // per-item pacing used by the successful burst runs.
+        public int TurboMouseDownHoldMs = 1;
+
         // If true, turbo mode will press Enter only when the salvage confirmation OK button is visible.
         // It must never send blind Enter, because blind Enter can open chat.
         public bool TurboImmediateLegendaryEnter = true;
 
         // Turbo legendary confirmation stability. After a legendary click, wait briefly for
         // the OK dialog before clicking another item; never send blind Enter.
-        public int TurboLegendaryConfirmWindowMs = 180;
-        public int TurboLegendaryConfirmPollMs = 10;
-        public int TurboPostConfirmSettleMs = 20;
+        public int TurboLegendaryConfirmWindowMs = 120;
+        public int TurboLegendaryConfirmPollMs = 5;
+        public int TurboPostConfirmSettleMs = 0;
 
         // Confirmation-first retry throttle. Keep this close to TurboLegendaryConfirmPollMs so
         // safety does not turn turbo legendary salvage into strict per-item verification.
@@ -104,7 +110,7 @@ namespace Turbo.Plugins.s7o
 
         // If a clicked item is still present, give Diablo III a short stale/pending cooldown
         // before retrying it. This avoids hammering greyed items and preserves cleanup retries.
-        public int FailedItemRetryCooldownMs = 200;
+        public int FailedItemRetryCooldownMs = 30;
 
         public bool EnableTurboFinalCleanup = true;
 
@@ -113,18 +119,18 @@ namespace Turbo.Plugins.s7o
         public int TurboFinalCleanupMinimumSpeed = 1;
 
         // Allow multiple cleanup passes because speed 10 can leave delayed inventory leftovers.
-        public int TurboFinalCleanupMaxPasses = 3;
+        public int TurboFinalCleanupMaxPasses = 1;
 
         // This is the key timing. 80ms can be too short for FREE inventory collection after speed-10 clicks.
-        public int TurboFinalCleanupValidationDelayMs = 120;
+        public int TurboFinalCleanupValidationDelayMs = 100;
 
         // Cleanup remains fast, but slightly more tolerant than the main speed-10 pass.
-        public int TurboFinalCleanupClickDelayMs = 25;
-        public int TurboFinalCleanupSettleDelayMs = 100;
+        public int TurboFinalCleanupClickDelayMs = 0;
+        public int TurboFinalCleanupSettleDelayMs = 120;
 
         // If a cleanup rescan sees zero candidates, verify a few more times before ending.
         // This catches delayed inventory snapshots.
-        public int TurboFinalCleanupEmptyValidationRetries = 2;
+        public int TurboFinalCleanupEmptyValidationRetries = 1;
 
         // Cleanup retry passes should be more tolerant than the main turbo retry pass.
         public int TurboFinalCleanupRetryPasses = 2;
@@ -182,9 +188,11 @@ namespace Turbo.Plugins.s7o
         // Speed tuning:
         // Speed 1 uses strict one-by-one verification.
         // Speeds 2-10 use paced turbo mode.
-        // TurboClickDelayBySpeed is the main visible per-item pacing value.
-        // TurboSettleDelayBySpeed controls how long the plugin waits after a paced turbo pass before verifying results.
-        // ItemTimeoutBySpeed is a failure threshold, not normal pacing; setting it too low can cause false retries.
+        // TurboClickDelayBySpeed and TurboSettleDelayBySpeed scale linearly
+        // toward the validated Speed-10 burst profile.
+        // TurboClicksPerPassBySpeed increases linearly from one item to a
+        // full-inventory burst. Verification and bounded retry preserve reliability.
+        // ItemTimeoutBySpeed is a failure threshold, not normal pacing.
         // ============================================================
 
         public int[] StepDelayBySpeed = new int[]
@@ -230,46 +238,46 @@ namespace Turbo.Plugins.s7o
         public int[] TurboClickDelayBySpeed = new int[]
         {
             0,
-            100, // 1
-            90,  // 2
-            80,  // 3
-            70,  // 4
-            60,  // 5
-            50,  // 6
-            40,  // 7
-            30,  // 8
-            20,  // 9
-            15   // 10
+            90, // 1
+            80, // 2
+            70, // 3
+            60, // 4
+            50, // 5
+            40, // 6
+            30, // 7
+            20, // 8
+            10, // 9
+            0   // 10
         };
 
         public int[] TurboClicksPerPassBySpeed = new int[]
         {
             0,
-            1, // 1
-            1, // 2
-            1, // 3
-            1, // 4
-            1, // 5
-            1, // 6
-            1, // 7
-            1, // 8
-            1, // 9
-            1  // 10
+            1,  // 1
+            8,  // 2
+            14, // 3
+            21, // 4
+            27, // 5
+            34, // 6
+            40, // 7
+            47, // 8
+            53, // 9
+            60  // 10
         };
 
         public int[] TurboSettleDelayBySpeed = new int[]
         {
             0,
-            100, // 1
-            90,  // 2
-            80,  // 3
-            70,  // 4
-            60,  // 5
-            50,  // 6
-            40,  // 7
-            30,  // 8
-            20,  // 9
-            10   // 10
+            200, // 1
+            187, // 2
+            173, // 3
+            160, // 4
+            147, // 5
+            133, // 6
+            120, // 7
+            107, // 8
+            93,  // 9
+            80   // 10
         };
 
         private IKeyEvent _salvageKeyEvent;
@@ -1255,7 +1263,8 @@ namespace Turbo.Plugins.s7o
                 if (!TryRegisterItemClickAttempt(key, item))
                     continue;
 
-                if (!ClickInventoryItem(item))
+                int clickTick = Environment.TickCount;
+                if (!ClickInventoryItemTurbo(item))
                 {
                     _runResolveSkipCount++;
                     continue;
@@ -1264,7 +1273,7 @@ namespace Turbo.Plugins.s7o
                 if (_pendingItemKeys.Count == 0)
                     MarkFinalItemClickedForCompletionPark();
 
-                _lastItemClickTick = now;
+                _lastItemClickTick = clickTick;
                 _runClickedCount++;
                 clickedThisPass++;
                 _turboClickedKeys.Add(key);
@@ -1272,12 +1281,16 @@ namespace Turbo.Plugins.s7o
                 if (TurboImmediateLegendaryEnter && item.IsLegendary)
                 {
                     _activeItemKey = key;
-                    _confirmStartTick = now;
+                    _confirmStartTick = clickTick;
 
-                    if (TryConfirmSalvageDialogWithEnter(now, "turbo post-click"))
+                    if (TryConfirmSalvageDialogWithEnter(clickTick, "turbo post-click"))
                     {
                         _activeItemKey = null;
-                        ScheduleNextTurboStepAfterItem(now, Math.Max(GetActiveTurboClickDelay(), Math.Max(0, TurboPostConfirmSettleMs)));
+                        ScheduleNextTurboStepAfterItem(
+                            clickTick,
+                            Math.Max(
+                                GetActiveTurboClickDelay(),
+                                Math.Max(0, TurboPostConfirmSettleMs)));
                         return;
                     }
 
@@ -1293,19 +1306,18 @@ namespace Turbo.Plugins.s7o
                     }
 
                     _state = State.TurboAwaitLegendaryConfirm;
-                    _nextStepTick = now + Math.Max(1, TurboLegendaryConfirmPollMs);
+                    _nextStepTick =
+                        clickTick + Math.Max(1, TurboLegendaryConfirmPollMs);
                     return;
                 }
 
                 if (DebugTurboTimings)
                 {
-                    LogDebug("Turbo click. item="
+                    LogDebug("Turbo burst click. item="
                         + SafeItemName(item)
                         + ", speed="
                         + GetSpeed()
-                        + ", turboClickDelay="
-                        + GetActiveTurboClickDelay()
-                        + "ms, clicksThisPass="
+                        + ", clicksThisPass="
                         + clickedThisPass
                         + "/"
                         + maxClicks
@@ -1315,7 +1327,9 @@ namespace Turbo.Plugins.s7o
                 }
             }
 
-            ScheduleNextTurboStepAfterItem(now, GetActiveTurboClickDelay());
+            ScheduleNextTurboStepAfterItem(
+                Environment.TickCount,
+                GetActiveTurboClickDelay());
         }
 
         private void ProcessTurboAwaitLegendaryConfirm(int now)
@@ -3484,6 +3498,30 @@ namespace Turbo.Plugins.s7o
             element.Refresh();
             if (!element.Visible) return false;
             return ClickRect(element.Rectangle);
+        }
+
+        private bool ClickInventoryItemTurbo(IItem item)
+        {
+            if (item == null) return false;
+
+            var rect = Hud.Inventory.GetItemRect(item);
+            if (rect.Width <= 0 || rect.Height <= 0)
+                return false;
+
+            int x = (int)Math.Round(rect.X + rect.Width * 0.5f);
+            int y = (int)Math.Round(rect.Y + rect.Height * 0.5f);
+
+            if (!SetCursorPos(x, y))
+                return false;
+
+            if (!SendMouse(LeftDown))
+                return false;
+
+            int hold = Math.Max(0, TurboMouseDownHoldMs);
+            if (hold > 0)
+                System.Threading.Thread.Sleep(hold);
+
+            return SendMouse(LeftUp);
         }
 
         private bool ClickInventoryItem(IItem item)
