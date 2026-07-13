@@ -1505,11 +1505,12 @@ namespace Turbo.Plugins.s7o
             {
                 foreach (var item in sorted)
                 {
-                    if (!IsLegendaryGemItem(item))
+                    bool isWhisper = IsWhisperOfAtonementItem(item);
+                    if (!isWhisper && !IsLegendaryGemItem(item))
                         continue;
 
                     int targetTabAbs = ResolveLegendaryGemTargetTab(item, plan);
-                    TryQueueCandidate(item, StoreKind.LegendaryGem, targetTabAbs);
+                    TryQueueCandidate(item, isWhisper ? StoreKind.Whisper : StoreKind.LegendaryGem, targetTabAbs);
                 }
             }
 
@@ -1527,7 +1528,46 @@ namespace Turbo.Plugins.s7o
             }
 
             _queue.AddRange(probeQueue);
+            SortStoreQueueByTargetTab();
 
+        }
+
+        private void SortStoreQueueByTargetTab()
+        {
+            // Deposit everything that belongs in the current tab first, then process each other tab as a group.
+            if (_queue.Count <= 1)
+                return;
+
+            int currentTabAbs = GetSelectedStashTabAbs();
+            _queue.Sort(delegate(StoreCandidate a, StoreCandidate b)
+            {
+                int groupCompare = GetStoreCandidateTabGroup(a, currentTabAbs).CompareTo(GetStoreCandidateTabGroup(b, currentTabAbs));
+                if (groupCompare != 0) return groupCompare;
+
+                int tabCompare = NormalizeStoreTargetTab(a).CompareTo(NormalizeStoreTargetTab(b));
+                if (tabCompare != 0) return tabCompare;
+
+                int yCompare = a.InventoryY.CompareTo(b.InventoryY);
+                if (yCompare != 0) return yCompare;
+
+                int xCompare = a.InventoryX.CompareTo(b.InventoryX);
+                if (xCompare != 0) return xCompare;
+
+                return ((int)a.Kind).CompareTo((int)b.Kind);
+            });
+        }
+
+        private static int GetStoreCandidateTabGroup(StoreCandidate candidate, int currentTabAbs)
+        {
+            if (candidate == null || candidate.TargetTabAbs < 0)
+                return 2;
+
+            return candidate.TargetTabAbs == currentTabAbs ? 0 : 1;
+        }
+
+        private static int NormalizeStoreTargetTab(StoreCandidate candidate)
+        {
+            return candidate == null || candidate.TargetTabAbs < 0 ? MaxD3StashTabs + 1 : candidate.TargetTabAbs;
         }
 
         private void TryQueueCandidate(IItem item, StoreKind kind, int targetTabAbs)
@@ -1546,11 +1586,14 @@ namespace Turbo.Plugins.s7o
             return new StoreCandidate
             {
                 ItemKey = item.ItemUniqueId ?? string.Empty,
+                AcdId = SafeItemAcdId(item),
                 Sno = item.SnoItem != null ? item.SnoItem.Sno : 0,
                 InventoryX = item.InventoryX,
                 InventoryY = item.InventoryY,
                 Seed = item.Seed,
+                JewelRank = item.JewelRank,
                 SpecialStackable = IsSpecialStackableItem(item),
+                Whisper = IsWhisperOfAtonementItem(item),
                 TargetTabAbs = targetTabAbs,
                 Kind = kind,
                 RequiresTooltipProbe = requiresTooltipProbe
@@ -1592,6 +1635,12 @@ namespace Turbo.Plugins.s7o
             if (StoreStackables && IsStoreStackable(item))
             {
                 kind = StoreKind.Stackable;
+                return true;
+            }
+
+            if (StoreLegendaryGems && IsWhisperOfAtonementItem(item))
+            {
+                kind = StoreKind.Whisper;
                 return true;
             }
 
@@ -1644,11 +1693,18 @@ namespace Turbo.Plugins.s7o
 
         private static bool IsWhisperOfAtonementItem(IItem item)
         {
-            if (!IsLegendaryGemItem(item))
+            if (item == null || item.SnoItem == null)
+                return false;
+
+            if (!EqualsText(item.SnoItem.MainGroupCode, "gems_unique"))
                 return false;
 
             string name = item.FullNameEnglish ?? item.SnoItem.NameEnglish ?? string.Empty;
-            return name.IndexOf("Whisper of Atonement", StringComparison.OrdinalIgnoreCase) >= 0;
+            if (name.IndexOf("Whisper of Atonement", StringComparison.OrdinalIgnoreCase) >= 0)
+                return true;
+
+            string code = item.SnoItem.Code ?? string.Empty;
+            return code.StartsWith("P73_Unique_Gem_", StringComparison.OrdinalIgnoreCase);
         }
 
         private int FindMatchingStackTab(IItem item, StashPlan plan)
@@ -1987,38 +2043,129 @@ namespace Turbo.Plugins.s7o
 
         private IItem FindInventoryItemByCandidate(StoreCandidate candidate)
         {
+            if (candidate == null)
+                return null;
+
             var items = SafeInventoryItems();
+
+            if (candidate.AcdId != 0)
+            {
+                foreach (var item in items)
+                {
+                    if (item == null || item.SnoItem == null)
+                        continue;
+
+                    if (SafeItemAcdId(item) != candidate.AcdId)
+                        continue;
+
+                    if (CandidateMatchesItem(candidate, item, false))
+                        return item;
+                }
+            }
+
+            if (!string.IsNullOrEmpty(candidate.ItemKey))
+            {
+                foreach (var item in items)
+                {
+                    if (item == null || item.SnoItem == null)
+                        continue;
+
+                    if (!string.Equals(item.ItemUniqueId, candidate.ItemKey, StringComparison.Ordinal))
+                        continue;
+
+                    if (CandidateMatchesItem(candidate, item, false))
+                        return item;
+                }
+            }
+
             foreach (var item in items)
             {
                 if (item == null || item.SnoItem == null)
                     continue;
 
-                if (candidate.SpecialStackable)
-                {
-                    if (item.SnoItem.Sno != candidate.Sno) continue;
-                    if (!SameInventorySlot(item, candidate.InventoryX, candidate.InventoryY)) continue;
-                    if (!SameSeedWhenKnown(item, candidate.Seed)) continue;
-                    if (candidate.Kind == StoreKind.Stackable)
-                        return item;
-
+                if (!SameInventorySlot(item, candidate.InventoryX, candidate.InventoryY))
                     continue;
-                }
 
-                if (!string.IsNullOrEmpty(candidate.ItemKey)
-                    && string.Equals(item.ItemUniqueId, candidate.ItemKey, StringComparison.Ordinal))
-                    return item;
-
-                if (candidate.Sno != 0 && item.SnoItem.Sno == candidate.Sno && TryClassMatches(candidate.Kind, item))
+                if (CandidateMatchesItem(candidate, item, true))
                     return item;
             }
 
-            return null;
+            IItem singleMatch = null;
+            int matchCount = 0;
+            foreach (var item in items)
+            {
+                if (item == null || item.SnoItem == null)
+                    continue;
+
+                if (!CandidateMatchesItem(candidate, item, true))
+                    continue;
+
+                singleMatch = item;
+                matchCount++;
+                if (matchCount > 1)
+                    return null;
+            }
+
+            return matchCount == 1 ? singleMatch : null;
+        }
+
+        private static uint SafeItemAcdId(IItem item)
+        {
+            try
+            {
+                if (item == null)
+                    return 0u;
+
+                uint acd = (uint)item.AcdId;
+                return acd == 0xFFFFFFFF ? 0u : acd;
+            }
+            catch { return 0u; }
+        }
+
+        private bool CandidateMatchesItem(StoreCandidate candidate, IItem item, bool requirePreciseValues)
+        {
+            if (candidate == null || item == null || item.SnoItem == null)
+                return false;
+
+            if (candidate.Sno != 0 && item.SnoItem.Sno != candidate.Sno)
+                return false;
+
+            if (candidate.SpecialStackable)
+            {
+                if (candidate.Kind != StoreKind.Stackable)
+                    return false;
+
+                return SameSeedWhenKnown(item, candidate.Seed);
+            }
+
+            if (!TryClassMatches(candidate.Kind, item))
+                return false;
+
+            if (candidate.Kind == StoreKind.Whisper)
+            {
+                if (!candidate.Whisper || !IsWhisperOfAtonementItem(item))
+                    return false;
+
+                if (requirePreciseValues && candidate.JewelRank > 0 && item.JewelRank > 0 && item.JewelRank != candidate.JewelRank)
+                    return false;
+            }
+
+            if (requirePreciseValues && candidate.Seed != 0 && item.Seed != 0 && item.Seed != candidate.Seed)
+                return false;
+
+            return true;
         }
 
         private bool TryClassMatches(StoreKind kind, IItem item)
         {
             StoreKind current;
             return TryClassifyCandidate(item, out current) && current == kind;
+        }
+
+        private int GetSelectedStashTabAbs()
+        {
+            int perPage = GetTabsPerPage();
+            return SafeSelectedStashPageIndex() * perPage + SafeSelectedStashTabIndex();
         }
 
         private bool EnsureTargetStashTab(int targetTabAbs, int now)
@@ -2988,6 +3135,7 @@ namespace Turbo.Plugins.s7o
             None,
             Stackable,
             LegendaryGem,
+            Whisper,
             Primal,
             Ancient
         }
@@ -3023,11 +3171,14 @@ namespace Turbo.Plugins.s7o
         private sealed class StoreCandidate
         {
             public string ItemKey;
+            public uint AcdId;
             public uint Sno;
             public int InventoryX;
             public int InventoryY;
             public int Seed;
+            public int JewelRank;
             public bool SpecialStackable;
+            public bool Whisper;
             public int TargetTabAbs;
             public StoreKind Kind;
             public bool RequiresTooltipProbe;
