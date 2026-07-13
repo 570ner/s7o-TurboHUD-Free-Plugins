@@ -34,6 +34,8 @@ namespace Turbo.Plugins.s7o
         public float OutlineSize { get; set; } = 2.0f;
         public bool UseTwoToneLighting { get; set; } = true;
 
+        private const uint AnyAttributeModifier = 0xFFFFFu;
+
         private readonly HashSet<ActorSnoEnum> _simulacrumSnos = new HashSet<ActorSnoEnum>
         {
             ActorSnoEnum._p6_necro_simulacrum_male,
@@ -109,7 +111,7 @@ namespace Turbo.Plugins.s7o
             if (!_simulacrumSnos.Contains(actor.SnoActor.Sno))
                 return false;
 
-            if (!actor.IsOnScreen || actor.IsDisabled || actor.Hitpoints <= 0.0f)
+            if (!actor.IsOnScreen || actor.IsDisabled)
                 return false;
 
             return true;
@@ -119,16 +121,21 @@ namespace Turbo.Plugins.s7o
         {
             ratio = 1.0f;
 
+            uint key = actor.AcdId != 0 ? actor.AcdId : actor.AnnId;
+            if (key == 0)
+                return false;
+
+            _lastSeenTickByActor[key] = tick;
+
+            if (TryGetNativeHealthRatio(actor, out ratio))
+                return true;
+
             float current = actor.Hitpoints;
             if (current <= 0.0f)
             {
                 ratio = 0.0f;
                 return false;
             }
-
-            uint key = actor.AcdId != 0 ? actor.AcdId : actor.AnnId;
-            if (key == 0)
-                return false;
 
             float max;
             if (!_maxHitpointsByActor.TryGetValue(key, out max) || current > max)
@@ -137,15 +144,71 @@ namespace Turbo.Plugins.s7o
                 _maxHitpointsByActor[key] = max;
             }
 
-            _lastSeenTickByActor[key] = tick;
-
             if (max <= 0.0f)
                 return false;
 
-            ratio = current / max;
-            if (ratio < 0.0f) ratio = 0.0f;
-            if (ratio > 1.0f) ratio = 1.0f;
+            ratio = ClampRatio(current / max);
             return true;
+        }
+
+        private bool TryGetNativeHealthRatio(IActor actor, out float ratio)
+        {
+            ratio = 1.0f;
+
+            double current = ReadAttribute(actor, Hud.Sno.Attributes.Hitpoints_Cur, AnyAttributeModifier);
+            double max = ReadAttribute(actor, Hud.Sno.Attributes.Hitpoints_Max_Total, AnyAttributeModifier);
+            if (TryMakeRatio(current, max, out ratio))
+                return true;
+
+            current = ReadAttribute(actor, Hud.Sno.Attributes.Hitpoints_Cur, 0);
+            max = ReadAttribute(actor, Hud.Sno.Attributes.Hitpoints_Max_Total, 0);
+            if (TryMakeRatio(current, max, out ratio))
+                return true;
+
+            current = ReadAttribute(actor, Hud.Sno.Attributes.Hitpoints_Cur, AnyAttributeModifier);
+            max = ReadAttribute(actor, Hud.Sno.Attributes.Hitpoints_Max, AnyAttributeModifier);
+            if (TryMakeRatio(current, max, out ratio))
+                return true;
+
+            current = ReadAttribute(actor, Hud.Sno.Attributes.Hitpoints_Cur, 0);
+            max = ReadAttribute(actor, Hud.Sno.Attributes.Hitpoints_Max, 0);
+            return TryMakeRatio(current, max, out ratio);
+        }
+
+        private double ReadAttribute(IActor actor, IAttribute attribute, uint modifier)
+        {
+            try
+            {
+                if (actor == null || attribute == null)
+                    return double.NaN;
+
+                return actor.GetAttributeValue(attribute, modifier, double.NaN);
+            }
+            catch
+            {
+                return double.NaN;
+            }
+        }
+
+        private bool TryMakeRatio(double current, double max, out float ratio)
+        {
+            ratio = 1.0f;
+
+            if (double.IsNaN(current) || double.IsNaN(max) || double.IsInfinity(current) || double.IsInfinity(max))
+                return false;
+
+            if (current < 0.0 || max <= 0.0)
+                return false;
+
+            ratio = ClampRatio((float)(current / max));
+            return true;
+        }
+
+        private float ClampRatio(float ratio)
+        {
+            if (ratio < 0.0f) return 0.0f;
+            if (ratio > 1.0f) return 1.0f;
+            return ratio;
         }
 
         private void DrawSimulacrumBar(IActor actor, float hpRatio, bool mine)
