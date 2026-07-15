@@ -9,9 +9,10 @@ using Turbo.Plugins.Default;
 
 namespace Turbo.Plugins.s7o
 {
-    // Saves one Paragon layout per character and native Armory slot, then
-    // restores it after that exact preset is equipped. Persisted native
-    // fingerprints verify settled profiles without opening Paragon. At startup,
+    // Saves independent Paragon and manual AutoSkill setups per character
+    // and native Armory slot, then restores enabled components after that exact
+    // preset is equipped. Persisted native Paragon fingerprints verify settled
+    // profiles without opening Paragon. At startup,
     // the already equipped profile may establish layout trust passively; a passive
     // mismatch never opens Paragon or changes points. Legacy or genuinely different
     // layouts retain the visible apply path and are fingerprinted afterward.
@@ -22,7 +23,7 @@ namespace Turbo.Plugins.s7o
         IInGameTopPainter
     {
         private const string SettingsFileName = "s7o_Paragon_Builds.ini";
-        private const int SettingsVersion = 15;
+        private const int SettingsVersion = 16;
         private const int NoTick = int.MinValue;
         private const int ActiveTabAnim = 13;
 
@@ -85,6 +86,8 @@ namespace Turbo.Plugins.s7o
         private const float EquipRelH = 0.0269f;
         private const float ArmoryPadX = 0.008f;
         private const float ArmoryPadY = 0.006f;
+        private const float ArmoryAutoCastToggleCenterXRel = 0.232f;
+        private const float ArmoryAutoCastLabelOffsetX = 0.0f;
         private const float ArmoryHeroToggleCenterXRel = 0.715f;
         private const float ArmoryHeroToggleYRel = 0.166f;
         private const float ArmoryHeroToggleWRel = 0.096f;
@@ -171,6 +174,46 @@ namespace Turbo.Plugins.s7o
                 : IsCurrentHeroParagonEnabled;
         }
 
+        public bool CanConfigureCurrentHeroAutoCast
+        {
+            get { return CurrentHeroId != 0u; }
+        }
+
+        public bool IsCurrentHeroAutoCastEnabled
+        {
+            get
+            {
+                uint heroId = CurrentHeroId;
+                return heroId != 0u &&
+                    !_disabledAutoCastHeroIds.Contains(heroId);
+            }
+        }
+
+        public bool SetCurrentHeroAutoCastEnabled(bool enabled)
+        {
+            uint heroId = CurrentHeroId;
+            if (heroId == 0u) return false;
+
+            bool changed = enabled
+                ? _disabledAutoCastHeroIds.Remove(heroId)
+                : _disabledAutoCastHeroIds.Add(heroId);
+            if (!changed) return true;
+
+            if (!enabled && !IsCurrentHeroParagonEnabled)
+                ClearPendingEquip();
+
+            SaveSettings();
+            return true;
+        }
+
+        public bool ToggleCurrentHeroAutoCastEnabled()
+        {
+            bool enabled = !IsCurrentHeroAutoCastEnabled;
+            return SetCurrentHeroAutoCastEnabled(enabled)
+                ? enabled
+                : IsCurrentHeroAutoCastEnabled;
+        }
+
         public void ForceStopForDisable()
         {
             StopCurrentHeroParagonWork(
@@ -226,6 +269,9 @@ namespace Turbo.Plugins.s7o
             new Dictionary<string, ParagonProfile>(StringComparer.Ordinal);
         private readonly HashSet<uint> _disabledHeroIds =
             new HashSet<uint>();
+        private readonly HashSet<uint> _disabledAutoCastHeroIds =
+            new HashSet<uint>();
+        private s7o_AutoSkill _autoSkillPlugin;
 
         private readonly int[,] _capturedRows = new int[4, 4];
         private readonly bool[] _capturedTabsSeen = new bool[4];
@@ -251,6 +297,9 @@ namespace Turbo.Plugins.s7o
         private string _profileSaveStableKey = string.Empty;
         private int _profileSaveArmoryIndex = -1;
         private string _profileSaveLabel = string.Empty;
+        private bool _profileSaveIncludeParagon;
+        private bool _profileSaveIncludeAutoCast;
+        private int _profileSaveAutoCastMask;
 
         private bool _knownCurrentLayoutValid;
         private uint _knownCurrentHeroId;
@@ -357,7 +406,8 @@ namespace Turbo.Plugins.s7o
             if (!enabled)
             {
                 StopCurrentHeroParagonWork(
-                    "disabled for current hero");
+                    "disabled for current hero",
+                    !IsCurrentHeroAutoCastEnabled);
                 return;
             }
 
@@ -370,6 +420,13 @@ namespace Turbo.Plugins.s7o
         private void StopCurrentHeroParagonWork(
             string reason)
         {
+            StopCurrentHeroParagonWork(reason, true);
+        }
+
+        private void StopCurrentHeroParagonWork(
+            string reason,
+            bool clearPendingEquip)
+        {
             // Abort through the existing path in case rows already changed.
             if (_applyState != ApplyState.Idle)
                 AbortApply(reason);
@@ -377,7 +434,8 @@ namespace Turbo.Plugins.s7o
                 InvalidateKnownCurrentLayout();
 
             ResetNativeTask();
-            ClearPendingEquip();
+            if (clearPendingEquip)
+                ClearPendingEquip();
             ClearProfileSaveRequest();
             _scanRunning = false;
             _scanRestoringCore = false;
@@ -413,6 +471,11 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
+            bool paragonEnabled =
+                IsCurrentHeroParagonEnabled;
+            bool autoCastEnabled =
+                IsCurrentHeroAutoCastEnabled;
+
             if (leftDown != _leftDownLast)
             {
                 if (leftDown)
@@ -420,13 +483,20 @@ namespace Turbo.Plugins.s7o
                     bool heroToggleHandled =
                         TryHandleArmoryHeroToggleClick();
 
-                    if (!heroToggleHandled &&
-                        IsCurrentHeroParagonEnabled)
+                    if (!heroToggleHandled)
                     {
-                        if (_applyState != ApplyState.Idle)
+                        if (paragonEnabled &&
+                            _applyState != ApplyState.Idle)
+                        {
                             AbortApply("user mouse input");
+                        }
                         else
-                            HandlePhysicalMouseDown(now);
+                        {
+                            HandlePhysicalMouseDown(
+                                now,
+                                paragonEnabled,
+                                autoCastEnabled);
+                        }
                     }
                 }
             }
@@ -434,39 +504,49 @@ namespace Turbo.Plugins.s7o
 
             bool paragonOpen = IsParagonOpen();
 
-            if (!IsCurrentHeroParagonEnabled)
+            if (!paragonEnabled)
             {
                 if (_knownCurrentLayoutValid ||
                     _applyState != ApplyState.Idle ||
                     _nativeTaskKind != NativeTaskKind.None ||
-                    _equipPending ||
                     _scanRunning ||
                     _profileSaveAfterScan)
                 {
-                    ApplyCurrentHeroParagonEnabledState(false);
+                    StopCurrentHeroParagonWork(
+                        "disabled for current hero",
+                        !autoCastEnabled);
                 }
 
                 // Keep the edge detector synchronized while disabled so
                 // re-enabling cannot manufacture an open/close transition.
                 _paragonOpenLast = paragonOpen;
-                return;
             }
-
-            if (paragonOpen && !_paragonOpenLast)
-                OnParagonOpened(now);
-            else if (!paragonOpen && _paragonOpenLast)
-                OnParagonClosed();
-            _paragonOpenLast = paragonOpen;
-
-            if (paragonOpen && _applyState == ApplyState.Idle)
+            else
             {
-                CaptureActiveTab(now);
-                ProcessCaptureScan(now, leftDown);
+                if (paragonOpen && !_paragonOpenLast)
+                    OnParagonOpened(now);
+                else if (!paragonOpen && _paragonOpenLast)
+                    OnParagonClosed();
+                _paragonOpenLast = paragonOpen;
+
+                if (paragonOpen &&
+                    _applyState == ApplyState.Idle)
+                {
+                    CaptureActiveTab(now);
+                    ProcessCaptureScan(now, leftDown);
+                }
             }
+
+            if (!paragonEnabled && !autoCastEnabled)
+                return;
 
             ProcessPendingEquip(now);
-            ProcessNativeTask(now);
-            ProcessApply(now, leftDown);
+
+            if (paragonEnabled)
+            {
+                ProcessNativeTask(now);
+                ProcessApply(now, leftDown);
+            }
 
             string liveKey = GetLiveBuildKey();
             if (!string.IsNullOrEmpty(liveKey) &&
@@ -479,15 +559,26 @@ namespace Turbo.Plugins.s7o
 
                 ParagonProfile existing =
                     FindCurrentProfile(liveKey);
-                if (existing != null)
-                    CopyProfileToCapture(existing);
-                else
-                    ClearCapturedProfile();
+                if (paragonEnabled)
+                {
+                    if (existing != null &&
+                        existing.HasParagonProfile)
+                    {
+                        CopyProfileToCapture(existing);
+                    }
+                    else
+                    {
+                        ClearCapturedProfile();
+                    }
+                }
 
                 RefreshCurrentBuildDisplay();
-                TryBeginPassiveCurrentProfileVerification(
-                    existing,
-                    now);
+                if (paragonEnabled)
+                {
+                    TryBeginPassiveCurrentProfileVerification(
+                        existing,
+                        now);
+                }
 
                 _nextBuildMetadataRefreshTick = unchecked(
                     now + BuildMetadataRefreshMs);
@@ -505,9 +596,12 @@ namespace Turbo.Plugins.s7o
                 ParagonProfile existing =
                     FindCurrentProfile(_currentBuildKey);
 
-                TryBeginPassiveCurrentProfileVerification(
-                    existing,
-                    now);
+                if (paragonEnabled)
+                {
+                    TryBeginPassiveCurrentProfileVerification(
+                        existing,
+                        now);
+                }
 
                 _nextBuildMetadataRefreshTick = unchecked(
                     now + BuildMetadataRefreshMs);
@@ -519,9 +613,14 @@ namespace Turbo.Plugins.s7o
             if (!Enabled || clipState != ClipState.AfterClip)
                 return;
 
-            DrawArmoryHeroToggle();
+            DrawArmoryHeroToggles();
 
-            if (!IsCurrentHeroParagonEnabled)
+            bool paragonEnabled =
+                IsCurrentHeroParagonEnabled;
+            bool autoCastEnabled =
+                IsCurrentHeroAutoCastEnabled;
+
+            if (!paragonEnabled && !autoCastEnabled)
                 return;
 
             DrawGlobalWarning();
@@ -535,79 +634,171 @@ namespace Turbo.Plugins.s7o
 
             int cursorX = SafeCursorX();
             int cursorY = SafeCursorY();
-            bool hover = PointInRect(_profileSaveButtonRect, cursorX, cursorY);
-            IBrush back = hover ? _saveButtonHoverBrush : _saveButtonBackBrush;
-            if (back != null) back.DrawRectangle(_profileSaveButtonRect);
-            if (_saveButtonBorderBrush != null) _saveButtonBorderBrush.DrawRectangle(_profileSaveButtonRect);
+            bool hover = PointInRect(
+                _profileSaveButtonRect,
+                cursorX,
+                cursorY);
+            IBrush back = hover
+                ? _saveButtonHoverBrush
+                : _saveButtonBackBrush;
+            if (back != null)
+                back.DrawRectangle(_profileSaveButtonRect);
+            if (_saveButtonBorderBrush != null)
+                _saveButtonBorderBrush.DrawRectangle(
+                    _profileSaveButtonRect);
 
-            string buildName = string.IsNullOrEmpty(_currentBuildDisplayLabel)
-                ? "current build"
-                : _currentBuildDisplayLabel;
-            string label = string.Equals(buildName, "current build",
-                    StringComparison.OrdinalIgnoreCase)
-                ? "Save current build profile"
-                : "Save to build: \"" + buildName + "\"";
+            string buildName =
+                string.IsNullOrEmpty(
+                    _currentBuildDisplayLabel)
+                    ? "current build"
+                    : _currentBuildDisplayLabel;
+            bool currentBuild = string.Equals(
+                buildName,
+                "current build",
+                StringComparison.OrdinalIgnoreCase);
+            string label;
+            if (paragonEnabled && autoCastEnabled)
+            {
+                label = currentBuild
+                    ? "Save current build setup"
+                    : "Save setup to build: \"" +
+                        buildName + "\"";
+            }
+            else if (autoCastEnabled)
+            {
+                label = currentBuild
+                    ? "Save current Autocast setup"
+                    : "Save Autocast to build: \"" +
+                        buildName + "\"";
+            }
+            else
+            {
+                label = currentBuild
+                    ? "Save current build profile"
+                    : "Save to build: \"" +
+                        buildName + "\"";
+            }
 
             if (_smallFont != null)
-                _smallFont.DrawText(label, _profileSaveButtonRect.Left + 9, _profileSaveButtonRect.Top + 5);
+            {
+                _smallFont.DrawText(
+                    label,
+                    _profileSaveButtonRect.Left + 9,
+                    _profileSaveButtonRect.Top + 5);
+            }
 
-            System.Drawing.RectangleF coreToggle;
-            System.Drawing.RectangleF vitalityToggle;
-            GetOverflowToggleRects(out coreToggle, out vitalityToggle);
-            DrawOverflowPrompt(coreToggle, vitalityToggle);
-            int selectedOverflow = GetDisplayedOverflowRow();
-            DrawOverflowToggle(coreToggle, "Core stat", selectedOverflow == PrimaryRow,
-                PointInRect(coreToggle, cursorX, cursorY));
-            DrawOverflowToggle(vitalityToggle, "Vitality", selectedOverflow == VitalityRow,
-                PointInRect(vitalityToggle, cursorX, cursorY));
+            if (paragonEnabled)
+            {
+                System.Drawing.RectangleF coreToggle;
+                System.Drawing.RectangleF vitalityToggle;
+                GetOverflowToggleRects(
+                    out coreToggle,
+                    out vitalityToggle);
+                DrawOverflowPrompt(
+                    coreToggle,
+                    vitalityToggle);
+                int selectedOverflow =
+                    GetDisplayedOverflowRow();
+                DrawOverflowToggle(
+                    coreToggle,
+                    "Core stat",
+                    selectedOverflow == PrimaryRow,
+                    PointInRect(
+                        coreToggle,
+                        cursorX,
+                        cursorY));
+                DrawOverflowToggle(
+                    vitalityToggle,
+                    "Vitality",
+                    selectedOverflow == VitalityRow,
+                    PointInRect(
+                        vitalityToggle,
+                        cursorX,
+                        cursorY));
+            }
 
             string status = GetStatus();
             if (!string.IsNullOrEmpty(status))
             {
                 if (_instructionFont != null)
-                    _instructionFont.DrawText(status, _profileSaveButtonRect.Left, _profileSaveButtonRect.Top - 19);
+                {
+                    _instructionFont.DrawText(
+                        status,
+                        _profileSaveButtonRect.Left,
+                        _profileSaveButtonRect.Top - 19);
+                }
             }
             else
             {
-                bool profileSaved = !string.IsNullOrEmpty(_currentBuildKey) &&
-                    FindCurrentProfile(_currentBuildKey) != null;
-                IFont stateFont = profileSaved ? _profileSavedFont : _profileMissingFont;
+                bool setupSaved;
+                string setupState =
+                    GetCurrentSetupStateText(
+                        paragonEnabled,
+                        autoCastEnabled,
+                        out setupSaved);
+                IFont stateFont = setupSaved
+                    ? _profileSavedFont
+                    : _profileMissingFont;
                 if (stateFont != null)
-                    stateFont.DrawText(profileSaved ? "Profile Saved" : "No Profile Saved",
-                        _profileSaveButtonRect.Left, _profileSaveButtonRect.Top - 19);
+                {
+                    stateFont.DrawText(
+                        setupState,
+                        _profileSaveButtonRect.Left,
+                        _profileSaveButtonRect.Top - 19);
+                }
             }
         }
 
-        private void HandlePhysicalMouseDown(int now)
+        private void HandlePhysicalMouseDown(
+            int now,
+            bool paragonEnabled,
+            bool autoCastEnabled)
         {
             int x = SafeCursorX();
             int y = SafeCursorY();
 
             if (IsParagonOpen())
             {
-                if (TrySelectOverflowByToggleClick(x, y))
+                if (paragonEnabled &&
+                    TrySelectOverflowByToggleClick(x, y))
+                {
                     return;
+                }
 
-                System.Drawing.RectangleF saveButton = GetProfileSaveButtonRect();
-                if (PointInRect(saveButton, x, y))
+                System.Drawing.RectangleF saveButton =
+                    GetProfileSaveButtonRect();
+                if ((paragonEnabled || autoCastEnabled) &&
+                    PointInRect(saveButton, x, y))
                 {
                     BeginProfileSave(now);
                     return;
                 }
 
+                if (!paragonEnabled)
+                    return;
+
                 // Any manual Paragon edit makes the persisted current-layout
                 // assumption unsafe until the custom Save button captures it.
                 for (int row = 0; row < 4; row++)
                 {
-                    if (PointInRect(SafeRect(_plusButtons[row]), x, y))
+                    if (PointInRect(
+                            SafeRect(_plusButtons[row]),
+                            x,
+                            y))
                     {
                         CancelNativeCapture();
                         InvalidateKnownCurrentLayout();
                         return;
                     }
                 }
-                if (PointInRect(SafeRect(_resetButton), x, y) ||
-                    PointInRect(SafeRect(_acceptButton), x, y))
+                if (PointInRect(
+                        SafeRect(_resetButton),
+                        x,
+                        y) ||
+                    PointInRect(
+                        SafeRect(_acceptButton),
+                        x,
+                        y))
                 {
                     CancelNativeCapture();
                     InvalidateKnownCurrentLayout();
@@ -616,8 +807,12 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
-            if (!IsArmoryOpen() || !AutoApplyOnArmoryEquip)
+            if (!IsArmoryOpen() ||
+                !AutoApplyOnArmoryEquip ||
+                (!paragonEnabled && !autoCastEnabled))
+            {
                 return;
+            }
 
             if (PointInRect(GetArmoryEquipRect(), x, y))
             {
@@ -628,11 +823,18 @@ namespace Turbo.Plugins.s7o
 
         private void BeginProfileSave(int now)
         {
-            if (!IsCurrentHeroParagonEnabled ||
+            bool includeParagon =
+                IsCurrentHeroParagonEnabled;
+            bool includeAutoCast =
+                IsCurrentHeroAutoCastEnabled;
+
+            if ((!includeParagon && !includeAutoCast) ||
                 _applyState != ApplyState.Idle ||
                 _scanRunning ||
                 !IsParagonOpen())
+            {
                 return;
+            }
 
             uint heroId = CurrentHeroId;
             string liveKey = GetLiveBuildKey();
@@ -681,6 +883,15 @@ namespace Turbo.Plugins.s7o
                 }
             }
 
+            int autoCastMask = 0;
+            if (includeAutoCast &&
+                !TryReadAutoCastSetup(out autoCastMask))
+            {
+                ShowStatus(
+                    "AutoSkill plugin was not available; setup was not saved.");
+                return;
+            }
+
             IPlayerArmorySet set =
                 GetArmorySetByIndex(_activeArmoryIndex);
 
@@ -693,17 +904,28 @@ namespace Turbo.Plugins.s7o
                 !string.IsNullOrEmpty(set.Name)
                     ? set.Name
                     : (_activeArmoryName ?? string.Empty);
+            _profileSaveIncludeParagon = includeParagon;
+            _profileSaveIncludeAutoCast = includeAutoCast;
+            _profileSaveAutoCastMask = autoCastMask;
 
             if (string.IsNullOrEmpty(_profileSaveLabel))
                 _profileSaveLabel = "Armory build";
 
-            _profileSaveAfterScan = true;
-            BeginFastCaptureScan(now);
+            _profileSaveAfterScan = includeParagon;
+            if (includeParagon)
+                BeginFastCaptureScan(now);
+            else
+                FinalizeProfileSave(now);
         }
 
         private void FinalizeProfileSave(int now)
         {
-            if (!_profileSaveAfterScan)
+            bool includeParagon =
+                _profileSaveIncludeParagon;
+            bool includeAutoCast =
+                _profileSaveIncludeAutoCast;
+
+            if (!includeParagon && !includeAutoCast)
                 return;
 
             _profileSaveAfterScan = false;
@@ -723,17 +945,38 @@ namespace Turbo.Plugins.s7o
                     _profileSaveArmoryIndex, baseKey))
             {
                 ClearProfileSaveRequest();
-                ShowStatus("Build changed; profile was not saved.");
+                ShowStatus("Build changed; setup was not saved.");
                 return;
             }
 
-            ParagonProfile profile;
-            if (!TryCreateProfileFromCapture(liveKey, out profile))
+            ParagonProfile captured = null;
+            if (includeParagon &&
+                !TryCreateProfileFromCapture(liveKey, out captured))
             {
                 ClearProfileSaveRequest();
                 ShowStatus("Could not read all four Paragon tabs.");
                 return;
             }
+
+            ParagonProfile existing =
+                FindProfileByArmoryIndex(
+                    _profileSaveHeroId,
+                    _profileSaveArmoryIndex);
+
+            bool preserveExisting =
+                existing != null &&
+                string.Equals(
+                    existing.StableBuildKey,
+                    stableKey,
+                    StringComparison.Ordinal);
+
+            ParagonProfile profile = preserveExisting
+                ? CloneProfile(existing)
+                : new ParagonProfile
+                {
+                    Rows = new int[4, 4],
+                    ArmoryIndex = -1
+                };
 
             profile.HeroId = _profileSaveHeroId;
             profile.LiveSignature = liveKey;
@@ -743,30 +986,62 @@ namespace Turbo.Plugins.s7o
             profile.Label = string.IsNullOrEmpty(_profileSaveLabel)
                 ? "Armory build"
                 : _profileSaveLabel;
-            profile.OverflowRow = NormalizeOverflowRow(
-                _currentOverflowRow, profile.Rows);
-            profile.OverflowExplicit = _currentOverflowExplicit;
+
+            if (includeParagon)
+            {
+                profile.Rows = captured.Rows;
+                profile.OverflowRow = NormalizeOverflowRow(
+                    _currentOverflowRow,
+                    profile.Rows);
+                profile.OverflowExplicit =
+                    _currentOverflowExplicit;
+                profile.HasParagonProfile = true;
+                profile.NativeFingerprint = null;
+
+                if (!ClickUi(_acceptButton, ClickModifier.None))
+                {
+                    ClearProfileSaveRequest();
+                    ShowStatus(
+                        "Accept was not available; setup was not saved.");
+                    return;
+                }
+            }
+
+            if (includeAutoCast)
+            {
+                profile.HasAutoCastProfile = true;
+                profile.AutoCastMask =
+                    NormalizeAutoCastMask(
+                        _profileSaveAutoCastMask);
+            }
+
+            if (profile.Rows == null)
+                profile.Rows = new int[4, 4];
+
             profile.ProfileId = MakeProfileId(profile);
             profile.UpdatedUtcTicks = DateTime.UtcNow.Ticks;
 
-            if (!ClickUi(_acceptButton, ClickModifier.None))
-            {
-                ClearProfileSaveRequest();
-                ShowStatus(
-                    "Accept was not available; profile was not saved.");
-                return;
-            }
-
             RemoveSupersededProfiles(profile);
             _profiles[profile.ProfileId] = CloneProfile(profile);
-            _currentOverflowRow = profile.OverflowRow;
             _currentStableBuildKey = stableKey;
-            SetKnownCurrentLayout(profile);
-            SaveSettings();
-            ScheduleNativeFingerprintCapture(profile, now);
-            ClearWarning();
 
-            ShowStatus("Paragon profile saved: " + profile.Label);
+            if (includeParagon)
+            {
+                _currentOverflowRow = profile.OverflowRow;
+                SetKnownCurrentLayout(profile);
+            }
+
+            SaveSettings();
+
+            if (includeParagon)
+                ScheduleNativeFingerprintCapture(profile, now);
+
+            ClearWarning();
+            ShowStatus(
+                BuildSavedSetupStatus(
+                    profile,
+                    includeParagon,
+                    includeAutoCast));
             MoveCursorToCloseButton();
             ClearProfileSaveRequest();
         }
@@ -787,12 +1062,18 @@ namespace Turbo.Plugins.s7o
             _profileSaveStableKey = string.Empty;
             _profileSaveArmoryIndex = -1;
             _profileSaveLabel = string.Empty;
+            _profileSaveIncludeParagon = false;
+            _profileSaveIncludeAutoCast = false;
+            _profileSaveAutoCastMask = 0;
         }
 
         private void ArmoryEquipClicked(int now)
         {
-            if (!IsCurrentHeroParagonEnabled)
+            if (!IsCurrentHeroParagonEnabled &&
+                !IsCurrentHeroAutoCastEnabled)
+            {
                 return;
+            }
 
             int selectedIndex;
             string selectedName;
@@ -861,10 +1142,17 @@ namespace Turbo.Plugins.s7o
                         stableKey,
                         StringComparison.Ordinal))
                 {
-                    CopyProfileToCapture(current);
+                    if (IsCurrentHeroParagonEnabled &&
+                        current.HasParagonProfile)
+                    {
+                        CopyProfileToCapture(current);
+                    }
                     ClearWarning();
 
-                    ResolveProfileAfterEquip(current, now);
+                    ResolveSavedComponentsAfterEquip(
+                        current,
+                        now,
+                        null);
                     return;
                 }
             }
@@ -894,7 +1182,7 @@ namespace Turbo.Plugins.s7o
                 ClearPendingEquip();
                 ShowWarning(
                     "The Armory build did not finish settling. " +
-                    "Paragon was left unchanged.");
+                    "Saved setup was left unchanged.");
                 return;
             }
 
@@ -1066,11 +1354,11 @@ namespace Turbo.Plugins.s7o
 
             if (profile == null)
             {
-                ClearCapturedProfile();
+                if (IsCurrentHeroParagonEnabled)
+                    ClearCapturedProfile();
                 ShowWarning(
-                    "No Paragon profile is saved for \"" +
-                    SafeBuildLabel(buildLabel) +
-                    "\". Check the points, then save it once.");
+                    BuildMissingSetupWarning(
+                        buildLabel));
                 return;
             }
 
@@ -1081,7 +1369,8 @@ namespace Turbo.Plugins.s7o
                     stableKey,
                     out validationMessage))
             {
-                ClearCapturedProfile();
+                if (IsCurrentHeroParagonEnabled)
+                    ClearCapturedProfile();
                 ShowWarning(validationMessage);
                 return;
             }
@@ -1092,10 +1381,8 @@ namespace Turbo.Plugins.s7o
                 baseKey,
                 buildLabel);
 
-            CopyProfileToCapture(profile);
             ClearWarning();
-
-            ResolveProfileAfterEquip(
+            ResolveSavedComponentsAfterEquip(
                 profile,
                 now,
                 settledNative);
@@ -1111,6 +1398,7 @@ namespace Turbo.Plugins.s7o
             ResetNativeTask();
 
             if (profile == null ||
+                !profile.HasParagonProfile ||
                 profile.HeroId != CurrentHeroId ||
                 !CanAutomate())
                 return;
@@ -1799,7 +2087,7 @@ namespace Turbo.Plugins.s7o
             _scanRunning = false;
             _scanRestoringCore = false;
             _scanNextTick = NoTick;
-            _profileSaveAfterScan = false;
+            ClearProfileSaveRequest();
             RestoreScanCursor();
         }
 
@@ -2014,6 +2302,7 @@ namespace Turbo.Plugins.s7o
                 StableBuildKey = string.Empty,
                 ArmoryIndex = -1,
                 Label = "Armory build",
+                HasParagonProfile = true,
                 Rows = rows,
                 OverflowRow = overflow,
                 OverflowExplicit = _currentOverflowExplicit,
@@ -2568,7 +2857,7 @@ namespace Turbo.Plugins.s7o
                 }
 
                 string layout =
-                    BuildParagonLayoutKey(profile);
+                    BuildEnabledSetupKey(profile);
 
                 if (representative == null)
                 {
@@ -2624,8 +2913,8 @@ namespace Turbo.Plugins.s7o
             }
 
             // Completely identical siblings may share a representative saved
-            // profile only when every sibling is saved and every saved Paragon
-            // layout is equivalent. Exact slot identity remains unresolved.
+            // profile only when every sibling is saved and every enabled setup
+            // component is equivalent. Exact slot identity remains unresolved.
             if (nativeMatches.Count > 1 &&
                 matchingProfileCount ==
                     nativeMatches.Count &&
@@ -2752,7 +3041,9 @@ namespace Turbo.Plugins.s7o
 
         private void CopyProfileToCapture(ParagonProfile profile)
         {
-            if (profile == null || profile.Rows == null) return;
+            if (profile == null ||
+                !profile.HasParagonProfile ||
+                profile.Rows == null) return;
             for (int tab = 0; tab < 4; tab++)
             {
                 for (int row = 0; row < 4; row++)
@@ -2802,6 +3093,7 @@ namespace Turbo.Plugins.s7o
             int now)
         {
             if (profile == null ||
+                !profile.HasParagonProfile ||
                 profile.NativeFingerprint == null ||
                 !NativeFingerprintHasRequiredSignals(
                     profile,
@@ -2873,6 +3165,7 @@ namespace Turbo.Plugins.s7o
             int now)
         {
             if (profile == null ||
+                !profile.HasParagonProfile ||
                 _equipNativeCandidate == null ||
                 _equipNativeSamples < NativeTaskStableSamples ||
                 _equipNativeCandidateFirstTick == NoTick ||
@@ -2891,6 +3184,238 @@ namespace Turbo.Plugins.s7o
             return _equipNativeCandidate.Clone();
         }
 
+        private s7o_AutoSkill GetAutoSkillPlugin()
+        {
+            if (_autoSkillPlugin != null)
+                return _autoSkillPlugin;
+
+            try
+            {
+                _autoSkillPlugin =
+                    Hud.GetPlugin<s7o_AutoSkill>();
+            }
+            catch
+            {
+                _autoSkillPlugin = null;
+            }
+
+            return _autoSkillPlugin;
+        }
+
+        private bool TryReadAutoCastSetup(
+            out int mask)
+        {
+            mask = 0;
+            s7o_AutoSkill autoSkill =
+                GetAutoSkillPlugin();
+            if (autoSkill == null)
+                return false;
+
+            try
+            {
+                mask = NormalizeAutoCastMask(
+                    autoSkill.GetManualSlotAutoCastMask());
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private bool TryApplyAutoCastSetup(
+            ParagonProfile profile)
+        {
+            if (profile == null ||
+                !profile.HasAutoCastProfile)
+            {
+                return false;
+            }
+
+            s7o_AutoSkill autoSkill =
+                GetAutoSkillPlugin();
+            if (autoSkill == null)
+                return false;
+
+            try
+            {
+                autoSkill.SetManualSlotAutoCastMask(
+                    NormalizeAutoCastMask(
+                        profile.AutoCastMask));
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static int NormalizeAutoCastMask(
+            int mask)
+        {
+            return mask & 0x7F;
+        }
+
+        private void ResolveSavedComponentsAfterEquip(
+            ParagonProfile profile,
+            int now,
+            NativeFingerprint settledNative)
+        {
+            if (profile == null)
+                return;
+
+            List<string> problems =
+                new List<string>();
+            bool needsSave = false;
+
+            if (IsCurrentHeroAutoCastEnabled)
+            {
+                if (!profile.HasAutoCastProfile)
+                {
+                    problems.Add("Autocast setup is not saved");
+                    needsSave = true;
+                }
+                else if (!TryApplyAutoCastSetup(profile))
+                {
+                    problems.Add(
+                        "AutoSkill plugin was not available; " +
+                        "Autocast setup was not changed");
+                }
+            }
+
+            if (IsCurrentHeroParagonEnabled)
+            {
+                if (!profile.HasParagonProfile)
+                {
+                    ClearCapturedProfile();
+                    problems.Add("Paragon profile is not saved");
+                    needsSave = true;
+                }
+                else
+                {
+                    CopyProfileToCapture(profile);
+                    ResolveProfileAfterEquip(
+                        profile,
+                        now,
+                        settledNative);
+                }
+            }
+
+            if (problems.Count > 0)
+            {
+                string warning =
+                    string.Join(". ", problems.ToArray());
+                warning += needsSave
+                    ? ". " + BuildProfileSaveInstruction()
+                    : ".";
+                ShowWarning(warning);
+            }
+            else
+            {
+                ClearWarning();
+            }
+        }
+
+        private string BuildMissingSetupWarning(
+            string buildLabel)
+        {
+            string label = SafeBuildLabel(buildLabel);
+
+            if (IsCurrentHeroParagonEnabled &&
+                IsCurrentHeroAutoCastEnabled)
+            {
+                return "No Paragon or Autocast setup is saved for \"" +
+                    label + "\". " + BuildProfileSaveInstruction();
+            }
+
+            if (IsCurrentHeroAutoCastEnabled)
+            {
+                return "No Autocast setup is saved for \"" +
+                    label + "\". " + BuildProfileSaveInstruction();
+            }
+
+            return "No Paragon profile is saved for \"" +
+                label + "\". " + BuildProfileSaveInstruction();
+        }
+
+        private string BuildProfileSaveInstruction()
+        {
+            if (IsCurrentHeroParagonEnabled &&
+                IsCurrentHeroAutoCastEnabled)
+            {
+                return "Open Paragon and click \"Save setup to build\" " +
+                    "while this build is equipped.";
+            }
+
+            if (IsCurrentHeroAutoCastEnabled)
+            {
+                return "Open Paragon and click \"Save Autocast to build\" " +
+                    "while this build is equipped.";
+            }
+
+            return "Open Paragon, verify the points, then click \"Save to " +
+                "build\" while this build is equipped.";
+        }
+
+        private static string BuildSavedSetupStatus(
+            ParagonProfile profile,
+            bool savedParagon,
+            bool savedAutoCast)
+        {
+            string label = profile != null &&
+                !string.IsNullOrEmpty(profile.Label)
+                    ? profile.Label
+                    : "Armory build";
+
+            if (savedParagon && savedAutoCast)
+                return "Paragon + Autocast saved: " + label;
+            if (savedAutoCast)
+                return "Autocast setup saved: " + label;
+            return "Paragon profile saved: " + label;
+        }
+
+        private string GetCurrentSetupStateText(
+            bool paragonEnabled,
+            bool autoCastEnabled,
+            out bool setupSaved)
+        {
+            ParagonProfile profile =
+                !string.IsNullOrEmpty(_currentBuildKey)
+                    ? FindCurrentProfile(_currentBuildKey)
+                    : null;
+
+            bool paragonSaved = profile != null &&
+                profile.HasParagonProfile;
+            bool autoCastSaved = profile != null &&
+                profile.HasAutoCastProfile;
+
+            setupSaved =
+                (!paragonEnabled || paragonSaved) &&
+                (!autoCastEnabled || autoCastSaved);
+
+            if (paragonEnabled && autoCastEnabled)
+            {
+                if (paragonSaved && autoCastSaved)
+                    return "Paragon + Autocast Saved";
+                if (!paragonSaved && !autoCastSaved)
+                    return "No Saved Setup";
+                return paragonSaved
+                    ? "Autocast Setup Missing"
+                    : "Paragon Profile Missing";
+            }
+
+            if (autoCastEnabled)
+            {
+                return autoCastSaved
+                    ? "Autocast Setup Saved"
+                    : "No Autocast Setup Saved";
+            }
+
+            return paragonSaved
+                ? "Paragon Profile Saved"
+                : "No Paragon Profile Saved";
+        }
+
         private void ResolveProfileAfterEquip(
             ParagonProfile profile,
             int now)
@@ -2906,8 +3431,11 @@ namespace Turbo.Plugins.s7o
             int now,
             NativeFingerprint settledNative)
         {
-            if (profile == null)
+            if (profile == null ||
+                !profile.HasParagonProfile)
+            {
                 return;
+            }
 
             if (KnownCurrentLayoutMatches(profile))
             {
@@ -2938,6 +3466,7 @@ namespace Turbo.Plugins.s7o
             int now)
         {
             if (profile == null ||
+                !profile.HasParagonProfile ||
                 profile.NativeFingerprint == null ||
                 !NativeFingerprintHasRequiredSignals(
                     profile,
@@ -2962,6 +3491,7 @@ namespace Turbo.Plugins.s7o
             ParagonProfile profile)
         {
             if (profile == null ||
+                !profile.HasParagonProfile ||
                 profile.NativeFingerprint == null ||
                 profile.HeroId == 0u ||
                 string.IsNullOrEmpty(
@@ -3003,6 +3533,7 @@ namespace Turbo.Plugins.s7o
         {
             if (!IsCurrentHeroParagonEnabled ||
                 profile == null ||
+                !profile.HasParagonProfile ||
                 profile.HeroId != CurrentHeroId ||
                 profile.NativeFingerprint == null ||
                 _equipPending ||
@@ -3070,6 +3601,7 @@ namespace Turbo.Plugins.s7o
         {
             if (!IsCurrentHeroParagonEnabled ||
                 profile == null ||
+                !profile.HasParagonProfile ||
                 profile.HeroId != CurrentHeroId)
             {
                 return;
@@ -3289,6 +3821,7 @@ namespace Turbo.Plugins.s7o
             ParagonProfile profile)
         {
             if (profile == null ||
+                !profile.HasParagonProfile ||
                 profile.HeroId != CurrentHeroId)
             {
                 return false;
@@ -3317,6 +3850,7 @@ namespace Turbo.Plugins.s7o
             NativeFingerprint fingerprint)
         {
             if (identity == null ||
+                !identity.HasParagonProfile ||
                 fingerprint == null)
             {
                 return;
@@ -3361,6 +3895,7 @@ namespace Turbo.Plugins.s7o
             ParagonProfile profile)
         {
             if (profile == null ||
+                !profile.HasParagonProfile ||
                 profile.Rows == null ||
                 profile.HeroId == 0u)
             {
@@ -3401,6 +3936,7 @@ namespace Turbo.Plugins.s7o
             ParagonProfile profile)
         {
             if (profile == null ||
+                !profile.HasParagonProfile ||
                 profile.Rows == null ||
                 profile.HeroId == 0u)
             {
@@ -3466,6 +4002,7 @@ namespace Turbo.Plugins.s7o
             ParagonProfile profile)
         {
             if (profile == null ||
+                !profile.HasParagonProfile ||
                 profile.Rows == null)
             {
                 return string.Empty;
@@ -3504,6 +4041,41 @@ namespace Turbo.Plugins.s7o
                             profile.Rows[tab, row]);
                     }
                 }
+            }
+
+            return sb.ToString();
+        }
+
+        private string BuildEnabledSetupKey(
+            ParagonProfile profile)
+        {
+            if (profile == null)
+                return string.Empty;
+
+            StringBuilder sb =
+                new StringBuilder(128);
+
+            if (IsCurrentHeroParagonEnabled)
+            {
+                sb.Append("paragon=")
+                    .Append(
+                        profile.HasParagonProfile
+                            ? BuildParagonLayoutKey(profile)
+                            : "-");
+            }
+
+            if (IsCurrentHeroAutoCastEnabled)
+            {
+                if (sb.Length > 0)
+                    sb.Append(';');
+                sb.Append("autocast=")
+                    .Append(
+                        profile.HasAutoCastProfile
+                            ? NormalizeAutoCastMask(
+                                profile.AutoCastMask)
+                                .ToString(
+                                    CultureInfo.InvariantCulture)
+                            : "-");
             }
 
             return sb.ToString();
@@ -4163,6 +4735,19 @@ namespace Turbo.Plugins.s7o
 
         private System.Drawing.RectangleF GetArmoryHeroToggleRect()
         {
+            return GetArmoryHeroToggleRect(
+                ArmoryHeroToggleCenterXRel);
+        }
+
+        private System.Drawing.RectangleF GetArmoryAutoCastToggleRect()
+        {
+            return GetArmoryHeroToggleRect(
+                ArmoryAutoCastToggleCenterXRel);
+        }
+
+        private System.Drawing.RectangleF GetArmoryHeroToggleRect(
+            float centerXRel)
+        {
             System.Drawing.RectangleF root = SafeRect(_armoryRoot);
             if (root.Width <= 0f || root.Height <= 0f)
                 return System.Drawing.RectangleF.Empty;
@@ -4181,7 +4766,7 @@ namespace Turbo.Plugins.s7o
 
             float centerX =
                 root.Left +
-                root.Width * ArmoryHeroToggleCenterXRel;
+                root.Width * centerXRel;
 
             return new System.Drawing.RectangleF(
                 centerX - width * 0.5f,
@@ -4191,7 +4776,7 @@ namespace Turbo.Plugins.s7o
                 height);
         }
 
-        private void DrawArmoryHeroToggle()
+        private void DrawArmoryHeroToggles()
         {
             if (!IsArmoryOpen() ||
                 !CanConfigureCurrentHeroParagon)
@@ -4199,17 +4784,30 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
-            System.Drawing.RectangleF button =
-                GetArmoryHeroToggleRect();
+            DrawArmoryHeroToggle(
+                GetArmoryAutoCastToggleRect(),
+                IsCurrentHeroAutoCastEnabled,
+                "Save Autocast Setup",
+                ArmoryAutoCastLabelOffsetX);
 
+            DrawArmoryHeroToggle(
+                GetArmoryHeroToggleRect(),
+                IsCurrentHeroParagonEnabled,
+                "Save Paragon",
+                0.0f);
+        }
+
+        private void DrawArmoryHeroToggle(
+            System.Drawing.RectangleF button,
+            bool enabled,
+            string labelText,
+            float labelOffsetX)
+        {
             if (button.Width <= 0f ||
                 button.Height <= 0f)
             {
                 return;
             }
-
-            bool enabled =
-                IsCurrentHeroParagonEnabled;
 
             bool hover =
                 PointInRect(
@@ -4229,18 +4827,17 @@ namespace Turbo.Plugins.s7o
             {
                 var layout =
                     _smallFont.GetTextLayout(
-                        "Save Paragon");
+                        labelText ?? string.Empty);
 
                 if (layout == null)
                     return;
 
                 float x =
                     button.Left +
-                    Math.Max(
-                        0.0f,
-                        (button.Width -
-                            layout.Metrics.Width) *
-                        0.5f);
+                    (button.Width -
+                        layout.Metrics.Width) *
+                    0.5f +
+                    labelOffsetX;
 
                 float y =
                     button.Top -
@@ -4344,19 +4941,28 @@ namespace Turbo.Plugins.s7o
                 return false;
             }
 
-            System.Drawing.RectangleF rect =
-                GetArmoryHeroToggleRect();
+            int x = SafeCursorX();
+            int y = SafeCursorY();
 
-            if (!PointInRect(
-                    rect,
-                    SafeCursorX(),
-                    SafeCursorY()))
+            if (PointInRect(
+                    GetArmoryAutoCastToggleRect(),
+                    x,
+                    y))
             {
-                return false;
+                ToggleCurrentHeroAutoCastEnabled();
+                return true;
             }
 
-            ToggleCurrentHeroParagonEnabled();
-            return true;
+            if (PointInRect(
+                    GetArmoryHeroToggleRect(),
+                    x,
+                    y))
+            {
+                ToggleCurrentHeroParagonEnabled();
+                return true;
+            }
+
+            return false;
         }
 
         private void DrawOverflowToggle(
@@ -4796,8 +5402,8 @@ namespace Turbo.Plugins.s7o
                 }
 
                 message =
-                    "This saved profile predates native slot validation. " +
-                    "Open Paragon and save it once for this Armory preset.";
+                    "This saved setup predates native slot validation. " +
+                    BuildProfileSaveInstruction();
                 return false;
             }
 
@@ -4808,8 +5414,8 @@ namespace Turbo.Plugins.s7o
             {
                 message =
                     "This Armory slot now contains a different build. " +
-                    "Paragon was left unchanged; save the slot again " +
-                    "only if the new build should replace its profile.";
+                    "The saved setup was left unchanged. " +
+                    BuildProfileSaveInstruction();
                 return false;
             }
 
@@ -5316,6 +5922,7 @@ namespace Turbo.Plugins.s7o
             NativeFingerprint fingerprint)
         {
             if (profile == null ||
+                !profile.HasParagonProfile ||
                 fingerprint == null ||
                 profile.OverflowRow != PrimaryRow ||
                 !fingerprint.Valid[0] ||
@@ -5419,6 +6026,7 @@ namespace Turbo.Plugins.s7o
             bool requireAccounting)
         {
             if (profile == null ||
+                !profile.HasParagonProfile ||
                 fingerprint == null)
             {
                 return false;
@@ -5467,6 +6075,7 @@ namespace Turbo.Plugins.s7o
                     : null;
 
             if (profile == null ||
+                !profile.HasParagonProfile ||
                 saved == null ||
                 live == null)
             {
@@ -5590,6 +6199,7 @@ namespace Turbo.Plugins.s7o
         {
             ClearAllKnownLayouts();
             _disabledHeroIds.Clear();
+            _disabledAutoCastHeroIds.Clear();
 
             if (string.IsNullOrEmpty(_settingsPath) ||
                 !File.Exists(_settingsPath))
@@ -5650,17 +6260,50 @@ namespace Turbo.Plugins.s7o
                         }
                     }
                     else if (key.Equals(
-                            "Profile9",
+                            "HeroAutoCastDisabled",
+                            StringComparison
+                                .OrdinalIgnoreCase))
+                    {
+                        uint heroId;
+                        if (uint.TryParse(
+                                value,
+                                NumberStyles.Integer,
+                                CultureInfo.InvariantCulture,
+                                out heroId) &&
+                            heroId != 0u)
+                        {
+                            _disabledAutoCastHeroIds.Add(heroId);
+                        }
+                    }
+                    else if (key.Equals(
+                            "Profile10",
                             StringComparison
                                 .OrdinalIgnoreCase))
                     {
                         ParagonProfile profile;
-                        if (TryParseProfile9(
+                        if (TryParseProfile10(
                                 value,
                                 out profile))
                         {
                             StoreLoadedProfile(profile);
                         }
+                    }
+                    else if (key.Equals(
+                            "Profile9",
+                            StringComparison
+                                .OrdinalIgnoreCase))
+                    {
+                        ParagonProfile profile;
+                        bool parsed =
+                            value.Split('|').Length >= 19
+                                ? TryParseProfile10(
+                                    value,
+                                    out profile)
+                                : TryParseProfile9(
+                                    value,
+                                    out profile);
+                        if (parsed)
+                            StoreLoadedProfile(profile);
                     }
                 }
             }
@@ -5672,9 +6315,17 @@ namespace Turbo.Plugins.s7o
         {
             if (profile == null ||
                 profile.HeroId == 0u ||
+                (!profile.HasParagonProfile &&
+                 !profile.HasAutoCastProfile) ||
                 string.IsNullOrEmpty(
                     profile.LiveSignature))
                 return;
+
+            if (profile.Rows == null)
+                profile.Rows = new int[4, 4];
+            profile.AutoCastMask =
+                NormalizeAutoCastMask(
+                    profile.AutoCastMask);
 
             string key;
             if (profile.ArmoryIndex >= 0)
@@ -5719,7 +6370,7 @@ namespace Turbo.Plugins.s7o
                     new StringBuilder();
 
                 sb.AppendLine(
-                    "# s7o_Paragon_Builds native slot profiles");
+                    "# s7o_Paragon_Builds native slot setups");
 
                 sb.AppendLine(
                     "SettingsVersion=" +
@@ -5744,19 +6395,39 @@ namespace Turbo.Plugins.s7o
                             CultureInfo.InvariantCulture));
                 }
 
+                List<uint> disabledAutoCastHeroIds =
+                    new List<uint>(
+                        _disabledAutoCastHeroIds);
+                disabledAutoCastHeroIds.Sort();
+
+                for (int i = 0;
+                    i < disabledAutoCastHeroIds.Count;
+                    i++)
+                {
+                    sb.AppendLine(
+                        "HeroAutoCastDisabled=" +
+                        disabledAutoCastHeroIds[i].ToString(
+                            CultureInfo.InvariantCulture));
+                }
+
                 foreach (
                     ParagonProfile profile
                     in _profiles.Values)
                 {
                     if (profile == null ||
                         profile.HeroId == 0u ||
+                        (!profile.HasParagonProfile &&
+                         !profile.HasAutoCastProfile) ||
                         string.IsNullOrEmpty(
                             profile.LiveSignature))
                     {
                         continue;
                     }
 
-                    sb.Append("Profile9=");
+                    sb.Append(
+                        profile.HasParagonProfile
+                            ? "Profile9="
+                            : "Profile10=");
                     sb.Append(
                         profile.HeroId.ToString(
                             CultureInfo
@@ -5808,8 +6479,9 @@ namespace Turbo.Plugins.s7o
                             profile.Label ??
                             string.Empty));
 
-                    // Optional extensions remain backward-readable by older
-                    // Profile9 parsers, which ignore fields after the label.
+                    // Extended Profile9 records remain readable by older
+                    // Paragon-only releases. AutoCast-only records use Profile10
+                    // so an older release cannot mistake zero rows for a layout.
                     sb.Append('|').Append(
                         ToBase64(
                             profile.StableBuildKey ??
@@ -5818,6 +6490,20 @@ namespace Turbo.Plugins.s7o
                     AppendNativeFingerprintSettings(
                         sb,
                         profile.NativeFingerprint);
+
+                    sb.Append('|').Append(
+                        profile.HasParagonProfile
+                            ? "1"
+                            : "0");
+                    sb.Append('|').Append(
+                        profile.HasAutoCastProfile
+                            ? "1"
+                            : "0");
+                    sb.Append('|').Append(
+                        NormalizeAutoCastMask(
+                            profile.AutoCastMask)
+                            .ToString(
+                                CultureInfo.InvariantCulture));
 
                     sb.AppendLine();
                 }
@@ -5874,6 +6560,57 @@ namespace Turbo.Plugins.s7o
                 }
                 catch { }
             }
+        }
+
+        private bool TryParseProfile10(
+            string value,
+            out ParagonProfile profile)
+        {
+            profile = null;
+
+            string[] parts =
+                (value ?? string.Empty).Split('|');
+            if (parts.Length < 19 ||
+                !TryParseProfile9(value, out profile))
+            {
+                return false;
+            }
+
+            int hasParagon;
+            int hasAutoCast;
+            int autoCastMask;
+            if (!int.TryParse(
+                    parts[16],
+                    NumberStyles.Integer,
+                    CultureInfo.InvariantCulture,
+                    out hasParagon) ||
+                !int.TryParse(
+                    parts[17],
+                    NumberStyles.Integer,
+                    CultureInfo.InvariantCulture,
+                    out hasAutoCast) ||
+                !int.TryParse(
+                    parts[18],
+                    NumberStyles.Integer,
+                    CultureInfo.InvariantCulture,
+                    out autoCastMask))
+            {
+                profile = null;
+                return false;
+            }
+
+            profile.HasParagonProfile =
+                hasParagon != 0;
+            profile.HasAutoCastProfile =
+                hasAutoCast != 0;
+            profile.AutoCastMask =
+                NormalizeAutoCastMask(autoCastMask);
+
+            if (!profile.HasParagonProfile)
+                profile.NativeFingerprint = null;
+
+            return profile.HasParagonProfile ||
+                profile.HasAutoCastProfile;
         }
 
         private bool TryParseProfile9(
@@ -5951,6 +6688,7 @@ namespace Turbo.Plugins.s7o
                             rows),
                     OverflowExplicit =
                         explicitValue != 0,
+                    HasParagonProfile = true,
                     Rows = rows,
                     UpdatedUtcTicks =
                         ticks,
@@ -6158,11 +6896,18 @@ namespace Turbo.Plugins.s7o
                 ArmoryIndex =
                     source.ArmoryIndex,
                 Label = source.Label,
+                HasParagonProfile =
+                    source.HasParagonProfile,
                 Rows = rows,
                 OverflowRow =
                     source.OverflowRow,
                 OverflowExplicit =
                     source.OverflowExplicit,
+                HasAutoCastProfile =
+                    source.HasAutoCastProfile,
+                AutoCastMask =
+                    NormalizeAutoCastMask(
+                        source.AutoCastMask),
                 UpdatedUtcTicks =
                     source.UpdatedUtcTicks,
                 NativeFingerprint =
@@ -6265,7 +7010,7 @@ namespace Turbo.Plugins.s7o
 
                 float maxWidth = Math.Max(260.0f,
                     Math.Min(460.0f, root.Width * WarningPaneWidthRel));
-                string[] lines = WrapWarningToTwoLines(warning, maxWidth);
+                string[] lines = WrapWarningLines(warning, maxWidth);
                 if (lines == null || lines.Length == 0)
                     return;
 
@@ -6296,7 +7041,7 @@ namespace Turbo.Plugins.s7o
             catch { }
         }
 
-        private string[] WrapWarningToTwoLines(string text, float maxWidth)
+        private string[] WrapWarningLines(string text, float maxWidth)
         {
             string cleaned = CleanText(text);
             if (string.IsNullOrEmpty(cleaned))
@@ -6304,36 +7049,31 @@ namespace Turbo.Plugins.s7o
 
             string[] words = cleaned.Split(new[] { ' ' },
                 StringSplitOptions.RemoveEmptyEntries);
-            if (words.Length < 2)
-                return new[] { cleaned };
+            List<string> lines = new List<string>();
+            string line = string.Empty;
 
-            int bestSplit = 1;
-            float bestScore = float.MaxValue;
-            for (int split = 1; split < words.Length; split++)
+            for (int i = 0; i < words.Length; i++)
             {
-                string first = string.Join(" ", words, 0, split);
-                string second = string.Join(" ", words, split,
-                    words.Length - split);
-                float firstWidth = MeasureWarningText(first);
-                float secondWidth = MeasureWarningText(second);
-                float overflow = Math.Max(0.0f, firstWidth - maxWidth) +
-                    Math.Max(0.0f, secondWidth - maxWidth);
-                float balance = Math.Abs(firstWidth - secondWidth) * 0.15f;
-                float score = overflow * 20.0f +
-                    Math.Max(firstWidth, secondWidth) + balance;
-                if (score < bestScore)
+                string candidate = string.IsNullOrEmpty(line)
+                    ? words[i]
+                    : line + " " + words[i];
+
+                if (string.IsNullOrEmpty(line) ||
+                    MeasureWarningText(candidate) <= maxWidth)
                 {
-                    bestScore = score;
-                    bestSplit = split;
+                    line = candidate;
+                }
+                else
+                {
+                    lines.Add(line);
+                    line = words[i];
                 }
             }
 
-            return new[]
-            {
-                string.Join(" ", words, 0, bestSplit),
-                string.Join(" ", words, bestSplit,
-                    words.Length - bestSplit)
-            };
+            if (!string.IsNullOrEmpty(line))
+                lines.Add(line);
+
+            return lines.ToArray();
         }
 
         private float MeasureWarningText(string text)
@@ -6472,9 +7212,12 @@ namespace Turbo.Plugins.s7o
             public string StableBuildKey;
             public int ArmoryIndex = -1;
             public string Label;
+            public bool HasParagonProfile;
             public int[,] Rows;
             public int OverflowRow;
             public bool OverflowExplicit;
+            public bool HasAutoCastProfile;
+            public int AutoCastMask;
             public long UpdatedUtcTicks;
             public NativeFingerprint NativeFingerprint;
         }
