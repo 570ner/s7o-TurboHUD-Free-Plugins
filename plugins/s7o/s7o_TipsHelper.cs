@@ -23,8 +23,6 @@ namespace Turbo.Plugins.s7o
         private const int BloodIsPowerAreaRebaseTicks = 45;
         private const float BloodIsPowerMaxSaneLossPct = 140f;
         private const float BloodIsPowerTrackedIconConfirmFloorPct = 80f;
-        private const float BloodIsPowerTrackedIconOnlyConfirmFloorPct = 95f;
-        private const float BloodIsPowerNonTrackedIconConfirmFloorPct = 95f;
         private const int BloodIsPowerReviveRebaseTicks = 45;
         private const int BloodIsPowerBloodRushPairWindowTicks = 45;
         private const int BloodIsPowerBloodRushFreshStartTicks = 30;
@@ -34,7 +32,6 @@ namespace Turbo.Plugins.s7o
         private const float BloodIsPowerBloodRushMinObservedLossPct = 0.75f;
         private const float BloodIsPowerBloodRushCreditMinShortfallPct = 0.50f;
         private const int BloodIsPowerPostProcVisualSuppressTicks = 45;
-        private const int BloodIsPowerPendingNativeConfirmGraceTicks = 60;
         private const int BloodIsPowerFreshLossDropConfirmTicks = 30;
         private const float BloodIsPowerFreshLossDropConfirmFloorPct = 0.50f;
         private const double BloodIsPowerNewGreaterRiftMaxPercent = 3.0d;
@@ -283,6 +280,7 @@ namespace Turbo.Plugins.s7o
         private IBrush _bipBarBorderBrush;
 
         private float _bipProgressPct;
+        private bool _bipEstimateUncertain;
         private float _bipLastHealth;
         private float _bipLastHealthMax;
         private int[] _bipSkillState;
@@ -996,7 +994,6 @@ namespace Turbo.Plugins.s7o
             public bool PendingProc;
 
             public bool ReceivedAny;
-            public bool IgnoredLowIconEdge;
             public bool IgnoredLowCooldownDrop;
             public bool CooldownDropConfirmed;
 
@@ -1013,7 +1010,6 @@ namespace Turbo.Plugins.s7o
 
             public bool TrackedIconEdge;
             public bool NonTrackedIconEdge;
-            public bool SameSkillIconDrop;
         }
 
         private sealed class BloodRushCreditCandidate
@@ -1491,6 +1487,7 @@ namespace Turbo.Plugins.s7o
         private void ResetBloodIsPowerTracker()
         {
             _bipProgressPct = 0f;
+            _bipEstimateUncertain = false;
             _bipLastHealth = 0f;
             _bipLastHealthMax = 0f;
             _bipSkillStateSeeded = false;
@@ -1713,9 +1710,10 @@ namespace Turbo.Plugins.s7o
             if (deltaPct <= 0f || deltaPct > BloodIsPowerMaxSaneLossPct)
                 return 0f;
 
-            _bipProgressPct = Math.Max(0f, _bipProgressPct + deltaPct);
-            if (_bipProgressPct > 250f)
-                _bipProgressPct = 250f;
+            // Blood is Power can hold one pending global trigger. Once the
+            // estimated threshold is reached, additional loss cannot represent
+            // a second queued proc, so keep the estimate saturated at 100%.
+            _bipProgressPct = Math.Min(100f, Math.Max(0f, _bipProgressPct + deltaPct));
 
             return deltaPct;
         }
@@ -1734,6 +1732,7 @@ namespace Turbo.Plugins.s7o
         private void ResolveBloodIsPowerReceived(int tick, float cur, float max)
         {
             _bipProgressPct = 0f;
+            _bipEstimateUncertain = false;
             _bipPendingProcStartTick = 0;
             _bipLastConfirmedProcTick = tick;
 
@@ -1741,25 +1740,6 @@ namespace Turbo.Plugins.s7o
             _bipLastHealthMax = max;
 
             _bipBloodRushCandidates.Clear();
-        }
-
-
-        private bool TryHardSyncStalePendingBloodIsPower(int tick)
-        {
-            if (_bipPendingProcStartTick <= 0)
-                return false;
-
-            if (tick - _bipPendingProcStartTick < BloodIsPowerPendingNativeConfirmGraceTicks)
-                return false;
-
-            _bipProgressPct = 0f;
-            _bipPendingProcStartTick = 0;
-            _bipLastConfirmedProcTick = tick;
-
-            _bipBloodRushCandidates.Clear();
-            _bipLastBloodRushCreditTick = tick;
-
-            return true;
         }
 
 
@@ -1771,27 +1751,35 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
-            if (pendingCooldown)
+            // Crossing the estimated threshold is not proof that Blood is Power
+            // fired. Preserve the estimate until native IconCounts or cooldown-drop
+            // data confirms the proc. The renderer marks the saturated estimate
+            // with "?" while a tracked cooldown awaits that confirmation.
+            if (pendingCooldown && _bipPendingProcStartTick <= 0)
+                _bipPendingProcStartTick = tick;
+        }
+
+        private bool IsBloodIsPowerCombatEstimateUncertain(IPlayer me, float observedLossPct)
+        {
+            if (me == null || observedLossPct < BloodIsPowerFreshLossDropConfirmFloorPct)
+                return false;
+
+            try
             {
-                if (_bipPendingProcStartTick <= 0)
-                    _bipPendingProcStartTick = tick;
+                // Outside town, a sampled health drop can overlap monster damage,
+                // healing, regeneration, shields, and server corrections. FreeHUD
+                // exposes only rolling combat rates, not the exact gross loss event
+                // stream used by Blood is Power, so treat the number as approximate.
+                if (Hud != null && Hud.Game != null && !Hud.Game.IsInTown)
+                    return true;
 
-                if (TryHardSyncStalePendingBloodIsPower(tick))
-                    return;
-
-                // Give native IconCounts/cooldown-drop signals a short grace window, then hard-sync
-                // stale pending 100% to 0 instead of carrying a misleading ready state forever.
-                return;
+                return me.Defense != null &&
+                    me.Defense.CurrentDamageTakenPerSecond > 0.0d;
             }
-
-            // Blood is Power was consumed with no tracked pending display. Do not carry a stale
-            // remainder into the next LoTD/Simulacrum cycle.
-            _bipProgressPct = 0f;
-            _bipPendingProcStartTick = 0;
-            _bipLastConfirmedProcTick = tick;
-
-            _bipBloodRushCandidates.Clear();
-            _bipLastBloodRushCreditTick = tick;
+            catch
+            {
+                return false;
+            }
         }
 
         // Blood is Power passive/cooldown state reference based on RNN's BloodIsPowerPlugin.
@@ -1891,9 +1879,6 @@ namespace Turbo.Plugins.s7o
                         result.DropSkillKey = skillKey;
                     }
 
-                    if (tracked && iconEdge && drop >= BloodIsPowerStrongCooldownDropTicks)
-                        result.SameSkillIconDrop = true;
-
                     _bipCooldownStartState[i] = onCooldown ? start : 0;
                     _bipCooldownFinishState[i] = onCooldown ? finish : 0;
                 }
@@ -1912,57 +1897,17 @@ namespace Turbo.Plugins.s7o
             bool freshLossDropConfirm = strongTrackedDrop && HasRecentBloodIsPowerFreshLoss(tick);
 
             bool trackedHighEstimate = _bipProgressPct >= BloodIsPowerTrackedIconConfirmFloorPct || pending100;
-            bool nonTrackedHighEstimate = _bipProgressPct >= BloodIsPowerNonTrackedIconConfirmFloorPct || pending100;
 
-            if (result.SameSkillIconDrop || (result.TrackedIconEdge && strongTrackedDrop))
+            if (result.TrackedIconEdge || result.NonTrackedIconEdge)
             {
+                // This is Blood is Power's own per-action-slot IconCounts array.
+                // A positive edge on any equipped skill is native confirmation that
+                // the current global BIP proc was applied to at least one cooldown.
                 result.ReceivedAny = true;
-                result.CooldownDropConfirmed = true;
-                result.ProcReason = "tracked-icon+tracked-drop";
-            }
-            else if (result.NonTrackedIconEdge && strongTrackedDrop)
-            {
-                if (result.TrackedIconEdge || trackedHighEstimate)
-                {
-                    result.ReceivedAny = true;
-                    result.CooldownDropConfirmed = true;
-                    result.ProcReason = "mixed-icon+tracked-drop";
-                }
-                else
-                {
-                    result.IgnoredLowIconEdge = true;
-                    result.IgnoredLowCooldownDrop = true;
-                    result.ProcReason = "ignored-mixed-low";
-                }
-            }
-            else if (result.TrackedIconEdge)
-            {
-                bool trackedIconOnlyHighEstimate =
-                    _bipProgressPct >= BloodIsPowerTrackedIconOnlyConfirmFloorPct || pending100;
-
-                if (trackedIconOnlyHighEstimate)
-                {
-                    result.ReceivedAny = true;
-                    result.ProcReason = "tracked-icon";
-                }
-                else
-                {
-                    result.IgnoredLowIconEdge = true;
-                    result.ProcReason = "ignored-low-tracked-icon";
-                }
-            }
-            else if (result.NonTrackedIconEdge)
-            {
-                if (nonTrackedHighEstimate)
-                {
-                    result.ReceivedAny = true;
-                    result.ProcReason = "nontracked-icon";
-                }
-                else
-                {
-                    result.IgnoredLowIconEdge = true;
-                    result.ProcReason = "ignored-low-nontracked-icon";
-                }
+                result.CooldownDropConfirmed = strongTrackedDrop;
+                result.ProcReason = result.TrackedIconEdge
+                    ? (strongTrackedDrop ? "tracked-icon+tracked-drop" : "tracked-icon-native")
+                    : "skill-icon-native";
             }
 
             if (!result.ReceivedAny && strongTrackedDrop)
@@ -2075,19 +2020,31 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
+            // Blood is Power uses one global cumulative life-loss counter. Life
+            // lost while LoTD/Simulacrum are inactive or already consumed still
+            // contributes to the next global proc; per-skill IconCounts only decide
+            // which currently running cooldowns receive that proc.
+            bool trackingEligible =
+                HasAnyUnconsumedBloodIsPowerDisplayCooldown(buff);
+
             float deltaPct = AddBloodIsPowerHealthLoss(cur, max);
 
-            float bloodRushCreditPct = UpdateBloodIsPowerBloodRushCredit(deltaPct);
+            // Enemy damage is sampled as net health movement. Healing and rapid
+            // server updates can hide or distort part of that loss, so retain the
+            // estimate but mark it as approximate until a native BIP proc resets it.
+            if (IsBloodIsPowerCombatEstimateUncertain(me, deltaPct))
+                _bipEstimateUncertain = true;
+
+            float bloodRushCreditPct =
+                UpdateBloodIsPowerBloodRushCredit(deltaPct);
             if (bloodRushCreditPct > 0f)
             {
-                _bipProgressPct += bloodRushCreditPct;
-                if (_bipProgressPct > 250f)
-                    _bipProgressPct = 250f;
-
+                _bipProgressPct = Math.Min(100f, _bipProgressPct + bloodRushCreditPct);
                 deltaPct += bloodRushCreditPct;
             }
 
-            if (deltaPct >= BloodIsPowerFreshLossDropConfirmFloorPct)
+            if (deltaPct >=
+                BloodIsPowerFreshLossDropConfirmFloorPct)
             {
                 _bipLastFreshLossTick = tick;
                 _bipLastFreshLossPct = deltaPct;
@@ -2095,11 +2052,17 @@ namespace Turbo.Plugins.s7o
 
             var bipSignals = UpdateBloodIsPowerSkillState(buff, tick);
 
-
-            if (bipSignals.ReceivedAny || bipSignals.CooldownDropConfirmed)
+            if (bipSignals.ReceivedAny ||
+                bipSignals.CooldownDropConfirmed)
+            {
                 ResolveBloodIsPowerReceived(tick, cur, max);
-            else
-                ResolveBloodIsPowerOverflow(bipSignals.PendingDisplay, tick);
+            }
+            else if (trackingEligible)
+            {
+                ResolveBloodIsPowerOverflow(
+                    bipSignals.PendingDisplay,
+                    tick);
+            }
 
             CleanupBloodIsPowerTransientSnapshots(tick);
 
@@ -2125,6 +2088,24 @@ namespace Turbo.Plugins.s7o
             if (pct < 0f) return 0f;
             if (pct > 100f) return 100f;
             return pct;
+        }
+
+        private bool IsBloodIsPowerPendingUnknown(IBuff buff)
+        {
+            return _bipPendingProcStartTick > 0 &&
+                _bipProgressPct >= 100f &&
+                HasAnyUnconsumedBloodIsPowerDisplayCooldown(buff);
+        }
+
+        private static string GetBloodIsPowerDisplayText(float pct, bool uncertain)
+        {
+            if (pct > 0f && pct < 1f)
+                return uncertain ? "<1%?" : "<1%";
+
+            int rounded = (int)Math.Round((double)pct);
+            if (rounded < 1) rounded = 1;
+            if (rounded > 100) rounded = 100;
+            return rounded.ToString() + "%" + (uncertain ? "?" : string.Empty);
         }
 
         private void DrawBloodIsPowerTracker()
@@ -2163,15 +2144,37 @@ namespace Turbo.Plugins.s7o
                     return;
             }
 
+            bool pendingUnknown = !preserveVisual &&
+                IsBloodIsPowerPendingUnknown(buff);
+
+            bool estimateUncertain = pendingUnknown || _bipEstimateUncertain;
+
             float pct = preserveVisual
                 ? Math.Max(0f, Math.Min(100f, _bipProgressPct))
                 : GetBloodIsPowerDisplayPct(buff);
 
+            // A fresh cooldown with no observed life loss is not an active
+            // measurement. Do not present an authoritative-looking 0%.
+            if (!pendingUnknown && pct <= 0f)
+                return;
+
             foreach (var skill in trackedSkills)
-                DrawBloodIsPowerTrackerOnSkill(skill, buff, pct, preserveVisual);
+                DrawBloodIsPowerTrackerOnSkill(
+                    skill,
+                    buff,
+                    pct,
+                    preserveVisual,
+                    pendingUnknown,
+                    estimateUncertain);
         }
 
-        private void DrawBloodIsPowerTrackerOnSkill(IPlayerSkill skill, IBuff buff, float pct, bool preserveVisual)
+        private void DrawBloodIsPowerTrackerOnSkill(
+            IPlayerSkill skill,
+            IBuff buff,
+            float pct,
+            bool preserveVisual,
+            bool pendingUnknown,
+            bool estimateUncertain)
         {
             if (skill == null)
                 return;
@@ -2217,7 +2220,14 @@ namespace Turbo.Plugins.s7o
 
             var r = ui.Rectangle;
 
-            int colorIdx = GetBloodIsPowerColorIndex(pct);
+            float visualPct = pendingUnknown
+                ? 99f
+                : Math.Max(0f, Math.Min(99f, pct));
+
+            int colorIdx = pendingUnknown
+                ? BloodIsPowerColorSteps - 1
+                : GetBloodIsPowerColorIndex(visualPct);
+
             IBrush fillBrush = colorIdx >= 0 && colorIdx < _bipBarFillBrushes.Length ? _bipBarFillBrushes[colorIdx] : null;
             IFont font = colorIdx >= 0 && colorIdx < _bipFonts.Length ? _bipFonts[colorIdx] : null;
             if (fillBrush == null || font == null)
@@ -2229,10 +2239,13 @@ namespace Turbo.Plugins.s7o
             float barY = r.Y + r.Height - barH - 1.5f;
 
             _bipBarBackBrush.DrawRectangle(barX, barY, barW, barH);
-            fillBrush.DrawRectangle(barX, barY, barW * (pct / 100f), barH);
+            if (visualPct > 0f)
+                fillBrush.DrawRectangle(barX, barY, barW * (visualPct / 100f), barH);
             _bipBarBorderBrush.DrawRectangle(barX, barY, barW, barH);
 
-            string text = ((int)Math.Round((double)pct)).ToString() + "%";
+            string text = GetBloodIsPowerDisplayText(
+                pendingUnknown ? 100f : visualPct,
+                estimateUncertain);
             var layout = font.GetTextLayout(text);
 
             float tx = r.X + Math.Max(2f, r.Width * 0.05f);
