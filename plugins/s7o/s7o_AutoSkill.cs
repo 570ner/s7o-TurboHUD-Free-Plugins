@@ -1363,6 +1363,46 @@ namespace Turbo.Plugins.s7o
             }
         }
 
+        // Bits 0-6: left, right, skills 1-4, potion.
+        /// <summary>Returns the seven manual autocast slot states as a compact bit mask.</summary>
+        public int GetManualSlotAutoCastMask()
+        {
+            int mask = 0;
+            for (int i = 0; i < _enabledSlots.Length; i++)
+            {
+                if (_enabledSlots[i])
+                    mask |= 1 << i;
+            }
+            return mask;
+        }
+
+        /// <summary>Applies all seven manual autocast slot states and persists once.</summary>
+        public void SetManualSlotAutoCastMask(int mask)
+        {
+            int validMask = mask & ((1 << _enabledSlots.Length) - 1);
+            bool changed = false;
+
+            for (int i = 0; i < _enabledSlots.Length; i++)
+            {
+                bool enabled = (validMask & (1 << i)) != 0;
+                if (_enabledSlots[i] != enabled)
+                {
+                    _enabledSlots[i] = enabled;
+                    changed = true;
+                }
+
+                var slot = FindSlotState(i);
+                if (slot != null)
+                    slot.IsManualEnabled = enabled;
+            }
+
+            if (changed && PersistUserSettings)
+            {
+                try { SaveUserSettings(); }
+                catch { }
+            }
+        }
+
         // ── End public API ──────────────────────────────────────────────────────
 
         private ConditionalCastProfile FindConditionalProfile(string code)
