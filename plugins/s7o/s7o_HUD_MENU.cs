@@ -17,6 +17,7 @@ namespace Turbo.Plugins.s7o
 {
     // s7o HUD MENU - FREEHUD in-game manager for plugin controls,
     // macros, visual helpers, hotkeys, and persistent global plugin states.
+    // REV78 keeps REV77 behavior and binds the existing Siphon Debuff Circle toggle to the Inarius remote-primary ring.
     public class s7o_HUD_MENU : BasePlugin, IKeyEventHandler, IAfterCollectHandler, IInGameWorldPainter, IInGameTopPainter, IMouseClickHandler
     {
         private const string SettingsFileName = "s7o_HUD_MENU.ini";
@@ -46,7 +47,7 @@ namespace Turbo.Plugins.s7o
         // while avoiding the old overly large +4f inflated hit test.
         private const float ProfileCloseMaskPaddingPx = 3f;
 
-        private const int SettingsVersion = 19;
+        private const int SettingsVersion = 21;
 
         // Default menu-dot placement target:
         // lower-right skill-bar area on 1920x1080, away from chat and other overlays.
@@ -266,6 +267,44 @@ namespace Turbo.Plugins.s7o
             "ZBarb_SpearSnap"
         };
 
+        // ── VISUAL / HUD language ─────────────────────────────────────────────────────
+        private bool _hudLanguageExpanded = false;
+        private string _hudLanguageCode = "enUS";
+        private readonly bool[] _hudLanguageAvailable = new bool[HudLanguageCodes.Length];
+
+        private static readonly string[] HudLanguageCodes =
+        {
+            "deDE", "enUS", "esES", "esMX", "frFR", "itIT", "koKR",
+            "plPL", "ptBR", "ptPT", "ruRU", "zhTW", "zhCN"
+        };
+
+        private static readonly string[] HudLanguageNames =
+        {
+            "German", "English", "Spanish (Europe)", "Spanish (Latin America)",
+            "French", "Italian", "Korean", "Polish", "Portuguese (Brazil)",
+            "Portuguese (Portugal)", "Russian", "Chinese (Traditional)",
+            "Chinese (Simplified)"
+        };
+
+        private static readonly string[] HudLanguageButtonNames =
+        {
+            "GERMAN", "ENGLISH", "SPANISH EU", "SPANISH MX", "FRENCH", "ITALIAN",
+            "KOREAN", "POLISH", "PORTUGUESE BR", "PORTUGUESE PT", "RUSSIAN",
+            "CHINESE TW", "CHINESE CN"
+        };
+
+        // ── VISUAL / movable player Convention of Elements overlay ────────────────────
+        private const float PlayerCoeDefaultOpacity = 0.70f;
+        private const float PlayerCoeDefaultSizeMultiplier = 0.75f;
+        private bool _visPlayerCoeEnabled = true;
+        private bool _visPlayerCoeExpanded = false;
+        private float _playerCoeOpacity = PlayerCoeDefaultOpacity;
+        private float _playerCoeSizeMultiplier = PlayerCoeDefaultSizeMultiplier;
+        private Key _playerCoeHotkey = Key.F2;
+        private Key _playerCoeElementHotkey = Key.F3;
+        private bool _playerCoeHotkeyCapture = false;
+        private bool _playerCoeElementHotkeyCapture = false;
+
         // ── VISUAL overlay state ───────────────────────────────────────────────────────
         private bool _visPlayerCircleEnabled = false;    private bool _visPlayerCircleExpanded = false;
         private float _visPlayerCircleYards = 25f;       private int  _visPlayerCircleColorIdx = 3;
@@ -341,6 +380,20 @@ namespace Turbo.Plugins.s7o
         private float _simHpOwnHeightScale = 1.50f;
         private float _simHpOtherWidthScale = 0.80f;
         private float _simHpOtherHeightScale = 1.50f;
+
+        // VISUAL / standalone s7o_EliteHealthBars controls.
+        // Bars and RadiusBottom circles share one renderer but are independent features.
+        private const float EliteHpBarDefaultWidth = 270.0f;
+        private const float EliteHpBarDefaultHeight = 22.0f;
+        private const float EliteGroundCircleDefaultThickness = 3.0f;
+        private const float EliteGroundCircleOutlineExtraThickness = 3.5f;
+        private bool  _visEliteHpBarsEnabled = true;
+        private bool  _visEliteHpBarsExpanded = false;
+        private float _eliteHpBarWidth = EliteHpBarDefaultWidth;
+        private float _eliteHpBarHeight = EliteHpBarDefaultHeight;
+        private bool  _visEliteGroundCirclesEnabled = false;
+        private bool  _visEliteGroundCirclesExpanded = false;
+        private float _eliteGroundCircleThickness = EliteGroundCircleDefaultThickness;
 
         private const uint VisualSiphonDebuffSno = 453563u;
 
@@ -920,6 +973,14 @@ namespace Turbo.Plugins.s7o
         private IBrush _bPrevPurpleDash;
         private IBrush _bPrevGrey;
         private IBrush _bPrevYellow;
+        private IBrush _bPlayerCoePreviewCold;
+        private IBrush _bPlayerCoePreviewFire;
+        private IBrush _bPlayerCoePreviewPhysical;
+        private IBrush _bPlayerCoePreviewPoison;
+        private IBrush _bPlayerCoePreviewBorder;
+        private IBrush _bPlayerCoePreviewHighlight;
+        private readonly ITexture[] _playerCoePreviewTextures = new ITexture[4];
+        private BuffRuleCalculator _playerCoePreviewRules;
         private IFont _fTitle, _fLabel, _fSection, _fText, _fSmall, _fButton, _fButtonActive;
         private IFont _fSmallShadow, _fButtonShadow;
         private IFont _fButtonLarge, _fButtonLargeActive, _fButtonLargeShadow;
@@ -941,6 +1002,8 @@ namespace Turbo.Plugins.s7o
             base.Load(hud);
             ResetTurboHudLogsDirectory();
             LoadSettings();
+            RefreshHudLanguageAvailability();
+            RefreshHudLanguageSetting();
             ApplyGlobalTtsSettings();
             ClaimAutoGemUiOwnership();
             InitHudHotkeyState();
@@ -958,6 +1021,8 @@ namespace Turbo.Plugins.s7o
             _visible = false;
             _capturingHotkey = false;
             _tipsPlayerMarkerHotkeyCapture = false;
+            _playerCoeHotkeyCapture = false;
+            _playerCoeElementHotkeyCapture = false;
             ClearProfileBackgroundState();
 
             RelocateLegacyRightCenterDotIfNeeded();
@@ -1275,6 +1340,40 @@ namespace Turbo.Plugins.s7o
                 _tipsPlayerMarkerHotkeyCapture = false;
                 ApplyTipsHelperSettingsToPlugin();
                 _status = "PLAYER MARKER HOTKEY SET TO " + CaptureKeyLabel(_tipsPlayerMarkerHotkey);
+                SaveSettings();
+                return;
+            }
+
+            if (_playerCoeHotkeyCapture)
+            {
+                if (IsCaptureCancelKey(keyEvent.Key))
+                {
+                    _playerCoeHotkeyCapture = false;
+                    _status = "PLAYER COE PLACEMENT HOTKEY CAPTURE CANCELLED";
+                    return;
+                }
+
+                _playerCoeHotkey = keyEvent.Key;
+                _playerCoeHotkeyCapture = false;
+                ApplyPlayerCoeSettingsToPlugin();
+                _status = "PLAYER COE PLACE / MOVE HOTKEY SET TO " + CaptureKeyLabel(_playerCoeHotkey);
+                SaveSettings();
+                return;
+            }
+
+            if (_playerCoeElementHotkeyCapture)
+            {
+                if (IsCaptureCancelKey(keyEvent.Key))
+                {
+                    _playerCoeElementHotkeyCapture = false;
+                    _status = "PLAYER COE ELEMENT HOTKEY CAPTURE CANCELLED";
+                    return;
+                }
+
+                _playerCoeElementHotkey = keyEvent.Key;
+                _playerCoeElementHotkeyCapture = false;
+                ApplyPlayerCoeSettingsToPlugin();
+                _status = "PLAYER COE ELEMENT HOTKEY SET TO " + CaptureKeyLabel(_playerCoeElementHotkey);
                 SaveSettings();
                 return;
             }
@@ -4497,6 +4596,43 @@ namespace Turbo.Plugins.s7o
             return FindPluginByTypeName("s7o_PartyInspector");
         }
 
+        private s7o_PartyInspector GetPartyInspectorPlugin()
+        {
+            return FindPartyInspectorPlugin() as s7o_PartyInspector;
+        }
+
+        private bool IsPlayerCoeOverlayEnabled()
+        {
+            s7o_PartyInspector plugin = GetPartyInspectorPlugin();
+            return plugin != null && _visPlayerCoeEnabled &&
+                plugin.ShowMovableCoELayers && SafePluginEnabled(plugin);
+        }
+
+        private void ApplyPlayerCoeSettingsToPlugin()
+        {
+            try
+            {
+                s7o_PartyInspector plugin = GetPartyInspectorPlugin();
+                if (plugin == null)
+                    return;
+
+                _playerCoeOpacity = ViClampF(_playerCoeOpacity, 0.10f, 1.00f);
+                _playerCoeSizeMultiplier = ViClampF(_playerCoeSizeMultiplier, 0.20f, 1.50f);
+
+                if (_visPlayerCoeEnabled && !SafePluginEnabled(plugin))
+                    SetPluginEnabledPersistent(plugin, true);
+
+                plugin.ShowMovableCoELayers = _visPlayerCoeEnabled;
+                plugin.MovableCoEHotkey = _playerCoeHotkey;
+                plugin.MovableCoEElementHotkey = _playerCoeElementHotkey;
+                plugin.MovableCoEOpacity = _playerCoeOpacity;
+                plugin.MovableCoESizeMultiplier = _playerCoeSizeMultiplier;
+            }
+            catch
+            {
+            }
+        }
+
         private bool IsPartyInspectorEnabled()
         {
             IPlugin plugin = FindPartyInspectorPlugin();
@@ -4530,6 +4666,49 @@ namespace Turbo.Plugins.s7o
 
                 if (field != null && typeof(IKeyEvent).IsAssignableFrom(field.FieldType))
                     field.SetValue(plugin, keyEvent);
+            }
+            catch
+            {
+            }
+        }
+
+        private s7o_EliteHealthBars GetEliteHealthBarsPlugin()
+        {
+            return FindPluginByTypeName("s7o_EliteHealthBars") as s7o_EliteHealthBars;
+        }
+
+        private bool IsEliteHealthBarsFeatureEnabled()
+        {
+            s7o_EliteHealthBars plugin = GetEliteHealthBarsPlugin();
+            return plugin != null && _visEliteHpBarsEnabled &&
+                plugin.ShowEliteHealthBars && SafePluginEnabled(plugin);
+        }
+
+        private bool IsEliteGroundCirclesFeatureEnabled()
+        {
+            s7o_EliteHealthBars plugin = GetEliteHealthBarsPlugin();
+            return plugin != null && _visEliteGroundCirclesEnabled &&
+                plugin.ShowEliteGroundCircles && SafePluginEnabled(plugin);
+        }
+
+        private void ApplyEliteHealthBarsSettingsToPlugin()
+        {
+            try
+            {
+                s7o_EliteHealthBars plugin = GetEliteHealthBarsPlugin();
+                if (plugin == null)
+                    return;
+
+                bool rendererNeeded = _visEliteHpBarsEnabled ||
+                    _visEliteGroundCirclesEnabled;
+                if (SafePluginEnabled(plugin) != rendererNeeded)
+                    SetPluginEnabledPersistent(plugin, rendererNeeded);
+
+                plugin.ShowEliteHealthBars = _visEliteHpBarsEnabled;
+                plugin.BarWidth = _eliteHpBarWidth;
+                plugin.BarHeight = _eliteHpBarHeight;
+                plugin.ShowEliteGroundCircles = _visEliteGroundCirclesEnabled;
+                plugin.EliteGroundCircleThickness = _eliteGroundCircleThickness;
             }
             catch
             {
@@ -4651,8 +4830,10 @@ namespace Turbo.Plugins.s7o
         {
             ApplyMonsterVisualToggles();
             ApplyRiftFishingMapSettings();
+            ApplyPlayerCoeSettingsToPlugin();
             ApplyPartyInspectorHotkeyToPlugin();
             ApplyTipsHelperSettingsToPlugin();
+            ApplyEliteHealthBarsSettingsToPlugin();
             ApplySimHpBarsSettingsToPlugin();
             ApplyAutoLootSettingsToPlugin();
             ApplyInventoryDropSettingsToPlugin();
@@ -6175,6 +6356,8 @@ namespace Turbo.Plugins.s7o
                 action.StartsWith("visual:dot:", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("visual:seconds:", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("visual:simhp:", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("visual:playercoe:", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("visual:elitehp:", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("visual:tipstoggle:", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("visual:reset:partyinspector", StringComparison.OrdinalIgnoreCase);
         }
@@ -6628,6 +6811,7 @@ namespace Turbo.Plugins.s7o
                     _pestilenceRgkRgAssist);
 
                 plugin.ShowTargetLineReticle = _pestilenceRgkShowTargetLineReticle;
+                plugin.ShowRemoteSiphonPrimaryTargetRing = _visSiphonEnabled;
 
                 plugin.ConfigureZeiCircle(
                     _pestilenceRgkZeiCircle,
@@ -6974,6 +7158,7 @@ namespace Turbo.Plugins.s7o
 
                 plugin.ShowRangeIndicator = _inariusRgkShowRangeIndicator;
                 plugin.ShowTargetLineReticle = _inariusRgkShowTargetLineReticle;
+                plugin.ShowRemoteSiphonPrimaryTargetRing = _visSiphonEnabled;
             }
             catch { }
         }
@@ -8405,10 +8590,27 @@ namespace Turbo.Plugins.s7o
                 if (!_visualFavorites.Remove(feature)) _visualFavorites.Add(feature);
                 SaveSettings(); return;
             }
+            if (cmd == "language") { SetHudLanguage(feature); return; }
+            if (cmd == "elitehp") { HandleEliteHpVisualAction(p); return; }
             if (cmd == "simhp") { HandleSimHpVisualAction(p); return; }
+            if (cmd == "playercoe") { HandlePlayerCoeVisualAction(p); return; }
             if (cmd == "toggle") { ToggleVisualFeature(feature); ApplyTipsHelperSettingsToPlugin(); SaveSettings(); return; }
             if (cmd == "expand") { ToggleVisualExpanded(feature); SaveSettings(); return; }
             if (cmd == "tipstoggle") { ToggleTipsHelperOption(feature); ApplyTipsHelperSettingsToPlugin(); SaveSettings(); return; }
+            if (cmd == "hotkey" && feature == "playercoe")
+            {
+                _playerCoeHotkeyCapture = true;
+                _playerCoeElementHotkeyCapture = false;
+                _status = "PRESS PLAYER COE PLACE / MOVE HOTKEY";
+                return;
+            }
+            if (cmd == "hotkey" && feature == "playercoeelement")
+            {
+                _playerCoeElementHotkeyCapture = true;
+                _playerCoeHotkeyCapture = false;
+                _status = "PRESS PLAYER COE ELEMENT HOTKEY";
+                return;
+            }
             if (cmd == "hotkey" && feature == "partyinspector")
             {
                 _partyInspectorHotkeyCapture = true;
@@ -8436,7 +8638,7 @@ namespace Turbo.Plugins.s7o
             {
                 int idx;
                 if (int.TryParse(p[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out idx))
-                { SetVisualColor(feature, idx); if (feature.StartsWith("menubutton", StringComparison.OrdinalIgnoreCase)) MarkLayoutDirty(); ApplyTipsHelperSettingsToPlugin(); SaveSettings(); }
+                { SetVisualColor(feature, idx); if (feature.StartsWith("menubutton", StringComparison.OrdinalIgnoreCase)) MarkLayoutDirty(); ApplyTipsHelperSettingsToPlugin(); ApplyEliteHealthBarsSettingsToPlugin(); SaveSettings(); }
                 return;
             }
 if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd == "dot" || cmd == "seconds") && p.Length >= 4)
@@ -8444,8 +8646,56 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 int delta = p[3] == "-1" ? -1 : 1;
                 AdjustVisualValue(cmd, feature, delta);
                 ApplyTipsHelperSettingsToPlugin();
+                ApplyEliteHealthBarsSettingsToPlugin();
                 SaveSettings();
                 return;
+            }
+        }
+
+        private void HandlePlayerCoeVisualAction(string[] p)
+        {
+            if (p == null || p.Length < 4)
+                return;
+
+            int delta = p[3] == "-1" ? -1 : 1;
+            string sub = p[2];
+
+            if (string.Equals(sub, "transparency", StringComparison.OrdinalIgnoreCase))
+            {
+                // Higher transparency means lower PartyInspector opacity.
+                _playerCoeOpacity = ViClampF(_playerCoeOpacity - delta * 0.05f, 0.10f, 1.00f);
+                _status = "PLAYER COE TRANSPARENCY: " +
+                    ((int)Math.Round((1.0f - _playerCoeOpacity) * 100f)).ToString(CultureInfo.InvariantCulture) + "%";
+            }
+            else if (string.Equals(sub, "size", StringComparison.OrdinalIgnoreCase))
+                _playerCoeSizeMultiplier = ViClampF(_playerCoeSizeMultiplier + delta * 0.05f, 0.20f, 1.50f);
+            else
+                return;
+
+            ApplyPlayerCoeSettingsToPlugin();
+            SaveSettings();
+        }
+
+        private void HandleEliteHpVisualAction(string[] p)
+        {
+            if (p == null || p.Length < 3)
+                return;
+
+            string sub = p[2];
+
+            if ((string.Equals(sub, "width", StringComparison.OrdinalIgnoreCase) ||
+                 string.Equals(sub, "height", StringComparison.OrdinalIgnoreCase)) &&
+                p.Length >= 4)
+            {
+                int delta = p[3] == "-1" ? -1 : 1;
+
+                if (string.Equals(sub, "width", StringComparison.OrdinalIgnoreCase))
+                    _eliteHpBarWidth = ViClampF(_eliteHpBarWidth + delta * 10.0f, 120.0f, 500.0f);
+                else
+                    _eliteHpBarHeight = ViClampF(_eliteHpBarHeight + delta * 2.0f, 8.0f, 50.0f);
+
+                ApplyEliteHealthBarsSettingsToPlugin();
+                SaveSettings();
             }
         }
 
@@ -8497,6 +8747,22 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
         private void ToggleVisualFeature(string feature)
         {
+            if (feature == "playercoe")
+            {
+                if (GetPartyInspectorPlugin() == null)
+                {
+                    _status = "PLAYER COE OVERLAY NOT INSTALLED";
+                    return;
+                }
+
+                _visPlayerCoeEnabled = !_visPlayerCoeEnabled;
+                _visPlayerCoeExpanded = _visPlayerCoeEnabled;
+                ApplyPlayerCoeSettingsToPlugin();
+                RequestPluginCacheRefresh();
+                _status = _visPlayerCoeEnabled ? "PLAYER COE OVERLAY ON" : "PLAYER COE OVERLAY OFF";
+                return;
+            }
+
             if (feature == "tipshelper")
             {
                 _visTipsHelperEnabled = !_visTipsHelperEnabled;
@@ -8511,6 +8777,40 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 _visDangerousAffixVisualsExpanded = _visDangerousAffixVisualsEnabled;
                 ApplyMonsterVisualToggles();
                 RequestPluginCacheRefresh();
+                return;
+            }
+
+            if (feature == "elitehp")
+            {
+                if (GetEliteHealthBarsPlugin() == null)
+                {
+                    _status = "ELITE HEALTH BARS NOT INSTALLED";
+                    return;
+                }
+
+                _visEliteHpBarsEnabled = !_visEliteHpBarsEnabled;
+                _visEliteHpBarsExpanded = _visEliteHpBarsEnabled;
+                ApplyEliteHealthBarsSettingsToPlugin();
+                RequestPluginCacheRefresh();
+                _status = _visEliteHpBarsEnabled ? "ELITE HEALTH BARS ON" : "ELITE HEALTH BARS OFF";
+                return;
+            }
+
+            if (feature == "elitecircles")
+            {
+                if (GetEliteHealthBarsPlugin() == null)
+                {
+                    _status = "ELITE HITBOX CIRCLES NOT INSTALLED";
+                    return;
+                }
+
+                _visEliteGroundCirclesEnabled = !_visEliteGroundCirclesEnabled;
+                _visEliteGroundCirclesExpanded = _visEliteGroundCirclesEnabled;
+                ApplyEliteHealthBarsSettingsToPlugin();
+                RequestPluginCacheRefresh();
+                _status = _visEliteGroundCirclesEnabled
+                    ? "ELITE HITBOX CIRCLES ON"
+                    : "ELITE HITBOX CIRCLES OFF";
                 return;
             }
 
@@ -8616,12 +8916,25 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             {
                 _visSiphonEnabled = !_visSiphonEnabled;
                 _visSiphonExpanded = _visSiphonEnabled;
+                ApplyPestilenceRgkSettingsToPlugin();
                 return;
             }
         }
 
         private void ToggleVisualExpanded(string feature)
         {
+            if (feature == "hudlanguage")
+            {
+                _hudLanguageExpanded = !_hudLanguageExpanded;
+                return;
+            }
+
+            if (feature == "playercoe")
+            {
+                _visPlayerCoeExpanded = !_visPlayerCoeExpanded;
+                return;
+            }
+
             if (feature == "tipshelper")
             {
                 _visTipsHelperExpanded = !_visTipsHelperExpanded;
@@ -8631,6 +8944,19 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             if (feature == "dangeraffixes")
             {
                 _visDangerousAffixVisualsExpanded = !_visDangerousAffixVisualsExpanded;
+                return;
+            }
+
+            if (feature == "elitehp")
+            {
+                _visEliteHpBarsExpanded = !_visEliteHpBarsExpanded;
+                return;
+            }
+
+            if (feature == "elitecircles")
+            {
+                _visEliteGroundCirclesExpanded =
+                    !_visEliteGroundCirclesExpanded;
                 return;
             }
 
@@ -8791,6 +9117,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     else if (f == "minion") _visMinionThickness = ViClampF(_visMinionThickness + delta * 0.3f, 0.5f, 6f);
                     else if (f == "guardiansentry") _visGuardianSentryThickness = ViClampF(_visGuardianSentryThickness + delta * 0.2f, 0.5f, 8f);
                     else if (f == "valleyofdeath") _visValleyOfDeathThickness = ViClampF(_visValleyOfDeathThickness + delta * 0.2f, 0.5f, 8f);
+                    else if (f == "elitecircle") _eliteGroundCircleThickness = ViClampF(_eliteGroundCircleThickness + delta * 0.5f, 0.5f, 10.0f);
                     break;
                 case "size":
                     if (f == "click") _visClickAnimSize = ViClampF(_visClickAnimSize + delta * 0.5f, 0.5f, 4.0f);
@@ -8814,9 +9141,170 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             }
         }
 
+        private static int HudLanguageIndex(string code)
+        {
+            if (string.IsNullOrWhiteSpace(code))
+                return -1;
+
+            for (int i = 0; i < HudLanguageCodes.Length; i++)
+                if (string.Equals(HudLanguageCodes[i], code.Trim(), StringComparison.OrdinalIgnoreCase))
+                    return i;
+
+            return -1;
+        }
+
+        private static string HudLanguageName(string code)
+        {
+            int index = HudLanguageIndex(code);
+            return index >= 0 ? HudLanguageNames[index] : "English";
+        }
+
+        private static string HudLanguageButtonName(string code)
+        {
+            int index = HudLanguageIndex(code);
+            return index >= 0 ? HudLanguageButtonNames[index] : "ENGLISH";
+        }
+
+        private static string HudDataDirectory()
+        {
+            return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data");
+        }
+
+        private static string HudLanguageSettingPath()
+        {
+            return Path.Combine(HudDataDirectory(), "selected_language.txt");
+        }
+
+        private static string HudLanguageResourcePath(string code)
+        {
+            return Path.Combine(HudDataDirectory(), "strings_" + code + ".bin");
+        }
+
+        private void RefreshHudLanguageAvailability()
+        {
+            for (int i = 0; i < HudLanguageCodes.Length; i++)
+                _hudLanguageAvailable[i] = File.Exists(HudLanguageResourcePath(HudLanguageCodes[i]));
+        }
+
+        private void RefreshHudLanguageSetting()
+        {
+            _hudLanguageCode = "enUS";
+
+            try
+            {
+                string path = HudLanguageSettingPath();
+                if (!File.Exists(path))
+                    return;
+
+                foreach (string rawLine in File.ReadAllLines(path))
+                {
+                    string line = (rawLine ?? string.Empty).Trim();
+                    if (line.Length == 0 || line.StartsWith("//", StringComparison.Ordinal))
+                        continue;
+
+                    int index = HudLanguageIndex(line);
+                    if (index >= 0)
+                    {
+                        _hudLanguageCode = HudLanguageCodes[index];
+                        return;
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private void SetHudLanguage(string code)
+        {
+            int index = HudLanguageIndex(code);
+            if (index < 0)
+            {
+                _status = "UNSUPPORTED HUD LANGUAGE";
+                return;
+            }
+
+            string selectedCode = HudLanguageCodes[index];
+            string resourcePath = HudLanguageResourcePath(selectedCode);
+            if (!_hudLanguageAvailable[index])
+            {
+                _status = "MISSING " + Path.GetFileName(resourcePath);
+                return;
+            }
+
+            try
+            {
+                Directory.CreateDirectory(HudDataDirectory());
+                File.WriteAllText(
+                    HudLanguageSettingPath(),
+                    selectedCode + Environment.NewLine,
+                    new UTF8Encoding(false));
+
+                _hudLanguageCode = selectedCode;
+                _status = "HUD LANGUAGE SET TO " + HudLanguageName(selectedCode).ToUpperInvariant() + " - RESTART HUD";
+                MarkLayoutDirty();
+            }
+            catch (Exception ex)
+            {
+                _status = "HUD LANGUAGE SAVE FAILED";
+                LogDebug("HUD language save failed: " + ex.Message);
+            }
+        }
+
         // ════════════════════════════════════════════════════════════════════════
         // VISUAL DRAW HELPERS (UI rows)
         // ════════════════════════════════════════════════════════════════════════
+
+        private void DrawHudLanguageFeatureRow(RectangleF r, bool expanded, int rowIdx)
+        {
+            const float stateW = 156f;
+            const float expandW = 30f;
+
+            (rowIdx % 2 == 0 ? _bRow : _bRowAlt).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
+
+            RectangleF expandR = new RectangleF(r.Right - expandW - 8f, r.Top + 6f, expandW, r.Height - 12f);
+            RectangleF stateR = new RectangleF(expandR.Left - stateW - 6f, r.Top + 6f, stateW, r.Height - 12f);
+
+            float textX = r.Left + 12f;
+            float textW = Math.Max(40f, stateR.Left - textX - 12f);
+
+            DrawOutlinedTextAt(_fRowTitle, _fRowTitleShadow, "HUD Language", textX, r.Top + 8f);
+            string[] lines = WrapToggleDescription("Changes FreeHUD localized text. Restart HUD after selecting a language.", ApproxCharsForToggleDescription(textW), 2);
+            if (lines.Length > 0) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[0], textX, r.Top + 31f);
+            if (lines.Length > 1) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[1], textX, r.Top + 49f);
+
+            string expandAction = "visual:expand:hudlanguage";
+            DrawGlossButton(stateR, FitButtonLabel(HudLanguageButtonName(_hudLanguageCode), stateR.Width), true, false, false);
+            RegisterToggleHit(expandAction, stateR);
+
+            DrawGlossButton(expandR, expanded ? "-" : "+", expanded, false, true);
+            RegisterToggleHit(expandAction, expandR);
+        }
+
+        private void DrawHudLanguageOptionRow(RectangleF r, int rowIdx, int languageIndex)
+        {
+            if (languageIndex < 0 || languageIndex >= HudLanguageCodes.Length)
+                return;
+
+            (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
+
+            string code = HudLanguageCodes[languageIndex];
+            string name = HudLanguageNames[languageIndex];
+            bool selected = string.Equals(_hudLanguageCode, code, StringComparison.OrdinalIgnoreCase);
+            bool available = _hudLanguageAvailable[languageIndex];
+
+            const float buttonW = 146f;
+            RectangleF buttonR = new RectangleF(r.Right - buttonW - 8f, r.Top + 8f, buttonW, r.Height - 16f);
+            float textX = r.Left + 28f;
+            float textW = Math.Max(40f, buttonR.Left - textX - 12f);
+
+            DrawOutlinedTextAt(_fRowTitle, _fRowTitleShadow, Trim(name, ApproxCharsForWidth(textW, 5.8f)), textX, r.Top + 9f);
+            DrawOutlinedTextAt(_fRowText, _fRowTextShadow, code + " - Restart required", textX, r.Top + 37f);
+
+            string buttonText = !available ? "MISSING" : selected ? "SELECTED" : "SELECT";
+            DrawGlossButton(buttonR, buttonText, selected, false, false);
+
+            if (available && !selected)
+                RegisterToggleHit("visual:language:" + code, buttonR);
+        }
 
         private void DrawVisualFeatureRow(RectangleF r, string feature, string title, string description,
             bool enabled, bool expanded, int rowIdx)
@@ -8843,7 +9331,13 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             if (!string.IsNullOrWhiteSpace(description))
             {
-                string[] lines = WrapToggleDescription(description, ApproxCharsForToggleDescription(textW), 2);
+                // Player CoE has a long two-line summary and enough real space in this
+                // row. Skip the universal conservative safety gap for this one feature.
+                int wrapChars = string.Equals(feature, "playercoe", StringComparison.OrdinalIgnoreCase)
+                    ? ApproxCharsForWidth(Math.Max(40f, textW - 8f), 6.2f)
+                    : ApproxCharsForToggleDescription(textW);
+
+                string[] lines = WrapToggleDescription(description, wrapChars, 2);
                 if (lines.Length > 0) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[0], textX, r.Top + 31f);
                 if (lines.Length > 1) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[1], textX, r.Top + 49f);
             }
@@ -9013,17 +9507,29 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
                 private static bool IsCustomVisualFeature(string feature)
         {
-            return feature == "tipshelper" || feature == "dangeraffixes" || feature == "simhp" || feature == "menubutton" || feature == "partyinspector";
+            return feature == "hudlanguage" || feature == "playercoe" || feature == "tipshelper" || feature == "dangeraffixes" || feature == "elitehp" || feature == "elitecircles" || feature == "simhp" || feature == "menubutton" || feature == "partyinspector";
         }
 
 
                 private int GetCustomVisualExpandedRowCount(string feature)
         {
+            if (feature == "hudlanguage")
+                return HudLanguageCodes.Length;
+
+            if (feature == "playercoe")
+                return 5;
+
             if (feature == "tipshelper")
                 return 13;
 
             if (feature == "dangeraffixes")
                 return 26;
+
+            if (feature == "elitehp")
+                return 2;
+
+            if (feature == "elitecircles")
+                return 3;
 
             if (feature == "simhp")
                 return 2;
@@ -9256,6 +9762,179 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             return CompactKeyName(s);
         }
 
+        private void DrawEliteHpBarPreviewRow(RectangleF r, int rowIdx)
+        {
+            (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
+
+            RectangleF labelR = new RectangleF(r.Left + 14f, r.Top + 3f, r.Width - 28f, 18f);
+            RectangleF defaultR = new RectangleF(r.Left + 14f, r.Top + 22f, r.Width - 28f, 15f);
+            RectangleF previewR = new RectangleF(r.Left + 14f, r.Top + 39f, r.Width - 28f, r.Height - 43f);
+
+            DrawCenteredTextExact(_fSection, "Elite Health Bar Preview (1:1 pixels)", labelR);
+            DrawCenteredTextExact(_fRowText,
+                "Default: " + FormatVisualFloat(EliteHpBarDefaultWidth) + " x " +
+                FormatVisualFloat(EliteHpBarDefaultHeight) + " pixels", defaultR);
+            DrawEliteHpPreviewBar(previewR, IsEliteHealthBarsFeatureEnabled(),
+                _eliteHpBarWidth, _eliteHpBarHeight);
+        }
+
+        private void DrawEliteHpBarControlsRow(RectangleF r, int rowIdx)
+        {
+            (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
+
+            const float stepW = 176f;
+            const float gap = 14f;
+            const float stepH = 30f;
+
+            float totalW = stepW * 2f + gap;
+            float x = r.Left + Math.Max(14f, (r.Width - totalW) * 0.5f);
+
+            RectangleF labelR = new RectangleF(r.Left + 14f, r.Top + 3f, r.Width - 28f, 18f);
+            RectangleF defaultR = new RectangleF(r.Left + 14f, r.Top + 22f, r.Width - 28f, 15f);
+            RectangleF widthR = new RectangleF(x, r.Top + 41f, stepW, stepH);
+            RectangleF heightR = new RectangleF(widthR.Right + gap, r.Top + 41f, stepW, stepH);
+
+            DrawCenteredTextExact(_fSection, "Elite Health Bar Dimensions", labelR);
+            DrawCenteredTextExact(_fRowText,
+                "Defaults: Width " + FormatVisualFloat(EliteHpBarDefaultWidth) +
+                "  |  Height " + FormatVisualFloat(EliteHpBarDefaultHeight), defaultR);
+            DrawVisualStepperWide(widthR, "Width", FormatVisualFloat(_eliteHpBarWidth),
+                "visual:elitehp:width:-1", "visual:elitehp:width:+1");
+            DrawVisualStepperWide(heightR, "Height", FormatVisualFloat(_eliteHpBarHeight),
+                "visual:elitehp:height:-1", "visual:elitehp:height:+1");
+        }
+
+        private void DrawEliteGroundCircleInfoRow(RectangleF r, int rowIdx)
+        {
+            (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
+
+            RectangleF titleR = new RectangleF(r.Left + 14f, r.Top + 3f, r.Width - 28f, 18f);
+            RectangleF line1R = new RectangleF(r.Left + 14f, r.Top + 31f, r.Width - 28f, 16f);
+            RectangleF line2R = new RectangleF(r.Left + 14f, r.Top + 50f, r.Width - 28f, 16f);
+
+            DrawCenteredTextExact(_fSection, "Elite Hitbox Circles", titleR);
+            DrawCenteredTextExact(_fRowText,
+                "Uses each elite's native RadiusBottom and matching health-bar color.", line1R);
+            DrawCenteredTextExact(_fRowText,
+                "Default line thickness: " + FormatVisualFloat(EliteGroundCircleDefaultThickness) +
+                "  |  Thick black contrast outline", line2R);
+        }
+
+        private void DrawEliteGroundCirclePreviewRow(RectangleF r, int rowIdx)
+        {
+            (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
+
+            RectangleF previewR = new RectangleF(r.Left + 22f, r.Top + 7f, r.Width - 44f, r.Height - 14f);
+            DrawEliteCirclePreview(previewR);
+        }
+
+        private void DrawEliteGroundCircleControlsRow(RectangleF r, int rowIdx)
+        {
+            (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
+
+            const float stepW = 230f;
+            const float stepH = 30f;
+            float x = r.Left + Math.Max(14f, (r.Width - stepW) * 0.5f);
+
+            RectangleF labelR = new RectangleF(r.Left + 14f, r.Top + 3f, r.Width - 28f, 18f);
+            RectangleF defaultR = new RectangleF(r.Left + 14f, r.Top + 22f, r.Width - 28f, 15f);
+            RectangleF lineR = new RectangleF(x, r.Top + 41f, stepW, stepH);
+
+            DrawCenteredTextExact(_fSection, "Elite Hitbox Circle Thickness", labelR);
+            DrawCenteredTextExact(_fRowText,
+                "Default: " + FormatVisualFloat(EliteGroundCircleDefaultThickness), defaultR);
+
+            DrawVisualStepperWide(lineR, "Line", FormatVisualFloat(_eliteGroundCircleThickness),
+                "visual:thick:elitecircle:-1", "visual:thick:elitecircle:+1");
+        }
+
+        private void DrawEliteHpPreviewBar(RectangleF area, bool enabled, float width, float height)
+        {
+            if (area.Width <= 10f || area.Height <= 8f)
+                return;
+
+            // BarWidth/BarHeight are screen pixels in s7o_EliteHealthBars. Keep the
+            // default 270x22 preview at true 1:1 scale; clamp only when a user grows
+            // it beyond the available menu preview area.
+            float w = ViClampF(width, 8f, Math.Max(8f, area.Width - 6f));
+            float h = ViClampF(height, 4f, Math.Max(4f, area.Height - 4f));
+            float x = area.Left + Math.Max(0f, (area.Width - w) * 0.5f);
+            float y = area.Top + Math.Max(0f, (area.Height - h) * 0.5f);
+            float pad = (3f * 2f < w && 3f * 2f < h) ? 3f : 0f;
+            float fillX = x + pad;
+            float fillY = y + pad;
+            float fillW = Math.Max(1f, w - pad * 2f);
+            float fillH = Math.Max(1f, h - pad * 2f);
+            float hpW = fillW * 0.72f;
+            int alpha = enabled ? 240 : 150;
+
+            IBrush background = GetVisualBrush(Math.Max(70, (int)(alpha * 0.86f)), 15, 15, 15, 0f);
+            IBrush border = GetVisualBrush(alpha, 0, 0, 0, 3f);
+            if (background != null) background.DrawRectangle(x, y, w, h);
+
+            int rr = enabled ? 255 : 70;
+            int gg = enabled ? 165 : 70;
+            int bb = enabled ? 35 : 70;
+            IBrush fill = GetVisualBrush(alpha, rr, gg, bb, 0f);
+            if (fill != null) fill.DrawRectangle(fillX, fillY, hpW, fillH);
+
+            if (fillH >= 5f)
+            {
+                IBrush hi = GetVisualBrush(alpha, ViClamp(rr + 45, 0, 255), ViClamp(gg + 40, 0, 255), ViClamp(bb + 35, 0, 255), 0f);
+                IBrush shade = GetVisualBrush(alpha, (int)(rr * 0.70f), (int)(gg * 0.62f), (int)(bb * 0.62f), 0f);
+                if (hi != null) hi.DrawRectangle(fillX, fillY, hpW, fillH * 0.45f);
+                if (shade != null) shade.DrawRectangle(fillX, fillY + fillH * 0.72f, hpW, fillH * 0.28f);
+            }
+
+            if (border != null) border.DrawRectangle(x, y, w, h);
+        }
+
+        private void DrawEliteCirclePreview(RectangleF area)
+        {
+            if (area.Width <= 30f || area.Height <= 12f)
+                return;
+
+            int alpha = _visEliteGroundCirclesEnabled ? 230 : 130;
+            int outlineAlpha = _visEliteGroundCirclesEnabled ? 245 : 155;
+            float thickness = ViClampF(_eliteGroundCircleThickness, 0.5f, 10.0f);
+            float outlineThickness = thickness + EliteGroundCircleOutlineExtraThickness;
+            float radiusX = Math.Min(76f, Math.Max(42f, area.Width * 0.12f));
+            float radiusY = Math.Min(24f, Math.Max(15f, area.Height * 0.38f));
+            float cy = area.Top + area.Height * 0.50f;
+
+            IBrush outline = GetVisualBrush(outlineAlpha, 0, 0, 0, outlineThickness);
+            IBrush champion = GetVisualBrush(alpha,
+                _visEliteGroundCirclesEnabled ? 70 : 80,
+                _visEliteGroundCirclesEnabled ? 140 : 80,
+                _visEliteGroundCirclesEnabled ? 255 : 80,
+                thickness);
+            IBrush rare = GetVisualBrush(alpha,
+                _visEliteGroundCirclesEnabled ? 255 : 80,
+                _visEliteGroundCirclesEnabled ? 165 : 80,
+                _visEliteGroundCirclesEnabled ? 35 : 80,
+                thickness);
+            IBrush juggernaut = GetVisualBrush(alpha,
+                _visEliteGroundCirclesEnabled ? 235 : 80,
+                _visEliteGroundCirclesEnabled ? 10 : 80,
+                _visEliteGroundCirclesEnabled ? 10 : 80,
+                thickness);
+
+            float x1 = area.Left + area.Width * 0.18f;
+            float x2 = area.Left + area.Width * 0.50f;
+            float x3 = area.Left + area.Width * 0.82f;
+
+            if (outline != null)
+            {
+                outline.DrawEllipse(x1, cy, radiusX, radiusY);
+                outline.DrawEllipse(x2, cy, radiusX, radiusY);
+                outline.DrawEllipse(x3, cy, radiusX, radiusY);
+            }
+
+            if (champion != null) champion.DrawEllipse(x1, cy, radiusX, radiusY);
+            if (rare != null) rare.DrawEllipse(x2, cy, radiusX, radiusY);
+            if (juggernaut != null) juggernaut.DrawEllipse(x3, cy, radiusX, radiusY);
+        }
+
         private void DrawSimHpBarsOptionsRow(RectangleF r, int rowIdx, bool own)
         {
             (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
@@ -9421,6 +10100,243 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 FormatVisualFloat(size),
                 "visual:size:" + feature + ":-1",
                 "visual:size:" + feature + ":+1");
+        }
+
+        private float GetPlayerCoePreviewIconSize()
+        {
+            float multiplier = ViClampF(_playerCoeSizeMultiplier, 0.20f, 1.50f);
+
+            try
+            {
+                if (_playerCoePreviewRules == null)
+                    _playerCoePreviewRules = new BuffRuleCalculator(Hud);
+
+                _playerCoePreviewRules.SizeMultiplier = multiplier;
+                float nativeSize = _playerCoePreviewRules.StandardIconSize;
+                if (nativeSize > 0f)
+                    return nativeSize;
+            }
+            catch
+            {
+            }
+
+            // Mirrors BuffRuleCalculator.StandardIconSize if the preview calculator is unavailable.
+            float screenHeight = 1080.0f;
+            try
+            {
+                if (Hud != null && Hud.Window != null && Hud.Window.Size.Height > 0f)
+                    screenHeight = Hud.Window.Size.Height;
+            }
+            catch
+            {
+            }
+
+            return 55.0f / 1200.0f * screenHeight * multiplier;
+        }
+
+        private void EnsurePlayerCoePreviewTextures()
+        {
+            try
+            {
+                if (_playerCoePreviewTextures.All(texture => texture != null))
+                    return;
+
+                ISnoPower coe = Hud != null && Hud.Sno != null ? Hud.Sno.GetSnoPower(430674) : null;
+                if (coe == null || coe.Icons == null)
+                    return;
+
+                // Representative real CoE icons: Cold, Fire, Physical, Poison.
+                int[] iconIndexes = { 2, 3, 6, 7 };
+                for (int i = 0; i < iconIndexes.Length; i++)
+                {
+                    int iconIndex = iconIndexes[i];
+                    if (_playerCoePreviewTextures[i] != null || iconIndex < 0 || iconIndex >= coe.Icons.Length)
+                        continue;
+
+                    SnoPowerIcon icon = coe.Icons[iconIndex];
+                    if (icon.Exists && icon.TextureId != 0)
+                        _playerCoePreviewTextures[i] = Hud.Texture.GetTexture(icon.TextureId);
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        private void DrawPlayerCoePreviewRow(RectangleF r, int rowIdx)
+        {
+            (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
+
+            float transparency = ViClampF(1.0f - _playerCoeOpacity, 0.0f, 0.90f);
+            float labelW = 290f;
+            RectangleF labelR = new RectangleF(r.Left + 14f, r.Top + 8f, labelW, r.Height - 16f);
+            RectangleF previewArea = new RectangleF(labelR.Right + 10f, r.Top + 1f, Math.Max(1f, r.Right - labelR.Right - 22f), r.Height - 2f);
+
+            float nativeIconSize = GetPlayerCoePreviewIconSize();
+            float maxIconSize = Math.Max(8f, Math.Min(r.Height - 1f, previewArea.Width / 4f));
+            float iconSize = Math.Min(nativeIconSize, maxIconSize);
+
+            DrawOutlinedTextAt(
+                _fRowTitle,
+                _fRowTitleShadow,
+                "Player CoE Preview",
+                labelR.Left,
+                labelR.Top);
+            DrawOutlinedTextAt(
+                _fRowText,
+                _fRowTextShadow,
+                ((int)Math.Round(transparency * 100f)).ToString(CultureInfo.InvariantCulture) + "% transparent  |  " +
+                    _playerCoeSizeMultiplier.ToString("0.00", CultureInfo.InvariantCulture) + "x size",
+                labelR.Left,
+                labelR.Top + 28f);
+
+            float totalW = iconSize * 4f;
+            float x = previewArea.Left + Math.Max(0f, (previewArea.Width - totalW) * 0.5f);
+            float y = previewArea.Top + Math.Max(0f, (previewArea.Height - iconSize) * 0.5f);
+
+            float oldCold = _bPlayerCoePreviewCold != null ? _bPlayerCoePreviewCold.Opacity : 1.0f;
+            float oldFire = _bPlayerCoePreviewFire != null ? _bPlayerCoePreviewFire.Opacity : 1.0f;
+            float oldPhysical = _bPlayerCoePreviewPhysical != null ? _bPlayerCoePreviewPhysical.Opacity : 1.0f;
+            float oldPoison = _bPlayerCoePreviewPoison != null ? _bPlayerCoePreviewPoison.Opacity : 1.0f;
+            float oldBorder = _bPlayerCoePreviewBorder != null ? _bPlayerCoePreviewBorder.Opacity : 1.0f;
+
+            try
+            {
+                float opacity = ViClampF(_playerCoeOpacity, 0.10f, 1.00f);
+                if (_bPlayerCoePreviewCold != null) _bPlayerCoePreviewCold.Opacity = opacity;
+                if (_bPlayerCoePreviewFire != null) _bPlayerCoePreviewFire.Opacity = opacity;
+                if (_bPlayerCoePreviewPhysical != null) _bPlayerCoePreviewPhysical.Opacity = opacity;
+                if (_bPlayerCoePreviewPoison != null) _bPlayerCoePreviewPoison.Opacity = opacity;
+                if (_bPlayerCoePreviewBorder != null) _bPlayerCoePreviewBorder.Opacity = opacity;
+
+                IBrush[] fills =
+                {
+                    _bPlayerCoePreviewCold,
+                    _bPlayerCoePreviewFire,
+                    _bPlayerCoePreviewPhysical,
+                    _bPlayerCoePreviewPoison,
+                };
+
+                EnsurePlayerCoePreviewTextures();
+
+                RectangleF selectedIconR = RectangleF.Empty;
+
+                for (int i = 0; i < fills.Length; i++)
+                {
+                    RectangleF iconR = new RectangleF(x + iconSize * i, y, iconSize, iconSize);
+                    ITexture texture = _playerCoePreviewTextures[i];
+                    if (texture != null)
+                        texture.Draw(iconR.Left, iconR.Top, iconR.Width, iconR.Height, opacity);
+                    else if (fills[i] != null)
+                        fills[i].DrawRectangle(iconR.Left, iconR.Top, iconR.Width, iconR.Height);
+
+                    if (_bPlayerCoePreviewBorder != null)
+                        _bPlayerCoePreviewBorder.DrawRectangle(iconR.Left, iconR.Top, iconR.Width, iconR.Height);
+
+                    if (i == 2)
+                        selectedIconR = iconR;
+                }
+
+                // Draw the selected-element outline after every icon so the next icon
+                // cannot cover the right edge of the yellow highlight.
+                if (!selectedIconR.IsEmpty && _bPlayerCoePreviewHighlight != null)
+                    _bPlayerCoePreviewHighlight.DrawRectangle(
+                        selectedIconR.Left,
+                        selectedIconR.Top,
+                        selectedIconR.Width,
+                        selectedIconR.Height);
+            }
+            finally
+            {
+                if (_bPlayerCoePreviewCold != null) _bPlayerCoePreviewCold.Opacity = oldCold;
+                if (_bPlayerCoePreviewFire != null) _bPlayerCoePreviewFire.Opacity = oldFire;
+                if (_bPlayerCoePreviewPhysical != null) _bPlayerCoePreviewPhysical.Opacity = oldPhysical;
+                if (_bPlayerCoePreviewPoison != null) _bPlayerCoePreviewPoison.Opacity = oldPoison;
+                if (_bPlayerCoePreviewBorder != null) _bPlayerCoePreviewBorder.Opacity = oldBorder;
+            }
+        }
+
+        private void DrawPlayerCoeControlsRow(RectangleF r, int rowIdx)
+        {
+            (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
+
+            const float stepW = 210f;
+            const float gap = 14f;
+            float totalW = stepW * 2f + gap;
+            float x = r.Left + Math.Max(16f, (r.Width - totalW) * 0.5f);
+            if (x + totalW > r.Right - 8f)
+                x = r.Right - totalW - 8f;
+
+            RectangleF transparencyR = new RectangleF(x, r.Top + 8f, stepW, 30f);
+            RectangleF sizeR = new RectangleF(transparencyR.Right + gap, r.Top + 8f, stepW, 30f);
+            int transparencyPercent = (int)Math.Round((1.0f - _playerCoeOpacity) * 100f);
+
+            DrawVisualStepperWide(
+                transparencyR,
+                "Transparency",
+                transparencyPercent.ToString(CultureInfo.InvariantCulture) + "%",
+                "visual:playercoe:transparency:-1",
+                "visual:playercoe:transparency:+1");
+
+            DrawVisualStepperWide(
+                sizeR,
+                "Size",
+                _playerCoeSizeMultiplier.ToString("0.00", CultureInfo.InvariantCulture) + "x",
+                "visual:playercoe:size:-1",
+                "visual:playercoe:size:+1");
+
+            int defaultTransparencyPercent = (int)Math.Round((1.0f - PlayerCoeDefaultOpacity) * 100f);
+            RectangleF defaultsR = new RectangleF(r.Left + 12f, r.Top + 45f, r.Width - 24f, 22f);
+            DrawCenteredOutlinedTextExact(
+                _fRowText,
+                _fRowTextShadow,
+                "Defaults: Transparency " + defaultTransparencyPercent.ToString(CultureInfo.InvariantCulture) +
+                    "%  |  Size " + PlayerCoeDefaultSizeMultiplier.ToString("0.00", CultureInfo.InvariantCulture) + "x",
+                defaultsR);
+        }
+
+        private void DrawPlayerCoeInstructionRow(RectangleF r, int rowIdx, string title, string description)
+        {
+            (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
+
+            float textX = r.Left + 14f;
+            float textW = Math.Max(40f, r.Width - 28f);
+            DrawOutlinedTextAt(_fRowTitle, _fRowTitleShadow, title, textX, r.Top + 8f);
+
+            string[] lines = WrapToggleDescription(description, ApproxCharsForToggleDescription(textW), 2);
+            if (lines.Length > 0) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[0], textX, r.Top + 31f);
+            if (lines.Length > 1) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[1], textX, r.Top + 49f);
+        }
+
+        private void DrawPlayerCoeHotkeyRow(RectangleF r, int rowIdx, bool elementKey)
+        {
+            (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
+
+            const float hotkeyW = 146f;
+            RectangleF hotkeyR = new RectangleF(r.Right - hotkeyW - 8f, r.Top + 8f, hotkeyW, r.Height - 16f);
+            float textX = r.Left + 14f;
+            float textW = Math.Max(40f, hotkeyR.Left - textX - 12f);
+
+            string title = elementKey ? "Highest-Damage Element" : "Add / Remove Player Overlay";
+            string description = elementKey
+                ? "Hover an element in a placed overlay and press the hotkey to mark that player's strongest damage element."
+                : "Tap the hotkey on a portrait or CoE row to add it below your hero.\nTap the source or overlay again to remove it.";
+
+            DrawOutlinedTextAt(_fRowTitle, _fRowTitleShadow, title, textX, r.Top + 8f);
+            int wrapChars = elementKey
+                ? ApproxCharsForToggleDescription(textW)
+                : ApproxCharsForWidth(Math.Max(40f, textW - 8f), 6.2f);
+            string[] lines = WrapToggleDescription(description, wrapChars, 2);
+            if (lines.Length > 0) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[0], textX, r.Top + 31f);
+            if (lines.Length > 1) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[1], textX, r.Top + 49f);
+
+            bool capture = elementKey ? _playerCoeElementHotkeyCapture : _playerCoeHotkeyCapture;
+            Key key = elementKey ? _playerCoeElementHotkey : _playerCoeHotkey;
+            string action = elementKey ? "visual:hotkey:playercoeelement" : "visual:hotkey:playercoe";
+            string label = capture ? "PRESS..." : "HOTKEY " + CaptureKeyLabel(key);
+
+            DrawGlossButton(hotkeyR, label, capture, false, true);
+            RegisterToggleHit(action, hotkeyR);
         }
 
         private void DrawPartyInspectorHotkeyRow(RectangleF r, int rowIdx)
@@ -9658,15 +10574,60 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
         private void DrawCustomVisualOptionsRow(RectangleF r, string feature, int rowIdx, int part)
         {
+            if (feature == "hudlanguage")
+            {
+                DrawHudLanguageOptionRow(r, rowIdx, part);
+                return;
+            }
+
             if (feature == "tipshelper")
             {
                 DrawTipsHelperOptionsRow(r, rowIdx, part);
                 return;
             }
 
+            if (feature == "playercoe")
+            {
+                if (part == 0)
+                    DrawPlayerCoePreviewRow(r, rowIdx);
+                else if (part == 1)
+                    DrawPlayerCoeControlsRow(r, rowIdx);
+                else if (part == 2)
+                    DrawPlayerCoeHotkeyRow(r, rowIdx, false);
+                else if (part == 3)
+                    DrawPlayerCoeInstructionRow(
+                        r,
+                        rowIdx,
+                        "Move and Place the Overlay",
+                        "Hold the placement hotkey while dragging the placed overlay. Release it where you want.");
+                else
+                    DrawPlayerCoeHotkeyRow(r, rowIdx, true);
+                return;
+            }
+
             if (feature == "partyinspector")
             {
                 DrawPartyInspectorHotkeyRow(r, rowIdx);
+                return;
+            }
+
+            if (feature == "elitehp")
+            {
+                if (part == 0)
+                    DrawEliteHpBarPreviewRow(r, rowIdx);
+                else
+                    DrawEliteHpBarControlsRow(r, rowIdx);
+                return;
+            }
+
+            if (feature == "elitecircles")
+            {
+                if (part == 0)
+                    DrawEliteGroundCircleInfoRow(r, rowIdx);
+                else if (part == 1)
+                    DrawEliteGroundCirclePreviewRow(r, rowIdx);
+                else
+                    DrawEliteGroundCircleControlsRow(r, rowIdx);
                 return;
             }
 
@@ -9795,6 +10756,13 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
 
 
+        private void DrawVisualSectionRow(RectangleF r, string title)
+        {
+            _bTitle.DrawRectangle(r.Left, r.Top, r.Width, r.Height);
+            _bPaneBorder.DrawRectangle(r.Left, r.Top, r.Width, r.Height);
+            DrawCenteredOutlinedTextExact(_fSection, _fRowTitleShadow, title, r);
+        }
+
         private void DrawToggleVisualCategory(RectangleF detail)
         {
             const float sbW = 18f;
@@ -9812,8 +10780,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             string[] feats =
             {
+                "hudlanguage",
+                "playercoe",
                 "tipshelper",
                 "dangeraffixes",
+                "elitehp",
+                "elitecircles",
                 "simhp",
                 "guardiansentry",
                 "valleyofdeath",
@@ -9831,8 +10803,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             string[] ftitles =
             {
+                "HUD Language",
+                "Player CoE Overlay",
                 "Visual Helpers",
                 "Elite/Dangerous Affix Visuals",
+                "Elite Health Bars",
+                "Elite Hitbox Circles",
                 "Simulacrum Health Bars",
                 "Guardian Sentry Circle",
                 "Valley of Death Circle",
@@ -9850,8 +10826,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             string[] fdescs =
             {
+                "Changes FreeHUD localized text. Restart HUD after selecting a language.",
+                "Movable Convention of Elements overlays for party members.\nAdjust transparency, size, placement, and damage element.",
                 "Ancient/primal alerts, globe dots, and party markers.",
                 "Enable or disable elite affix/danger visual effects.",
+                "Customize elite health-bar width and height.",
+                "Native RadiusBottom circles matching each elite health-bar color.",
                 "Small elite-style HP bars under own and party Simulacrums.",
                 "Draws Guardian Sentry turret circles.",
                 "Draws Marked for Death - Valley of Death ground circles.",
@@ -9864,13 +10844,17 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 "Animated three-ring reticle on selected monster. Adjustable color and size.",
                 "Outer ring drawn around selected monster. Adjustable color and thickness.",
                 "Draws ground circles on elite minions.",
-                "Rotating dotted circle on elites affected by Siphon Blood."
+                "Shows Siphon debuffs and the other Necro's primary target."
             };
 
             bool[] fenabled =
             {
+                true,
+                IsPlayerCoeOverlayEnabled(),
                 _visTipsHelperEnabled,
                 _visDangerousAffixVisualsEnabled,
+                IsEliteHealthBarsFeatureEnabled(),
+                IsEliteGroundCirclesFeatureEnabled(),
                 IsSimHpBarsFeatureEnabled(),
                 _visGuardianSentryEnabled,
                 _visValleyOfDeathEnabled,
@@ -9888,8 +10872,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             bool[] fexpanded =
             {
+                _hudLanguageExpanded,
+                _visPlayerCoeExpanded,
                 _visTipsHelperExpanded,
                 _visDangerousAffixVisualsExpanded,
+                _visEliteHpBarsExpanded,
+                _visEliteGroundCirclesExpanded,
                 _visSimHpBarsExpanded,
                 _visGuardianSentryExpanded,
                 _visValleyOfDeathExpanded,
@@ -9907,6 +10895,10 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             int[] fcolor =
             {
+                0,
+                0,
+                0,
+                0,
                 0,
                 0,
                 0,
@@ -9929,6 +10921,10 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 0,
                 0,
                 0,
+                0,
+                0,
+                0,
+                0,
                 _visGuardianSentryTone,
                 _visValleyOfDeathTone,
                 0,
@@ -9943,18 +10939,29 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 _visSiphonTone
             };
 
-            // Build ordered item list (favorites first)
+            // HUD Language is the only fixed VISUAL option. Every other row, including
+            // Player CoE, participates in the normal favorites ordering.
+            int languageFeatureIndex = Array.IndexOf(feats, "hudlanguage");
             var favIdx  = new List<int>();
             var mainIdx = new List<int>();
             for (int fi = 0; fi < feats.Length; fi++)
+            {
+                if (fi == languageFeatureIndex)
+                    continue;
+
                 (_visualFavorites.Contains(feats[fi]) ? favIdx : mainIdx).Add(fi);
+            }
 
             var ordered = new List<int>();
             ordered.AddRange(favIdx);
             ordered.AddRange(mainIdx);
 
-            // Count total scrollable items (fav header + feature rows + expanded options rows)
-            int totalItems = (favIdx.Count > 0 ? 1 : 0);
+            // Count fixed language rows, favorites, the favorites-end separator, and normal rows.
+            int totalItems = languageFeatureIndex >= 0 ? 1 : 0;
+            if (languageFeatureIndex >= 0 && fexpanded[languageFeatureIndex])
+                totalItems += GetCustomVisualExpandedRowCount("hudlanguage");
+            totalItems += (favIdx.Count > 0 ? 1 : 0);
+            totalItems += (favIdx.Count > 0 && mainIdx.Count > 0 ? 1 : 0);
             foreach (int fi in ordered)
             {
                 totalItems++;
@@ -9972,6 +10979,35 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             int itemIdx = 0;
             float drawY = listTop;
 
+            // Fixed first option: HUD language.
+            if (languageFeatureIndex >= 0)
+            {
+                if (itemIdx >= _visualScroll)
+                {
+                    float ry = drawY;
+                    if (ry >= clipTop && ry + VisualListSlotH <= clipBot)
+                        DrawHudLanguageFeatureRow(new RectangleF(x, ry, w, VisualListSlotH - 8f), fexpanded[languageFeatureIndex], ri);
+                    drawY += VisualListSlotH;
+                }
+                ri++;
+                itemIdx++;
+
+                if (fexpanded[languageFeatureIndex])
+                {
+                    for (int part = 0; part < GetCustomVisualExpandedRowCount("hudlanguage"); part++)
+                    {
+                        if (itemIdx >= _visualScroll)
+                        {
+                            float ry = drawY;
+                            if (ry >= clipTop && ry + VisualListSlotH <= clipBot)
+                                DrawHudLanguageOptionRow(new RectangleF(x, ry, w, VisualListSlotH - 8f), ri++, part);
+                            drawY += VisualListSlotH;
+                        }
+                        itemIdx++;
+                    }
+                }
+            }
+
             // Favorites header
             if (favIdx.Count > 0)
             {
@@ -9979,25 +11015,39 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 {
                     float ry = drawY;
                     if (ry >= clipTop && ry + 30f <= clipBot)
-                    {
-                        _bTitle.DrawRectangle(x, ry, w, 30f);
-                        _bPaneBorder.DrawRectangle(x, ry, w, 30f);
-                        _fSection.DrawText("★  Favorites", x + 12f, ry + 6f);
-                    }
+                        DrawVisualSectionRow(new RectangleF(x, ry, w, 30f), "★  FAVORITES");
                     drawY += 34f;
                 }
                 itemIdx++;
             }
 
+            int orderedPosition = 0;
             foreach (int fi in ordered)
             {
+                if (orderedPosition == favIdx.Count && favIdx.Count > 0 && mainIdx.Count > 0)
+                {
+                    if (itemIdx >= _visualScroll)
+                    {
+                        float separatorY = drawY;
+                        if (separatorY >= clipTop && separatorY + 30f <= clipBot)
+                            DrawVisualSectionRow(new RectangleF(x, separatorY, w, 30f), "OTHER VISUALS");
+                        drawY += 34f;
+                    }
+                    itemIdx++;
+                }
+
                 float rowH = VisualListSlotH;
 
                 if (itemIdx >= _visualScroll)
                 {
                     float ry = drawY;
                     if (ry >= clipTop && ry + rowH <= clipBot)
-                        DrawVisualFeatureRow(new RectangleF(x, ry, w, rowH - 8f), feats[fi], ftitles[fi], fdescs[fi], fenabled[fi], fexpanded[fi], ri);
+                    {
+                        if (feats[fi] == "hudlanguage")
+                            DrawHudLanguageFeatureRow(new RectangleF(x, ry, w, rowH - 8f), fexpanded[fi], ri);
+                        else
+                            DrawVisualFeatureRow(new RectangleF(x, ry, w, rowH - 8f), feats[fi], ftitles[fi], fdescs[fi], fenabled[fi], fexpanded[fi], ri);
+                    }
                     drawY += rowH;
                 }
                 ri++;
@@ -10073,6 +11123,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                         itemIdx++;
                     }
                 }
+
+                orderedPosition++;
             }
 
             // Edge cover + border
@@ -12569,6 +13621,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 _ttsCustomMessageHotkeyCaptureIndex = -1;
                 _zbarbAutoSnapHotkeyCapture = false;
                 _autoLootPauseHotkeyCapture = false;
+                _playerCoeHotkeyCapture = false;
+                _playerCoeElementHotkeyCapture = false;
                 _partyInspectorHotkeyCapture = false;
                 _autoSkillKeybindCaptureSlot = -1;
                 _tipsPlayerMarkerHotkeyCapture = false;
@@ -12603,6 +13657,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             _ttsCustomMessageHotkeyCaptureIndex = -1;
             _zbarbAutoSnapHotkeyCapture = false;
             _autoLootPauseHotkeyCapture = false;
+            _playerCoeHotkeyCapture = false;
+            _playerCoeElementHotkeyCapture = false;
             _partyInspectorHotkeyCapture = false;
             _autoSkillKeybindCaptureSlot = -1;
             _tipsPlayerMarkerHotkeyCapture = false;
@@ -13880,6 +14936,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             _bPrevPurpleDash = Hud.Render.CreateBrush(170, 255, 60, 255, 2.0f);
             _bPrevGrey = Hud.Render.CreateBrush(190, 150, 150, 150, 0);
             _bPrevYellow = Hud.Render.CreateBrush(220, 255, 220, 70, 0);
+            _bPlayerCoePreviewCold = Hud.Render.CreateBrush(255, 70, 155, 255, 0);
+            _bPlayerCoePreviewFire = Hud.Render.CreateBrush(255, 255, 96, 28, 0);
+            _bPlayerCoePreviewPhysical = Hud.Render.CreateBrush(255, 205, 205, 205, 0);
+            _bPlayerCoePreviewPoison = Hud.Render.CreateBrush(255, 80, 220, 90, 0);
+            _bPlayerCoePreviewBorder = Hud.Render.CreateBrush(255, 0, 0, 0, 2.0f);
+            _bPlayerCoePreviewHighlight = Hud.Render.CreateBrush(220, 255, 215, 60, 2.0f);
 
             _fTitle   = Hud.Render.CreateFont("tahoma", 10.5f, 255, 255, 225, 70, true, false, 145, 0, 0, 0, true);
             _fLabel   = Hud.Render.CreateFont("tahoma",  8.2f, 255, 215, 222, 226, false, false, 108, 0, 0, 0, true);
@@ -14468,7 +15530,13 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 x = Math.Max(0f, Math.Min(w - 1f, x));
                 y = Math.Max(0f, Math.Min(h - 1f, y));
 
-                SetCursorPos((int)Math.Round(x), (int)Math.Round(y));
+                long screenX = (long)Math.Round(x) + Hud.Window.Offset.X;
+                long screenY = (long)Math.Round(y) + Hud.Window.Offset.Y;
+                if (screenX < int.MinValue || screenX > int.MaxValue ||
+                    screenY < int.MinValue || screenY > int.MaxValue)
+                    return;
+
+                SetCursorPos((int)screenX, (int)screenY);
             }
             catch { }
         }
@@ -15975,6 +17043,17 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     _tipsPlayerMinimapDotSize.ToString(CultureInfo.InvariantCulture) + "|" +
                     _tipsBloodIsPowerTracker.ToString(CultureInfo.InvariantCulture));
 
+                lines.Add("VIS_ELITE_HEALTH_BARS=" +
+                    _visEliteHpBarsEnabled.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _visEliteHpBarsExpanded.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _eliteHpBarWidth.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _eliteHpBarHeight.ToString(CultureInfo.InvariantCulture));
+
+                lines.Add("VIS_ELITE_HITBOX_CIRCLES=" +
+                    _visEliteGroundCirclesEnabled.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _visEliteGroundCirclesExpanded.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _eliteGroundCircleThickness.ToString(CultureInfo.InvariantCulture));
+
                 lines.Add("VIS_SIMULACRUM_HP_BARS=" +
                     _visSimHpBarsEnabled.ToString(CultureInfo.InvariantCulture) + "|" +
                     _visSimHpBarsExpanded.ToString(CultureInfo.InvariantCulture) + "|" +
@@ -16013,6 +17092,13 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 lines.Add("AFFIX_BOSS_SANDMONSTER_TURRET_HAZARDS=" + _affixBossSandmonsterTurretHazards.ToString(CultureInfo.InvariantCulture));
                 lines.Add("ELITE_AFFIX_LABELS=" + _eliteAffixLabelsEnabled.ToString(CultureInfo.InvariantCulture));
                 lines.Add("DANGEROUS_MONSTER_LABELS=" + _dangerousMonsterLabelsEnabled.ToString(CultureInfo.InvariantCulture));
+                lines.Add("VIS_PLAYER_COE=" +
+                    _visPlayerCoeEnabled.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _visPlayerCoeExpanded.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _playerCoeOpacity.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _playerCoeSizeMultiplier.ToString(CultureInfo.InvariantCulture));
+                lines.Add("PLAYER_COE_HOTKEY=" + _playerCoeHotkey.ToString());
+                lines.Add("PLAYER_COE_ELEMENT_HOTKEY=" + _playerCoeElementHotkey.ToString());
                 lines.Add("VIS_PARTY_INSPECTOR_EXPANDED=" + _visPartyInspectorExpanded.ToString(CultureInfo.InvariantCulture));
                 lines.Add("PARTY_INSPECTOR_HOTKEY=" + _partyInspectorHotkey.ToString());
                 lines.Add("TIPS_PLAYER_MARKER_HOTKEY=" + _tipsPlayerMarkerHotkey.ToString());
@@ -16138,6 +17224,21 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
         }
 
 
+        private void ParsePlayerCoeVisualLine(string val)
+        {
+            string[] p = (val ?? string.Empty).Split('|');
+            if (p.Length < 4)
+                return;
+
+            _visPlayerCoeEnabled = ParseBool(p[0], _visPlayerCoeEnabled);
+            _visPlayerCoeExpanded = ParseBool(p[1], _visPlayerCoeExpanded);
+            TryParseFloat(p[2], ref _playerCoeOpacity);
+            TryParseFloat(p[3], ref _playerCoeSizeMultiplier);
+
+            _playerCoeOpacity = ViClampF(_playerCoeOpacity, 0.10f, 1.00f);
+            _playerCoeSizeMultiplier = ViClampF(_playerCoeSizeMultiplier, 0.20f, 1.50f);
+        }
+
         private void ParseTipsHelperVisualLine(string val)
         {
             string[] p = (val ?? string.Empty).Split('|');
@@ -16198,6 +17299,46 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             _tipsPlayer4Tone = ViClamp(_tipsPlayer4Tone, 0, 10);
             _tipsPlayerGroundSize = ViClampF(_tipsPlayerGroundSize, 12f, 60f);
             _tipsPlayerMinimapDotSize = ViClampF(_tipsPlayerMinimapDotSize, 3f, 14f);
+        }
+
+        private void ParseEliteHealthBarsVisualLine(string val)
+        {
+            string[] p = (val ?? string.Empty).Split('|');
+            if (p.Length < 4)
+                return;
+
+            _visEliteHpBarsEnabled = ParseBool(p[0], _visEliteHpBarsEnabled);
+            _visEliteHpBarsExpanded = ParseBool(p[1], _visEliteHpBarsExpanded);
+            TryParseFloat(p[2], ref _eliteHpBarWidth);
+            TryParseFloat(p[3], ref _eliteHpBarHeight);
+
+            // REV66-REV68 embedded circle state and thickness in this line.
+            // The new independent circle feature intentionally starts OFF, but
+            // preserve a customized legacy thickness for the user.
+            if (p.Length >= 6)
+            {
+                int thicknessIndex = p.Length >= 8 ? 7 : 5;
+                TryParseFloat(p[thicknessIndex], ref _eliteGroundCircleThickness);
+            }
+
+            _eliteHpBarWidth = ViClampF(_eliteHpBarWidth, 120.0f, 500.0f);
+            _eliteHpBarHeight = ViClampF(_eliteHpBarHeight, 8.0f, 50.0f);
+            _eliteGroundCircleThickness = ViClampF(_eliteGroundCircleThickness, 0.5f, 10.0f);
+        }
+
+        private void ParseEliteHitboxCirclesVisualLine(string val)
+        {
+            string[] p = (val ?? string.Empty).Split('|');
+            if (p.Length < 3)
+                return;
+
+            _visEliteGroundCirclesEnabled = ParseBool(
+                p[0], _visEliteGroundCirclesEnabled);
+            _visEliteGroundCirclesExpanded = ParseBool(
+                p[1], _visEliteGroundCirclesExpanded);
+            TryParseFloat(p[2], ref _eliteGroundCircleThickness);
+            _eliteGroundCircleThickness = ViClampF(
+                _eliteGroundCircleThickness, 0.5f, 10.0f);
         }
 
         private void ParseSimHpBarsVisualLine(string val)
@@ -16427,6 +17568,14 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     {
                         ParseTipsHelperVisualLine(val);
                     }
+                    else if (key == "VIS_ELITE_HEALTH_BARS")
+                    {
+                        ParseEliteHealthBarsVisualLine(val);
+                    }
+                    else if (key == "VIS_ELITE_HITBOX_CIRCLES")
+                    {
+                        ParseEliteHitboxCirclesVisualLine(val);
+                    }
                     else if (key == "VIS_SIMULACRUM_HP_BARS")
                     {
                         ParseSimHpBarsVisualLine(val);
@@ -16564,6 +17713,22 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     else if (key == "VIS_DANGEROUS_MONSTER_LABELS")
                     {
                         _dangerousMonsterLabelsEnabled = ParseBool(val, _dangerousMonsterLabelsEnabled);
+                    }
+                    else if (key == "VIS_PLAYER_COE")
+                    {
+                        ParsePlayerCoeVisualLine(val);
+                    }
+                    else if (key == "PLAYER_COE_HOTKEY")
+                    {
+                        Key k;
+                        if (Enum.TryParse<Key>(val, true, out k) && k != Key.Unknown)
+                            _playerCoeHotkey = k;
+                    }
+                    else if (key == "PLAYER_COE_ELEMENT_HOTKEY")
+                    {
+                        Key k;
+                        if (Enum.TryParse<Key>(val, true, out k) && k != Key.Unknown)
+                            _playerCoeElementHotkey = k;
                     }
                     else if (key == "VIS_PARTY_INSPECTOR_EXPANDED")
                     {
@@ -17055,6 +18220,17 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     _inventoryDropGifts = true;
                     _inventoryDropScreams = false;
                     _inventoryDropGems = false;
+                }
+
+                // Update each exact REV75 default independently. A customized value
+                // remains untouched even when the other value still used its old default.
+                if (_loadedSettingsVersion > 0 && _loadedSettingsVersion < 21)
+                {
+                    if (Math.Abs(_playerCoeOpacity - 0.72f) < 0.001f)
+                        _playerCoeOpacity = PlayerCoeDefaultOpacity;
+
+                    if (Math.Abs(_playerCoeSizeMultiplier - 0.55f) < 0.001f)
+                        _playerCoeSizeMultiplier = PlayerCoeDefaultSizeMultiplier;
                 }
 
                 try
