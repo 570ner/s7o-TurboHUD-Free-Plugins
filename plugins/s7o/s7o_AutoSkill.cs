@@ -45,6 +45,10 @@ namespace Turbo.Plugins.s7o
 
         public bool UseForceStandstillForCasts = true;
         public bool AllowBuffUpkeepInTown = true;
+        public bool AutoCloseBlockingRiftDialogs = true;
+        public ushort BlockingRiftDialogCloseVirtualKey = 0x1B; // Escape
+        public int BlockingRiftDialogStableMs = 30;
+        public int BlockingRiftDialogRetryMs = 180;
         public bool BlockLeftSkillOnSelectedClickableActor = true;
         public bool CommandSkeletonsMoveCursorToTarget = false;
         public ushort ForceStandstillVirtualKey = 0x10; // Shift
@@ -118,6 +122,8 @@ namespace Turbo.Plugins.s7o
         private int _lastActMapVisibleTick;
         private int _lastWorldMapVisibleTick;
         private int _nextBlockedLogTick;
+        private int _blockingRiftDialogVisibleSinceTick;
+        private int _nextBlockingRiftDialogCloseTick;
 
         private int _hoverSlotIndex = -1;
         private int _hoverStartTick;
@@ -141,8 +147,11 @@ namespace Turbo.Plugins.s7o
         private IBrush _dotBorderBrush;
 
         private IUiElement _chatEditLine;
+        private IUiElement _skillPaneSkillsList;
         private IUiElement _vendorMainPage;
         private IUiElement _shopMainPanel;
+        private IUiElement _conversationDialog;
+        private IUiElement _scriptedSequenceDialog;
 
         #endregion
 
@@ -265,6 +274,8 @@ namespace Turbo.Plugins.s7o
             _entryBuffBurstStartTick = 0;
             _lastActMapVisibleTick = 0;
             _lastWorldMapVisibleTick = 0;
+            _blockingRiftDialogVisibleSinceTick = 0;
+            _nextBlockingRiftDialogCloseTick = 0;
             _lastCommandSkeletonsRequestTick = 0;
             _commandSkeletonsBloodsongLotdCast = false;
             _lastBlockedReason = null;
@@ -292,8 +303,11 @@ namespace Turbo.Plugins.s7o
         private void RegisterUiElements()
         {
             _chatEditLine = RegisterOrGetUiElement("Root.NormalLayer.chatentry_dialog_backgroundScreen.chatentry_content.chat_editline");
+            _skillPaneSkillsList = RegisterOrGetUiElement("Root.NormalLayer.SkillPane_main.LayoutRoot.SkillsList");
             _vendorMainPage = RegisterOrGetUiElement("Root.NormalLayer.vendor_dialog_mainPage");
             _shopMainPanel = RegisterOrGetUiElement("Root.NormalLayer.shop_dialog_mainPage.panel");
+            _conversationDialog = RegisterOrGetUiElement("Root.NormalLayer.conversation_dialog_main");
+            _scriptedSequenceDialog = RegisterOrGetUiElement("Root.TopLayer.scripted_sequence");
         }
 
         #endregion
@@ -308,6 +322,9 @@ namespace Turbo.Plugins.s7o
             RefreshSkillCacheIfNeeded(now);
             UpdateNayrsSiphonBloodCue(now);
             UpdateHoverToggle(now);
+
+            if (HandleBlockingRiftDialog(now))
+                return;
 
             string healBlockedReason;
             if (EnableManualSlotAutoCast
@@ -379,7 +396,7 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
-            if (Hud == null || Hud.Window == null || !Hud.Window.IsForeground)
+            if (Hud == null || Hud.Window == null || !Hud.Window.IsForeground || IsSkillPaneVisible())
             {
                 ResetHoverToggle();
                 return;
@@ -464,6 +481,16 @@ namespace Turbo.Plugins.s7o
                 return false;
             }
 
+            // Keep AutoSkill quiet for the completed-GR Urshi reward phase. The gem
+            // pane already blocks casts while visible, but it can close before the
+            // town-portal animation is observable. Without this handoff guard an
+            // enabled skill can fire in that gap and cancel the portal request.
+            if (IsUrshiRewardInteractionActive())
+            {
+                reason = "urshi reward active";
+                return false;
+            }
+
             if (IsBlockingUiOpen())
             {
                 reason = "blocking ui open";
@@ -508,6 +535,9 @@ namespace Turbo.Plugins.s7o
 
         private bool IsBlockingUiOpen()
         {
+            if (IsSkillPaneVisible()) return true;
+            if (IsUiVisible(_conversationDialog)) return true;
+            if (IsUiVisible(_scriptedSequenceDialog)) return true;
             if (IsUiVisible(_chatEditLine)) return true;
             if (IsUiVisible(_vendorMainPage)) return true;
             if (IsUiVisible(_shopMainPanel)) return true;
@@ -526,6 +556,80 @@ namespace Turbo.Plugins.s7o
             }
 
             return false;
+        }
+
+        private bool HandleBlockingRiftDialog(int now)
+        {
+            bool conversationVisible = IsUiVisible(_conversationDialog);
+            bool scriptedVisible = IsUiVisible(_scriptedSequenceDialog);
+
+            if (!conversationVisible && !scriptedVisible)
+            {
+                _blockingRiftDialogVisibleSinceTick = 0;
+                _nextBlockingRiftDialogCloseTick = 0;
+                return false;
+            }
+
+            if (_blockingRiftDialogVisibleSinceTick == 0)
+                _blockingRiftDialogVisibleSinceTick = now;
+
+            if (!AutoCloseBlockingRiftDialogs ||
+                Hud == null ||
+                Hud.Game == null ||
+                Hud.Window == null ||
+                !Hud.Window.IsForeground ||
+                BlockingRiftDialogCloseVirtualKey == 0 ||
+                Hud.Game.IsLoading ||
+                Hud.Game.IsPaused ||
+                Hud.Game.IsInTown ||
+                (Hud.Game.SpecialArea != SpecialArea.Rift &&
+                 Hud.Game.SpecialArea != SpecialArea.GreaterRift) ||
+                IsUrshiRewardInteractionActive())
+            {
+                return true;
+            }
+
+            int stableMs = Math.Max(0, BlockingRiftDialogStableMs);
+            if (unchecked(now - _blockingRiftDialogVisibleSinceTick) < stableMs)
+                return true;
+
+            if (!IsTickReached(now, _nextBlockingRiftDialogCloseTick))
+                return true;
+
+            bool stillVisible = conversationVisible
+                ? IsUiVisible(_conversationDialog)
+                : IsUiVisible(_scriptedSequenceDialog);
+
+            if (!stillVisible)
+                return true;
+
+            PressKey(BlockingRiftDialogCloseVirtualKey);
+            _nextBlockingRiftDialogCloseTick = unchecked(now + Math.Max(80, BlockingRiftDialogRetryMs));
+            LogDebug("Closed blocking rift dialog: " + (conversationVisible ? "conversation" : "scripted sequence"));
+            return true;
+        }
+
+        private bool IsUrshiRewardInteractionActive()
+        {
+            if (Hud == null ||
+                Hud.Game == null ||
+                Hud.Game.SpecialArea != SpecialArea.GreaterRift ||
+                Hud.Game.RiftPercentage < 100.0d)
+            {
+                return false;
+            }
+
+            try
+            {
+                return Hud.Game.Actors.Any(actor =>
+                    actor != null &&
+                    actor.SnoActor != null &&
+                    actor.SnoActor.Sno == ActorSnoEnum._p1_lr_tieredrift_nephalem);
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private bool IsPlayerBusy()
@@ -572,6 +676,11 @@ namespace Turbo.Plugins.s7o
             }
 
             return false;
+        }
+
+        private bool IsSkillPaneVisible()
+        {
+            return IsUiVisible(_skillPaneSkillsList);
         }
 
         private bool IsUiVisible(IUiElement ui)
@@ -2205,16 +2314,8 @@ namespace Turbo.Plugins.s7o
                 if (monster.Rarity == ActorRarity.Boss)
                     return true;
 
-                var value = GetBoolProperty(monster, "IsBoss")
-                    || GetBoolProperty(monster, "Boss")
-                    || GetBoolProperty(monster, "IsRiftGuardian")
-                    || GetBoolProperty(monster, "RiftGuardian");
-
-                if (value)
-                    return true;
-
                 var sno = monster.SnoMonster;
-                return sno != null && (GetBoolProperty(sno, "IsBoss") || GetBoolProperty(sno, "Boss") || GetBoolProperty(sno, "IsRiftGuardian") || GetBoolProperty(sno, "RiftGuardian"));
+                return sno != null && sno.Priority == MonsterPriority.boss;
             }
             catch { return false; }
         }
@@ -2292,7 +2393,25 @@ namespace Turbo.Plugins.s7o
                 _commandSkeletonsRestoreY = point.Y;
                 _commandSkeletonsCursorRestoreKnown = true;
 
-                return SetCursorPos(_commandSkeletonsAimX, _commandSkeletonsAimY);
+                return MoveCommandSkeletonsCursorToClientPoint(_commandSkeletonsAimX, _commandSkeletonsAimY);
+            }
+            catch { return false; }
+        }
+
+        private bool MoveCommandSkeletonsCursorToClientPoint(int x, int y)
+        {
+            try
+            {
+                if (Hud == null || Hud.Window == null)
+                    return false;
+
+                long screenX = (long)x + Hud.Window.Offset.X;
+                long screenY = (long)y + Hud.Window.Offset.Y;
+                if (screenX < int.MinValue || screenX > int.MaxValue ||
+                    screenY < int.MinValue || screenY > int.MaxValue)
+                    return false;
+
+                return SetCursorPos((int)screenX, (int)screenY);
             }
             catch { return false; }
         }
@@ -2363,22 +2482,6 @@ namespace Turbo.Plugins.s7o
                     && !monster.Stealthed
                     && !monster.Untargetable
                     && monster.Attackable;
-            }
-            catch { return false; }
-        }
-
-        private bool GetBoolProperty(object source, string name)
-        {
-            try
-            {
-                if (source == null || string.IsNullOrEmpty(name))
-                    return false;
-
-                var prop = source.GetType().GetProperty(name);
-                if (prop == null || prop.PropertyType != typeof(bool))
-                    return false;
-
-                return (bool)prop.GetValue(source, null);
             }
             catch { return false; }
         }
@@ -2590,12 +2693,8 @@ namespace Turbo.Plugins.s7o
 
                 int x = Hud.Window.CursorX;
                 int y = Hud.Window.CursorY;
-                int left = Hud.Window.Offset.X;
-                int top = Hud.Window.Offset.Y;
-                int right = left + Hud.Window.Size.Width;
-                int bottom = top + Hud.Window.Size.Height;
-
-                return x >= left && x < right && y >= top && y < bottom;
+                return x >= 0 && x < Hud.Window.Size.Width &&
+                    y >= 0 && y < Hud.Window.Size.Height;
             }
             catch
             {
@@ -2879,7 +2978,7 @@ namespace Turbo.Plugins.s7o
             if (clipState != ClipState.BeforeClip)
                 return;
 
-            if (!Enabled || Hud == null || Hud.Window == null)
+            if (!Enabled || Hud == null || Hud.Window == null || IsSkillPaneVisible())
                 return;
 
             DrawSlotToggleMarkers();
@@ -2996,7 +3095,7 @@ namespace Turbo.Plugins.s7o
             if (!EnableClickToggle)
                 return false;
 
-            if (Hud == null || Hud.Window == null || !Hud.Window.IsForeground)
+            if (Hud == null || Hud.Window == null || !Hud.Window.IsForeground || IsSkillPaneVisible())
                 return false;
 
             int x = Hud.Window.CursorX;
