@@ -24,6 +24,22 @@ namespace Turbo.Plugins.s7o
 
         public bool HideReminderWhenPanelOpen { get; set; }
 
+        // Movable, semi-transparent party CoE overlays.
+        public bool ShowMovableCoELayers { get; set; }
+        public Key MovableCoEHotkey { get; set; }
+        public Key MovableCoEElementHotkey { get; set; }
+        public float MovableCoEOpacity { get; set; }
+        // Public sizing controls used directly by HUD Menu.
+        public float MovableCoESizeMultiplier { get; set; }
+        public float MovableCoEActiveElementScale { get; set; }
+        public bool ShowMovableCoECountdown { get; set; }
+        public float MovableCoECountdownGap { get; set; }
+        public float MovableCoEAutoYOffset { get; set; }
+        public float MovableCoELayerSpacing { get; set; }
+        public float MovableCoEDragThreshold { get; set; }
+        public int MaxMovableCoELayers { get; set; }
+        public bool HighlightMovableCoEBestElement { get; set; }
+
         public float PanelX { get; set; }
         public float PanelY { get; set; }
         public float PanelWidth { get; set; }
@@ -171,6 +187,43 @@ namespace Turbo.Plugins.s7o
         private IBrush _portraitHoverCellBrush;
         private IBrush _portraitHoverBorderBrush;
 
+        private BuffPainter _movableCoePainter;
+        private BuffRuleCalculator _movableCoeRules;
+        private IBrush _movableCoeHighlightBrush;
+        private IFont _movableCoeCountdownFont;
+        private IFont[] _movableCoeGoPulseFonts;
+
+        private const int MovableCoeGoPulseFontSteps = 7;
+        private const int MovableCoeGoPulsePeriodMs = 900;
+
+        private sealed class MovableCoeLayer
+        {
+            public string PlayerKey;
+            public bool Manual;
+            public float X;
+            public float Y;
+            public DXRectangleF Rectangle;
+            public readonly DXRectangleF[] ElementRectangles = new DXRectangleF[8];
+            public int PreferredElement;
+            public int ManualPreferredElement;
+            public int PreferredElementTick;
+            public bool PreferredElementActive;
+            public double PreferredElementCountdown;
+        }
+
+        private readonly Dictionary<string, MovableCoeLayer> _movableCoeLayers =
+            new Dictionary<string, MovableCoeLayer>();
+        private readonly List<string> _movableCoeOrder = new List<string>();
+        private bool _movableCoeHeld;
+        private bool _movableCoeStartedOnLayer;
+        private bool _movableCoeStartedOnExistingSource;
+        private bool _movableCoeMoved;
+        private string _movableCoeGestureKey;
+        private float _movableCoeStartX;
+        private float _movableCoeStartY;
+        private float _movableCoeOffsetX;
+        private float _movableCoeOffsetY;
+
         private readonly Dictionary<string, PortraitHoverPlayerStatsSnapshot> _portraitHoverStatsCache =
             new Dictionary<string, PortraitHoverPlayerStatsSnapshot>();
 
@@ -263,6 +316,20 @@ namespace Turbo.Plugins.s7o
             // Portrait counters are the default reminder style.
             ShowGemUpgradeReminder = false;
             HideReminderWhenPanelOpen = false;
+
+            ShowMovableCoELayers = true;
+            MovableCoEHotkey = Key.F2;
+            MovableCoEElementHotkey = Key.F3;
+            MovableCoEOpacity = 0.70f;
+            MovableCoESizeMultiplier = 0.75f;
+            MovableCoEActiveElementScale = 1.18f;
+            ShowMovableCoECountdown = true;
+            MovableCoECountdownGap = 2.0f;
+            MovableCoEAutoYOffset = 82.0f;
+            MovableCoELayerSpacing = 10.0f;
+            MovableCoEDragThreshold = 5.0f;
+            MaxMovableCoELayers = 4;
+            HighlightMovableCoEBestElement = true;
 
             // Expanded panel sections.
             ShowSkills = true;
@@ -417,6 +484,28 @@ namespace Turbo.Plugins.s7o
 
             // Gem icon inner accent: thin blue highlight inside the black border.
             _gemAccentBrush      = Hud.Render.CreateBrush(170,  80, 155, 255, 1.0f);
+
+            _movableCoePainter = new BuffPainter(Hud, true)
+            {
+                Opacity = MovableCoEOpacity,
+                ShowTooltips = true,
+                TimeLeftFont = Hud.Render.CreateFont("tahoma", 8.0f, 205, 255, 255, 255, true, false, 190, 0, 0, 0, true),
+            };
+            _movableCoeRules = new BuffRuleCalculator(Hud) { SizeMultiplier = MovableCoESizeMultiplier };
+            for (int i = 1; i <= 7; i++)
+                _movableCoeRules.Rules.Add(new BuffRule(430674) { IconIndex = i, MinimumIconCount = 0, DisableName = true });
+            _movableCoeHighlightBrush = Hud.Render.CreateBrush(220, 255, 215, 60, 2.0f);
+            _movableCoeCountdownFont = Hud.Render.CreateFont("tahoma", 8.5f, 245, 255, 230, 120, true, false, 220, 0, 0, 0, true);
+
+            // Cache a small font ladder once. Rendering only selects a font, so the
+            // active-element GO! pulse creates no per-frame resources.
+            _movableCoeGoPulseFonts = new IFont[MovableCoeGoPulseFontSteps];
+            for (int i = 0; i < _movableCoeGoPulseFonts.Length; i++)
+            {
+                float fontSize = 8.8f + (i * 0.2f);
+                _movableCoeGoPulseFonts[i] = Hud.Render.CreateFont(
+                    "tahoma", fontSize, 255, 255, 45, 45, true, false, 235, 0, 0, 0, true);
+            }
         }
 
         // -----------------------------------------------------------------------
@@ -425,16 +514,24 @@ namespace Turbo.Plugins.s7o
 
         public void OnKeyEvent(IKeyEvent keyEvent)
         {
-            if (ToggleKeyEvent == null || keyEvent == null)
+            if (keyEvent == null)
                 return;
 
-            if (!ToggleKeyEvent.Matches(keyEvent))
+            if ((ShowMovableCoELayers || _movableCoeHeld) && keyEvent.Key == MovableCoEHotkey)
+            {
+                if (keyEvent.IsPressed) BeginMovableCoEGesture();
+                else EndMovableCoEGesture();
                 return;
+            }
 
-            if (!keyEvent.IsPressed)
+            if (ShowMovableCoELayers && keyEvent.Key == MovableCoEElementHotkey && keyEvent.IsPressed)
+            {
+                SetMovableCoEPreferredElementFromCursor();
                 return;
+            }
 
-            ShowPanel = !ShowPanel;
+            if (ToggleKeyEvent != null && ToggleKeyEvent.Matches(keyEvent) && keyEvent.IsPressed)
+                ShowPanel = !ShowPanel;
         }
 
         // -----------------------------------------------------------------------
@@ -473,6 +570,16 @@ namespace Turbo.Plugins.s7o
             if (needsPortraitOverlay)
                 DrawPartyPortraitOverlay();
 
+            if (ShowMovableCoELayers)
+            {
+                UpdateMovableCoEDrag();
+                DrawMovableCoELayers();
+            }
+            else if (_movableCoeHeld)
+            {
+                CancelMovableCoEGesture();
+            }
+
             // Optional legacy top-center text reminder. Default is false.
             // Portrait Gem Ups counters are the primary reminder style.
             if (ShowGemUpgradeReminder && IsGemUpgradeContextActive())
@@ -483,6 +590,480 @@ namespace Turbo.Plugins.s7o
 
             if (ShowPortraitHoverStats)
                 DrawPortraitHoverStatsIfNeeded(portraitPlayers);
+        }
+
+        // -----------------------------------------------------------------------
+        // Movable party CoE overlays
+        // -----------------------------------------------------------------------
+
+        private void BeginMovableCoEGesture()
+        {
+            if (_movableCoeHeld || Hud == null || Hud.Window == null)
+                return;
+
+            _movableCoeHeld = true;
+            _movableCoeMoved = false;
+            _movableCoeStartedOnLayer = false;
+            _movableCoeStartedOnExistingSource = false;
+            _movableCoeGestureKey = null;
+            _movableCoeStartX = Hud.Window.CursorX;
+            _movableCoeStartY = Hud.Window.CursorY;
+
+            MovableCoeLayer layer;
+            if (TryGetMovableCoELayerUnderCursor(out layer))
+            {
+                _movableCoeGestureKey = layer.PlayerKey;
+                _movableCoeStartedOnLayer = true;
+                _movableCoeOffsetX = _movableCoeStartX - layer.X;
+                _movableCoeOffsetY = _movableCoeStartY - layer.Y;
+                return;
+            }
+
+            IPlayer player;
+            if (!TryGetMovableCoESourcePlayer(out player) || !PlayerHasActiveCoE(player))
+                return;
+
+            string key = GetMovableCoEPlayerKey(player);
+            if (string.IsNullOrEmpty(key))
+                return;
+
+            if (_movableCoeLayers.TryGetValue(key, out layer))
+            {
+                // A source tap toggles an existing overlay off. Mouse movement from
+                // a portrait/original CoE row is intentionally ignored; repositioning
+                // begins only from the placed overlay itself.
+                _movableCoeStartedOnExistingSource = true;
+                _movableCoeGestureKey = key;
+                return;
+            }
+
+            if (_movableCoeLayers.Count >= Math.Max(1, MaxMovableCoELayers))
+            {
+                CancelMovableCoEGesture();
+                return;
+            }
+
+            layer = new MovableCoeLayer { PlayerKey = key };
+            _movableCoeLayers[key] = layer;
+            _movableCoeOrder.Add(key);
+
+            // New overlays remain in the automatic centered-below-player layout.
+            // Cancel the gesture now so an incidental source click-and-move cannot
+            // turn into a drag.
+            CancelMovableCoEGesture();
+        }
+
+        private void UpdateMovableCoEDrag()
+        {
+            if (!_movableCoeHeld || _movableCoeStartedOnExistingSource ||
+                string.IsNullOrEmpty(_movableCoeGestureKey))
+                return;
+
+            MovableCoeLayer layer;
+            if (!_movableCoeLayers.TryGetValue(_movableCoeGestureKey, out layer))
+                return;
+
+            float cursorX = Hud.Window.CursorX;
+            float cursorY = Hud.Window.CursorY;
+            float dx = cursorX - _movableCoeStartX;
+            float dy = cursorY - _movableCoeStartY;
+            float threshold = Math.Max(1.0f, MovableCoEDragThreshold);
+            if (!_movableCoeMoved && (dx * dx) + (dy * dy) < threshold * threshold)
+                return;
+
+            _movableCoeMoved = true;
+            layer.Manual = true;
+            layer.X = cursorX - _movableCoeOffsetX;
+            layer.Y = cursorY - _movableCoeOffsetY;
+        }
+
+        private void EndMovableCoEGesture()
+        {
+            if (_movableCoeHeld && !_movableCoeMoved &&
+                (_movableCoeStartedOnLayer || _movableCoeStartedOnExistingSource))
+                RemoveMovableCoELayer(_movableCoeGestureKey);
+            CancelMovableCoEGesture();
+        }
+
+        private void CancelMovableCoEGesture()
+        {
+            _movableCoeHeld = false;
+            _movableCoeStartedOnLayer = false;
+            _movableCoeStartedOnExistingSource = false;
+            _movableCoeMoved = false;
+            _movableCoeGestureKey = null;
+        }
+
+        private void RemoveMovableCoELayer(string key)
+        {
+            if (string.IsNullOrEmpty(key)) return;
+            _movableCoeLayers.Remove(key);
+            _movableCoeOrder.Remove(key);
+        }
+
+        private bool TryGetMovableCoELayerUnderCursor(out MovableCoeLayer layer)
+        {
+            for (int i = _movableCoeOrder.Count - 1; i >= 0; i--)
+            {
+                if (!_movableCoeLayers.TryGetValue(_movableCoeOrder[i], out layer)) continue;
+                DXRectangleF r = layer.Rectangle;
+                if (r.Width > 0 && r.Height > 0 && Hud.Window.CursorInsideRect(r.X, r.Y, r.Width, r.Height))
+                    return true;
+            }
+            layer = null;
+            return false;
+        }
+
+        private bool TryGetMovableCoESourcePlayer(out IPlayer player)
+        {
+            List<IPlayer> players = GetPartyPlayers();
+            for (int i = players.Count - 1; i >= 0; i--)
+            {
+                IPlayer candidate = players[i];
+                if (candidate == null || candidate.PortraitUiElement == null) continue;
+
+                System.Drawing.RectangleF r = candidate.PortraitUiElement.Rectangle;
+                if (r.Width <= 0 || r.Height <= 0) continue;
+                if (Hud.Window.CursorInsideRect(r.X, r.Y, r.Width, r.Height))
+                {
+                    player = candidate;
+                    return true;
+                }
+
+                float size = GetMovableCoEIconSize();
+                if (Hud.Window.CursorInsideRect(r.Right, r.Top + r.Height * 0.51f - size * 0.2f,
+                    EstimateMovableCoEWidth(candidate), size * 1.4f))
+                {
+                    player = candidate;
+                    return true;
+                }
+            }
+            player = null;
+            return false;
+        }
+
+        private void DrawMovableCoELayers()
+        {
+            if (_movableCoePainter == null || _movableCoeRules == null)
+                return;
+
+            // Apply live public settings before layout so a later HUD Menu binding updates immediately.
+            _movableCoeRules.SizeMultiplier = Math.Max(0.20f, Math.Min(1.50f, MovableCoESizeMultiplier));
+
+            var players = new Dictionary<string, IPlayer>();
+            foreach (IPlayer player in GetPartyPlayers())
+            {
+                string key = GetMovableCoEPlayerKey(player);
+                if (!string.IsNullOrEmpty(key)) players[key] = player;
+            }
+
+            for (int i = _movableCoeOrder.Count - 1; i >= 0; i--)
+                if (!players.ContainsKey(_movableCoeOrder[i])) RemoveMovableCoELayer(_movableCoeOrder[i]);
+
+            var automatic = _movableCoeOrder
+                .Where(k => _movableCoeLayers.ContainsKey(k) && !_movableCoeLayers[k].Manual && players.ContainsKey(k))
+                .Select(k => _movableCoeLayers[k]).ToList();
+            LayoutAutomaticMovableCoELayers(automatic, players);
+
+            foreach (string key in _movableCoeOrder.ToList())
+            {
+                MovableCoeLayer layer;
+                IPlayer player;
+                if (_movableCoeLayers.TryGetValue(key, out layer) && players.TryGetValue(key, out player))
+                    DrawMovableCoELayer(player, layer);
+            }
+        }
+
+        private void LayoutAutomaticMovableCoELayers(List<MovableCoeLayer> layers, Dictionary<string, IPlayer> players)
+        {
+            if (layers.Count == 0) return;
+
+            float centerX = Hud.Window.Size.Width * 0.5f;
+            float centerY = Hud.Window.Size.Height * 0.5f;
+            try
+            {
+                var screen = Hud.Game.Me.FloorCoordinate.ToScreenCoordinate(true, true);
+                if (screen != null) { centerX = screen.X; centerY = screen.Y; }
+            }
+            catch { }
+
+            float spacing = Math.Max(0, MovableCoELayerSpacing);
+            float totalWidth = spacing * Math.Max(0, layers.Count - 1);
+            foreach (MovableCoeLayer layer in layers)
+                totalWidth += EstimateMovableCoEWidth(players[layer.PlayerKey]);
+
+            float x = centerX - totalWidth * 0.5f;
+            foreach (MovableCoeLayer layer in layers)
+            {
+                IPlayer player = players[layer.PlayerKey];
+                layer.X = x;
+                layer.Y = centerY + MovableCoEAutoYOffset;
+                x += EstimateMovableCoEWidth(player) + spacing;
+            }
+        }
+
+        private void DrawMovableCoELayer(IPlayer player, MovableCoeLayer layer)
+        {
+            if (!PrepareMovableCoEPaintInfo(player, layer))
+            {
+                layer.Rectangle = new DXRectangleF();
+                return;
+            }
+
+            _movableCoePainter.Opacity = Math.Max(0.1f, Math.Min(1.0f, MovableCoEOpacity));
+            float standardSize = _movableCoeRules.StandardIconSize;
+            float width = 0;
+            float height = standardSize;
+            for (int i = 0; i < layer.ElementRectangles.Length; i++)
+                layer.ElementRectangles[i] = new DXRectangleF();
+
+            float x = layer.X;
+            foreach (var info in _movableCoeRules.PaintInfoList)
+            {
+                float y = layer.Y + (standardSize - info.Size) * 0.5f;
+                int element = info.Rule.IconIndex.GetValueOrDefault();
+                if (element > 0 && element < layer.ElementRectangles.Length)
+                    layer.ElementRectangles[element] = new DXRectangleF(x, y, info.Size, info.Size);
+                width += info.Size;
+                height = Math.Max(height, info.Size);
+                x += info.Size;
+            }
+
+            layer.Rectangle = new DXRectangleF(layer.X, layer.Y - (height - standardSize) * 0.5f, width, height);
+            _movableCoePainter.PaintHorizontal(_movableCoeRules.PaintInfoList, layer.X, layer.Y, standardSize, 0);
+
+            if (layer.PreferredElement <= 0 || layer.PreferredElement >= layer.ElementRectangles.Length) return;
+            DXRectangleF r = layer.ElementRectangles[layer.PreferredElement];
+            if (r.Width <= 0 || r.Height <= 0) return;
+
+            if (HighlightMovableCoEBestElement && _movableCoeHighlightBrush != null)
+                _movableCoeHighlightBrush.DrawRectangle(r.X, r.Y, r.Width, r.Height);
+
+            DrawMovableCoECountdown(layer, r);
+        }
+
+        private void DrawMovableCoECountdown(MovableCoeLayer layer, DXRectangleF preferredRect)
+        {
+            if (!ShowMovableCoECountdown || layer == null) return;
+
+            bool active = layer.PreferredElementActive;
+            IFont font = active ? GetMovableCoeGoPulseFont() : _movableCoeCountdownFont;
+            if (font == null) return;
+
+            string text = active
+                ? "GO!"
+                : Math.Max(0.0d, Math.Ceiling(layer.PreferredElementCountdown)).ToString("F0", CultureInfo.InvariantCulture);
+
+            var textLayout = font.GetTextLayout(text);
+            float x = preferredRect.X + ((preferredRect.Width - textLayout.Metrics.Width) * 0.5f);
+            float y = preferredRect.Y - textLayout.Metrics.Height - Math.Max(0.0f, MovableCoECountdownGap);
+            font.DrawText(textLayout, x, y);
+        }
+
+        private IFont GetMovableCoeGoPulseFont()
+        {
+            if (_movableCoeGoPulseFonts == null || _movableCoeGoPulseFonts.Length == 0)
+                return null;
+
+            int now = Environment.TickCount & int.MaxValue;
+            double phase = (now % MovableCoeGoPulsePeriodMs) / (double)MovableCoeGoPulsePeriodMs;
+            double pulse = 0.5d - (0.5d * Math.Cos(phase * Math.PI * 2.0d));
+            int index = (int)Math.Round(pulse * (_movableCoeGoPulseFonts.Length - 1));
+
+            if (index < 0) index = 0;
+            if (index >= _movableCoeGoPulseFonts.Length) index = _movableCoeGoPulseFonts.Length - 1;
+            return _movableCoeGoPulseFonts[index];
+        }
+
+        private bool PrepareMovableCoEPaintInfo(IPlayer player, MovableCoeLayer layer)
+        {
+            if (!PlayerHasActiveCoE(player)) return false;
+            _movableCoeRules.CalculatePaintInfo(player, GetMovableCoERules(player.HeroClassDefinition.HeroClass));
+            if (_movableCoeRules.PaintInfoList.Count == 0 || !_movableCoeRules.PaintInfoList.Any(i => i.TimeLeft > 0)) return false;
+
+            for (int i = 0; i < _movableCoeRules.PaintInfoList.Count; i++)
+            {
+                var info = _movableCoeRules.PaintInfoList[0];
+                if (info.TimeLeft > 0) break;
+                _movableCoeRules.PaintInfoList.RemoveAt(0);
+                _movableCoeRules.PaintInfoList.Add(info);
+            }
+
+            int tick = GetCurrentGameTickSafe();
+            if (layer.ManualPreferredElement > 0)
+            {
+                layer.PreferredElement = layer.ManualPreferredElement;
+            }
+            else if (layer.PreferredElementTick == 0 || tick <= 0 || tick - layer.PreferredElementTick >= 60)
+            {
+                layer.PreferredElement = GetPreferredMovableCoEElement(player);
+                layer.PreferredElementTick = tick;
+            }
+
+            layer.PreferredElementActive = false;
+            layer.PreferredElementCountdown = 0.0d;
+            double activeTimeLeft = Math.Max(0.0d, _movableCoeRules.PaintInfoList[0].TimeLeft);
+
+            for (int i = 0; i < _movableCoeRules.PaintInfoList.Count; i++)
+            {
+                var info = _movableCoeRules.PaintInfoList[i];
+                bool preferred = info.Rule.IconIndex.GetValueOrDefault() == layer.PreferredElement;
+                info.TimeLeftNumbersOverride = false;
+                if (!preferred) continue;
+
+                layer.PreferredElementActive = i == 0;
+                layer.PreferredElementCountdown = i == 0
+                    ? 0.0d
+                    : ((i - 1) * 4.0d) + activeTimeLeft;
+
+                if (layer.PreferredElementActive && HighlightMovableCoEBestElement)
+                    info.Size *= Math.Max(1.0f, Math.Min(1.75f, MovableCoEActiveElementScale));
+            }
+            return true;
+        }
+
+        private IEnumerable<BuffRule> GetMovableCoERules(HeroClass heroClass)
+        {
+            for (int i = 1; i <= 7; i++)
+            {
+                if ((heroClass == HeroClass.Barbarian || heroClass == HeroClass.DemonHunter) && (i == 1 || i == 4 || i == 7)) continue;
+                if (heroClass == HeroClass.Crusader && (i == 1 || i == 2 || i == 7)) continue;
+                if (heroClass == HeroClass.Monk && (i == 1 || i == 7)) continue;
+                if (heroClass == HeroClass.Necromancer && (i == 1 || i == 3 || i == 4 || i == 5)) continue;
+                if (heroClass == HeroClass.WitchDoctor && (i == 1 || i == 4 || i == 5)) continue;
+                if (heroClass == HeroClass.Wizard && (i == 4 || i == 6 || i == 7)) continue;
+                yield return _movableCoeRules.Rules[i - 1];
+            }
+        }
+
+        private bool PlayerHasActiveCoE(IPlayer player)
+        {
+            try
+            {
+                IBuff buff = player.Powers.GetBuff(430674);
+                return buff != null && buff.IconCounts != null && buff.IconCounts.Length > 0 && buff.IconCounts[0] > 0;
+            }
+            catch { return false; }
+        }
+
+        private float GetMovableCoEIconSize()
+        {
+            return _movableCoeRules != null && _movableCoeRules.StandardIconSize > 0 ? _movableCoeRules.StandardIconSize : 28.0f;
+        }
+
+        private float EstimateMovableCoEWidth(IPlayer player)
+        {
+            int count = 4;
+            try { count = GetMovableCoERules(player.HeroClassDefinition.HeroClass).Count(); } catch { }
+            return GetMovableCoEIconSize() * (Math.Max(1, count) + 0.35f);
+        }
+
+        private string GetMovableCoEPlayerKey(IPlayer player)
+        {
+            if (player == null) return string.Empty;
+            try { if (player.HeroId != 0) return "hero:" + player.HeroId.ToString(CultureInfo.InvariantCulture); } catch { }
+            try { if (!string.IsNullOrEmpty(player.BattleTagAbovePortrait)) return "battle:" + player.BattleTagAbovePortrait; } catch { }
+            try { return "portrait:" + player.PortraitIndex.ToString(CultureInfo.InvariantCulture); } catch { return string.Empty; }
+        }
+
+        private void SetMovableCoEPreferredElementFromCursor()
+        {
+            if (Hud == null || Hud.Window == null) return;
+
+            for (int i = _movableCoeOrder.Count - 1; i >= 0; i--)
+            {
+                MovableCoeLayer layer;
+                if (!_movableCoeLayers.TryGetValue(_movableCoeOrder[i], out layer)) continue;
+
+                for (int element = 1; element < layer.ElementRectangles.Length; element++)
+                {
+                    DXRectangleF r = layer.ElementRectangles[element];
+                    if (r.Width > 0 && r.Height > 0 && Hud.Window.CursorInsideRect(r.X, r.Y, r.Width, r.Height))
+                    {
+                        layer.ManualPreferredElement = element;
+                        layer.PreferredElement = element;
+                        return;
+                    }
+                }
+            }
+        }
+
+        private int GetPreferredMovableCoEElement(IPlayer player)
+        {
+            if (player == null || player.Offense == null) return 0;
+
+            double[] bonus = new double[8];
+            try
+            {
+                bonus[1] = player.Offense.BonusToArcane;
+                bonus[2] = player.Offense.BonusToCold;
+                bonus[3] = player.Offense.BonusToFire;
+                bonus[4] = player.Offense.BonusToHoly;
+                bonus[5] = player.Offense.BonusToLightning;
+                bonus[6] = player.Offense.BonusToPhysical;
+                bonus[7] = player.Offense.BonusToPoison;
+            }
+            catch { return 0; }
+
+            var allowed = new HashSet<int>();
+            foreach (BuffRule rule in GetMovableCoERules(player.HeroClassDefinition.HeroClass))
+            {
+                if (rule.IconIndex.HasValue)
+                    allowed.Add(rule.IconIndex.Value);
+            }
+
+            double highest = allowed.Count > 0 ? allowed.Max(e => bonus[e]) : 0;
+            var tied = allowed.Where(e => Math.Abs(bonus[e] - highest) < 0.0001).ToList();
+            if (highest > 0 && tied.Count == 1) return tied[0];
+
+            IEnumerable<int> skillCandidates = allowed;
+            if (tied.Count > 1)
+                skillCandidates = tied;
+
+            int skillElement = GetMostLikelyMovableCoESkillElement(player, skillCandidates);
+            if (skillElement > 0) return skillElement;
+            return highest > 0 && tied.Count > 0 ? tied[0] : 0;
+        }
+
+        private int GetMostLikelyMovableCoESkillElement(IPlayer player, IEnumerable<int> candidates)
+        {
+            if (player == null || player.Powers == null || player.Powers.SkillSlots == null) return 0;
+
+            var allowed = new HashSet<int>(candidates ?? Enumerable.Empty<int>());
+            int[] counts = new int[8];
+            var order = new List<int>();
+            try
+            {
+                foreach (IPlayerSkill skill in player.Powers.SkillSlots)
+                {
+                    if (skill == null) continue;
+                    int element = MapSkillElementToCoE(skill.ElementalType);
+                    if (element <= 0 || (allowed.Count > 0 && !allowed.Contains(element))) continue;
+                    if (counts[element] == 0) order.Add(element);
+                    counts[element]++;
+                }
+            }
+            catch { return 0; }
+
+            int best = 0;
+            foreach (int element in order)
+                if (best == 0 || counts[element] > counts[best]) best = element;
+            return best;
+        }
+
+        private int MapSkillElementToCoE(int elementalType)
+        {
+            switch (elementalType)
+            {
+                case 0: return 6; // Physical
+                case 1: return 3; // Fire
+                case 2: return 5; // Lightning
+                case 3: return 2; // Cold
+                case 4: return 7; // Poison
+                case 5: return 1; // Arcane
+                case 6: return 4; // Holy
+                default: return 0;
+            }
         }
 
         // -----------------------------------------------------------------------
