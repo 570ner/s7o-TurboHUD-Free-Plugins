@@ -8,7 +8,8 @@ using Turbo.Plugins.Default;
 
 namespace Turbo.Plugins.s7o
 {
-    // Inarius RGK helper: AutoSnap, selected-target rings, and Siphon Blood Power Shift automation.
+    // Inarius RGK helper: range-gated AutoSnap, selected-target rings, and Siphon Blood Power Shift automation.
+    // REV37 ports the proven cursor, multi-monitor, dead-target handoff, and remote-primary coordination fixes.
     public class s7o_Inarius_RGK : BasePlugin, IAfterCollectHandler, INewAreaHandler, IInGameWorldPainter
     {
         private const uint InariusSetSno = 740281;
@@ -23,6 +24,8 @@ namespace Turbo.Plugins.s7o
         public bool AutoSiphonEnabled = true;
         public bool LateRefreshAssist = true;
         public bool PrioritizeDebuffedElites = true;
+        public bool RemoteNecromancerTargetAssist = true;
+        public bool ShowRemoteSiphonPrimaryTargetRing = false;
         public bool AggressiveScanMode = false;
         public bool IncludeTrashTargets = true;
         public bool RestoreCursorOnReleaseOrMove = true;
@@ -68,9 +71,15 @@ namespace Turbo.Plugins.s7o
         private const int VerifiedHoverRetryIntervalTicks = 2;
         private const int VerifiedHoverMaxRetries = 4;
         private const int RecentLeaderPriorityLatchTicks = 6;
+        private const float InariusEngagementFocusBaseBonus = 8000f;
+        private const float InariusEngagementFocusDurationBonusMax = 5000f;
+        private const int EngagementFocusDurationRampTicks = 360;
+        private const int EngagementFocusLingerTicks = 120;
+        private const int RemoteSiphonTargetConfirmSamples = 2;
+        private const int RemoteSiphonTargetLingerTicks = 30;
+        private const int DeadTargetHandoffTicks = 1;
         private const int LeaderReacquireWindowTicks = 30;
         private const int CursorRestoreShortEngageTicks = 120; // HUD_MENU AutoSnap restore window (~2s at 60 tps)
-        private const int DeadTargetRestoreAnchorTicks = 180;
         private const float CursorRestoreMinMovePxSq = 16f;
         private const float InariusTargetRangeLeewayYards = 0.0f;
         private const float InariusHardTargetRangeYards = 17.0f;
@@ -108,6 +117,7 @@ namespace Turbo.Plugins.s7o
         private const double InariusPriorityTrashMinProgression = 0.70d;
         private const double InariusPriorityTrashMinGap = 0.30d;
         private const float InariusLastBlueEliteBonus = 22000f;
+        private static readonly uint[] IdentityAttributeModifiers = { 0u, 0xFFFFFu, 0xFFFFFFFFu, 2147483647u };
 
         private const int AdaptiveBinCount = 8;
         private const int AdaptiveCandidateCapacity = 128;
@@ -264,13 +274,12 @@ namespace Turbo.Plugins.s7o
         private bool _cursorOwned;
         private bool _cursorWasMovedByPlugin;
         private bool _haveSavedCursor;
+        private bool _cursorRestoreSuppressedForEngagement;
         private float _savedCursorX;
         private float _savedCursorY;
         private int _engageStartTick;
-        private uint _targetRestoreAnchorAcdId;
-        private float _targetRestoreAnchorX;
-        private float _targetRestoreAnchorY;
-        private int _targetRestoreAnchorTick;
+        private uint _cursorRestoreSegmentTargetAcdId;
+        private bool _cursorRestoreSegmentLongHoldEligible;
         private uint _lastHoverAcdId;
         private int _lastHoverTick;
         private float _lastHoverDx;
@@ -335,6 +344,15 @@ namespace Turbo.Plugins.s7o
         private uint _lastPassiveHoverCaptureAcdId;
         private uint _recentPriorityLeaderAcdId;
         private int _recentPriorityLeaderUntilTick;
+        private uint _engagementFocusAcdId;
+        private int _engagementFocusStartTick;
+        private int _engagementFocusUntilTick;
+        private uint _remoteSiphonCandidateAcdId;
+        private int _remoteSiphonCandidateSamples;
+        private uint _remoteSiphonTargetAcdId;
+        private int _remoteSiphonTargetUntilTick;
+        private int _siphonAffectedTargetCount;
+        private int _deadTargetHandoffUntilTick;
 
         private uint _solverProfileAcd;
         private float _solverOccLeft, _solverOccRight, _solverOccUp, _solverOccDown;
@@ -396,6 +414,8 @@ namespace Turbo.Plugins.s7o
         private IBrush _inariusLockReticleInRangeBrush;
         private IBrush _inariusLockReticleToleranceBrush;
         private IBrush _inariusLockReticleOutOfRangeBrush;
+        private IBrush _remoteSiphonPrimaryBrush;
+        private IBrush _remoteSiphonPrimaryOutlineBrush;
         private uint _targetSwitchRefreshAcdId;
         private bool _lateRefreshIntentActive;
         private bool _lateRefreshIntentFromEngage;
@@ -462,6 +482,8 @@ namespace Turbo.Plugins.s7o
                 _inariusLockReticleInRangeBrush = Hud.Render.CreateBrush(235, 40, 255, 80, 1.45f);
                 _inariusLockReticleToleranceBrush = Hud.Render.CreateBrush(235, 255, 145, 25, 1.45f);
                 _inariusLockReticleOutOfRangeBrush = Hud.Render.CreateBrush(235, 255, 45, 35, 1.45f);
+                _remoteSiphonPrimaryOutlineBrush = Hud.Render.CreateBrush(245, 0, 0, 0, 4.8f);
+                _remoteSiphonPrimaryBrush = Hud.Render.CreateBrush(250, 255, 35, 35, 3.5f);
             }
             catch { }
         }
@@ -543,35 +565,54 @@ namespace Turbo.Plugins.s7o
                 if (DetectStaleSessionReset(tick))
                     return;
 
-                ProcessPendingCursorRestore(tick);
-                UpdatePlayerMotionState(tick);
-                UpdatePassiveEliteHoverCache(tick);
-                ClearDeadTargetState(tick);
-
                 if (!ResolveSkillKeys())
                 {
-                    QueueCursorRestore(tick);
-                    ProcessPendingCursorRestore(tick);
+                    ReleaseCursorOwnershipWithoutRestore();
                     ResetRuntime(true);
                     return;
                 }
 
-                bool releaseWasPulseActive = _pulseActive || _standstillOwned;
-                TickPulseReleaseIfNeeded(tick);
-
                 bool lanceHeld = IsActionPhysicallyDown(_lanceKey);
                 ProcessJuggerHotkey(tick);
-                if (lanceHeld)
-                    RefreshManualEliteLock(tick);
-                bool freshManualEngagement = lanceHeld && !_lanceWasDown;
+
+                // Keep the passive red remote-primary ring current even when local
+                // AutoSnap is idle. Active target acquisition refreshes the same state.
+                if (ShowRemoteSiphonPrimaryTargetRing && (!lanceHeld || !AutoSnapEnabled))
+                    RefreshTargetCoordinationState(tick, CaptureAliveMonsters());
+
+                // Release is the highest-priority edge. Do not run movement, dead-target
+                // cleanup, or another target pass before returning cursor ownership.
+                if (!lanceHeld)
+                {
+                    bool engagementActive = _lanceWasDown || _cursorOwned || _pulseActive
+                        || _standstillOwned || _openingSiphonPending || _openingSiphonHandoffPending;
+                    if (engagementActive)
+                        DisengageOnLanceRelease(tick);
+                    else
+                    {
+                        UpdatePassiveEliteHoverCache(tick);
+                        ClearDeadTargetState(tick);
+                    }
+                    return;
+                }
+
+                UpdatePlayerMotionState(tick);
+                UpdatePassiveEliteHoverCache(tick);
+                ClearDeadTargetState(tick);
+                TickPulseReleaseIfNeeded(tick);
+                RefreshManualEliteLock(tick);
+
+                bool freshManualEngagement = !_lanceWasDown;
                 bool openingMovementIntentAtPress = IsMovementDisengageActive() || IsPlayerRunning();
                 bool movedIntoEngagement = freshManualEngagement && _reengageAfterMovementPending;
                 if (freshManualEngagement)
                 {
+                    _cursorRestoreSuppressedForEngagement = false;
                     _movementEscapeLatched = false;
                     _reengageAfterMovementPending = false;
                     _movementDisengageUntilTick = 0;
                     _manualCursorOverrideUntilTick = 0;
+                    CaptureFreshManualEngagementFocus(tick);
                     _openingSiphonPending = true;
                     _openingSiphonExpireTick = tick + OpeningSiphonRetryWindowTicks;
                     _openingSiphonHandoffPending = false;
@@ -579,14 +620,14 @@ namespace Turbo.Plugins.s7o
                     RefreshCursorRestoreWindowForFreshEngagement(tick);
                 }
 
-                if (!lanceHeld)
-                {
-                    DisengageOnLanceRelease(tick, IsMovementDisengageActive(), releaseWasPulseActive);
-                    return;
-                }
-
                 bool newLanceEngagement = freshManualEngagement;
                 _lanceWasDown = true;
+
+                if (tick < _deadTargetHandoffUntilTick)
+                {
+                    CancelForcedAutosnap();
+                    return;
+                }
 
                 if (_openingSiphonPending)
                 {
@@ -735,11 +776,8 @@ namespace Turbo.Plugins.s7o
                 if (!IsAliveTarget(siphonTarget))
                     siphonTarget = GetManualSiphonTargetFallback();
 
-                if (!IsAliveTarget(target) && !IsAliveTarget(siphonTarget) && AnyEliteOrMinionCandidateExists() )
-                {
-                    QueueCursorRestore(tick);
-                    ProcessPendingCursorRestore(tick);
-                }
+                if (!IsAliveTarget(target) && !IsAliveTarget(siphonTarget) && AnyEliteOrMinionCandidateExists())
+                    CancelForcedAutosnap();
 
                 RunAutoSiphon(tick, siphonTarget, newLanceEngagement);
 
@@ -758,9 +796,8 @@ namespace Turbo.Plugins.s7o
             StopPulseNow();
             CancelForcedAutosnap();
 
-            if (!TryRestoreCursorImmediately(tick, true))
-                ReleaseCursorOwnershipWithoutRestore();
-
+            // Running can be caused by the cursor position AutoSnap currently owns.
+            // Preserve the original restore point until physical Lance release.
             _lastPluginCursorX = 0f;
             _lastPluginCursorY = 0f;
             _lastPluginCursorMoveTick = 0;
@@ -770,7 +807,7 @@ namespace Turbo.Plugins.s7o
         {
             StopPulseNow();
             CancelForcedAutosnap();
-            ReleaseCursorOwnershipWithoutRestore();
+            SuppressCursorRestoreForEngagement();
             _lastPluginCursorX = 0f;
             _lastPluginCursorY = 0f;
             _lastPluginCursorMoveTick = 0;
@@ -811,6 +848,14 @@ namespace Turbo.Plugins.s7o
             if (IsInariusImmediateReengageTarget(target))
                 return target;
 
+            target = GetConfirmedRemoteSiphonPrimaryTarget(SafeGameTick());
+            if (IsInariusImmediateReengageTarget(target))
+                return target;
+
+            target = GetEngagementFocusTarget(SafeGameTick());
+            if (IsInariusImmediateReengageTarget(target))
+                return target;
+
             target = FindAliveMonsterByAcdId(_lockedTargetAcdId);
             if (IsInariusImmediateReengageTarget(target))
                 return target;
@@ -845,26 +890,13 @@ namespace Turbo.Plugins.s7o
             return IsLeader(monster) || IsEliteMinionLike(monster);
         }
 
-        private void DisengageOnLanceRelease(int tick, bool movementDisengageActive, bool pulseWasActiveAtStart)
+        private void DisengageOnLanceRelease(int tick)
         {
-            bool movementRelease = movementDisengageActive || _movementEscapeLatched;
-            bool escapeRelease = movementRelease || pulseWasActiveAtStart || _pulseActive || _standstillOwned || tick <= _movementDisengageUntilTick;
-
-            if (movementRelease)
-                _reengageAfterMovementPending = true;
-
             StopPulseNow();
 
-            if (escapeRelease)
-            {
-                TryRestoreCursorImmediately(tick, true);
-            }
-            else
-            {
-                QueueCursorRestore(tick);
-                ProcessPendingCursorRestore(tick);
-            }
-
+            // Brief presses restore immediately. Long elite-target holds stay parked,
+            // and all owned input/cursor state is cleared before this collection returns.
+            TryRestoreCursorImmediately(tick);
             ResetRuntime(false);
         }
 
@@ -884,8 +916,7 @@ namespace Turbo.Plugins.s7o
                 _postEliteClearPauseUntilTick = Math.Max(_postEliteClearPauseUntilTick, tick + MsToTicks(PostEliteClearPauseMs));
                 ClearAutosnapLockState();
                 StopPulseNow();
-                QueueCursorRestore(tick);
-                ProcessPendingCursorRestore(tick);
+                CancelForcedAutosnap();
             }
 
             _lastLiveLeaderCount = liveLeaders;
@@ -895,8 +926,7 @@ namespace Turbo.Plugins.s7o
 
             ClearAutosnapLockState();
             ReleaseStandstillIfOwned();
-            QueueCursorRestore(tick);
-            ProcessPendingCursorRestore(tick);
+            CancelForcedAutosnap();
             return true;
         }
 
@@ -982,6 +1012,7 @@ namespace Turbo.Plugins.s7o
             catch { }
 
             try { DrawInariusRangeIndicator(); } catch { }
+            try { DrawRemoteSiphonPrimaryTargetRing(); } catch { }
 
             IMonster locked = GetManualJuggerLockTarget();
             if (!IsAliveTarget(locked) || locked.FloorCoordinate == null)
@@ -1132,6 +1163,40 @@ namespace Turbo.Plugins.s7o
             catch { return false; }
 
             return true;
+        }
+
+        private void DrawRemoteSiphonPrimaryTargetRing()
+        {
+            if (!ShowRemoteSiphonPrimaryTargetRing || Hud == null || Hud.Game == null)
+                return;
+
+            int tick = SafeGameTick();
+            IMonster target = GetConfirmedRemoteSiphonPrimaryTarget(tick);
+            if (!IsAliveTarget(target) || target.FloorCoordinate == null)
+                return;
+
+            float pulse = (float)Math.Sin(tick * 0.22f) * 2.2f;
+            DrawDottedScreenEllipse(target.FloorCoordinate, 58f + pulse, 18, tick * 0.50f, 3.9f);
+            DrawDottedScreenEllipse(target.FloorCoordinate, 70f - pulse * 0.35f, 22, -tick * 0.38f, 3.5f);
+        }
+
+        private void DrawDottedScreenEllipse(IWorldCoordinate center, float radius, int dots, float rotation, float dotRadius)
+        {
+            if (center == null || dots <= 0 || _remoteSiphonPrimaryBrush == null)
+                return;
+
+            IScreenCoordinate screen = center.ToScreenCoordinate();
+            for (int i = 0; i < dots; i++)
+            {
+                float angle = rotation + (float)(Math.PI * 2.0d * i / dots);
+                float x = screen.X + (float)Math.Cos(angle) * radius;
+                float y = screen.Y + (float)Math.Sin(angle) * radius * 0.74f;
+
+                if (_remoteSiphonPrimaryOutlineBrush != null)
+                    _remoteSiphonPrimaryOutlineBrush.DrawEllipse(x, y, dotRadius + 2.0f, dotRadius + 2.0f);
+
+                _remoteSiphonPrimaryBrush.DrawEllipse(x, y, dotRadius, dotRadius);
+            }
         }
 
         private void DrawWorldCircle(IWorldCoordinate center, float radius, IBrush brush)
@@ -1374,6 +1439,12 @@ namespace Turbo.Plugins.s7o
 
             IMonster selected = null;
             try { selected = Hud.Game.SelectedMonster2; } catch { }
+
+            if (!IsCursorOverClickDangerUi() && IsValidEligibleLeader(selected, tick)
+                && IsWithinInariusTargetRange(selected))
+            {
+                RememberEngagementFocus(selected, tick);
+            }
 
             IMonster anchor = null;
             try { anchor = PickTarget(tick); } catch { }
@@ -1690,6 +1761,10 @@ namespace Turbo.Plugins.s7o
 
         private IMonster GetManualSiphonTargetFallback()
         {
+            IMonster focus = GetEngagementFocusTarget(SafeGameTick());
+            if (IsAliveTarget(focus))
+                return focus;
+
             try
             {
                 if (_lockedTargetAcdId != 0)
@@ -2246,19 +2321,12 @@ namespace Turbo.Plugins.s7o
 
         private IMonster AcquireTarget(int tick)
         {
+            List<IMonster> coordinationMonsters = CaptureAliveMonsters();
+            RefreshTargetCoordinationState(tick, coordinationMonsters);
+
             IMonster forced = GetManualJuggerLockTarget();
             if (IsAliveTarget(forced))
                 return forced;
-
-            IMonster pendingHover = GetPendingPulseHoverTarget(tick);
-            if (IsAliveTarget(pendingHover))
-            {
-                if (IsWithinInariusTargetRange(pendingHover))
-                    PrepareImmediateInariusRetarget(pendingHover, tick);
-                else if (IsValidOutOfRangeLeaderAssistTarget(pendingHover, tick))
-                    PrepareImmediateOutOfRangeLeaderAssist(pendingHover, tick);
-                return pendingHover;
-            }
 
             if (BossAlive())
             {
@@ -2272,6 +2340,46 @@ namespace Turbo.Plugins.s7o
                 _snapPhaseAcdId = 0;
                 _snapPhase = 0;
                 return null;
+            }
+
+            // A confirmed remote Power Shift primary is direct party-target evidence.
+            // It bypasses same-rank hover/lock stickiness, but never bypasses the
+            // Inarius range, eligibility, shield, illusion, or Juggernaut gates.
+            IMonster remotePrimary = GetConfirmedRemoteSiphonPrimaryTarget(tick);
+            if (IsAliveTarget(remotePrimary))
+            {
+                uint remoteAcd = GetMonsterAcdId(remotePrimary);
+                IMonster selectedBeforeRemote = null;
+                try { selectedBeforeRemote = Hud.Game.SelectedMonster2; } catch { }
+
+                ClearOutOfRangeLeaderAssist();
+                ClearOutOfRangeTargetState();
+                RememberEngagementFocus(remotePrimary, tick);
+
+                // Exact remote-primary evidence bypasses same-rank leader stickiness.
+                // Clear a different hard lock and immediately restart the in-range
+                // hover solver unless Diablo already has the red target selected.
+                if (remoteAcd != 0 && _lockedTargetAcdId != 0 && _lockedTargetAcdId != remoteAcd)
+                {
+                    _lockedTargetAcdId = 0;
+                    _lockedTargetKeepUntilTick = 0;
+                }
+
+                if (!IsSameAcd(selectedBeforeRemote, remoteAcd))
+                    PrepareImmediateInariusRetarget(remotePrimary, tick);
+
+                LockTarget(remotePrimary, tick);
+                return remotePrimary;
+            }
+
+            IMonster pendingHover = GetPendingPulseHoverTarget(tick);
+            if (IsAliveTarget(pendingHover))
+            {
+                if (IsWithinInariusTargetRange(pendingHover))
+                    PrepareImmediateInariusRetarget(pendingHover, tick);
+                else if (IsValidOutOfRangeLeaderAssistTarget(pendingHover, tick))
+                    PrepareImmediateOutOfRangeLeaderAssist(pendingHover, tick);
+                return pendingHover;
             }
 
             // Target order: in-range leaders, visible far leaders, in-range minions, then trash.
@@ -2332,6 +2440,188 @@ namespace Turbo.Plugins.s7o
             return null;
         }
 
+
+        private List<IMonster> CaptureAliveMonsters()
+        {
+            var result = new List<IMonster>();
+            try
+            {
+                foreach (IMonster monster in Hud.Game.AliveMonsters)
+                    if (monster != null) result.Add(monster);
+            }
+            catch { }
+            return result;
+        }
+
+        private void RefreshTargetCoordinationState(int tick, List<IMonster> monsters)
+        {
+            _siphonAffectedTargetCount = 0;
+            if (monsters != null)
+            {
+                for (int i = 0; i < monsters.Count; i++)
+                {
+                    IMonster monster = monsters[i];
+                    if (IsAliveTarget(monster) && IsWithinInariusTargetRange(monster) && GetSiphonDebuffTier(monster) > 0)
+                        _siphonAffectedTargetCount++;
+                }
+            }
+
+            if (!RemoteNecromancerTargetAssist || monsters == null)
+            {
+                ClearRemoteSiphonTarget();
+                return;
+            }
+
+            IMonster best = null;
+            float bestScore = float.MaxValue;
+            try
+            {
+                foreach (IPlayer player in Hud.Game.Players)
+                {
+                    if (!IsRemoteSiphonNecromancer(player))
+                        continue;
+
+                    uint identity = ReadIdentityAttribute(player, Hud.Sno.Attributes.Last_ACD_Attacked);
+                    IMonster candidate = FindMonsterByIdentity(monsters, identity);
+                    if (!IsValidEligibleLeader(candidate, tick) || !IsWithinInariusTargetRange(candidate)
+                        || !HasAnySiphonDebuff(candidate))
+                        continue;
+
+                    float score = GetRemoteTargetPreferenceScore(candidate);
+                    if (score < bestScore)
+                    {
+                        best = candidate;
+                        bestScore = score;
+                    }
+                }
+            }
+            catch { }
+
+            uint bestAcd = GetMonsterAcdId(best);
+            if (bestAcd != 0)
+            {
+                if (_remoteSiphonCandidateAcdId == bestAcd)
+                    _remoteSiphonCandidateSamples = Math.Min(99, _remoteSiphonCandidateSamples + 1);
+                else
+                {
+                    _remoteSiphonCandidateAcdId = bestAcd;
+                    _remoteSiphonCandidateSamples = 1;
+                }
+
+                if (_remoteSiphonCandidateSamples >= RemoteSiphonTargetConfirmSamples)
+                {
+                    _remoteSiphonTargetAcdId = bestAcd;
+                    _remoteSiphonTargetUntilTick = tick + RemoteSiphonTargetLingerTicks;
+                }
+            }
+            else
+            {
+                _remoteSiphonCandidateAcdId = 0;
+                _remoteSiphonCandidateSamples = 0;
+            }
+
+            if (_remoteSiphonTargetAcdId != 0)
+            {
+                IMonster latched = FindAliveMonsterByAcdId(_remoteSiphonTargetAcdId);
+                if (tick > _remoteSiphonTargetUntilTick || !IsValidEligibleLeader(latched, tick)
+                    || !IsWithinInariusTargetRange(latched))
+                {
+                    _remoteSiphonTargetAcdId = 0;
+                    _remoteSiphonTargetUntilTick = 0;
+                }
+            }
+        }
+
+        private bool IsRemoteSiphonNecromancer(IPlayer player)
+        {
+            try
+            {
+                if (player == null || player.IsMe || !player.IsInGame || player.HeroClassDefinition == null
+                    || player.HeroClassDefinition.HeroClass != HeroClass.Necromancer || player.Powers == null)
+                    return false;
+
+                IPlayerSkill siphon = player.Powers.GetUsedSkill(Hud.Sno.SnoPowers.Necromancer_SiphonBlood);
+                if (siphon == null || siphon.Rune != 3) // Power Shift
+                    return false;
+
+                string animation = player.Animation.ToString();
+                return player.AnimationState == AcdAnimationState.Channeling
+                    && !string.IsNullOrEmpty(animation)
+                    && animation.IndexOf("bloodsiphon", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+            catch { return false; }
+        }
+
+        private uint ReadIdentityAttribute(IActor actor, IAttribute attribute)
+        {
+            if (actor == null || attribute == null)
+                return 0u;
+
+            for (int i = 0; i < IdentityAttributeModifiers.Length; i++)
+            {
+                try
+                {
+                    uint value = actor.GetAttributeValueAsUInt(attribute, IdentityAttributeModifiers[i], 0u);
+                    if (value != 0u && value != uint.MaxValue)
+                        return value;
+                }
+                catch { }
+            }
+
+            return 0u;
+        }
+
+        private IMonster FindMonsterByIdentity(List<IMonster> monsters, uint identity)
+        {
+            if (identity == 0u || monsters == null)
+                return null;
+
+            for (int i = 0; i < monsters.Count; i++)
+            {
+                IMonster monster = monsters[i];
+                if (monster == null)
+                    continue;
+
+                try
+                {
+                    if (monster.AcdId == identity || monster.AnnId == identity)
+                        return monster;
+                }
+                catch { }
+            }
+
+            return null;
+        }
+
+        private float GetRemoteTargetPreferenceScore(IMonster monster)
+        {
+            float score = (float)Math.Max(0.0d, Math.Min(1.0d, SafeHitPoints(monster))) * 20.0f;
+            if (GetSiphonDebuffTier(monster) >= 2 && _siphonAffectedTargetCount >= 2)
+                score -= 3.0f;
+            return score;
+        }
+
+        private IMonster GetConfirmedRemoteSiphonPrimaryTarget(int tick)
+        {
+            if (!RemoteNecromancerTargetAssist || _remoteSiphonTargetAcdId == 0
+                || tick <= 0 || tick > _remoteSiphonTargetUntilTick)
+                return null;
+
+            IMonster target = FindAliveMonsterByAcdId(_remoteSiphonTargetAcdId);
+            if (!IsValidEligibleLeader(target, tick) || !IsWithinInariusTargetRange(target)
+                || !HasAnySiphonDebuff(target))
+                return null;
+
+            return target;
+        }
+
+        private void ClearRemoteSiphonTarget()
+        {
+            _remoteSiphonCandidateAcdId = 0;
+            _remoteSiphonCandidateSamples = 0;
+            _remoteSiphonTargetAcdId = 0;
+            _remoteSiphonTargetUntilTick = 0;
+        }
 
         private void ProcessJuggerHotkey(int tick)
         {
@@ -2941,13 +3231,20 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
-            // Persist only verified leader hovers or explicit manual Juggernaut locks.
+            // Persist only active-engagement leader hovers or explicit manual Juggernaut locks.
+            // A stale physical hover cannot overwrite the target currently requested by
+            // engagement focus, the snap phase, or a forced in-range retarget.
             bool verifiedHover = acd != 0 && IsActuallySelectedTarget(acd);
             bool explicitManualLock = acd != 0 && acd == _manualJuggerLockAcdId;
-            if (IsLeader(monster) && (!IsJuggernautPack(monster) || explicitManualLock) && (verifiedHover || explicitManualLock))
+            bool confirmsRequestedFocus = verifiedHover && _lanceWasDown
+                && (_engagementFocusAcdId == 0 || acd == _engagementFocusAcdId
+                    || acd == _snapPhaseAcdId || acd == _forcedInariusSnapAcdId);
+            if (IsLeader(monster) && (!IsJuggernautPack(monster) || explicitManualLock)
+                && (confirmsRequestedFocus || explicitManualLock))
             {
                 _lockedTargetAcdId = acd;
                 _lockedTargetKeepUntilTick = Math.Max(_lockedTargetKeepUntilTick, tick + LockedTargetKeepTicks);
+                RememberEngagementFocus(monster, tick);
             }
             else if (tick >= _lockedTargetKeepUntilTick)
             {
@@ -2984,15 +3281,27 @@ namespace Turbo.Plugins.s7o
         {
             if (_lockedTargetAcdId != 0 && FindAliveMonsterByAcdId(_lockedTargetAcdId) == null)
             {
-                ReArmCursorRestoreForDeadTarget(_lockedTargetAcdId, tick);
+                ArmDeadTargetHandoff(tick);
                 _lockedTargetAcdId = 0;
                 _lockedTargetKeepUntilTick = 0;
             }
 
             if (_manualJuggerLockAcdId != 0 && GetManualJuggerLockTarget() == null)
             {
-                ReArmCursorRestoreForDeadTarget(_manualJuggerLockAcdId, tick);
+                ArmDeadTargetHandoff(tick);
                 ClearManualJuggerLock();
+            }
+
+            if (_remoteSiphonTargetAcdId != 0 && FindAliveMonsterByAcdId(_remoteSiphonTargetAcdId) == null)
+            {
+                ArmDeadTargetHandoff(tick);
+                ClearRemoteSiphonTarget();
+            }
+
+            if (_engagementFocusAcdId != 0 && FindAliveMonsterByAcdId(_engagementFocusAcdId) == null)
+            {
+                ArmDeadTargetHandoff(tick);
+                ClearEngagementFocus();
             }
 
             if (_returnToRareAcdId != 0 && FindAliveMonsterByAcdId(_returnToRareAcdId) == null)
@@ -3013,28 +3322,25 @@ namespace Turbo.Plugins.s7o
 
             if (_snapPhaseAcdId != 0 && FindAliveMonsterByAcdId(_snapPhaseAcdId) == null)
             {
-                ReArmCursorRestoreForDeadTarget(_snapPhaseAcdId, tick);
+                ArmDeadTargetHandoff(tick);
                 _snapPhaseAcdId = 0;
                 _snapPhase = 0;
             }
 
             if (_stableLockAcdId != 0 && FindAliveMonsterByAcdId(_stableLockAcdId) == null)
             {
-                ReArmCursorRestoreForDeadTarget(_stableLockAcdId, tick);
                 _stableLockAcdId = 0;
                 _stableLockUntilTick = 0;
             }
 
             if (_softLockAcdId != 0 && FindAliveMonsterByAcdId(_softLockAcdId) == null)
             {
-                ReArmCursorRestoreForDeadTarget(_softLockAcdId, tick);
                 _softLockAcdId = 0;
                 _softLockUntilTick = 0;
             }
 
             if (_cachedHoverAcdId != 0 && FindAliveMonsterByAcdId(_cachedHoverAcdId) == null)
             {
-                ReArmCursorRestoreForDeadTarget(_cachedHoverAcdId, tick);
                 _cachedHoverAcdId = 0;
                 _cachedHoverUntilTick = 0;
                 _cachedHoverTryUntilTick = 0;
@@ -3042,7 +3348,6 @@ namespace Turbo.Plugins.s7o
 
             if (_lastHoverAcdId != 0 && FindAliveMonsterByAcdId(_lastHoverAcdId) == null)
             {
-                ReArmCursorRestoreForDeadTarget(_lastHoverAcdId, tick);
                 _lastHoverAcdId = 0;
                 _lastHoverTick = 0;
             }
@@ -3061,6 +3366,86 @@ namespace Turbo.Plugins.s7o
                 _alternateScanAcdId = 0;
                 _alternateScanUntilTick = 0;
             }
+        }
+
+        private void CaptureFreshManualEngagementFocus(int tick)
+        {
+            try
+            {
+                IMonster selected = Hud.Game.SelectedMonster2;
+                if (IsValidEligibleLeader(selected, tick) && IsWithinInariusTargetRange(selected))
+                    RememberEngagementFocus(selected, tick);
+            }
+            catch { }
+        }
+
+        private void RememberEngagementFocus(IMonster monster, int tick)
+        {
+            if (!IsValidEligibleLeader(monster, tick) || !IsWithinInariusTargetRange(monster))
+                return;
+
+            uint acd = GetMonsterAcdId(monster);
+            if (acd == 0)
+                return;
+
+            if (_engagementFocusAcdId != acd)
+            {
+                _engagementFocusAcdId = acd;
+                _engagementFocusStartTick = tick;
+            }
+
+            _engagementFocusUntilTick = tick + EngagementFocusLingerTicks;
+        }
+
+        private IMonster GetEngagementFocusTarget(int tick)
+        {
+            if (_engagementFocusAcdId == 0 || tick <= 0 || tick > _engagementFocusUntilTick)
+            {
+                ClearEngagementFocus();
+                return null;
+            }
+
+            IMonster target = FindAliveMonsterByAcdId(_engagementFocusAcdId);
+            if (!IsValidEligibleLeader(target, tick) || !IsWithinInariusTargetRange(target))
+            {
+                ClearEngagementFocus();
+                return null;
+            }
+
+            return target;
+        }
+
+        private float GetInariusEngagementFocusBonus(IMonster monster, int tick)
+        {
+            if (_engagementFocusAcdId == 0 || tick <= 0 || tick > _engagementFocusUntilTick
+                || GetMonsterAcdId(monster) != _engagementFocusAcdId)
+            {
+                return 0f;
+            }
+
+            int age = Math.Max(0, tick - _engagementFocusStartTick);
+            float duration = Math.Min(1f, age / (float)Math.Max(1, EngagementFocusDurationRampTicks));
+            return InariusEngagementFocusBaseBonus
+                + duration * InariusEngagementFocusDurationBonusMax;
+        }
+
+        private void ClearEngagementFocus()
+        {
+            _engagementFocusAcdId = 0;
+            _engagementFocusStartTick = 0;
+            _engagementFocusUntilTick = 0;
+        }
+
+        private void ArmDeadTargetHandoff(int tick)
+        {
+            if (_lanceWasDown || _cursorOwned)
+                _deadTargetHandoffUntilTick = Math.Max(_deadTargetHandoffUntilTick, tick + DeadTargetHandoffTicks);
+        }
+
+        private int SafeGameTick()
+        {
+            try { return Hud != null && Hud.Game != null ? Hud.Game.CurrentGameTick : 0; }
+            catch { return 0; }
         }
 
         private bool BossAlive()
@@ -3882,6 +4267,7 @@ namespace Turbo.Plugins.s7o
             }
             catch { }
 
+            score -= GetInariusEngagementFocusBonus(monster, SafeGameTick());
             return score;
         }
 
@@ -4446,15 +4832,22 @@ namespace Turbo.Plugins.s7o
 
         private bool HasAnySiphonDebuff(IMonster monster)
         {
+            return GetSiphonDebuffTier(monster) > 0;
+        }
+
+        private int GetSiphonDebuffTier(IMonster monster)
+        {
             try
             {
                 if (monster == null || !monster.IsAlive)
-                    return false;
+                    return 0;
 
-                return monster.GetAttributeValue(Hud.Sno.Attributes.Power_Buff_9_Visual_Effect_D, _snoSiphonBlood, 0) == 1
-                    || monster.GetAttributeValue(Hud.Sno.Attributes.Power_Buff_11_Visual_Effect_D, _snoSiphonBlood, 0) == 1;
+                if (monster.GetAttributeValue(Hud.Sno.Attributes.Power_Buff_11_Visual_Effect_D, _snoSiphonBlood, 0) == 1)
+                    return 2;
+
+                return monster.GetAttributeValue(Hud.Sno.Attributes.Power_Buff_9_Visual_Effect_D, _snoSiphonBlood, 0) == 1 ? 1 : 0;
             }
-            catch { return false; }
+            catch { return 0; }
         }
 
         private bool HasInariusDamageDebuff(IMonster monster)
@@ -6349,10 +6742,7 @@ namespace Turbo.Plugins.s7o
                 if (!IsAutoSnapHoverPoint(x, y) || _movementEscapeLatched)
                     return false;
 
-                if (IsManualCursorOverrideActive(tick))
-                    return false;
-
-                if (tick <= _movementDisengageUntilTick)
+                if (IsManualCursorOverrideActive(tick) || tick <= _movementDisengageUntilTick)
                     return false;
 
                 int targetX = (int)Math.Round((double)x);
@@ -6361,7 +6751,9 @@ namespace Turbo.Plugins.s7o
                     return true;
 
                 BeginCursorOwnershipIfNeeded(tick);
-                SetCursorPos(targetX, targetY);
+                if (!SetCursorPosClient(targetX, targetY))
+                    return false;
+
                 _lastPluginCursorX = targetX;
                 _lastPluginCursorY = targetY;
                 _lastPluginCursorMoveTick = tick;
@@ -6380,6 +6772,12 @@ namespace Turbo.Plugins.s7o
             _cursorWasMovedByPlugin = false;
             _engageStartTick = tick;
 
+            if (_cursorRestoreSuppressedForEngagement)
+            {
+                _haveSavedCursor = false;
+                return;
+            }
+
             try
             {
                 _savedCursorX = Hud.Window.CursorX;
@@ -6396,60 +6794,58 @@ namespace Turbo.Plugins.s7o
 
         private void RememberTargetRestoreAnchor(uint acd, bool eliteLike, float x, float y, int tick)
         {
-            if (!eliteLike || acd == 0 || !RestoreCursorOnReleaseOrMove)
+            if (!RestoreCursorOnReleaseOrMove || acd == 0)
                 return;
 
-            try
+            if (_cursorRestoreSegmentTargetAcdId == 0)
             {
-                if (!IsCursorRestorePoint(x, y))
-                    return;
-
-                _targetRestoreAnchorAcdId = acd;
-                _targetRestoreAnchorX = x;
-                _targetRestoreAnchorY = y;
-                _targetRestoreAnchorTick = tick;
+                _cursorRestoreSegmentTargetAcdId = acd;
+                _cursorRestoreSegmentLongHoldEligible = eliteLike;
+                return;
             }
-            catch { }
+
+            if (_cursorRestoreSegmentTargetAcdId == acd)
+            {
+                _cursorRestoreSegmentLongHoldEligible = eliteLike;
+                return;
+            }
+
+            // A new target starts an independent restore segment instead of inheriting
+            // the previous target's long-hold duration.
+            if (_cursorOwned && _cursorWasMovedByPlugin && _haveSavedCursor)
+            {
+                try
+                {
+                    float anchorX = Hud.Window.CursorX;
+                    float anchorY = Hud.Window.CursorY;
+                    if (IsCursorRestorePoint(anchorX, anchorY))
+                    {
+                        _savedCursorX = anchorX;
+                        _savedCursorY = anchorY;
+                        _engageStartTick = tick;
+                    }
+                }
+                catch { }
+            }
+
+            _cursorRestoreSegmentTargetAcdId = acd;
+            _cursorRestoreSegmentLongHoldEligible = eliteLike;
         }
 
-        private bool ReArmCursorRestoreForDeadTarget(uint acd, int tick)
+        private bool TryRestoreCursorImmediately(int tick)
         {
-            if (acd == 0 || acd != _targetRestoreAnchorAcdId)
-                return false;
-
-            if (!RestoreCursorOnReleaseOrMove || !_cursorOwned || !_cursorWasMovedByPlugin)
-                return false;
-
-            if (_targetRestoreAnchorTick <= 0 || tick - _targetRestoreAnchorTick > DeadTargetRestoreAnchorTicks)
-                return false;
-
-            if (!IsCursorRestorePoint(_targetRestoreAnchorX, _targetRestoreAnchorY))
-                return false;
-
-            _savedCursorX = _targetRestoreAnchorX;
-            _savedCursorY = _targetRestoreAnchorY;
-            _haveSavedCursor = true;
-            _engageStartTick = tick;
-            _pendingRestoreTick = 0;
-            return true;
-        }
-
-        private bool TryRestoreCursorImmediately(int tick, bool force)
-        {
-            if (!RestoreCursorOnReleaseOrMove || !_cursorOwned || !_cursorWasMovedByPlugin || !_haveSavedCursor)
+            if (_cursorRestoreSuppressedForEngagement || !RestoreCursorOnReleaseOrMove
+                || !_cursorOwned || !_cursorWasMovedByPlugin || !_haveSavedCursor)
             {
                 ReleaseCursorOwnershipWithoutRestore();
                 return false;
             }
 
-            if (!force)
+            int engagedTicks = _engageStartTick > 0 ? Math.Max(0, tick - _engageStartTick) : int.MaxValue;
+            if (_cursorRestoreSegmentLongHoldEligible && engagedTicks > CursorRestoreShortEngageTicks)
             {
-                int engagedTicks = _engageStartTick > 0 ? Math.Max(0, tick - _engageStartTick) : int.MaxValue;
-                if (engagedTicks > CursorRestoreShortEngageTicks)
-                {
-                    ReleaseCursorOwnershipWithoutRestore();
-                    return false;
-                }
+                ReleaseCursorOwnershipWithoutRestore();
+                return false;
             }
 
             float targetX = _savedCursorX;
@@ -6458,10 +6854,14 @@ namespace Turbo.Plugins.s7o
 
             try
             {
-                if (Hud.Window.IsForeground && IsCursorRestorePoint(targetX, targetY))
+                float dx = targetX - Hud.Window.CursorX;
+                float dy = targetY - Hud.Window.CursorY;
+                if (dx * dx + dy * dy >= CursorRestoreMinMovePxSq
+                    && Hud.Window.IsForeground && IsCursorRestorePoint(targetX, targetY))
                 {
-                    SetCursorPos((int)Math.Round((double)targetX), (int)Math.Round((double)targetY));
-                    restored = true;
+                    restored = SetCursorPosClient(
+                        (int)Math.Round((double)targetX),
+                        (int)Math.Round((double)targetY));
                 }
             }
             catch { }
@@ -6470,81 +6870,44 @@ namespace Turbo.Plugins.s7o
             return restored;
         }
 
-        private void QueueCursorRestore(int tick)
-        {
-            if (!RestoreCursorOnReleaseOrMove || !_cursorOwned || !_cursorWasMovedByPlugin)
-                return;
-
-            int engagedTicks = _engageStartTick > 0 ? Math.Max(0, tick - _engageStartTick) : int.MaxValue;
-            if (engagedTicks > CursorRestoreShortEngageTicks || !_haveSavedCursor)
-            {
-                ReleaseCursorOwnershipWithoutRestore();
-                return;
-            }
-
-            float targetX = _savedCursorX;
-            float targetY = _savedCursorY;
-
-            try
-            {
-                float dx = targetX - Hud.Window.CursorX;
-                float dy = targetY - Hud.Window.CursorY;
-                if ((dx * dx + dy * dy) < CursorRestoreMinMovePxSq)
-                {
-                    ReleaseCursorOwnershipWithoutRestore();
-                    return;
-                }
-            }
-            catch { }
-
-            _pendingRestoreX = targetX;
-            _pendingRestoreY = targetY;
-            _pendingRestoreTick = tick;
-        }
-
         private void RefreshCursorRestoreWindowForFreshEngagement(int tick)
         {
             if (!RestoreCursorOnReleaseOrMove)
                 return;
 
-            // Preserve the pre-snap cursor across rapid taps without combining their durations.
             if (_cursorOwned && _cursorWasMovedByPlugin && _haveSavedCursor)
-            {
-                _pendingRestoreTick = 0;
                 _engageStartTick = tick;
-            }
+        }
+
+        private void SuppressCursorRestoreForEngagement()
+        {
+            _cursorRestoreSuppressedForEngagement = true;
+            ReleaseCursorOwnershipWithoutRestore();
         }
 
         private void ReleaseCursorOwnershipWithoutRestore()
         {
-            _pendingRestoreTick = 0;
             _cursorOwned = false;
             _cursorWasMovedByPlugin = false;
             _haveSavedCursor = false;
             _engageStartTick = 0;
+            _cursorRestoreSegmentTargetAcdId = 0;
+            _cursorRestoreSegmentLongHoldEligible = false;
         }
 
-        private float _pendingRestoreX;
-        private float _pendingRestoreY;
-        private int _pendingRestoreTick;
-
-        private void ProcessPendingCursorRestore(int tick)
+        private bool SetCursorPosClient(int x, int y)
         {
-            if (_pendingRestoreTick <= 0 || tick < _pendingRestoreTick)
-                return;
-
             try
             {
-                if (Hud != null && Hud.Window != null && Hud.Window.IsForeground && IsCursorRestorePoint(_pendingRestoreX, _pendingRestoreY))
-                    SetCursorPos((int)Math.Round((double)_pendingRestoreX), (int)Math.Round((double)_pendingRestoreY));
-            }
-            catch { }
+                long screenX = (long)x + Hud.Window.Offset.X;
+                long screenY = (long)y + Hud.Window.Offset.Y;
+                if (screenX < int.MinValue || screenX > int.MaxValue
+                    || screenY < int.MinValue || screenY > int.MaxValue)
+                    return false;
 
-            _pendingRestoreTick = 0;
-            _cursorOwned = false;
-            _cursorWasMovedByPlugin = false;
-            _haveSavedCursor = false;
-            _engageStartTick = 0;
+                return SetCursorPos((int)screenX, (int)screenY);
+            }
+            catch { return false; }
         }
 
         private bool IsInsideGameWindow(float x, float y)
@@ -7500,13 +7863,9 @@ namespace Turbo.Plugins.s7o
             _savedCursorX = 0f;
             _savedCursorY = 0f;
             _engageStartTick = 0;
-            _targetRestoreAnchorAcdId = 0;
-            _targetRestoreAnchorX = 0f;
-            _targetRestoreAnchorY = 0f;
-            _targetRestoreAnchorTick = 0;
-            _pendingRestoreTick = 0;
-            _pendingRestoreX = 0f;
-            _pendingRestoreY = 0f;
+            _cursorRestoreSegmentTargetAcdId = 0;
+            _cursorRestoreSegmentLongHoldEligible = false;
+            _cursorRestoreSuppressedForEngagement = false;
             _lastHoverAcdId = 0;
             _lastHoverTick = 0;
             _lastHoverDx = 0f;
@@ -7581,6 +7940,9 @@ namespace Turbo.Plugins.s7o
             _lanceWasDown = false;
             _engageRefreshConsumed = false;
             _lastSiphonTargetAcdId = 0;
+            ClearRemoteSiphonTarget();
+            _siphonAffectedTargetCount = 0;
+            _deadTargetHandoffUntilTick = 0;
             _targetSwitchRefreshAcdId = 0;
             ClearLateRefreshIntent();
             ClearFastBuildGuard();
@@ -7602,6 +7964,9 @@ namespace Turbo.Plugins.s7o
             _siphonKeyKnown = false;
             _lanceKey = ActionKey.Unknown;
             _siphonKey = ActionKey.Unknown;
+
+            if (releaseInput)
+                ClearEngagementFocus();
         }
 
         private bool IsActionPhysicallyDown(ActionKey key)
