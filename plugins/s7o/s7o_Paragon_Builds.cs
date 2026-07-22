@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Reflection;
 using System.Text;
 using System.Windows.Forms;
 using Turbo.Plugins.Default;
@@ -17,7 +18,9 @@ namespace Turbo.Plugins.s7o
     // mismatch never opens Paragon or changes points. Legacy or genuinely different
     // layouts retain the visible apply path and are fingerprinted afterward.
     // Native Armory identity and stable item/socket data remain the final stale-slot
-    // and transitional-build barriers.
+    // and transitional-build barriers. HUD UI coordinates are client-relative;
+    // Win32 cursor input is converted through Hud.Window.Offset for multi-monitor use.
+    // Manual AutoSkill masks support both s7o_AutoSkill and LightningMOD AutoSkillPlugin.
     public class s7o_Paragon_Builds : BasePlugin,
         IAfterCollectHandler,
         IInGameTopPainter
@@ -271,7 +274,10 @@ namespace Turbo.Plugins.s7o
             new HashSet<uint>();
         private readonly HashSet<uint> _disabledAutoCastHeroIds =
             new HashSet<uint>();
-        private s7o_AutoSkill _autoSkillPlugin;
+        private IPlugin _autoSkillPlugin;
+        private MethodInfo _autoSkillGetMaskMethod;
+        private MethodInfo _autoSkillSetMaskMethod;
+        private FieldInfo _autoSkillEnabledSlotsField;
 
         private readonly int[,] _capturedRows = new int[4, 4];
         private readonly bool[] _capturedTabsSeen = new bool[4];
@@ -1485,15 +1491,38 @@ namespace Turbo.Plugins.s7o
                         return;
                     }
 
-                    if (IsArmoryOpen() && !_applyEscapedArmory)
+                    if (IsArmoryOpen())
                     {
-                        PressVirtualKey(Keys.Escape);
-                        _applyEscapedArmory = true;
-                        _applyNextTick = unchecked(now + 32);
+                        if (!_applyEscapedArmory)
+                        {
+                            if (!PressVirtualKey(Keys.Escape))
+                            {
+                                AbortApply("foreground lost before closing Armory");
+                                return;
+                            }
+
+                            _applyEscapedArmory = true;
+                            _applyDeadlineTick = unchecked(now + 1000);
+                            _applyNextTick = unchecked(now + 32);
+                            return;
+                        }
+
+                        if (TickReached(now, _applyDeadlineTick))
+                        {
+                            AbortApply("Armory window did not close");
+                            return;
+                        }
+
+                        _applyNextTick = unchecked(now + FastActionMs);
                         return;
                     }
 
-                    PressVirtualKey(ParagonWindowKey);
+                    if (!PressVirtualKey(ParagonWindowKey))
+                    {
+                        AbortApply("foreground lost before opening Paragon");
+                        return;
+                    }
+
                     _applyClickCount++;
                     _applyDeadlineTick = unchecked(now + OpenParagonTimeoutMs);
                     _applyState = ApplyState.WaitParagon;
@@ -1808,7 +1837,11 @@ namespace Turbo.Plugins.s7o
                         CompleteApply();
                         return;
                     }
-                    PressVirtualKey(ParagonWindowKey);
+                    if (!PressVirtualKey(ParagonWindowKey))
+                    {
+                        AbortApply("foreground lost before closing Paragon");
+                        return;
+                    }
                     _applyClickCount++;
                     _applyState = ApplyState.WaitClose;
                     _applyDeadlineTick = unchecked(now + 1000);
@@ -3184,37 +3217,121 @@ namespace Turbo.Plugins.s7o
             return _equipNativeCandidate.Clone();
         }
 
-        private s7o_AutoSkill GetAutoSkillPlugin()
+        private bool ResolveAutoSkillBridge()
         {
             if (_autoSkillPlugin != null)
-                return _autoSkillPlugin;
+                return true;
 
             try
             {
-                _autoSkillPlugin =
-                    Hud.GetPlugin<s7o_AutoSkill>();
-            }
-            catch
-            {
-                _autoSkillPlugin = null;
-            }
+                IPlugin lightningPlugin = null;
+                FieldInfo lightningSlots = null;
 
-            return _autoSkillPlugin;
+                foreach (IPlugin plugin in Hud.AllPlugins)
+                {
+                    if (plugin == null)
+                        continue;
+
+                    Type type = plugin.GetType();
+                    string fullName = type.FullName ?? string.Empty;
+
+                    if (string.Equals(
+                            fullName,
+                            "Turbo.Plugins.s7o.s7o_AutoSkill",
+                            StringComparison.Ordinal))
+                    {
+                        MethodInfo getMask = type.GetMethod(
+                            "GetManualSlotAutoCastMask",
+                            BindingFlags.Instance | BindingFlags.Public,
+                            null,
+                            Type.EmptyTypes,
+                            null);
+                        MethodInfo setMask = type.GetMethod(
+                            "SetManualSlotAutoCastMask",
+                            BindingFlags.Instance | BindingFlags.Public,
+                            null,
+                            new[] { typeof(int) },
+                            null);
+
+                        if (getMask != null &&
+                            getMask.ReturnType == typeof(int) &&
+                            setMask != null &&
+                            setMask.ReturnType == typeof(void))
+                        {
+                            _autoSkillPlugin = plugin;
+                            _autoSkillGetMaskMethod = getMask;
+                            _autoSkillSetMaskMethod = setMask;
+                            return true;
+                        }
+                    }
+                    else if (lightningPlugin == null &&
+                        string.Equals(
+                            fullName,
+                            "Turbo.Plugins.LightningMod.AutoSkillPlugin",
+                            StringComparison.Ordinal))
+                    {
+                        FieldInfo enabledSlots = type.GetField(
+                            "EnabledSkill",
+                            BindingFlags.Instance |
+                            BindingFlags.NonPublic);
+
+                        if (enabledSlots != null &&
+                            enabledSlots.FieldType == typeof(bool[]))
+                        {
+                            lightningPlugin = plugin;
+                            lightningSlots = enabledSlots;
+                        }
+                    }
+                }
+
+                if (lightningPlugin != null)
+                {
+                    _autoSkillPlugin = lightningPlugin;
+                    _autoSkillEnabledSlotsField = lightningSlots;
+                    return true;
+                }
+            }
+            catch { }
+
+            return false;
         }
 
         private bool TryReadAutoCastSetup(
             out int mask)
         {
             mask = 0;
-            s7o_AutoSkill autoSkill =
-                GetAutoSkillPlugin();
-            if (autoSkill == null)
+            if (!ResolveAutoSkillBridge())
                 return false;
 
             try
             {
-                mask = NormalizeAutoCastMask(
-                    autoSkill.GetManualSlotAutoCastMask());
+                if (_autoSkillGetMaskMethod != null)
+                {
+                    object value = _autoSkillGetMaskMethod.Invoke(
+                        _autoSkillPlugin,
+                        null);
+                    if (!(value is int))
+                        return false;
+
+                    mask = NormalizeAutoCastMask((int)value);
+                    return true;
+                }
+
+                bool[] enabled =
+                    _autoSkillEnabledSlotsField != null
+                        ? _autoSkillEnabledSlotsField.GetValue(
+                            _autoSkillPlugin) as bool[]
+                        : null;
+                if (enabled == null || enabled.Length < 7)
+                    return false;
+
+                for (int i = 0; i < 7; i++)
+                {
+                    if (enabled[i])
+                        mask |= 1 << i;
+                }
+
+                mask = NormalizeAutoCastMask(mask);
                 return true;
             }
             catch
@@ -3227,21 +3344,36 @@ namespace Turbo.Plugins.s7o
             ParagonProfile profile)
         {
             if (profile == null ||
-                !profile.HasAutoCastProfile)
+                !profile.HasAutoCastProfile ||
+                !ResolveAutoSkillBridge())
             {
                 return false;
             }
 
-            s7o_AutoSkill autoSkill =
-                GetAutoSkillPlugin();
-            if (autoSkill == null)
-                return false;
+            int mask = NormalizeAutoCastMask(
+                profile.AutoCastMask);
 
             try
             {
-                autoSkill.SetManualSlotAutoCastMask(
-                    NormalizeAutoCastMask(
-                        profile.AutoCastMask));
+                if (_autoSkillSetMaskMethod != null)
+                {
+                    _autoSkillSetMaskMethod.Invoke(
+                        _autoSkillPlugin,
+                        new object[] { mask });
+                    return true;
+                }
+
+                bool[] enabled =
+                    _autoSkillEnabledSlotsField != null
+                        ? _autoSkillEnabledSlotsField.GetValue(
+                            _autoSkillPlugin) as bool[]
+                        : null;
+                if (enabled == null || enabled.Length < 7)
+                    return false;
+
+                for (int i = 0; i < 7; i++)
+                    enabled[i] = (mask & (1 << i)) != 0;
+
                 return true;
             }
             catch
@@ -4326,7 +4458,8 @@ namespace Turbo.Plugins.s7o
 
         private bool ClickAt(int x, int y, ClickModifier modifier)
         {
-            if (!IsParagonOpen() || !PointInRect(SafeRect(_paragonRoot), x, y))
+            if (!IsParagonOpen() || !PointInRect(SafeRect(_paragonRoot), x, y) ||
+                !MoveCursorToClientPoint(x, y))
                 return false;
 
             bool ownCtrl = false;
@@ -4338,10 +4471,12 @@ namespace Turbo.Plugins.s7o
                 if (ownCtrl) KeyDown(VK_CONTROL);
                 if (ownShift) KeyDown(VK_SHIFT);
 
-                SetCursorPos(x, y);
+                if (!IsForeground())
+                    return false;
+
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
-                return true;
+                return IsForeground();
             }
             catch
             {
@@ -4356,16 +4491,47 @@ namespace Turbo.Plugins.s7o
 
         private bool RawMouseClickAt(int x, int y)
         {
-            if (!IsParagonOpen() || !PointInRect(SafeRect(_paragonRoot), x, y))
+            if (!IsParagonOpen() || !PointInRect(SafeRect(_paragonRoot), x, y) ||
+                !MoveCursorToClientPoint(x, y))
                 return false;
             try
             {
-                SetCursorPos(x, y);
+                if (!IsForeground())
+                    return false;
+
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
-                return true;
+                return IsForeground();
             }
             catch { return false; }
+        }
+
+        private bool MoveCursorToClientPoint(int clientX, int clientY)
+        {
+            if (!IsForeground())
+                return false;
+
+            try
+            {
+                var size = Hud.Window.Size;
+                if (clientX < 0 || clientY < 0 ||
+                    clientX >= size.Width || clientY >= size.Height)
+                    return false;
+
+                var offset = Hud.Window.Offset;
+                long screenX = (long)offset.X + clientX;
+                long screenY = (long)offset.Y + clientY;
+                if (screenX < int.MinValue || screenX > int.MaxValue ||
+                    screenY < int.MinValue || screenY > int.MaxValue)
+                    return false;
+
+                return SetCursorPos((int)screenX, (int)screenY) &&
+                    IsForeground();
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private void ReleasePendingModifier()
@@ -4379,15 +4545,22 @@ namespace Turbo.Plugins.s7o
             _pendingModifierOwned = false;
         }
 
-        private void PressVirtualKey(Keys key)
+        private bool PressVirtualKey(Keys key)
         {
+            if (!IsForeground())
+                return false;
+
             byte vk = (byte)((int)key & 0xFF);
             try
             {
                 keybd_event(vk, 0, 0, UIntPtr.Zero);
                 keybd_event(vk, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+                return IsForeground();
             }
-            catch { }
+            catch
+            {
+                return false;
+            }
         }
 
         private static void KeyDown(byte vk)
@@ -4434,7 +4607,7 @@ namespace Turbo.Plugins.s7o
 
             int x = (int)Math.Round(root.Left + root.Width * 0.6300f);
             int y = (int)Math.Round(root.Top + root.Height * 0.9030f);
-            try { SetCursorPos(x, y); } catch { }
+            MoveCursorToClientPoint(x, y);
         }
 
         private void CaptureCursorForRestore()
