@@ -8,35 +8,109 @@ using Turbo.Plugins.Default;
 
 namespace Turbo.Plugins.s7o
 {
+    // Blood Rush cast identity survives area transfers; native cooldown and
+    // recharge shifts validate Blood is Power without duplicating Life costs.
     public class s7o_TipsHelper : BasePlugin, IInGameWorldPainter, IInGameTopPainter, IAfterCollectHandler, INewAreaHandler, ITransparentCollection, IKeyEventHandler, ISkillCooldownHandler
     {
         private const int AncientRank = 1;
         private const int PrimalRank = 2;
         private const int PlayerMarkerSlots = 4;
         private const uint BloodIsPowerSno = 465037u;
+        private const uint ArmyOfTheDeadSno = 460358u;
         private const uint LandOfTheDeadSno = 465839u;
         private const uint SimulacrumSno = 465350u;
         private const uint BloodRushSno = 454090u;
+        private const uint BoneArmorSno = 466857u;
+        private const uint BoneSpearSno = 451490u;
+        private const uint BoneSpikesSno = 462147u;
+        private const uint BoneSpiritSno = 464896u;
+        private const uint CommandGolemSno = 451537u;
+        private const uint CommandSkeletonsSno = 453801u;
+        private const uint CorpseExplosionSno = 454174u;
+        private const uint CorpseLanceSno = 461650u;
+        private const uint DeathNovaSno = 462243u;
+        private const uint DecrepifySno = 451491u;
+        private const uint DevourSno = 460757u;
+        private const uint FrailtySno = 460870u;
+        private const uint GrimScytheSno = 462198u;
+        private const uint LeechSno = 462255u;
+        private const uint ReviveSno = 462239u;
+        private const uint SiphonBloodSno = 453563u;
+        private const uint SkeletalMageSno = 462089u;
         private const uint ChannelingPylonBuffSno = 266258u;
-        private const int BloodIsPowerCooldownSettleTicks = 60;
-        private const int BloodIsPowerStrongCooldownDropTicks = 360;
+        private const uint BloodForBloodSno = 465821u;
+        private const uint RathmasShieldSno = 472910u;
+        private const int BloodIsPowerShortActionLockMaxTicks = 90;
+        private const int BloodIsPowerSharedActionLockMinimumSkills = 3;
+        private const int BloodIsPowerCooldownShiftToleranceTicks = 3;
+        private const int BloodIsPowerVerifiedCooldownQuantumTicks = 60;
+        private const double BloodIsPowerCooldownFraction = 0.20d;
+        private const int BloodIsPowerNativeProcDedupeTicks = 15;
+        private const int BloodIsPowerNativeRolloverMatchTicks = 5;
+        private const int BloodIsPowerExactShiftRolloverAssociationTicks = 45;
+        private const float BloodIsPowerTerminalCarryAllowancePct = 1.0f;
+        private const float BloodIsPowerNativeCorrectionFreshLossPct = 4f;
+        private const float BloodIsPowerNativeArbiterFreshLossPct = 0.50f;
+        private const float BloodIsPowerNativeArbiterBoundaryWindowPct = 10f;
+        private const float BloodIsPowerNativeArbiterBoundaryTolerancePct = 0.25f;
+        private const float BloodIsPowerNativeArbiterCarryAllowancePct = 3f;
         private const int BloodIsPowerAreaRebaseTicks = 45;
+        private const int BloodIsPowerWorldTransitionGuardTicks = 120;
         private const float BloodIsPowerMaxSaneLossPct = 140f;
-        private const float BloodIsPowerTrackedIconConfirmFloorPct = 80f;
         private const int BloodIsPowerReviveRebaseTicks = 45;
         private const int BloodIsPowerBloodRushPairWindowTicks = 45;
         private const int BloodIsPowerBloodRushFreshStartTicks = 30;
         private const int BloodIsPowerBloodRushNoDuplicateTicks = 20;
         private const int BloodIsPowerBloodRushZeroLossDelayTicks = 18;
+        private const int BloodIsPowerBloodRushResolvedSignalDedupeTicks = 18;
         private const float BloodIsPowerBloodRushTeleportMinYards = 8f;
         private const float BloodIsPowerBloodRushMinObservedLossPct = 0.75f;
         private const float BloodIsPowerBloodRushCreditMinShortfallPct = 0.50f;
-        private const int BloodIsPowerPostProcVisualSuppressTicks = 45;
+        private const float BloodIsPowerNativeStaleHighPhasePct = 90f;
+        private const float BloodIsPowerSimulacrumExpectedCostPct = 25f;
+        private const float BloodIsPowerSimulacrumCreditMinShortfallPct = 0.50f;
+        private const int BloodIsPowerSimulacrumPairWindowTicks = 8;
         private const int BloodIsPowerFreshLossDropConfirmTicks = 30;
         private const float BloodIsPowerFreshLossDropConfirmFloorPct = 0.50f;
         private const double BloodIsPowerNewGreaterRiftMaxPercent = 3.0d;
         private const int BloodIsPowerGreaterRiftEntryCheckTicks = 180;
         private const int BloodIsPowerGreaterRiftStartResetGuardTicks = 120;
+
+        private static readonly HashSet<uint> BloodRushAnimationSnos = new HashSet<uint>
+        {
+            455407u, 462310u,
+            473239u, 473240u, 473241u, 473244u, 473247u, 473657u,
+            474708u, 474709u, 474710u, 474711u, 474712u
+        };
+
+        // FreeHUD's ISnoPowerList and INecromancerPowerInfo expose the same 21
+        // active Necromancer powers. Keep the complete native SNO set explicit:
+        // CurrentSkills supplies the equipped instances and this list prevents an
+        // unrelated or overridden action-slot power from becoming a BIP target.
+        private static readonly HashSet<uint> NecromancerActiveSkillSnos = new HashSet<uint>
+        {
+            ArmyOfTheDeadSno,
+            BloodRushSno,
+            BoneArmorSno,
+            BoneSpearSno,
+            BoneSpikesSno,
+            BoneSpiritSno,
+            CommandGolemSno,
+            CommandSkeletonsSno,
+            CorpseExplosionSno,
+            CorpseLanceSno,
+            DeathNovaSno,
+            DecrepifySno,
+            DevourSno,
+            FrailtySno,
+            GrimScytheSno,
+            LandOfTheDeadSno,
+            LeechSno,
+            ReviveSno,
+            SimulacrumSno,
+            SiphonBloodSno,
+            SkeletalMageSno
+        };
 
         public bool VisualHelpersEnabled { get; set; } = true;
 
@@ -65,6 +139,8 @@ namespace Turbo.Plugins.s7o
         public bool ShowPoolPartyStatus { get; set; } = true;
         public bool ShowVisitedWaypointMarkers { get; set; } = true;
         public bool ShowBloodIsPowerTracker { get; set; } = true;
+        public bool ShowBloodIsPowerOnBloodRush { get; set; } = false;
+        public bool UseBloodIsPowerUpperBoundEstimate { get; set; } = false;
 
         public int PylonProgressMarkerMaxAgeMs { get; set; } = 7200000;
         public float PylonProgressIconSize { get; set; } = 26.0f;
@@ -280,28 +356,35 @@ namespace Turbo.Plugins.s7o
         private IBrush _bipBarBorderBrush;
 
         private float _bipProgressPct;
-        private bool _bipEstimateUncertain;
+        private float _bipObservedRawPct;
+        private float _bipTrackerCostRawPct;
+        private double _bipLastSessionDamageTaken;
+        private bool _bipSessionDamageSeeded;
         private float _bipLastHealth;
         private float _bipLastHealthMax;
         private int[] _bipSkillState;
+        private uint[] _bipSkillSnoState;
         private int[] _bipCooldownStartState;
         private int[] _bipCooldownFinishState;
+        private int[] _bipActivationTickState;
         private bool _bipSkillStateSeeded;
-        private int _bipLastPlayerIndex = -1;
         private int _bipPendingProcStartTick;
         private int _bipAreaRebaseUntilTick;
-        private float _bipAreaSnapshotPct;
+        private uint _bipObservedWorldId;
+        private int _bipWorldTransitionGuardUntilTick;
         private bool _bipWasDead;
         private int _bipReviveRebaseUntilTick;
-        private float _bipDeathSnapshotPct;
         private bool _bipInactive;
         private string _bipInactiveReason;
         private int _bipLastBloodRushStartTick;
         private int _bipLastConfirmedProcTick;
-        private int _bipLastBloodRushCreditStartTick;
-
         private readonly List<BloodRushCreditCandidate> _bipBloodRushCandidates = new List<BloodRushCreditCandidate>();
         private int _bipLastBloodRushCreditTick;
+        private int _bipLastResolvedBloodRushCandidateTick;
+        private int _bipLastResolvedBloodRushCandidateCreatedTick;
+        private int _bipLastResolvedBloodRushCandidateStartTick;
+        private float _bipLastResolvedBloodRushCostPct;
+        private bool _bipLastResolvedBloodRushCandidateAnimationConfirmed;
         private float _bipLastPlayerX;
         private float _bipLastPlayerY;
         private uint _bipLastPlayerWorldId;
@@ -309,8 +392,23 @@ namespace Turbo.Plugins.s7o
         private bool _bipLastBloodRushChanneling;
         private int _bipLastBloodRushObservedLossTick;
         private float _bipLastBloodRushObservedLossPct;
+        private uint _bipLastPlayerAnimationSno;
+        private bool _bipPlayerAnimationSeeded;
+        private int _bipLastBloodRushAnimationTick;
+        private int _bipBloodRushNextChargeTickState;
+        private int _bipInferredCycleCount;
+        private int _bipLastObservedRolloverTick;
+        private bool _bipPhaseSynchronized;
+        private int _bipLastBloodForBloodCharges;
+        private bool _bipLastRathmasShieldActive;
         private int _bipLastFreshLossTick;
         private float _bipLastFreshLossPct;
+        private int _bipLastNativeArbiterTick;
+        private int _bipNativeArbiterCorrectionCount;
+        private float _bipLastNativeArbiterObservedPhasePct;
+        private float _bipLastNativeArbiterTrackerPhasePct;
+        private float _bipLastNativeArbiterCarryPct;
+        private string _bipLastNativeArbiterDecision = string.Empty;
         private bool _bipLastInGreaterRift;
         private bool _bipPendingGreaterRiftStartCheck;
         private int _bipGreaterRiftEntryTick;
@@ -842,17 +940,36 @@ namespace Turbo.Plugins.s7o
         {
             if (_bipSkillState == null || _bipSkillState.Length < 7)
                 _bipSkillState = new int[] { 0, 0, 0, 0, 0, 0, 0 };
+            if (_bipSkillSnoState == null || _bipSkillSnoState.Length < 7)
+                _bipSkillSnoState = new uint[] { 0u, 0u, 0u, 0u, 0u, 0u, 0u };
             if (_bipCooldownStartState == null || _bipCooldownStartState.Length < 7)
                 _bipCooldownStartState = new int[] { 0, 0, 0, 0, 0, 0, 0 };
             if (_bipCooldownFinishState == null || _bipCooldownFinishState.Length < 7)
                 _bipCooldownFinishState = new int[] { 0, 0, 0, 0, 0, 0, 0 };
+            if (_bipActivationTickState == null || _bipActivationTickState.Length < 7)
+                _bipActivationTickState = new int[] { 0, 0, 0, 0, 0, 0, 0 };
         }
 
         private bool IsBloodIsPowerTrackedSno(uint sno)
         {
-            return sno == LandOfTheDeadSno || sno == SimulacrumSno ||
-                   sno == Hud.Sno.SnoPowers.Necromancer_LandOfTheDead.Sno ||
-                   sno == Hud.Sno.SnoPowers.Necromancer_Simulacrum.Sno;
+            return NecromancerActiveSkillSnos.Contains(sno);
+        }
+
+        private uint GetBloodIsPowerSkillSno(IPlayerSkill skill)
+        {
+            if (skill == null)
+                return 0u;
+
+            try
+            {
+                ISnoPower power = skill.CurrentSnoPower ?? skill.SnoPower;
+                if (power != null)
+                    return power.Sno;
+            }
+            catch { }
+
+            try { return skill.SnoPower == null ? 0u : skill.SnoPower.Sno; }
+            catch { return 0u; }
         }
 
         private bool SkillMatchesBloodIsPowerSno(IPlayerSkill skill, uint fallbackSno, uint hudSno)
@@ -907,20 +1024,121 @@ namespace Turbo.Plugins.s7o
 
         private List<IPlayerSkill> GetBloodIsPowerTrackedSkills()
         {
-            var skills = new List<IPlayerSkill>(2);
+            var skills = new List<IPlayerSkill>(6);
+            var seenKeys = new HashSet<int>();
 
-            IPlayerSkill lotd = null;
-            IPlayerSkill simulacrum = null;
+            try
+            {
+                foreach (var skill in Hud.Game.Me.Powers.CurrentSkills)
+                {
+                    if (!IsBloodIsPowerTrackedSkill(skill))
+                        continue;
 
-            try { lotd = GetBloodIsPowerTrackedSkill(LandOfTheDeadSno, Hud.Sno.SnoPowers.Necromancer_LandOfTheDead.Sno); } catch { }
-            try { simulacrum = GetBloodIsPowerTrackedSkill(SimulacrumSno, Hud.Sno.SnoPowers.Necromancer_Simulacrum.Sno); } catch { }
+                    int key = (int)skill.Key;
+                    if (key < 0 || key >= 6 || !seenKeys.Add(key))
+                        continue;
 
-            if (lotd != null)
-                skills.Add(lotd);
-            if (simulacrum != null && !skills.Any(s => s != null && s.Key == simulacrum.Key))
-                skills.Add(simulacrum);
+                    skills.Add(skill);
+                }
+            }
+            catch { }
 
-            return skills;
+            return skills.OrderBy(skill => (int)skill.Key).ToList();
+        }
+
+        private bool IsBloodIsPowerDisplayCooldown(IPlayerSkill skill, int tick)
+        {
+            if (!IsBloodIsPowerTrackedSkill(skill))
+                return false;
+
+            int managedCharges = 0;
+            try { managedCharges = skill.Charges; }
+            catch { }
+
+            // A recharging charged skill remains usable while at least one charge
+            // exists, so painting BIP over it would imply a false lockout.
+            if (managedCharges > 0)
+                return false;
+
+            uint sno = GetBloodIsPowerSkillSno(skill);
+            if (sno == 0u)
+                return false;
+
+            // Blood Rush still contributes its Life cost and its native icon
+            // remains a global validation signal. Its very short charge cycle is
+            // excluded from painting by default because the overlay flickers for
+            // only a few frames and obscures a frequently used movement skill.
+            if (sno == BloodRushSno && !ShowBloodIsPowerOnBloodRush)
+                return false;
+
+            int nativeCharges = int.MinValue;
+            try
+            {
+                nativeCharges = Hud.Game.Me.GetAttributeValueAsInt(
+                    Hud.Sno.Attributes.Skill_Charges,
+                    sno,
+                    int.MinValue);
+            }
+            catch { }
+
+            if (nativeCharges > 0)
+                return false;
+
+            bool onCooldown = false;
+            try { onCooldown = skill.IsOnCooldown; }
+            catch { }
+
+            if (onCooldown)
+            {
+                int startTick = 0;
+                int finishTick = 0;
+                try
+                {
+                    startTick = skill.CooldownStartTick;
+                    finishTick = skill.CooldownFinishTick;
+                }
+                catch { }
+
+                int cooldownWindowTicks = finishTick > startTick
+                    ? finishTick - startTick
+                    : 0;
+
+                // Rearranging the skill bar can expose an identical 60-tick
+                // action lock on every equipped skill. Exclude only a shared
+                // lock; Channeling Pylon can legitimately reduce Bone Armor to
+                // a 70-tick cooldown which must remain visible and trackable.
+                if (cooldownWindowTicks <=
+                        BloodIsPowerShortActionLockMaxTicks &&
+                    IsBloodIsPowerSharedShortActionLock(
+                        startTick,
+                        finishTick))
+                    return false;
+
+                return true;
+            }
+
+            // Blood Rush and other charge-based skills can report no ordinary
+            // cooldown even at zero charges. The native next-charge tick is the
+            // authoritative proof that the skill is currently unavailable.
+            int nextChargeTick = GetBloodIsPowerNextChargeTick(sno);
+
+            return managedCharges <= 0 && nativeCharges <= 0 && nextChargeTick > tick;
+        }
+
+        private int GetBloodIsPowerNextChargeTick(uint sno)
+        {
+            if (sno == 0u || Hud == null || Hud.Game == null ||
+                Hud.Game.Me == null)
+                return 0;
+
+            try
+            {
+                return Hud.Game.Me.GetAttributeValueAsInt(
+                    Hud.Sno.Attributes.Next_Charge_Gained_time,
+                    sno,
+                    0);
+            }
+            catch { return 0; }
         }
 
         private int GetBloodIsPowerSkillIndex(IPlayerSkill skill)
@@ -933,83 +1151,189 @@ namespace Turbo.Plugins.s7o
             catch { return -1; }
         }
 
-        private int GetBloodIsPowerIconCount(IBuff buff, IPlayerSkill skill)
+        private bool IsBloodIsPowerSharedShortActionLock(
+            int startTick,
+            int finishTick)
         {
-            if (buff == null || buff.IconCounts == null || skill == null)
-                return 0;
-
-            int idx = GetBloodIsPowerSkillIndex(skill);
-            if (idx < 0 || idx >= buff.IconCounts.Length)
-                return 0;
-
-            try { return buff.IconCounts[idx]; }
-            catch { return 0; }
-        }
-
-        private bool IsBloodIsPowerPendingDisplaySkill(IPlayerSkill skill, IBuff buff)
-        {
-            if (skill == null || buff == null || buff.IconCounts == null)
+            int windowTicks = finishTick > startTick
+                ? finishTick - startTick
+                : 0;
+            if (windowTicks <= 0 ||
+                windowTicks > BloodIsPowerShortActionLockMaxTicks)
                 return false;
 
+            int matchingSkills = 0;
             try
             {
-                if (!IsBloodIsPowerTrackedSkill(skill) || !skill.IsOnCooldown)
-                    return false;
+                foreach (var candidate in Hud.Game.Me.Powers.CurrentSkills)
+                {
+                    if (candidate == null || !candidate.IsOnCooldown)
+                        continue;
 
-                return GetBloodIsPowerIconCount(buff, skill) != 1;
-            }
-            catch { return false; }
-        }
+                    if (candidate.CooldownStartTick != startTick ||
+                        candidate.CooldownFinishTick != finishTick)
+                        continue;
 
-        private bool HasAnyUnconsumedBloodIsPowerDisplayCooldown(IBuff buff)
-        {
-            if (buff == null || buff.IconCounts == null)
-                return false;
-
-            try
-            {
-                var skills = GetBloodIsPowerTrackedSkills();
-                foreach (var skill in skills)
-                    if (IsBloodIsPowerPendingDisplaySkill(skill, buff))
+                    matchingSkills++;
+                    if (matchingSkills >=
+                        BloodIsPowerSharedActionLockMinimumSkills)
                         return true;
+                }
             }
             catch { }
 
             return false;
         }
 
-        
+        private bool IsBloodIsPowerTownArmoryActionLock()
+        {
+            if (Hud == null || Hud.Game == null || !Hud.Game.IsInTown)
+                return false;
 
-        
+            try
+            {
+                var skill = GetBloodIsPowerBloodRushSkill();
+                return skill != null && skill.IsOnCooldown &&
+                    IsBloodIsPowerSharedShortActionLock(
+                        skill.CooldownStartTick, skill.CooldownFinishTick);
+            }
+            catch { return false; }
+        }
 
-        
+        private bool CancelBloodRushCandidateAt(int index)
+        {
+            if (index < 0 || index >= _bipBloodRushCandidates.Count)
+                return false;
 
-        
+            var candidate = _bipBloodRushCandidates[index];
+            _bipBloodRushCandidates.RemoveAt(index);
 
-        
+            if (candidate == null || candidate.Completed ||
+                candidate.ExpectedCostPct <= 0f)
+                return false;
 
+            _bipTrackerCostRawPct = Math.Max(0f,
+                _bipTrackerCostRawPct - candidate.ExpectedCostPct);
+            return true;
+        }
+
+        private void CancelAllBloodRushCandidates(int tick)
+        {
+            bool trackerChanged = false;
+            for (int i = _bipBloodRushCandidates.Count - 1; i >= 0; i--)
+                trackerChanged = CancelBloodRushCandidateAt(i) || trackerChanged;
+
+            if (trackerChanged)
+                RefreshBloodIsPowerDualSourcePhase(tick);
+        }
+
+        private void SettleBloodRushCandidatesForArea(int tick)
+        {
+            bool trackerChanged = false;
+            for (int i = _bipBloodRushCandidates.Count - 1; i >= 0; i--)
+            {
+                var candidate = _bipBloodRushCandidates[i];
+                if (candidate != null && !candidate.Completed &&
+                    candidate.AnimationConfirmed)
+                {
+                    float shortfall = Math.Max(0f,
+                        candidate.ExpectedCostPct - candidate.ObservedPct);
+                    if (shortfall >=
+                        BloodIsPowerBloodRushCreditMinShortfallPct)
+                        AddBloodIsPowerProgress(shortfall, tick);
+
+                    CompleteBloodRushCandidate(candidate, tick);
+                    _bipBloodRushCandidates.RemoveAt(i);
+                    continue;
+                }
+
+                trackerChanged =
+                    CancelBloodRushCandidateAt(i) || trackerChanged;
+            }
+
+            if (trackerChanged)
+                RefreshBloodIsPowerDualSourcePhase(tick);
+        }
+
+        private void DiscardBloodIsPowerArmoryActionLockCandidates(int tick)
+        {
+            bool removed = false;
+            for (int i = _bipBloodRushCandidates.Count - 1; i >= 0; i--)
+            {
+                var c = _bipBloodRushCandidates[i];
+                if (c == null || c.Completed || c.AnimationConfirmed ||
+                    (!c.HandlerConfirmed && !c.PollConfirmed &&
+                        !c.TeleportConfirmed) ||
+                    tick < c.Tick || tick - c.Tick > BloodIsPowerShortActionLockMaxTicks)
+                    continue;
+
+                removed = CancelBloodRushCandidateAt(i) || removed;
+            }
+
+            if (removed)
+                RefreshBloodIsPowerDualSourcePhase(tick);
+        }
+
+        private bool IsBloodIsPowerWorldTransitionGuardActive(int tick)
+        {
+            return _bipWorldTransitionGuardUntilTick > 0 &&
+                tick <= _bipWorldTransitionGuardUntilTick;
+        }
+
+        private void ObserveBloodIsPowerWorldTransition(int tick)
+        {
+            try
+            {
+                uint worldId = Hud.Game.Me.WorldId;
+                if (worldId == 0)
+                    return;
+
+                if (_bipObservedWorldId == 0)
+                {
+                    _bipObservedWorldId = worldId;
+                    return;
+                }
+
+                if (_bipObservedWorldId == worldId)
+                    return;
+
+                _bipObservedWorldId = worldId;
+                _bipWorldTransitionGuardUntilTick =
+                    tick + BloodIsPowerWorldTransitionGuardTicks;
+                DiscardBloodIsPowerWorldTransitionCandidates(tick);
+            }
+            catch { }
+        }
+
+        private void DiscardBloodIsPowerWorldTransitionCandidates(int tick)
+        {
+            bool removed = false;
+            for (int i = _bipBloodRushCandidates.Count - 1; i >= 0; i--)
+            {
+                var c = _bipBloodRushCandidates[i];
+                if (c == null || c.Completed || c.AnimationConfirmed ||
+                    c.ObservedPct > 0f)
+                    continue;
+
+                removed = CancelBloodRushCandidateAt(i) || removed;
+            }
+
+            if (removed)
+                RefreshBloodIsPowerDualSourcePhase(tick);
+        }
         private sealed class BloodIsPowerProcSignals
         {
-            public bool PendingDisplay;
-            public bool PendingProc;
+            public bool SimulacrumActivated;
 
             public bool ReceivedAny;
-            public bool IgnoredLowCooldownDrop;
             public bool CooldownDropConfirmed;
-
-            public int MaxAnyDropTicks;
-            public int MaxTrackedDropTicks;
-
-            public string ProcReason = string.Empty;
-            public string IconEdgeKey = string.Empty;
-            public string DropSkillKey = string.Empty;
-
-            public string AllIconEdgeKeys = string.Empty;
-            public string TrackedIconEdgeKey = string.Empty;
-            public string NonTrackedIconEdgeKey = string.Empty;
-
-            public bool TrackedIconEdge;
-            public bool NonTrackedIconEdge;
+            public bool TerminalCooldownApplication;
+            public bool ApplicationActivationPredatesObservedRollover;
+            public bool ApplicationActivationStartedAfterObservedRollover;
+            public bool BloodRushIconEdge;
+            public bool BloodRushChargeDropConfirmed;
+            public bool ExistingCooldownIconEdge;
+            public int TrackedIconEdgeCount;
         }
 
         private sealed class BloodRushCreditCandidate
@@ -1024,6 +1348,7 @@ namespace Turbo.Plugins.s7o
             public bool HandlerConfirmed;
             public bool PollConfirmed;
             public bool TeleportConfirmed;
+            public bool AnimationConfirmed;
             public bool Credited;
             public bool Completed;
         }
@@ -1034,20 +1359,29 @@ namespace Turbo.Plugins.s7o
             if (skill == null)
                 return false;
 
-            try { if (skill.SnoPower != null && skill.SnoPower.Sno == BloodRushSno) return true; } catch { }
-            try { if (skill.CurrentSnoPower != null && skill.CurrentSnoPower.Sno == BloodRushSno) return true; } catch { }
-            try { if (skill.OverrideSnoPower != null && skill.OverrideSnoPower.Sno == BloodRushSno) return true; } catch { }
-
+            uint hudSno = BloodRushSno;
             try
             {
-                uint hudSno = Hud.Sno.SnoPowers.Necromancer_BloodRush.Sno;
-                try { if (skill.SnoPower != null && skill.SnoPower.Sno == hudSno) return true; } catch { }
-                try { if (skill.CurrentSnoPower != null && skill.CurrentSnoPower.Sno == hudSno) return true; } catch { }
-                try { if (skill.OverrideSnoPower != null && skill.OverrideSnoPower.Sno == hudSno) return true; } catch { }
+                hudSno = Hud.Sno.SnoPowers.Necromancer_BloodRush.Sno;
             }
             catch { }
 
-            return false;
+            return SkillMatchesBloodIsPowerSno(skill, BloodRushSno, hudSno);
+        }
+
+        private bool IsBloodIsPowerSimulacrumSkill(IPlayerSkill skill)
+        {
+            if (skill == null)
+                return false;
+
+            uint hudSno = SimulacrumSno;
+            try
+            {
+                hudSno = Hud.Sno.SnoPowers.Necromancer_Simulacrum.Sno;
+            }
+            catch { }
+
+            return SkillMatchesBloodIsPowerSno(skill, SimulacrumSno, hudSno);
         }
 
         private IPlayerSkill GetBloodIsPowerBloodRushSkill()
@@ -1062,15 +1396,15 @@ namespace Turbo.Plugins.s7o
 
             try
             {
-                uint hudSno = Hud.Sno.SnoPowers.Necromancer_BloodRush.Sno;
+                uint hudSno = BloodRushSno;
+                try { hudSno = Hud.Sno.SnoPowers.Necromancer_BloodRush.Sno; }
+                catch { }
+
                 foreach (var skill in Hud.Game.Me.Powers.CurrentSkills)
                 {
-                    if (skill == null)
-                        continue;
-
-                    try { if (skill.SnoPower != null && (skill.SnoPower.Sno == BloodRushSno || skill.SnoPower.Sno == hudSno)) return skill; } catch { }
-                    try { if (skill.CurrentSnoPower != null && (skill.CurrentSnoPower.Sno == BloodRushSno || skill.CurrentSnoPower.Sno == hudSno)) return skill; } catch { }
-                    try { if (skill.OverrideSnoPower != null && (skill.OverrideSnoPower.Sno == BloodRushSno || skill.OverrideSnoPower.Sno == hudSno)) return skill; } catch { }
+                    if (SkillMatchesBloodIsPowerSno(
+                        skill, BloodRushSno, hudSno))
+                        return skill;
                 }
             }
             catch { }
@@ -1078,11 +1412,16 @@ namespace Turbo.Plugins.s7o
             return null;
         }
 
-        
-
         private float GetBloodIsPowerBloodRushExpectedCostPct(IPlayerSkill skill)
         {
             if (skill == null)
+                return 0f;
+
+            // Channeling Pylon makes Blood Rush free. Its animation still fires,
+            // so this must be checked before creating a reconstruction candidate.
+            // Real sampled Life loss continues through AddBloodIsPowerHealthLoss
+            // and is therefore treated as combat damage, not a skill cost.
+            if (IsBloodIsPowerLifeCostSuppressed())
                 return 0f;
 
             string rune = string.Empty;
@@ -1091,10 +1430,83 @@ namespace Turbo.Plugins.s7o
             if (rune.IndexOf("Hemostasis", StringComparison.OrdinalIgnoreCase) >= 0)
                 return 0f;
 
-            if (rune.IndexOf("Metabolism", StringComparison.OrdinalIgnoreCase) >= 0)
-                return 10f;
+            float expected = rune.IndexOf("Metabolism", StringComparison.OrdinalIgnoreCase) >= 0
+                ? 10f
+                : 5f;
 
-            return 5f;
+            if (IsBloodDebtReducingLifeCosts())
+                expected *= 0.25f;
+
+            return expected;
+        }
+
+        private float GetBloodIsPowerSimulacrumExpectedCostPct()
+        {
+            // Credit only the part missing from health samples, unless a
+            // verified zero-cost state suppresses the cast cost.
+            return IsBloodIsPowerLifeCostSuppressed()
+                ? 0f
+                : BloodIsPowerSimulacrumExpectedCostPct;
+        }
+
+        private bool IsBloodIsPowerLifeCostSuppressed()
+        {
+            try
+            {
+                var me = Hud == null || Hud.Game == null ? null : Hud.Game.Me;
+                if (me == null || me.Powers == null)
+                    return false;
+
+                bool bloodForBloodCharge = GetBloodForBloodChargeCount(me) > 0;
+                bool rathmasShield = me.Powers.BuffIsActive(RathmasShieldSno);
+                bool channelingPylon = IsBloodIsPowerChannelingPylonActive();
+                return channelingPylon ||
+                    _bipLastBloodForBloodCharges > 0 || bloodForBloodCharge ||
+                    _bipLastRathmasShieldActive || rathmasShield;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static int GetBloodForBloodChargeCount(IPlayer me)
+        {
+            if (me == null || me.Powers == null)
+                return 0;
+
+            try
+            {
+                IBuff buff = me.Powers.GetBuff(BloodForBloodSno);
+                if (buff == null || buff.IconCounts == null || buff.IconCounts.Length == 0)
+                    return 0;
+                return Math.Max(0, buff.IconCounts.Max());
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        private bool IsBloodDebtReducingLifeCosts()
+        {
+            try
+            {
+                var sim = GetBloodIsPowerTrackedSkill(SimulacrumSno,
+                    Hud.Sno.SnoPowers.Necromancer_Simulacrum.Sno);
+                if (sim == null ||
+                    (sim.RuneNameEnglish ?? string.Empty).IndexOf("Blood Debt", StringComparison.OrdinalIgnoreCase) < 0)
+                    return false;
+
+                if (sim.BuffIsActive)
+                    return true;
+
+                return sim.Buff != null && sim.Buff.Active;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private bool IsBloodIsPowerChannelingPylonActive()
@@ -1110,6 +1522,14 @@ namespace Turbo.Plugins.s7o
             }
         }
 
+        private static bool IsValidBloodRushCooldownSignal(
+            int startTick,
+            int finishTick)
+        {
+            return startTick > 0 && startTick < int.MaxValue / 2 &&
+                finishTick > startTick && finishTick < int.MaxValue / 2;
+        }
+
         public void OnCooldown(IPlayerSkill playerSkill, bool expired)
         {
             if (expired || playerSkill == null || Hud == null || Hud.Game == null || Hud.Game.Me == null)
@@ -1121,9 +1541,24 @@ namespace Turbo.Plugins.s7o
             int tick = Hud.Game.CurrentGameTick;
 
             int start = 0;
+            int finish = 0;
             try { start = playerSkill.CooldownStartTick; } catch { }
+            try { finish = playerSkill.CooldownFinishTick; } catch { }
 
-            QueueBloodRushCandidate(tick, start, playerSkill, true, false, false);
+            // FreeHUD can dispatch simultaneous handler callbacks with sentinel
+            // 2147483647/0 timestamps even though Blood Rush was not cast. Real
+            // casts remain covered by the native animation path.
+            if (!IsValidBloodRushCooldownSignal(start, finish))
+                return;
+
+            // Armory/build application exposes the same short action lock on
+            // several equipped skills and fires this callback without Blood Rush.
+            // The display path already rejects this native pattern; reuse that
+            // exact arbiter so a build swap cannot synthesize a 5%/10% Life cost.
+            if (IsBloodIsPowerSharedShortActionLock(start, finish))
+                return;
+
+            QueueBloodRushCandidate(tick, start, playerSkill, true, false, false, false);
         }
 
 
@@ -1183,29 +1618,88 @@ namespace Turbo.Plugins.s7o
         }
 
 
-        private void QueueBloodRushCandidate(int tick, int start, IPlayerSkill skill, bool handler, bool poll, bool teleport)
+        private void QueueBloodRushCandidate(int tick, int start, IPlayerSkill skill, bool handler, bool poll, bool teleport, bool animation)
         {
+            ObserveBloodIsPowerWorldTransition(tick);
+
             float expected = GetBloodIsPowerBloodRushExpectedCostPct(skill);
             if (expected <= 0f)
+                return;
+
+            // A coordinate jump is useful corroboration but is not a cast
+            // identity: portals and world transfers can move the player before
+            // WorldId changes. Attach it only to an already proven candidate.
+            if (teleport && !animation && !handler && !poll)
+            {
+                foreach (var candidate in _bipBloodRushCandidates)
+                {
+                    if (candidate == null || candidate.Completed ||
+                        Math.Abs(tick - candidate.Tick) >
+                            BloodIsPowerBloodRushPairWindowTicks)
+                        continue;
+
+                    candidate.TeleportConfirmed = true;
+                    return;
+                }
+
+                return;
+            }
+
+            bool currentObservedLoss =
+                _bipLastBloodRushObservedLossTick == tick &&
+                _bipLastBloodRushObservedLossPct >=
+                    BloodIsPowerBloodRushMinObservedLossPct;
+
+            if (!animation && !currentObservedLoss &&
+                IsBloodIsPowerWorldTransitionGuardActive(tick))
+                return;
+
+            // During an Armory/build application the current Blood Rush slot can
+            // publish a fresh cooldown start without a cast. By the normal collect
+            // pass, the complete shared-lock state is available even when the
+            // earlier cooldown callback arrived before the other skills updated.
+            if ((handler || poll) && !animation && !teleport &&
+                IsBloodIsPowerTownArmoryActionLock())
+                return;
+
+            bool delayedResolvedSignal =
+                (handler || poll) && !animation && !teleport &&
+                _bipLastResolvedBloodRushCandidateTick > 0 &&
+                _bipLastResolvedBloodRushCandidateCreatedTick > 0 &&
+                _bipLastResolvedBloodRushCandidateCreatedTick <=
+                    _bipLastResolvedBloodRushCandidateTick &&
+                Math.Abs(tick - _bipLastResolvedBloodRushCandidateTick) <=
+                    BloodIsPowerBloodRushResolvedSignalDedupeTicks &&
+                (start <= 0 || start >= int.MaxValue / 2 ||
+                    _bipLastResolvedBloodRushCandidateStartTick <= 0 ||
+                    Math.Abs(start -
+                        _bipLastResolvedBloodRushCandidateStartTick) <=
+                        BloodIsPowerBloodRushResolvedSignalDedupeTicks);
+
+            if (delayedResolvedSignal)
                 return;
 
             foreach (var c in _bipBloodRushCandidates)
             {
                 bool sameStart = start > 0 && start < int.MaxValue / 2 && c.StartTick == start;
                 bool nearbyStartless = (start <= 0 || start >= int.MaxValue / 2) && c.StartTick <= 0 && Math.Abs(tick - c.Tick) <= BloodIsPowerBloodRushNoDuplicateTicks;
+                bool nearbyAnimationPair = Math.Abs(tick - c.Tick) <= BloodIsPowerBloodRushNoDuplicateTicks &&
+                    (animation || c.AnimationConfirmed);
 
-                if (!c.Completed && (sameStart || nearbyStartless))
+                if (!c.Completed && (sameStart || nearbyStartless || nearbyAnimationPair))
                 {
                     c.HandlerConfirmed = c.HandlerConfirmed || handler;
                     c.PollConfirmed = c.PollConfirmed || poll;
                     c.TeleportConfirmed = c.TeleportConfirmed || teleport;
+                    c.AnimationConfirmed = c.AnimationConfirmed || animation;
                     return;
                 }
             }
 
             float priorObserved = 0f;
-            if (_bipLastBloodRushObservedLossTick > 0 &&
-                _bipLastBloodRushObservedLossTick < tick &&
+            if (!animation &&
+                _bipLastBloodRushObservedLossTick > 0 &&
+                _bipLastBloodRushObservedLossTick <= tick &&
                 tick - _bipLastBloodRushObservedLossTick <= BloodIsPowerBloodRushPairWindowTicks)
             {
                 priorObserved = _bipLastBloodRushObservedLossPct;
@@ -1220,12 +1714,99 @@ namespace Turbo.Plugins.s7o
                 ObservedPct = priorObserved,
                 HandlerConfirmed = handler,
                 PollConfirmed = poll,
-                TeleportConfirmed = teleport
+                TeleportConfirmed = teleport,
+                AnimationConfirmed = animation
             });
+
+            // Session.DamageTaken excludes Blood Rush's Life cost. Register the
+            // full deterministic cost once, at creation of the deduplicated cast
+            // candidate; the observed-health model separately credits only its
+            // sampled shortfall.
+            AddBloodIsPowerTrackerCost(expected, tick);
+        }
+
+        private void CompleteBloodRushCandidate(
+            BloodRushCreditCandidate candidate,
+            int tick)
+        {
+            if (candidate == null)
+                return;
+
+            candidate.Completed = true;
+            _bipLastResolvedBloodRushCandidateTick = tick;
+            _bipLastResolvedBloodRushCandidateCreatedTick = candidate.Tick;
+            _bipLastResolvedBloodRushCandidateStartTick =
+                candidate.StartTick > 0 &&
+                candidate.StartTick < int.MaxValue / 2
+                    ? candidate.StartTick
+                    : 0;
+            _bipLastResolvedBloodRushCostPct =
+                Math.Max(0f, candidate.ExpectedCostPct);
+            _bipLastResolvedBloodRushCandidateAnimationConfirmed =
+                candidate.AnimationConfirmed;
+        }
+
+        private void ConsumeRecentBloodRushCandidateAfterNativeRebase(
+            int tick)
+        {
+            int nearestIndex = -1;
+            for (int i = 0; i < _bipBloodRushCandidates.Count; i++)
+            {
+                var candidate = _bipBloodRushCandidates[i];
+                if (candidate == null || !candidate.AnimationConfirmed ||
+                    tick < candidate.Tick ||
+                    tick - candidate.Tick >
+                        BloodIsPowerNativeRolloverMatchTicks)
+                    continue;
+
+                if (nearestIndex < 0 || candidate.Tick >
+                    _bipBloodRushCandidates[nearestIndex].Tick)
+                    nearestIndex = i;
+            }
+
+            if (nearestIndex < 0)
+                return;
+
+            var nearest = _bipBloodRushCandidates[nearestIndex];
+            if (!nearest.Completed)
+                CompleteBloodRushCandidate(nearest, tick);
+            _bipBloodRushCandidates.RemoveAt(nearestIndex);
+        }
+
+        private float GetRecentConfirmedBloodRushCostPct(int tick)
+        {
+            float expectedCostPct =
+                _bipLastResolvedBloodRushCandidateTick > 0 &&
+                _bipLastResolvedBloodRushCandidateCreatedTick > 0 &&
+                _bipLastResolvedBloodRushCandidateCreatedTick <=
+                    _bipLastResolvedBloodRushCandidateTick &&
+                _bipLastResolvedBloodRushCandidateAnimationConfirmed &&
+                tick >= _bipLastResolvedBloodRushCandidateTick &&
+                tick - _bipLastResolvedBloodRushCandidateTick <=
+                    BloodIsPowerNativeRolloverMatchTicks
+                    ? Math.Max(0f, _bipLastResolvedBloodRushCostPct)
+                    : 0f;
+            foreach (var candidate in _bipBloodRushCandidates)
+            {
+                if (candidate == null || !candidate.AnimationConfirmed ||
+                    candidate.ExpectedCostPct <= 0f ||
+                    tick < candidate.Tick ||
+                    tick - candidate.Tick >
+                        BloodIsPowerNativeRolloverMatchTicks)
+                    continue;
+
+                expectedCostPct = Math.Max(
+                    expectedCostPct,
+                    candidate.ExpectedCostPct);
+            }
+
+            return expectedCostPct;
         }
 
         private float ResolveBloodRushCandidateCredit(int tick, float observedDeltaPct)
         {
+            bool observedAllocated = false;
+            bool trackerChanged = false;
             for (int i = _bipBloodRushCandidates.Count - 1; i >= 0; i--)
             {
                 var c = _bipBloodRushCandidates[i];
@@ -1236,79 +1817,66 @@ namespace Turbo.Plugins.s7o
                     continue;
                 }
 
-                if (_bipProgressPct >= 100f)
+                if (tick > c.ExpireTick)
                 {
-                    c.Completed = true;
+                    trackerChanged =
+                        CancelBloodRushCandidateAt(i) || trackerChanged;
                     continue;
                 }
 
-                if (observedDeltaPct > 0f)
+                bool candidateObservedThisTick = false;
+                if (observedDeltaPct > 0f && !observedAllocated)
+                {
                     c.ObservedPct += observedDeltaPct;
+                    observedAllocated = true;
+                    candidateObservedThisTick = true;
+                }
 
                 if (c.ObservedPct >= c.ExpectedCostPct - BloodIsPowerBloodRushCreditMinShortfallPct)
                 {
-                    c.Completed = true;
+                    CompleteBloodRushCandidate(c, tick);
                     continue;
                 }
 
-                if (observedDeltaPct >= BloodIsPowerBloodRushMinObservedLossPct &&
+                if (candidateObservedThisTick &&
+                    observedDeltaPct >= BloodIsPowerBloodRushMinObservedLossPct &&
                     c.ObservedPct < c.ExpectedCostPct)
                 {
-                    if (c.StartTick > 0 && c.StartTick < int.MaxValue / 2 && c.StartTick == _bipLastBloodRushCreditStartTick)
-                    {
-                        c.Completed = true;
-                        continue;
-                    }
-
-                    if (tick - _bipLastBloodRushCreditTick < BloodIsPowerBloodRushNoDuplicateTicks)
-                    {
-                        c.Completed = true;
-                        continue;
-                    }
-
                     float shortfall = c.ExpectedCostPct - c.ObservedPct;
                     if (shortfall >= BloodIsPowerBloodRushCreditMinShortfallPct)
                     {
                         c.Credited = true;
-                        c.Completed = true;
+                        CompleteBloodRushCandidate(c, tick);
                         _bipLastBloodRushCreditTick = tick;
-
-                        if (c.StartTick > 0 && c.StartTick < int.MaxValue / 2)
-                            _bipLastBloodRushCreditStartTick = c.StartTick;
 
                         return shortfall;
                     }
                 }
 
-                // Health snapshots can miss Blood Rush completely. Only estimate zero-loss casts
-                // from stronger handler/teleport evidence, never from poll-only cooldown noise.
+                // Blood Rush animation is the cast identity when IsOnCooldown is
+                // unavailable. Reconstruct only corroborated, non-free shortfall.
+                float delayedShortfall = c.ExpectedCostPct - c.ObservedPct;
                 if (!c.Credited &&
-                    c.ObservedPct <= 0f &&
+                    delayedShortfall >= BloodIsPowerBloodRushCreditMinShortfallPct &&
                     !_bipLastBloodRushChanneling &&
-                    (c.HandlerConfirmed || c.TeleportConfirmed) &&
+                    (c.AnimationConfirmed || c.HandlerConfirmed || c.TeleportConfirmed) &&
                     tick - c.Tick >= BloodIsPowerBloodRushZeroLossDelayTicks)
                 {
                     c.Credited = true;
-                    c.Completed = true;
+                    CompleteBloodRushCandidate(c, tick);
                     _bipLastBloodRushCreditTick = tick;
 
-                    if (c.StartTick > 0 && c.StartTick < int.MaxValue / 2)
-                        _bipLastBloodRushCreditStartTick = c.StartTick;
-
                     _bipBloodRushCandidates.RemoveAt(i);
-                    return c.ExpectedCostPct;
+                    return delayedShortfall;
                 }
 
-                if (tick > c.ExpireTick)
-                {
-                    _bipBloodRushCandidates.RemoveAt(i);
-                    continue;
-                }
             }
+
+            if (trackerChanged)
+                RefreshBloodIsPowerDualSourcePhase(tick);
 
             return 0f;
         }
-
 
         private float UpdateBloodIsPowerBloodRushCredit(float observedDeltaPct)
         {
@@ -1321,6 +1889,33 @@ namespace Turbo.Plugins.s7o
                 var skill = GetBloodIsPowerBloodRushSkill();
                 if (skill == null)
                     return 0f;
+
+                uint animationSno = 0u;
+                try { animationSno = (uint)Hud.Game.Me.Animation; } catch { }
+
+                bool animationChanged = !_bipPlayerAnimationSeeded ||
+                    animationSno != _bipLastPlayerAnimationSno;
+                bool repeatedTransitionAnimation =
+                    IsBloodIsPowerWorldTransitionGuardActive(tick) &&
+                    _bipLastBloodRushAnimationTick > 0 &&
+                    tick >= _bipLastBloodRushAnimationTick &&
+                    tick - _bipLastBloodRushAnimationTick <=
+                        BloodIsPowerBloodRushNoDuplicateTicks;
+                bool bloodRushAnimation = animationChanged &&
+                    BloodRushAnimationSnos.Contains(animationSno) &&
+                    tick - _bipLastBloodRushAnimationTick > 8 &&
+                    (!repeatedTransitionAnimation ||
+                        observedDeltaPct >=
+                            BloodIsPowerBloodRushMinObservedLossPct);
+
+                _bipLastPlayerAnimationSno = animationSno;
+                _bipPlayerAnimationSeeded = true;
+
+                if (bloodRushAnimation)
+                {
+                    _bipLastBloodRushAnimationTick = tick;
+                    QueueBloodRushCandidate(tick, 0, skill, false, false, false, true);
+                }
 
                 int start = 0;
                 int finish = 0;
@@ -1337,17 +1932,17 @@ namespace Turbo.Plugins.s7o
                 bool teleportEdge = UpdateBloodRushMovementValidator(tick);
                 bool supportingSignal = teleportEdge || observedDeltaPct >= BloodIsPowerBloodRushMinObservedLossPct;
 
-                if (startChanged && IsFreshBloodRushStart(tick, start, finish, supportingSignal))
-                    QueueBloodRushCandidate(tick, start, skill, false, true, false);
-
-                if (teleportEdge)
-                    QueueBloodRushCandidate(tick, start, skill, false, false, true);
-
                 if (observedDeltaPct >= BloodIsPowerBloodRushMinObservedLossPct)
                 {
                     _bipLastBloodRushObservedLossTick = tick;
                     _bipLastBloodRushObservedLossPct = observedDeltaPct;
                 }
+
+                if (startChanged && IsFreshBloodRushStart(tick, start, finish, supportingSignal))
+                    QueueBloodRushCandidate(tick, start, skill, false, true, false, false);
+
+                if (teleportEdge)
+                    QueueBloodRushCandidate(tick, start, skill, false, false, true, false);
 
                 return ResolveBloodRushCandidateCredit(tick, observedDeltaPct);
             }
@@ -1427,15 +2022,27 @@ namespace Turbo.Plugins.s7o
                         continue;
 
                     _bipSkillState[i] = buff.IconCounts[i];
+                    uint skillSno = GetBloodIsPowerSkillSno(skill);
+                    bool sameSkill = _bipSkillSnoState[i] == skillSno;
+                    _bipSkillSnoState[i] = skillSno;
+                    if (skillSno == BloodRushSno)
+                        _bipBloodRushNextChargeTickState =
+                            GetBloodIsPowerNextChargeTick(skillSno);
                     try
                     {
-                        _bipCooldownStartState[i] = skill.IsOnCooldown ? skill.CooldownStartTick : 0;
-                        _bipCooldownFinishState[i] = skill.IsOnCooldown ? skill.CooldownFinishTick : 0;
+                        bool onCooldown = skill.IsOnCooldown;
+                        _bipCooldownStartState[i] = onCooldown ? skill.CooldownStartTick : 0;
+                        _bipCooldownFinishState[i] = onCooldown ? skill.CooldownFinishTick : 0;
+                        if (!onCooldown)
+                            _bipActivationTickState[i] = 0;
+                        else if (!sameSkill || _bipActivationTickState[i] <= 0)
+                            _bipActivationTickState[i] = Hud.Game.CurrentGameTick;
                     }
                     catch
                     {
                         _bipCooldownStartState[i] = 0;
                         _bipCooldownFinishState[i] = 0;
+                        _bipActivationTickState[i] = 0;
                     }
                 }
             }
@@ -1452,32 +2059,53 @@ namespace Turbo.Plugins.s7o
                     return;
 
                 int tick = Hud.Game.CurrentGameTick;
-                int playerIndex = Hud.Game.Me.Index;
 
                 if (newGame)
                 {
-                    _bipLastPlayerIndex = playerIndex;
                     ResetBloodIsPowerTracker();
+                    _bipPhaseSynchronized = true;
                     ResetBloodIsPowerGreaterRiftLifecycle();
                     return;
                 }
 
-                // FreeHUD can change Me.Index on normal GR floor transfers. Treat same-game area
-                // changes as a short rebase window, not as a BIP reset. The progress snapshot is
-                // kept visible while health/IconCounts are reseeded on the new floor.
-                _bipLastPlayerIndex = playerIndex;
-                _bipAreaSnapshotPct = _bipProgressPct;
+                // Same-game floor changes preserve progress while health,
+                // cooldown and icon baselines settle in the new area.
+                ObserveBloodIsPowerWorldTransition(tick);
+                _bipWorldTransitionGuardUntilTick = Math.Max(
+                    _bipWorldTransitionGuardUntilTick,
+                    tick + BloodIsPowerWorldTransitionGuardTicks);
+                DiscardBloodIsPowerWorldTransitionCandidates(tick);
+                SettleBloodRushCandidatesForArea(tick);
                 _bipAreaRebaseUntilTick = tick + BloodIsPowerAreaRebaseTicks;
                 _bipLastHealth = 0f;
                 _bipLastHealthMax = 0f;
+                _bipLastSessionDamageTaken = 0d;
+                _bipSessionDamageSeeded = false;
                 _bipSkillStateSeeded = false;
-                _bipLastBloodRushCreditStartTick = 0;
                 _bipLastBloodRushCreditTick = 0;
-                _bipBloodRushCandidates.Clear();
+                _bipLastResolvedBloodRushCandidateTick = 0;
+                _bipLastResolvedBloodRushCandidateCreatedTick = 0;
+                _bipLastResolvedBloodRushCandidateStartTick = 0;
+                _bipLastResolvedBloodRushCostPct = 0f;
+                _bipLastResolvedBloodRushCandidateAnimationConfirmed = false;
                 _bipLastPlayerWorldId = 0;
                 _bipLastPlayerPositionTick = 0;
                 _bipLastBloodRushObservedLossTick = 0;
                 _bipLastBloodRushObservedLossPct = 0f;
+                try
+                {
+                    _bipLastPlayerAnimationSno =
+                        (uint)Hud.Game.Me.Animation;
+                    _bipPlayerAnimationSeeded = true;
+                }
+                catch
+                {
+                    _bipPlayerAnimationSeeded = false;
+                    _bipLastPlayerAnimationSno = 0u;
+                }
+                _bipBloodRushNextChargeTickState = 0;
+                _bipLastBloodForBloodCharges = 0;
+                _bipLastRathmasShieldActive = false;
                 _bipLastFreshLossTick = 0;
                 _bipLastFreshLossPct = 0f;
             }
@@ -1487,23 +2115,30 @@ namespace Turbo.Plugins.s7o
         private void ResetBloodIsPowerTracker()
         {
             _bipProgressPct = 0f;
-            _bipEstimateUncertain = false;
+            _bipObservedRawPct = 0f;
+            _bipTrackerCostRawPct = 0f;
+            _bipLastSessionDamageTaken = 0d;
+            _bipSessionDamageSeeded = false;
             _bipLastHealth = 0f;
             _bipLastHealthMax = 0f;
             _bipSkillStateSeeded = false;
             _bipPendingProcStartTick = 0;
             _bipAreaRebaseUntilTick = 0;
-            _bipAreaSnapshotPct = 0f;
+            _bipObservedWorldId = 0;
+            _bipWorldTransitionGuardUntilTick = 0;
             _bipWasDead = false;
             _bipReviveRebaseUntilTick = 0;
-            _bipDeathSnapshotPct = 0f;
             _bipInactive = false;
             _bipInactiveReason = null;
             _bipLastBloodRushStartTick = 0;
             _bipLastConfirmedProcTick = 0;
-            _bipLastBloodRushCreditStartTick = 0;
             _bipBloodRushCandidates.Clear();
             _bipLastBloodRushCreditTick = 0;
+            _bipLastResolvedBloodRushCandidateTick = 0;
+            _bipLastResolvedBloodRushCandidateCreatedTick = 0;
+            _bipLastResolvedBloodRushCandidateStartTick = 0;
+            _bipLastResolvedBloodRushCostPct = 0f;
+            _bipLastResolvedBloodRushCandidateAnimationConfirmed = false;
             _bipLastPlayerX = 0f;
             _bipLastPlayerY = 0f;
             _bipLastPlayerWorldId = 0;
@@ -1511,15 +2146,32 @@ namespace Turbo.Plugins.s7o
             _bipLastBloodRushChanneling = false;
             _bipLastBloodRushObservedLossTick = 0;
             _bipLastBloodRushObservedLossPct = 0f;
+            _bipPlayerAnimationSeeded = false;
+            _bipLastPlayerAnimationSno = 0u;
+            _bipLastBloodRushAnimationTick = 0;
+            _bipBloodRushNextChargeTickState = 0;
+            _bipInferredCycleCount = 0;
+            _bipLastObservedRolloverTick = 0;
+            _bipPhaseSynchronized = false;
+            _bipLastBloodForBloodCharges = 0;
+            _bipLastRathmasShieldActive = false;
             _bipLastFreshLossTick = 0;
             _bipLastFreshLossPct = 0f;
+            _bipLastNativeArbiterTick = 0;
+            _bipNativeArbiterCorrectionCount = 0;
+            _bipLastNativeArbiterObservedPhasePct = 0f;
+            _bipLastNativeArbiterTrackerPhasePct = 0f;
+            _bipLastNativeArbiterCarryPct = 0f;
+            _bipLastNativeArbiterDecision = string.Empty;
 
             EnsureBloodIsPowerStateArrays();
             for (int i = 0; i < _bipSkillState.Length; i++)
             {
                 _bipSkillState[i] = 0;
+                _bipSkillSnoState[i] = 0u;
                 _bipCooldownStartState[i] = 0;
                 _bipCooldownFinishState[i] = 0;
+                _bipActivationTickState[i] = 0;
             }
         }
 
@@ -1573,6 +2225,7 @@ namespace Turbo.Plugins.s7o
                 tick > _bipLastGreaterRiftStartResetTick + BloodIsPowerGreaterRiftStartResetGuardTicks)
             {
                 ResetBloodIsPowerTracker();
+                _bipPhaseSynchronized = true;
 
                 _bipLastGreaterRiftStartResetTick = tick;
                 _bipPendingGreaterRiftStartCheck = false;
@@ -1618,24 +2271,6 @@ namespace Turbo.Plugins.s7o
             catch { return 0f; }
         }
 
-        private float GetBloodIsPowerDisplayPct()
-        {
-            try
-            {
-                IBuff buff = null;
-                var me = Hud.Game.Me;
-                if (me != null)
-                    buff = me.Powers.GetBuff(BloodIsPowerSno);
-                return GetBloodIsPowerDisplayPct(buff);
-            }
-            catch
-            {
-                if (_bipProgressPct < 0f) return 0f;
-                if (_bipProgressPct > 100f) return 100f;
-                return _bipProgressPct;
-            }
-        }
-
         private void PreserveBloodIsPowerDataUnavailable(string reason, int tick)
         {
             _bipLastHealth = 0f;
@@ -1643,16 +2278,39 @@ namespace Turbo.Plugins.s7o
             _bipSkillStateSeeded = false;
         }
 
-        private void PreserveBloodIsPowerOnDeath(int tick)
+        private void ResetBloodIsPowerPhaseOnDeath(int tick)
         {
             if (!_bipWasDead)
             {
                 _bipWasDead = true;
-                _bipDeathSnapshotPct = GetBloodIsPowerDisplayPct();
+
+                // Death clears partial progress. Exclude the lethal sample and
+                // preserve only the completed-cycle boundary for native echoes.
+                CancelAllBloodRushCandidates(tick);
+                float deathBoundary =
+                    SnapBloodIsPowerRawToCycleBoundary(
+                        _bipObservedRawPct);
+                _bipObservedRawPct = deathBoundary;
+                _bipTrackerCostRawPct = deathBoundary;
+                RefreshBloodIsPowerDualSourcePhase(tick);
+                _bipPhaseSynchronized = true;
+                _bipPendingProcStartTick = 0;
+                _bipLastObservedRolloverTick = 0;
+                _bipLastFreshLossTick = 0;
+                _bipLastFreshLossPct = 0f;
+
+                _bipLastSessionDamageTaken = 0d;
+                _bipSessionDamageSeeded = false;
+                _bipLastResolvedBloodRushCandidateTick = 0;
+                _bipLastResolvedBloodRushCandidateCreatedTick = 0;
+                _bipLastResolvedBloodRushCandidateStartTick = 0;
+                _bipLastResolvedBloodRushCostPct = 0f;
+                _bipLastResolvedBloodRushCandidateAnimationConfirmed = false;
+                _bipLastBloodForBloodCharges = 0;
+                _bipLastRathmasShieldActive = false;
             }
 
-            // Death does not reset Blood is Power progress. Only clear volatile baselines that
-            // can be invalid while dead; IconCounts/cooldown state will be reseeded on revive.
+            // IconCounts/cooldown and cast baselines are invalid while dead.
             _bipLastHealth = 0f;
             _bipLastHealthMax = 0f;
             _bipSkillStateSeeded = false;
@@ -1665,14 +2323,27 @@ namespace Turbo.Plugins.s7o
 
             _bipLastHealth = GetCurrentHealth(me);
             _bipLastHealthMax = GetCurrentMaxHealth(me);
+            _bipLastSessionDamageTaken = 0d;
+            _bipSessionDamageSeeded = false;
             _bipSkillStateSeeded = false;
-            _bipLastBloodRushCreditStartTick = 0;
+            CancelAllBloodRushCandidates(tick);
             _bipLastBloodRushCreditTick = 0;
-            _bipBloodRushCandidates.Clear();
+            _bipLastResolvedBloodRushCandidateTick = 0;
+            _bipLastResolvedBloodRushCandidateCreatedTick = 0;
+            _bipLastResolvedBloodRushCandidateStartTick = 0;
+            _bipLastResolvedBloodRushCostPct = 0f;
+            _bipLastResolvedBloodRushCandidateAnimationConfirmed = false;
             _bipLastPlayerWorldId = 0;
             _bipLastPlayerPositionTick = 0;
             _bipLastBloodRushObservedLossTick = 0;
             _bipLastBloodRushObservedLossPct = 0f;
+            _bipPlayerAnimationSeeded = false;
+            _bipLastPlayerAnimationSno = 0u;
+            _bipLastBloodRushAnimationTick = 0;
+            _bipBloodRushNextChargeTickState = 0;
+            _bipLastBloodForBloodCharges = GetBloodForBloodChargeCount(me);
+            try { _bipLastRathmasShieldActive = me.Powers.BuffIsActive(RathmasShieldSno); }
+            catch { _bipLastRathmasShieldActive = false; }
             _bipLastFreshLossTick = 0;
             _bipLastFreshLossPct = 0f;
         }
@@ -1684,9 +2355,6 @@ namespace Turbo.Plugins.s7o
                 ResetBloodIsPowerTracker();
                 _bipInactive = true;
                 _bipInactiveReason = reason;
-            }
-            else
-            {
             }
         }
 
@@ -1710,91 +2378,469 @@ namespace Turbo.Plugins.s7o
             if (deltaPct <= 0f || deltaPct > BloodIsPowerMaxSaneLossPct)
                 return 0f;
 
-            // Blood is Power can hold one pending global trigger. Once the
-            // estimated threshold is reached, additional loss cannot represent
-            // a second queued proc, so keep the estimate saturated at 100%.
-            _bipProgressPct = Math.Min(100f, Math.Max(0f, _bipProgressPct + deltaPct));
+            int tick = 0;
+            try { tick = Hud.Game.CurrentGameTick; } catch { }
+            AddBloodIsPowerProgress(deltaPct, tick);
 
             return deltaPct;
         }
 
-        private bool HasRecentBloodIsPowerFreshLoss(int tick)
+        private void AddBloodIsPowerProgress(float deltaPct, int tick)
         {
-            if (_bipLastFreshLossTick <= 0)
-                return false;
-
-            if (_bipLastFreshLossPct < BloodIsPowerFreshLossDropConfirmFloorPct)
-                return false;
-
-            return tick - _bipLastFreshLossTick <= BloodIsPowerFreshLossDropConfirmTicks;
-        }
-
-        private void ResolveBloodIsPowerReceived(int tick, float cur, float max)
-        {
-            _bipProgressPct = 0f;
-            _bipEstimateUncertain = false;
-            _bipPendingProcStartTick = 0;
-            _bipLastConfirmedProcTick = tick;
-
-            _bipLastHealth = cur;
-            _bipLastHealthMax = max;
-
-            _bipBloodRushCandidates.Clear();
-        }
-
-
-        private void ResolveBloodIsPowerOverflow(bool pendingCooldown, int tick)
-        {
-            if (_bipProgressPct < 100f)
-            {
-                _bipPendingProcStartTick = 0;
+            if (deltaPct <= 0f || float.IsNaN(deltaPct) || float.IsInfinity(deltaPct))
                 return;
+
+            float rawBefore = Math.Max(0f, _bipObservedRawPct);
+            _bipObservedRawPct = rawBefore + deltaPct;
+
+            if ((int)Math.Floor(_bipObservedRawPct / 100f) >
+                (int)Math.Floor(rawBefore / 100f))
+            {
+                _bipLastObservedRolloverTick = tick;
             }
 
-            // Crossing the estimated threshold is not proof that Blood is Power
-            // fired. Preserve the estimate until native IconCounts or cooldown-drop
-            // data confirms the proc. The renderer marks the saturated estimate
-            // with "?" while a tracked cooldown awaits that confirmation.
-            if (pendingCooldown && _bipPendingProcStartTick <= 0)
-                _bipPendingProcStartTick = tick;
+            RefreshBloodIsPowerDualSourcePhase(tick);
         }
 
-        private bool IsBloodIsPowerCombatEstimateUncertain(IPlayer me, float observedLossPct)
+        private void AddBloodIsPowerTrackerCost(float expectedCostPct, int tick)
         {
-            if (me == null || observedLossPct < BloodIsPowerFreshLossDropConfirmFloorPct)
-                return false;
+            if (expectedCostPct <= 0f || float.IsNaN(expectedCostPct) ||
+                float.IsInfinity(expectedCostPct))
+                return;
 
+            _bipTrackerCostRawPct = Math.Max(0f, _bipTrackerCostRawPct) +
+                expectedCostPct;
+            RefreshBloodIsPowerDualSourcePhase(tick);
+        }
+
+        private float AddBloodIsPowerTrackerDamage(float currentMaxHealth, int tick)
+        {
+            double currentDamageTaken;
             try
             {
-                // Outside town, a sampled health drop can overlap monster damage,
-                // healing, regeneration, shields, and server corrections. FreeHUD
-                // exposes only rolling combat rates, not the exact gross loss event
-                // stream used by Blood is Power, so treat the number as approximate.
-                if (Hud != null && Hud.Game != null && !Hud.Game.IsInTown)
-                    return true;
-
-                return me.Defense != null &&
-                    me.Defense.CurrentDamageTakenPerSecond > 0.0d;
+                IStatTracker tracker = Hud == null || Hud.Tracker == null
+                    ? null
+                    : Hud.Tracker.Session;
+                if (tracker == null)
+                    return 0f;
+                currentDamageTaken = tracker.DamageTaken;
             }
             catch
             {
+                return 0f;
+            }
+
+            if (double.IsNaN(currentDamageTaken) ||
+                double.IsInfinity(currentDamageTaken) || currentDamageTaken < 0d)
+                return 0f;
+
+            if (!_bipSessionDamageSeeded)
+            {
+                _bipLastSessionDamageTaken = currentDamageTaken;
+                _bipSessionDamageSeeded = true;
+                return 0f;
+            }
+
+            double delta = currentDamageTaken - _bipLastSessionDamageTaken;
+            _bipLastSessionDamageTaken = currentDamageTaken;
+
+            // A negative delta means the Session tracker was replaced/reset.
+            // The new value is now the baseline; do not manufacture damage.
+            float denominator = _bipLastHealthMax > 0f
+                ? _bipLastHealthMax
+                : currentMaxHealth;
+            if (delta <= 0d || denominator <= 0f)
+                return 0f;
+
+            float deltaPct = (float)(delta / denominator * 100d);
+            if (deltaPct <= 0f || deltaPct > BloodIsPowerMaxSaneLossPct ||
+                float.IsNaN(deltaPct) || float.IsInfinity(deltaPct))
+                return 0f;
+
+            _bipTrackerCostRawPct = Math.Max(0f, _bipTrackerCostRawPct) + deltaPct;
+            RefreshBloodIsPowerDualSourcePhase(tick);
+            return deltaPct;
+        }
+
+        private void RefreshBloodIsPowerDualSourcePhase(int tick)
+        {
+            // Keep sampled Life loss and Session.DamageTaken as independent
+            // estimates. The sampled source is the safe default; the tracker
+            // source can capture damage hidden between HUD collections.
+            float observedRaw = Math.Max(0f, _bipObservedRawPct);
+            float trackerUpperRaw = Math.Max(0f, _bipTrackerCostRawPct);
+            float selectedRaw = UseBloodIsPowerUpperBoundEstimate
+                ? Math.Max(observedRaw, trackerUpperRaw)
+                : observedRaw;
+            int selectedCycles = selectedRaw >= 100f
+                ? (int)Math.Floor(selectedRaw / 100f)
+                : 0;
+
+            _bipProgressPct = selectedRaw - selectedCycles * 100f;
+            if (_bipProgressPct < 0.001f)
+                _bipProgressPct = 0f;
+
+            if (selectedCycles > _bipInferredCycleCount)
+            {
+                _bipPendingProcStartTick = tick;
+            }
+
+            _bipInferredCycleCount = selectedCycles;
+        }
+
+        private static float SnapBloodIsPowerRawToCycleBoundary(float rawPct)
+        {
+            if (rawPct <= 0f || float.IsNaN(rawPct) || float.IsInfinity(rawPct))
+                return 0f;
+
+            return (float)Math.Floor(rawPct / 100f) * 100f;
+        }
+
+        private static float GetBloodIsPowerRawPhase(float rawPct)
+        {
+            if (rawPct <= 0f || float.IsNaN(rawPct) || float.IsInfinity(rawPct))
+                return 0f;
+
+            return rawPct -
+                (float)Math.Floor(rawPct / 100f) * 100f;
+        }
+
+        private bool TryApplyBloodIsPowerNativeDamageArbiter(
+            BloodIsPowerProcSignals signals,
+            int tick,
+            float observedRawAfterSample,
+            float trackerRawAfterSample,
+            float recentBloodRushCostPct,
+            bool paidBloodRushApplication,
+            bool meaningfulFreshLoss,
+            bool observedThresholdThisSample,
+            bool recentObservedRollover,
+            bool applicationCanCorrect)
+        {
+            if (signals == null)
+                return false;
+
+            bool strongNativeBoundary =
+                signals.CooldownDropConfirmed ||
+                signals.TerminalCooldownApplication ||
+                paidBloodRushApplication;
+
+            if (!strongNativeBoundary)
+                return false;
+
+            float observedPhase =
+                GetBloodIsPowerRawPhase(observedRawAfterSample);
+            float trackerPhase =
+                GetBloodIsPowerRawPhase(trackerRawAfterSample);
+            _bipLastNativeArbiterTick = tick;
+            _bipLastNativeArbiterObservedPhasePct = observedPhase;
+            _bipLastNativeArbiterTrackerPhasePct = trackerPhase;
+            _bipLastNativeArbiterCarryPct = 0f;
+
+            if (tick <= _bipAreaRebaseUntilTick ||
+                tick <= _bipReviveRebaseUntilTick ||
+                IsBloodIsPowerWorldTransitionGuardActive(tick))
+            {
+                _bipLastNativeArbiterDecision =
+                    "SKIP_TRANSITION_OR_REBASE";
                 return false;
             }
+
+            if (!applicationCanCorrect && !paidBloodRushApplication)
+            {
+                _bipLastNativeArbiterDecision =
+                    "SKIP_NEW_COOLDOWN_APPLICATION";
+                return false;
+            }
+
+            if (!meaningfulFreshLoss && !paidBloodRushApplication)
+            {
+                _bipLastNativeArbiterDecision =
+                    "SKIP_NO_FRESH_LIFE_LOSS";
+                return false;
+            }
+
+            bool outsideCombat = false;
+            try
+            {
+                outsideCombat = Hud.Game.IsInTown ||
+                    (Hud.Game.Me != null && !Hud.Game.Me.InCombat);
+            }
+            catch { }
+
+            // A backward ordinary cooldown or Blood Rush recharge shift proves
+            // the receiving timer was already running before this paid cast.
+            bool authoritativeNoCombatBloodRushBoundary =
+                paidBloodRushApplication &&
+                (applicationCanCorrect ||
+                    signals.BloodRushChargeDropConfirmed) &&
+                (signals.CooldownDropConfirmed ||
+                    signals.BloodRushChargeDropConfirmed) &&
+                outsideCombat;
+
+            if (authoritativeNoCombatBloodRushBoundary)
+            {
+                float correctedBoundary =
+                    SnapBloodIsPowerRawToCycleBoundary(
+                        observedRawAfterSample);
+                _bipObservedRawPct = correctedBoundary;
+                _bipTrackerCostRawPct = correctedBoundary;
+                _bipLastObservedRolloverTick = tick;
+                _bipLastNativeArbiterCarryPct = 0f;
+                _bipLastNativeArbiterDecision =
+                    "APPLIED_AUTHORITATIVE_NO_COMBAT_ZERO";
+                _bipNativeArbiterCorrectionCount++;
+                ConsumeRecentBloodRushCandidateAfterNativeRebase(tick);
+                _bipLastFreshLossTick = 0;
+                _bipLastFreshLossPct = 0f;
+                _bipLastBloodRushObservedLossTick = 0;
+                _bipLastBloodRushObservedLossPct = 0f;
+                RefreshBloodIsPowerDualSourcePhase(tick);
+                return true;
+            }
+
+            if (observedThresholdThisSample || recentObservedRollover)
+            {
+                _bipLastNativeArbiterDecision =
+                    observedThresholdThisSample
+                        ? "SKIP_OBSERVED_SAME_SAMPLE_ROLLOVER"
+                        : "SKIP_RECENT_OBSERVED_ROLLOVER";
+                return false;
+            }
+
+            float observedBoundary =
+                SnapBloodIsPowerRawToCycleBoundary(
+                    observedRawAfterSample);
+            bool trackerNearHighBoundary =
+                trackerPhase +
+                    BloodIsPowerNativeArbiterBoundaryTolerancePct >=
+                    100f - BloodIsPowerNativeArbiterBoundaryWindowPct &&
+                trackerRawAfterSample +
+                    BloodIsPowerNativeArbiterBoundaryTolerancePct >=
+                    observedBoundary +
+                        100f - BloodIsPowerNativeArbiterBoundaryWindowPct;
+            bool trackerNearLowCarry =
+                trackerPhase <=
+                    BloodIsPowerNativeArbiterBoundaryWindowPct +
+                        BloodIsPowerNativeArbiterBoundaryTolerancePct &&
+                trackerRawAfterSample +
+                    BloodIsPowerNativeArbiterBoundaryTolerancePct >=
+                        observedBoundary + 100f;
+
+            if (!trackerNearHighBoundary && !trackerNearLowCarry)
+            {
+                _bipLastNativeArbiterDecision =
+                    "SKIP_TRACKER_NOT_NEAR_BOUNDARY";
+                return false;
+            }
+
+            float carryPct = 0f;
+            if (trackerNearLowCarry)
+            {
+                float maximumCarry = Math.Min(
+                    BloodIsPowerNativeArbiterBoundaryWindowPct +
+                        BloodIsPowerNativeArbiterBoundaryTolerancePct,
+                    Math.Max(
+                        _bipLastFreshLossPct,
+                        recentBloodRushCostPct) +
+                        BloodIsPowerNativeArbiterCarryAllowancePct);
+                if (trackerPhase <= maximumCarry)
+                    carryPct = trackerPhase;
+            }
+
+            float correctedRaw =
+                observedBoundary + 100f + carryPct;
+            _bipObservedRawPct = correctedRaw;
+            _bipTrackerCostRawPct = correctedRaw;
+            _bipLastObservedRolloverTick = tick;
+            _bipLastNativeArbiterCarryPct = carryPct;
+            _bipLastNativeArbiterDecision = trackerNearLowCarry
+                ? (carryPct > 0f
+                    ? "APPLIED_BOUNDED_LOW_CARRY"
+                    : "APPLIED_LOW_CARRY_REJECTED_TO_ZERO")
+                : "APPLIED_HIGH_PHASE_TO_ZERO";
+            _bipNativeArbiterCorrectionCount++;
+            if (paidBloodRushApplication)
+                ConsumeRecentBloodRushCandidateAfterNativeRebase(tick);
+            RefreshBloodIsPowerDualSourcePhase(tick);
+            return true;
         }
 
-        // Blood is Power passive/cooldown state reference based on RNN's BloodIsPowerPlugin.
-        // TipsHelper tracks health-loss progress globally, then lets native signals validate procs.
-        // Low-estimate cooldown drops are accepted only when paired with tracked IconCounts
-        // or recent health loss, which covers damage-triggered BIP procs.
-        private void CleanupBloodIsPowerTransientSnapshots(int tick)
+        private void ResolveBloodIsPowerReceived(
+            BloodIsPowerProcSignals signals,
+            int tick,
+            float cur,
+            float max,
+            float observedRawBeforeSample,
+            float trackerRawBeforeSample)
         {
-            if (!_bipWasDead && _bipDeathSnapshotPct > 0f && tick > _bipReviveRebaseUntilTick)
-                _bipDeathSnapshotPct = 0f;
+            bool exactCooldownShift =
+                signals != null && signals.CooldownDropConfirmed;
+            bool terminalCooldownApplication =
+                signals != null && signals.TerminalCooldownApplication;
+            bool applicationOnlyNewActivation =
+                signals != null &&
+                signals.ApplicationActivationStartedAfterObservedRollover &&
+                !signals.ApplicationActivationPredatesObservedRollover;
 
-            if (_bipAreaSnapshotPct > 0f && tick > _bipAreaRebaseUntilTick)
-                _bipAreaSnapshotPct = 0f;
+            int freshLossAge =
+                _bipLastFreshLossTick > 0 &&
+                tick >= _bipLastFreshLossTick
+                    ? tick - _bipLastFreshLossTick
+                    : int.MaxValue;
+            bool meaningfulFreshLoss =
+                _bipLastFreshLossPct >=
+                    BloodIsPowerNativeCorrectionFreshLossPct &&
+                freshLossAge <=
+                    BloodIsPowerNativeRolloverMatchTicks;
+            bool nativeArbiterFreshLoss =
+                _bipLastFreshLossPct >=
+                    BloodIsPowerNativeArbiterFreshLossPct &&
+                freshLossAge <=
+                    BloodIsPowerNativeRolloverMatchTicks;
+
+            float observedRawAfterSample =
+                Math.Max(0f, _bipObservedRawPct);
+            float trackerRawAfterSample =
+                Math.Max(0f, _bipTrackerCostRawPct);
+            float upperRawBeforeSample = Math.Max(
+                Math.Max(0f, observedRawBeforeSample),
+                Math.Max(0f, trackerRawBeforeSample));
+            float upperRawAfterSample = Math.Max(
+                observedRawAfterSample,
+                trackerRawAfterSample);
+
+            bool observedThresholdThisSample =
+                (int)Math.Floor(observedRawAfterSample / 100f) >
+                (int)Math.Floor(
+                    Math.Max(0f, observedRawBeforeSample) / 100f);
+            bool upperThresholdThisSample =
+                (int)Math.Floor(upperRawAfterSample / 100f) >
+                (int)Math.Floor(upperRawBeforeSample / 100f);
+
+            float recentBloodRushCostPct =
+                GetRecentConfirmedBloodRushCostPct(tick);
+            bool recentPaidBloodRushCast =
+                recentBloodRushCostPct >=
+                    BloodIsPowerFreshLossDropConfirmFloorPct &&
+                !_bipLastBloodRushChanneling;
+            bool paidBloodRushTrackedApplication =
+                recentPaidBloodRushCast &&
+                (exactCooldownShift || terminalCooldownApplication);
+            bool paidBloodRushApplication =
+                signals != null &&
+                recentPaidBloodRushCast &&
+                ((signals.ReceivedAny && signals.BloodRushIconEdge) ||
+                    paidBloodRushTrackedApplication);
+            bool sameCastMultiSkillNativeRollover =
+                signals != null &&
+                signals.ReceivedAny &&
+                signals.BloodRushIconEdge &&
+                (signals.ExistingCooldownIconEdge ||
+                    signals.TrackedIconEdgeCount >= 2) &&
+                recentBloodRushCostPct > 0f &&
+                GetBloodIsPowerRawPhase(observedRawAfterSample) >=
+                    BloodIsPowerNativeStaleHighPhasePct;
+            bool applicationCanCorrect =
+                !applicationOnlyNewActivation ||
+                sameCastMultiSkillNativeRollover ||
+                paidBloodRushTrackedApplication;
+
+            int observedRolloverAge =
+                _bipLastObservedRolloverTick > 0 &&
+                tick >= _bipLastObservedRolloverTick
+                    ? tick - _bipLastObservedRolloverTick
+                    : int.MaxValue;
+            bool recentObservedRollover =
+                observedRolloverAge <=
+                    BloodIsPowerExactShiftRolloverAssociationTicks;
+
+            bool nativeDamageArbiterApplied =
+                TryApplyBloodIsPowerNativeDamageArbiter(
+                    signals,
+                    tick,
+                    observedRawAfterSample,
+                    trackerRawAfterSample,
+                    recentBloodRushCostPct,
+                    paidBloodRushApplication,
+                    nativeArbiterFreshLoss,
+                    observedThresholdThisSample,
+                    recentObservedRollover,
+                    applicationCanCorrect);
+
+            // Exact numerical shifts are per-skill application signals. They
+            // can disprove an early inferred rollover only when the receiving
+            // cooldown activation was already running at that rollover. A newer
+            // activation can receive an already-earned application and must not
+            // erase progress accumulated since the prior rollover.
+            if (!nativeDamageArbiterApplied &&
+                exactCooldownShift &&
+                meaningfulFreshLoss &&
+                !observedThresholdThisSample &&
+                !recentObservedRollover &&
+                applicationCanCorrect)
+            {
+                float correctedBoundary =
+                    SnapBloodIsPowerRawToCycleBoundary(
+                        observedRawAfterSample);
+                _bipObservedRawPct = correctedBoundary;
+                _bipTrackerCostRawPct = correctedBoundary;
+                _bipLastObservedRolloverTick = tick;
+                if (paidBloodRushApplication)
+                    ConsumeRecentBloodRushCandidateAfterNativeRebase(tick);
+                RefreshBloodIsPowerDualSourcePhase(tick);
+            }
+            else if (!nativeDamageArbiterApplied &&
+                (terminalCooldownApplication ||
+                    sameCastMultiSkillNativeRollover) &&
+                (meaningfulFreshLoss ||
+                    sameCastMultiSkillNativeRollover) &&
+                !observedThresholdThisSample &&
+                applicationCanCorrect)
+            {
+                // If BIP finishes a cooldown, FreeHUD exposes the icon edge but
+                // no backward tick shift because the skill is already ready. A
+                // same-cast Blood Rush edge plus an edge on a previously running
+                // cooldown is the bounded fallback when production misses that
+                // terminal classification. Use only a same-sample upper-source
+                // crossing for carry; otherwise rebase to zero.
+                float carryPct = 0f;
+                if (upperThresholdThisSample)
+                {
+                    float upperCarry =
+                        GetBloodIsPowerRawPhase(
+                            upperRawAfterSample);
+                    float maximumCarry =
+                        Math.Min(
+                            99f,
+                            Math.Max(
+                                _bipLastFreshLossPct,
+                                recentBloodRushCostPct) +
+                                BloodIsPowerTerminalCarryAllowancePct);
+                    if (upperCarry <= maximumCarry)
+                        carryPct = upperCarry;
+                }
+
+                float correctedBoundary =
+                    SnapBloodIsPowerRawToCycleBoundary(
+                        observedRawAfterSample);
+                _bipObservedRawPct = correctedBoundary + carryPct;
+                _bipTrackerCostRawPct = correctedBoundary + carryPct;
+                _bipLastObservedRolloverTick = tick;
+                if (paidBloodRushApplication)
+                    ConsumeRecentBloodRushCandidateAfterNativeRebase(tick);
+                RefreshBloodIsPowerDualSourcePhase(tick);
+            }
+
+            _bipPhaseSynchronized = true;
+            _bipPendingProcStartTick = 0;
+            _bipLastConfirmedProcTick = tick;
+            _bipLastHealth = cur;
+            _bipLastHealthMax = max;
         }
 
+        // Native BIP shifts equal 20% of the activation window, optionally
+        // plus verified 60-tick cooldown-reduction quanta.
         private BloodIsPowerProcSignals UpdateBloodIsPowerSkillState(IBuff buff, int tick)
         {
             var result = new BloodIsPowerProcSignals();
@@ -1804,9 +2850,8 @@ namespace Turbo.Plugins.s7o
 
             EnsureBloodIsPowerStateArrays();
 
-            var allIconEdges = new List<string>(4);
-            var trackedIconEdges = new List<string>(2);
-            var nonTrackedIconEdges = new List<string>(4);
+            bool anyIconEdge = false;
+            int trackedIconEdgeCount = 0;
 
             try
             {
@@ -1820,10 +2865,43 @@ namespace Turbo.Plugins.s7o
                         continue;
 
                     bool tracked = IsBloodIsPowerTrackedSkill(skill);
-                    string skillKey = "k" + skill.Key;
-
                     int n = buff.IconCounts[i];
                     int previousIcon = _bipSkillState[i];
+                    uint skillSno = GetBloodIsPowerSkillSno(skill);
+                    bool bloodRushSkill = skillSno == BloodRushSno;
+                    int previousBloodRushNextChargeTick = bloodRushSkill
+                        ? _bipBloodRushNextChargeTickState
+                        : 0;
+                    int currentBloodRushNextChargeTick = bloodRushSkill
+                        ? GetBloodIsPowerNextChargeTick(skillSno)
+                        : 0;
+
+                    // A skill swap reuses the same action-slot icon index. Seed
+                    // the new power instead of treating the previous power's
+                    // icon/cooldown values as a BIP application or 20% shift.
+                    if (_bipSkillSnoState[i] != 0u && _bipSkillSnoState[i] != skillSno)
+                    {
+                        _bipSkillState[i] = n;
+                        _bipSkillSnoState[i] = skillSno;
+                        if (bloodRushSkill)
+                            _bipBloodRushNextChargeTickState =
+                                currentBloodRushNextChargeTick;
+                        try
+                        {
+                            bool swappedOnCooldown = skill.IsOnCooldown;
+                            _bipCooldownStartState[i] = swappedOnCooldown ? skill.CooldownStartTick : 0;
+                            _bipCooldownFinishState[i] = swappedOnCooldown ? skill.CooldownFinishTick : 0;
+                            _bipActivationTickState[i] = swappedOnCooldown ? tick : 0;
+                        }
+                        catch
+                        {
+                            _bipCooldownStartState[i] = 0;
+                            _bipCooldownFinishState[i] = 0;
+                            _bipActivationTickState[i] = 0;
+                        }
+                        continue;
+                    }
+                    _bipSkillSnoState[i] = skillSno;
 
                     bool iconEdge = false;
                     if (n != previousIcon)
@@ -1832,15 +2910,9 @@ namespace Turbo.Plugins.s7o
 
                         if (iconEdge)
                         {
-                            allIconEdges.Add(skillKey);
-
+                            anyIconEdge = true;
                             if (tracked)
-                                trackedIconEdges.Add(skillKey);
-                            else
-                                nonTrackedIconEdges.Add(skillKey);
-
-                            if (string.IsNullOrEmpty(result.IconEdgeKey))
-                                result.IconEdgeKey = skillKey;
+                                trackedIconEdgeCount++;
                         }
 
                         _bipSkillState[i] = n;
@@ -1861,69 +2933,137 @@ namespace Turbo.Plugins.s7o
                     }
                     catch { }
 
-                    if (tracked && onCooldown && n != 1)
-                        result.PendingDisplay = true;
-
-                    if (onCooldown && n != 1 && tick - start > BloodIsPowerCooldownSettleTicks)
-                        result.PendingProc = true;
-
                     int previousFinish = _bipCooldownFinishState[i];
-                    int drop = previousFinish > 0 && finish > 0 ? previousFinish - finish : 0;
+                    int previousStart = _bipCooldownStartState[i];
+                    bool previousOnCooldown =
+                        previousStart > 0 && previousFinish > 0;
 
-                    if (drop > result.MaxAnyDropTicks)
-                        result.MaxAnyDropTicks = drop;
-
-                    if (tracked && drop > result.MaxTrackedDropTicks)
+                    if (iconEdge && bloodRushSkill)
                     {
-                        result.MaxTrackedDropTicks = drop;
-                        result.DropSkillKey = skillKey;
+                        result.BloodRushIconEdge = true;
+                        result.BloodRushChargeDropConfirmed =
+                            previousBloodRushNextChargeTick > tick &&
+                            currentBloodRushNextChargeTick > tick &&
+                            previousBloodRushNextChargeTick >
+                                currentBloodRushNextChargeTick;
                     }
+
+                    if (iconEdge && tracked && previousOnCooldown)
+                        result.ExistingCooldownIconEdge = true;
+
+                    bool forwardCooldownJump =
+                        previousOnCooldown &&
+                        onCooldown &&
+                        (start - previousStart >
+                            BloodIsPowerCooldownShiftToleranceTicks ||
+                         finish - previousFinish >
+                            BloodIsPowerCooldownShiftToleranceTicks);
+                    bool cooldownActivated =
+                        tracked &&
+                        onCooldown &&
+                        start > 0 &&
+                        (!previousOnCooldown || forwardCooldownJump);
+
+                    if (cooldownActivated)
+                        _bipActivationTickState[i] = tick;
+
+                    if (cooldownActivated && IsBloodIsPowerSimulacrumSkill(skill))
+                        result.SimulacrumActivated = true;
+
+                    int activationTick = _bipActivationTickState[i];
+                    int drop = previousFinish > 0 && finish > 0 ? previousFinish - finish : 0;
+                    int startDrop = previousStart > 0 && start > 0 ? previousStart - start : 0;
+
+                    bool equalBackwardShift =
+                        startDrop > 0 && drop > 0 &&
+                        Math.Abs(startDrop - drop) <= BloodIsPowerCooldownShiftToleranceTicks;
+                    int cooldownWindowTicks = previousFinish > previousStart
+                        ? previousFinish - previousStart
+                        : 0;
+                    int expectedBipShift = cooldownWindowTicks > 0
+                        ? (int)Math.Round(cooldownWindowTicks * BloodIsPowerCooldownFraction)
+                        : 0;
+                    int residual = equalBackwardShift ? startDrop - expectedBipShift : int.MinValue;
+                    bool exactBipShift = equalBackwardShift && expectedBipShift > 0 &&
+                        Math.Abs(residual) <= BloodIsPowerCooldownShiftToleranceTicks;
+                    int quantumCount = residual > 0
+                        ? (int)Math.Round(residual / (double)BloodIsPowerVerifiedCooldownQuantumTicks)
+                        : 0;
+                    bool bipPlusVerifiedQuantum = equalBackwardShift && expectedBipShift > 0 &&
+                        quantumCount >= 1 &&
+                        Math.Abs(residual - quantumCount * BloodIsPowerVerifiedCooldownQuantumTicks) <=
+                            BloodIsPowerCooldownShiftToleranceTicks;
+                    int previousRemainingTicks = previousFinish > tick
+                        ? previousFinish - tick
+                        : 0;
+                    bool terminalBipApplication =
+                        tracked &&
+                        iconEdge &&
+                        previousStart > 0 &&
+                        previousFinish >
+                            tick + BloodIsPowerCooldownShiftToleranceTicks &&
+                        !onCooldown &&
+                        expectedBipShift > 0 &&
+                        previousRemainingTicks <=
+                            expectedBipShift +
+                            BloodIsPowerCooldownShiftToleranceTicks;
+
+                    bool authoritativeApplication =
+                        tracked &&
+                        (exactBipShift || bipPlusVerifiedQuantum ||
+                            terminalBipApplication);
+                    if (authoritativeApplication && activationTick > 0)
+                    {
+                        if (_bipLastObservedRolloverTick > 0)
+                        {
+                            if (activationTick <=
+                                _bipLastObservedRolloverTick)
+                                result.ApplicationActivationPredatesObservedRollover =
+                                    true;
+                            else
+                                result.ApplicationActivationStartedAfterObservedRollover =
+                                    true;
+                        }
+                    }
+
+                    if (tracked && (exactBipShift || bipPlusVerifiedQuantum))
+                        result.CooldownDropConfirmed = true;
+
+                    if (terminalBipApplication)
+                        result.TerminalCooldownApplication = true;
 
                     _bipCooldownStartState[i] = onCooldown ? start : 0;
                     _bipCooldownFinishState[i] = onCooldown ? finish : 0;
+                    if (bloodRushSkill)
+                        _bipBloodRushNextChargeTickState =
+                            currentBloodRushNextChargeTick;
+                    if (!onCooldown)
+                        _bipActivationTickState[i] = 0;
                 }
             }
             catch { }
 
-            result.AllIconEdgeKeys = string.Join(",", allIconEdges.ToArray());
-            result.TrackedIconEdgeKey = string.Join(",", trackedIconEdges.ToArray());
-            result.NonTrackedIconEdgeKey = string.Join(",", nonTrackedIconEdges.ToArray());
+            result.TrackedIconEdgeCount = trackedIconEdgeCount;
 
-            result.TrackedIconEdge = trackedIconEdges.Count > 0;
-            result.NonTrackedIconEdge = nonTrackedIconEdges.Count > 0;
-
-            bool pending100 = _bipPendingProcStartTick > 0 || _bipProgressPct >= 100f;
-            bool strongTrackedDrop = result.MaxTrackedDropTicks >= BloodIsPowerStrongCooldownDropTicks;
-            bool freshLossDropConfirm = strongTrackedDrop && HasRecentBloodIsPowerFreshLoss(tick);
-
-            bool trackedHighEstimate = _bipProgressPct >= BloodIsPowerTrackedIconConfirmFloorPct || pending100;
-
-            if (result.TrackedIconEdge || result.NonTrackedIconEdge)
+            if (anyIconEdge)
             {
                 // This is Blood is Power's own per-action-slot IconCounts array.
                 // A positive edge on any equipped skill is native confirmation that
                 // the current global BIP proc was applied to at least one cooldown.
-                result.ReceivedAny = true;
-                result.CooldownDropConfirmed = strongTrackedDrop;
-                result.ProcReason = result.TrackedIconEdge
-                    ? (strongTrackedDrop ? "tracked-icon+tracked-drop" : "tracked-icon-native")
-                    : "skill-icon-native";
-            }
+                // Native attribute/icon wrappers can report the same proc several
+                // ticks after the exact cooldown shift, so deduplicate that echo.
+                bool duplicateNativeEcho = _bipLastConfirmedProcTick > 0 &&
+                    tick >= _bipLastConfirmedProcTick &&
+                    tick - _bipLastConfirmedProcTick <= BloodIsPowerNativeProcDedupeTicks;
 
-            if (!result.ReceivedAny && strongTrackedDrop)
-            {
-                if (trackedHighEstimate || freshLossDropConfirm)
-                {
-                    result.CooldownDropConfirmed = true;
-                    result.ProcReason = freshLossDropConfirm && !trackedHighEstimate
-                        ? "tracked-drop+fresh-loss"
-                        : "tracked-drop";
-                }
+                if (!duplicateNativeEcho)
+                    result.ReceivedAny = true;
                 else
                 {
-                    result.IgnoredLowCooldownDrop = true;
-                    if (string.IsNullOrEmpty(result.ProcReason))
-                        result.ProcReason = "ignored-low-drop";
+                    // The same native proc can expose an exact shift first and
+                    // a ready-state icon edge a few ticks later. Do not run a
+                    // second terminal correction for that echo.
+                    result.TerminalCooldownApplication = false;
                 }
             }
 
@@ -1952,12 +3092,14 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
+            ObserveBloodIsPowerWorldTransition(tick);
             UpdateBloodIsPowerGreaterRiftLifecycle(tick);
 
-            // Passive/power data can be stale while dead. Preserve first; do not wipe BIP.
+            // Passive/power data can be stale while dead. Reset the partial
+            // phase once, exclude the lethal sample, and wait for revive.
             if (me.IsDead)
             {
-                PreserveBloodIsPowerOnDeath(tick);
+                ResetBloodIsPowerPhaseOnDeath(tick);
                 return;
             }
 
@@ -2001,7 +3143,6 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
-            EnsureBloodIsPowerStateArrays();
             SeedBloodIsPowerSkillState(buff);
 
             float cur = GetCurrentHealth(me);
@@ -2016,6 +3157,9 @@ namespace Turbo.Plugins.s7o
             {
                 _bipLastHealth = cur;
                 _bipLastHealthMax = max;
+                _bipLastBloodForBloodCharges = GetBloodForBloodChargeCount(me);
+                try { _bipLastRathmasShieldActive = me.Powers.BuffIsActive(RathmasShieldSno); }
+                catch { _bipLastRathmasShieldActive = false; }
                 SeedBloodIsPowerSkillState(buff);
                 return;
             }
@@ -2024,23 +3168,71 @@ namespace Turbo.Plugins.s7o
             // lost while LoTD/Simulacrum are inactive or already consumed still
             // contributes to the next global proc; per-skill IconCounts only decide
             // which currently running cooldowns receive that proc.
-            bool trackingEligible =
-                HasAnyUnconsumedBloodIsPowerDisplayCooldown(buff);
+            float observedRawBeforeSample = _bipObservedRawPct;
+            float trackerRawBeforeSample = _bipTrackerCostRawPct;
 
-            float deltaPct = AddBloodIsPowerHealthLoss(cur, max);
+            // Armory swaps can change maximum Life while current Life remains at
+            // 100%. When the shared town action lock proves a build application,
+            // rebase the absolute-health sample instead of recording false damage.
+            bool armoryActionLock = IsBloodIsPowerTownArmoryActionLock();
+            float deltaPct;
+            if (armoryActionLock)
+            {
+                _bipLastHealth = cur;
+                _bipLastHealthMax = max;
+                DiscardBloodIsPowerArmoryActionLockCandidates(tick);
+                deltaPct = 0f;
+            }
+            else
+            {
+                deltaPct = AddBloodIsPowerHealthLoss(cur, max);
+            }
 
-            // Enemy damage is sampled as net health movement. Healing and rapid
-            // server updates can hide or distort part of that loss, so retain the
-            // estimate but mark it as approximate until a native BIP proc resets it.
-            if (IsBloodIsPowerCombatEstimateUncertain(me, deltaPct))
-                _bipEstimateUncertain = true;
+            AddBloodIsPowerTrackerDamage(max, tick);
 
             float bloodRushCreditPct =
                 UpdateBloodIsPowerBloodRushCredit(deltaPct);
             if (bloodRushCreditPct > 0f)
             {
-                _bipProgressPct = Math.Min(100f, _bipProgressPct + bloodRushCreditPct);
+                AddBloodIsPowerProgress(bloodRushCreditPct, tick);
                 deltaPct += bloodRushCreditPct;
+            }
+
+            var bipSignals = UpdateBloodIsPowerSkillState(buff, tick);
+
+            if (bipSignals.SimulacrumActivated)
+            {
+                float expectedSimulacrumCostPct =
+                    GetBloodIsPowerSimulacrumExpectedCostPct();
+                float pairedObservedLossPct = Math.Max(0f, deltaPct);
+
+                if (expectedSimulacrumCostPct > 0f)
+                    AddBloodIsPowerTrackerCost(
+                        expectedSimulacrumCostPct,
+                        tick);
+
+                // Cooldown activation and the health callback normally share a
+                // collection, but tolerate a short sampling split without
+                // crediting the same 25% twice.
+                if (_bipLastFreshLossTick > 0 &&
+                    tick >= _bipLastFreshLossTick &&
+                    tick - _bipLastFreshLossTick <=
+                        BloodIsPowerSimulacrumPairWindowTicks)
+                {
+                    pairedObservedLossPct = Math.Max(
+                        pairedObservedLossPct,
+                        _bipLastFreshLossPct);
+                }
+
+                float simulacrumShortfall =
+                    expectedSimulacrumCostPct - pairedObservedLossPct;
+
+                if (simulacrumShortfall >=
+                    BloodIsPowerSimulacrumCreditMinShortfallPct)
+                {
+                    AddBloodIsPowerProgress(simulacrumShortfall, tick);
+                    deltaPct += simulacrumShortfall;
+                }
             }
 
             if (deltaPct >=
@@ -2050,30 +3242,27 @@ namespace Turbo.Plugins.s7o
                 _bipLastFreshLossPct = deltaPct;
             }
 
-            var bipSignals = UpdateBloodIsPowerSkillState(buff, tick);
-
             if (bipSignals.ReceivedAny ||
-                bipSignals.CooldownDropConfirmed)
+                bipSignals.CooldownDropConfirmed ||
+                bipSignals.TerminalCooldownApplication)
             {
-                ResolveBloodIsPowerReceived(tick, cur, max);
+                ResolveBloodIsPowerReceived(
+                    bipSignals,
+                    tick,
+                    cur,
+                    max,
+                    observedRawBeforeSample,
+                    trackerRawBeforeSample);
             }
-            else if (trackingEligible)
-            {
-                ResolveBloodIsPowerOverflow(
-                    bipSignals.PendingDisplay,
-                    tick);
-            }
-
-            CleanupBloodIsPowerTransientSnapshots(tick);
 
             _bipLastHealth = cur;
             _bipLastHealthMax = max;
+            _bipLastBloodForBloodCharges = GetBloodForBloodChargeCount(me);
+            try { _bipLastRathmasShieldActive = me.Powers.BuffIsActive(RathmasShieldSno); }
+            catch { _bipLastRathmasShieldActive = false; }
 
             if (_bipAreaRebaseUntilTick > 0 && tick > _bipAreaRebaseUntilTick)
-            {
                 _bipAreaRebaseUntilTick = 0;
-                _bipAreaSnapshotPct = 0f;
-            }
 
             if (_bipReviveRebaseUntilTick > 0 && tick > _bipReviveRebaseUntilTick)
                 _bipReviveRebaseUntilTick = 0;
@@ -2082,30 +3271,25 @@ namespace Turbo.Plugins.s7o
         private float GetBloodIsPowerDisplayPct(IBuff buff)
         {
             float pct = _bipProgressPct;
-            if (pct >= 100f && HasAnyUnconsumedBloodIsPowerDisplayCooldown(buff))
-                return 100f;
-
             if (pct < 0f) return 0f;
-            if (pct > 100f) return 100f;
+            if (pct >= 100f) return 99.999f;
             return pct;
         }
 
         private bool IsBloodIsPowerPendingUnknown(IBuff buff)
         {
-            return _bipPendingProcStartTick > 0 &&
-                _bipProgressPct >= 100f &&
-                HasAnyUnconsumedBloodIsPowerDisplayCooldown(buff);
+            return false;
         }
 
-        private static string GetBloodIsPowerDisplayText(float pct, bool uncertain)
+        private static string GetBloodIsPowerDisplayText(float pct)
         {
             if (pct > 0f && pct < 1f)
-                return uncertain ? "<1%?" : "<1%";
+                return "<1%";
 
             int rounded = (int)Math.Round((double)pct);
             if (rounded < 1) rounded = 1;
-            if (rounded > 100) rounded = 100;
-            return rounded.ToString() + "%" + (uncertain ? "?" : string.Empty);
+            if (rounded > 99) rounded = 99;
+            return rounded.ToString() + "%";
         }
 
         private void DrawBloodIsPowerTracker()
@@ -2147,10 +3331,8 @@ namespace Turbo.Plugins.s7o
             bool pendingUnknown = !preserveVisual &&
                 IsBloodIsPowerPendingUnknown(buff);
 
-            bool estimateUncertain = pendingUnknown || _bipEstimateUncertain;
-
             float pct = preserveVisual
-                ? Math.Max(0f, Math.Min(100f, _bipProgressPct))
+                ? Math.Max(0f, Math.Min(99.999f, _bipProgressPct))
                 : GetBloodIsPowerDisplayPct(buff);
 
             // A fresh cooldown with no observed life loss is not an active
@@ -2164,8 +3346,7 @@ namespace Turbo.Plugins.s7o
                     buff,
                     pct,
                     preserveVisual,
-                    pendingUnknown,
-                    estimateUncertain);
+                    pendingUnknown);
         }
 
         private void DrawBloodIsPowerTrackerOnSkill(
@@ -2173,32 +3354,16 @@ namespace Turbo.Plugins.s7o
             IBuff buff,
             float pct,
             bool preserveVisual,
-            bool pendingUnknown,
-            bool estimateUncertain)
+            bool pendingUnknown)
         {
             if (skill == null)
-                return;
-
-            bool onCooldown = false;
-            try { onCooldown = skill.IsOnCooldown; } catch { }
-
-            if (!onCooldown)
                 return;
 
             int tick = 0;
             try { tick = Hud.Game.CurrentGameTick; } catch { }
 
-            if (!preserveVisual &&
-                _bipLastConfirmedProcTick > 0 &&
-                tick <= _bipLastConfirmedProcTick + BloodIsPowerPostProcVisualSuppressTicks)
-            {
-                if (buff == null || buff.IconCounts == null)
-                    return;
-
-                int procIdx = 1 + (int)skill.Key;
-                if (procIdx >= 0 && procIdx < buff.IconCounts.Length && buff.IconCounts[procIdx] == 1)
-                    return;
-            }
+            if (!IsBloodIsPowerDisplayCooldown(skill, tick))
+                return;
 
             if (!preserveVisual)
             {
@@ -2244,8 +3409,7 @@ namespace Turbo.Plugins.s7o
             _bipBarBorderBrush.DrawRectangle(barX, barY, barW, barH);
 
             string text = GetBloodIsPowerDisplayText(
-                pendingUnknown ? 100f : visualPct,
-                estimateUncertain);
+                pendingUnknown ? 100f : visualPct);
             var layout = font.GetTextLayout(text);
 
             float tx = r.X + Math.Max(2f, r.Width * 0.05f);
