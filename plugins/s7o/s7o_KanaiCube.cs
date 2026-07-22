@@ -104,11 +104,19 @@ namespace Turbo.Plugins.s7o
         [DllImport("user32.dll")] private static extern bool GetCursorPos(out POINT point);
         [DllImport("user32.dll", SetLastError = true)] private static extern uint SendInput(uint inputCount, Input[] inputs, int inputSize);
         public static bool TryGetCursorPos(out int x, out int y) { POINT p; if (GetCursorPos(out p)) { x = p.X; y = p.Y; return true; } x = 0; y = 0; return false; }
-        public static bool MouseMove(int x, int y) { return SetCursorPos(x, y); }
+        public static bool MouseMoveScreen(int x, int y) { return SetCursorPos(x, y); }
+        public static bool MouseMoveClient(int x, int y, int offsetX, int offsetY)
+        {
+            long screenX = (long)x + offsetX;
+            long screenY = (long)y + offsetY;
+            if (screenX < int.MinValue || screenX > int.MaxValue || screenY < int.MinValue || screenY > int.MaxValue)
+                return false;
+            return SetCursorPos((int)screenX, (int)screenY);
+        }
         public static bool MouseDown(MouseButtons button) { if (button == MouseButtons.Left) return SendMouse(LeftDown); if (button == MouseButtons.Right) return SendMouse(RightDown); return false; }
         public static bool MouseUp(MouseButtons button) { if (button == MouseButtons.Left) return SendMouse(LeftUp); if (button == MouseButtons.Right) return SendMouse(RightUp); return false; }
-        public static bool ClickAt(MouseButtons button, float x, float y) { if (!MouseMove((int)Math.Round(x), (int)Math.Round(y))) return false; if (!MouseDown(button)) return false; return MouseUp(button); }
-        public static bool ClickRect(RectangleF rect, MouseButtons button) { if (rect.Width <= 0 || rect.Height <= 0) return false; return ClickAt(button, rect.X + rect.Width * 0.5f, rect.Y + rect.Height * 0.5f); }
+        public static bool ClickAt(MouseButtons button, float x, float y, int offsetX, int offsetY) { if (!MouseMoveClient((int)Math.Round(x), (int)Math.Round(y), offsetX, offsetY)) return false; if (!MouseDown(button)) return false; return MouseUp(button); }
+        public static bool ClickRect(RectangleF rect, MouseButtons button, int offsetX, int offsetY) { if (rect.Width <= 0 || rect.Height <= 0) return false; return ClickAt(button, rect.X + rect.Width * 0.5f, rect.Y + rect.Height * 0.5f, offsetX, offsetY); }
         private static bool SendMouse(uint flags) { var input = new Input[1]; input[0].Type = InputMouse; input[0].U.Mouse.Flags = flags; input[0].U.Mouse.Dx = 0; input[0].U.Mouse.Dy = 0; input[0].U.Mouse.MouseData = 0; input[0].U.Mouse.Time = 0; input[0].U.Mouse.ExtraInfo = IntPtr.Zero; return SendInput(1, input, Marshal.SizeOf(typeof(Input))) == 1; }
     }
 
@@ -123,9 +131,11 @@ namespace Turbo.Plugins.s7o
     ///   _p is frozen at run start so mid-run UI speed changes have no effect.
     ///   Skip recovery: after the snapshot queue finishes, a live cleanup pass
     ///   re-queries inventory and processes any items the queue pass missed.
-    ///   Page 3 overlaps transaction settlement with gated page repair, then
-    ///   verifies the result from live material/target evidence. Automation
-    ///   failures never become recipe-ineligible marks.
+    ///   Page 3 confirms target insertion from the occupied Cube slot, fills
+    ///   immediately, then waits only for the native Transmute-ready state (54).
+    ///   After one verified-ready click it overlaps acceptance/settlement with
+    ///   page repair and verifies live material/target evidence on return.
+    ///   Automation failures never become recipe-ineligible marks.
     public class s7o_KanaiCube : s7o_KanaiCubePluginBase,
         IKeyEventHandler, IInGameTopPainter, IAfterCollectHandler,
         IMouseClickHandler, INewAreaHandler
@@ -134,7 +144,7 @@ namespace Turbo.Plugins.s7o
         {
             get
             {
-                return "REV08-INSTANCE-REQUIREMENT-LEVEL";
+                return "REV11-POST-FILL-READY-FAST-REPAIR-MULTI-MONITOR";
             }
         }
 
@@ -249,6 +259,11 @@ namespace Turbo.Plugins.s7o
         private const int Page3TransmuteConfirmTimeoutMs = 900;
         private const int Page3TransmuteRetryDelayMs = 35;
         private const int MaxPage3TransmuteClicksPerCycle = 2;
+        private const int Page3TransmuteReadyAnimState = 54;
+        private const int Page3TransmuteAcceptedAnimState = 51;
+        private const int Page3NativeGatePollMs = 15;
+        private const int Page3NativeGateMinTimeoutMs = 250;
+        private const int Page3NativeGateMaxTimeoutMs = 900;
 
         // ── Diagnostics ───────────────────────────────────────────────────────
         public bool   DebugLogEnabled             { get; set; } = false;
@@ -320,7 +335,7 @@ namespace Turbo.Plugins.s7o
         private int _plusFlashUntilTick = NoTick;
 
         private string _header, _info, _noItem, _running, _lockMissing;
-        private enum CubeStage { Idle, EnsurePage, AcquireTarget, InsertTarget, ConfirmInsert, Fill1, Fill2, WaitPage3FillSettle, Transmute, ConfirmPage3Transmute, FlipWaitReadyNext, FlipClickNext, FlipWaitNextConfirm, FlipRightToLeftDelay, FlipWaitReadyPrev, FlipClickPrev, FlipWaitPrevConfirm, OpenPageRecovery, PostCycleEvaluate, Finish, PageArrowDown, PageArrowUp }
+        private enum CubeStage { Idle, EnsurePage, AcquireTarget, InsertTarget, ConfirmInsert, Fill1, Fill2, WaitPage3TransmuteReady, Transmute, ConfirmPage3Transmute, FlipWaitReadyNext, FlipClickNext, FlipWaitNextConfirm, FlipRightToLeftDelay, FlipWaitReadyPrev, FlipClickPrev, FlipWaitPrevConfirm, OpenPageRecovery, PostCycleEvaluate, Finish, PageArrowDown, PageArrowUp }
 
         private enum UpgradeRareEligibility
         {
@@ -349,6 +364,12 @@ namespace Turbo.Plugins.s7o
         private int _page3TransmuteClicks;
         private int _page3TransmuteClickTick = NoTick;
         private bool _page3SawOccupiedSlot;
+        private bool _page3SawNotReadySinceInsert;
+        private bool _page3ReadyEdgeSeen;
+        private bool _page3TransmuteAccepted;
+        private int _page3AnimBeforeInsert = int.MinValue;
+        private bool _page3PreflightChecked;
+        private CubeStage _pageRepairResumeStage = CubeStage.PostCycleEvaluate;
         private long _page3BeforeDeathsBreath;
         private long _page3BeforeReusableParts;
         private long _page3BeforeArcaneDust;
@@ -773,6 +794,8 @@ namespace Turbo.Plugins.s7o
             _snapshotLimit = 0;
             _openPageClicks = 0;
             _flipPrevAttempts = 0;
+            _page3PreflightChecked = false;
+            _pageRepairResumeStage = CubeStage.PostCycleEvaluate;
 
             _target = null;
             _snapshotQueue = null;
@@ -794,8 +817,10 @@ namespace Turbo.Plugins.s7o
 
             if (!s7o_KanaiCubeInput.TryGetCursorPos(out _savedCursorX, out _savedCursorY))
             {
-                _savedCursorX = Hud.Window.CursorX;
-                _savedCursorY = Hud.Window.CursorY;
+                long fallbackX = (long)Hud.Window.CursorX + Hud.Window.Offset.X;
+                long fallbackY = (long)Hud.Window.CursorY + Hud.Window.Offset.Y;
+                _savedCursorX = fallbackX >= int.MinValue && fallbackX <= int.MaxValue ? (int)fallbackX : 0;
+                _savedCursorY = fallbackY >= int.MinValue && fallbackY <= int.MaxValue ? (int)fallbackY : 0;
             }
 
             if (page == 2 && _startAncientIds.Count == 0)
@@ -846,6 +871,8 @@ namespace Turbo.Plugins.s7o
             _afterArrowStage = CubeStage.Idle;
 
             _repairingPageAfterNext = false;
+            _page3PreflightChecked = false;
+            _pageRepairResumeStage = CubeStage.PostCycleEvaluate;
 
             ClearDeadline();
 
@@ -879,6 +906,8 @@ namespace Turbo.Plugins.s7o
             _afterArrowStage = CubeStage.Idle;
 
             _repairingPageAfterNext = false;
+            _page3PreflightChecked = false;
+            _pageRepairResumeStage = CubeStage.PostCycleEvaluate;
             _lastProcessedRect = RectangleF.Empty;
 
             _startAncientIds.Clear();
@@ -1007,7 +1036,8 @@ namespace Turbo.Plugins.s7o
 
                     if (_runPage == 3)
                     {
-                        _stage = CubeStage.WaitPage3FillSettle;
+                        ClearDeadline();
+                        _stage = CubeStage.WaitPage3TransmuteReady;
                         Delay(now, _p.P3FillToTransmute);
                     }
                     else if (DoubleClickFillButton)
@@ -1033,14 +1063,24 @@ namespace Turbo.Plugins.s7o
                     Delay(now, _p.Sleep);
                     return;
 
-                case CubeStage.WaitPage3FillSettle:
-                    _stage = CubeStage.Transmute;
-                    Delay(now, 0);
+                case CubeStage.WaitPage3TransmuteReady:
+                    AdvanceWaitPage3TransmuteReady(now);
                     return;
 
                 case CubeStage.Transmute:
                     if (_runPage == 3)
+                    {
+                        if (ReadUiAnimState(transmuteButton) !=
+                            Page3TransmuteReadyAnimState)
+                        {
+                            ClearDeadline();
+                            _stage = CubeStage.WaitPage3TransmuteReady;
+                            Delay(now, 0);
+                            return;
+                        }
+
                         SnapshotPage3Materials();
+                    }
 
                     if (!ClickUi(transmuteButton, "TRANSMUTE"))
                     {
@@ -1054,8 +1094,22 @@ namespace Turbo.Plugins.s7o
                     {
                         _page3TransmuteClicks++;
                         _page3TransmuteClickTick = now;
-                        _stage = CubeStage.ConfirmPage3Transmute;
-                        Delay(now, 0);
+                        _page3TransmuteAccepted = false;
+
+                        // The button was verified ready immediately before the
+                        // click. Do not block on 54→51 here: the normal page-arrow
+                        // gate already waits for slot clear (or its bounded timeout),
+                        // while the return pass verifies materials/target removal.
+                        if (UsePageFlipReset)
+                        {
+                            _stage = CubeStage.FlipWaitReadyNext;
+                            Delay(now, 0);
+                        }
+                        else
+                        {
+                            _stage = CubeStage.ConfirmPage3Transmute;
+                            Delay(now, 0);
+                        }
                     }
                     else if (UsePageFlipReset)
                     {
@@ -1162,8 +1216,7 @@ namespace Turbo.Plugins.s7o
                             return;
                         }
 
-                        _stage = CubeStage.PostCycleEvaluate;
-                        Delay(now, 0);
+                        ResumeAfterPageRepair(now);
                         return;
                     }
 
@@ -1275,8 +1328,7 @@ namespace Turbo.Plugins.s7o
                 }
 
                 _openPageClicks = 0;
-                _stage = CubeStage.PostCycleEvaluate;
-                Delay(now, 0);
+                ResumeAfterPageRepair(now);
                 return;
             }
 
@@ -1334,7 +1386,7 @@ namespace Turbo.Plugins.s7o
             var x = (int)Math.Round(r.Left + r.Width * 0.5f);
             var y = (int)Math.Round(r.Top + r.Height * 0.5f);
 
-            if (!s7o_KanaiCubeInput.MouseMove(x, y) || !s7o_KanaiCubeInput.MouseDown(MouseButtons.Left))
+            if (!s7o_KanaiCubeInput.MouseMoveClient(x, y, Hud.Window.Offset.X, Hud.Window.Offset.Y) || !s7o_KanaiCubeInput.MouseDown(MouseButtons.Left))
             {
                 ReleaseMouseButtons();
                 Delay(now, 30);
@@ -1397,6 +1449,22 @@ namespace Turbo.Plugins.s7o
                 _stage = CubeStage.EnsurePage;
                 Delay(now, 0);
                 return;
+            }
+
+            if (_runPage == 3 && !_page3PreflightChecked)
+            {
+                _page3PreflightChecked = true;
+
+                if (UsePageFlipReset &&
+                    (!SlotsClear() ||
+                     ReadUiAnimState(transmuteButton) == Page3TransmuteReadyAnimState))
+                {
+                    BeginPage3PageRepair(
+                        CubeStage.AcquireTarget,
+                        now,
+                        "preflight-stale-cube-state");
+                    return;
+                }
             }
 
             if (MaxTransmutesPerRun > 0 && _doneThisRun >= MaxTransmutesPerRun)
@@ -1517,6 +1585,7 @@ namespace Turbo.Plugins.s7o
             _insertAttemptsForTarget = 0;
             ResetPage3TransactionState();
             ResetPostFailureConfirmation();
+            _pageRepairResumeStage = CubeStage.PostCycleEvaluate;
 
             _stage = CubeStage.InsertTarget;
             Delay(now, 0);
@@ -1614,6 +1683,15 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
+            if (_runPage == 3)
+            {
+                _page3AnimBeforeInsert = ReadUiAnimState(transmuteButton);
+                _page3SawNotReadySinceInsert =
+                    _page3AnimBeforeInsert != Page3TransmuteReadyAnimState;
+                _page3ReadyEdgeSeen = false;
+                _page3TransmuteAccepted = false;
+            }
+
             _cycleId++;
             _cycleStartTick = now;
 
@@ -1649,22 +1727,40 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
-            // The existing item1/item2 elements are already used by SlotsClear().
-            // A nonempty Cube slot confirms that the right-click insertion reached
-            // the Cube UI.
+            int anim = ReadUiAnimState(transmuteButton);
+
+            if (anim != Page3TransmuteReadyAnimState)
+                _page3SawNotReadySinceInsert = true;
+
+            if (_page3SawNotReadySinceInsert &&
+                anim == Page3TransmuteReadyAnimState)
+            {
+                _page3ReadyEdgeSeen = true;
+            }
+
             if (!SlotsClear())
             {
-                ClearDeadline();
                 _page3SawOccupiedSlot = true;
+                ClearDeadline();
 
+                // Slot occupancy is the native insertion arbiter. Do not wait
+                // for 51→54 before Fill: the supplied runtime log proved that
+                // some valid insertions remain at 51 until Fill is clicked.
                 _stage = CubeStage.Fill1;
                 Delay(now, _p.P3InsertToFill);
                 return;
             }
 
-            EnsureDeadline(
-                now,
-                InsertConfirmTimeoutMs);
+            if (_page3SawOccupiedSlot)
+            {
+                BeginPage3PageRepair(
+                    CubeStage.PostCycleEvaluate,
+                    now,
+                    "cube-slots-cleared-before-ready");
+                return;
+            }
+
+            EnsureDeadline(now, InsertConfirmTimeoutMs);
 
             if (!DeadlineExpired(now))
             {
@@ -1698,8 +1794,6 @@ namespace Turbo.Plugins.s7o
                 "UPGRADE insert failed; skipping for this run key=" +
                 failedKey);
 
-            // This is an automation failure, not recipe ineligibility.
-            // Do not draw an X and do not create persistent rejection state.
             _target = null;
             _insertAttemptsForTarget = 0;
             ResetPage3TransactionState();
@@ -1713,10 +1807,170 @@ namespace Turbo.Plugins.s7o
             _page3TransmuteClicks = 0;
             _page3TransmuteClickTick = NoTick;
             _page3SawOccupiedSlot = false;
+            _page3SawNotReadySinceInsert = false;
+            _page3ReadyEdgeSeen = false;
+            _page3TransmuteAccepted = false;
+            _page3AnimBeforeInsert = int.MinValue;
             _page3BeforeDeathsBreath = -1;
             _page3BeforeReusableParts = -1;
             _page3BeforeArcaneDust = -1;
             _page3BeforeVeiledCrystal = -1;
+        }
+
+        private int ReadUiAnimState(IUiElement element)
+        {
+            if (element == null)
+                return int.MinValue;
+
+            try
+            {
+                element.Refresh();
+                return element.Visible
+                    ? element.AnimState
+                    : int.MinValue;
+            }
+            catch
+            {
+                return int.MinValue;
+            }
+        }
+
+        private int Page3NativeGateTimeoutMs()
+        {
+            double latency = 0.0d;
+
+            try
+            {
+                latency = Math.Max(
+                    Hud.Game.CurrentLatency,
+                    Hud.Game.AverageLatency);
+            }
+            catch
+            {
+            }
+
+            if (double.IsNaN(latency) ||
+                double.IsInfinity(latency) ||
+                latency < 0.0d)
+            {
+                latency = 0.0d;
+            }
+
+            int timeout =
+                (int)Math.Ceiling(latency * 2.0d + 120.0d);
+
+            return Math.Max(
+                Page3NativeGateMinTimeoutMs,
+                Math.Min(Page3NativeGateMaxTimeoutMs, timeout));
+        }
+
+        private void BeginPage3PageRepair(
+            CubeStage resumeStage,
+            int now,
+            string reason)
+        {
+            Log(
+                "UPGRADE native arbiter reset key=" +
+                (_target == null ? "?" : _target.Key) +
+                " reason=" + reason +
+                " animBeforeInsert=" + _page3AnimBeforeInsert +
+                " animNow=" + ReadUiAnimState(transmuteButton));
+
+            ClearDeadline();
+
+            if (UsePageFlipReset)
+            {
+                _pageRepairResumeStage = resumeStage;
+                _stage = CubeStage.FlipWaitReadyNext;
+                Delay(now, 0);
+                return;
+            }
+
+            string failedKey =
+                _target == null ? string.Empty : _target.Key;
+
+            if (!string.IsNullOrEmpty(failedKey) &&
+                _skippedThisRun != null)
+            {
+                _skippedThisRun.Add(failedKey);
+            }
+
+            _target = null;
+            _insertAttemptsForTarget = 0;
+            ResetPage3TransactionState();
+            ResetPostFailureConfirmation();
+            _stage = CubeStage.AcquireTarget;
+            Delay(now, 0);
+        }
+
+        private void ResumeAfterPageRepair(int now)
+        {
+            CubeStage resume = _pageRepairResumeStage;
+            _pageRepairResumeStage = CubeStage.PostCycleEvaluate;
+
+            if (resume == CubeStage.AcquireTarget)
+            {
+                _target = null;
+                _insertAttemptsForTarget = 0;
+                ResetPage3TransactionState();
+                ResetPostFailureConfirmation();
+            }
+
+            _stage = resume;
+            Delay(now, 0);
+        }
+
+        private void AdvanceWaitPage3TransmuteReady(int now)
+        {
+            if (_target == null ||
+                string.IsNullOrEmpty(_target.Key))
+            {
+                ClearDeadline();
+                _stage = CubeStage.AcquireTarget;
+                Delay(now, 0);
+                return;
+            }
+
+            if (SlotsClear())
+            {
+                BeginPage3PageRepair(
+                    CubeStage.PostCycleEvaluate,
+                    now,
+                    "cube-slots-cleared-before-transmute");
+                return;
+            }
+
+            int anim = ReadUiAnimState(transmuteButton);
+
+            if (anim != Page3TransmuteReadyAnimState)
+                _page3SawNotReadySinceInsert = true;
+
+            if (_page3SawNotReadySinceInsert &&
+                anim == Page3TransmuteReadyAnimState)
+            {
+                _page3ReadyEdgeSeen = true;
+            }
+
+            if (anim == Page3TransmuteReadyAnimState)
+            {
+                ClearDeadline();
+                _stage = CubeStage.Transmute;
+                Delay(now, 0);
+                return;
+            }
+
+            EnsureDeadline(now, Page3NativeGateTimeoutMs());
+
+            if (!DeadlineExpired(now))
+            {
+                Delay(now, Page3NativeGatePollMs);
+                return;
+            }
+
+            BeginPage3PageRepair(
+                CubeStage.PostCycleEvaluate,
+                now,
+                "transmute-ready-lost-after-fill");
         }
 
         private void SnapshotPage3Materials()
@@ -1827,8 +2081,58 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
-            // Fast path: overlap the roughly 160-190 ms transaction settlement
-            // with page repair, then verify the real result after repair.
+            if (!_page3TransmuteAccepted)
+            {
+                int anim = ReadUiAnimState(transmuteButton);
+
+                if (anim == Page3TransmuteAcceptedAnimState)
+                {
+                    _page3TransmuteAccepted = true;
+                    ClearDeadline();
+                    LogV(
+                        "UPGRADE transmute accepted key=" +
+                        _target.Key +
+                        " click=" +
+                        _page3TransmuteClicks);
+                }
+                else
+                {
+                    EnsureDeadline(now, Page3NativeGateTimeoutMs());
+
+                    if (!DeadlineExpired(now))
+                    {
+                        Delay(now, Page3NativeGatePollMs);
+                        return;
+                    }
+
+                    ClearDeadline();
+
+                    if (_page3TransmuteClicks <
+                            MaxPage3TransmuteClicksPerCycle &&
+                        anim == Page3TransmuteReadyAnimState &&
+                        !SlotsClear())
+                    {
+                        Log(
+                            "UPGRADE transmute click not accepted; retrying key=" +
+                            _target.Key +
+                            " click=" +
+                            (_page3TransmuteClicks + 1));
+
+                        _stage = CubeStage.Transmute;
+                        Delay(now, Page3TransmuteRetryDelayMs);
+                        return;
+                    }
+
+                    BeginPage3PageRepair(
+                        CubeStage.PostCycleEvaluate,
+                        now,
+                        "transmute-accept-timeout");
+                    return;
+                }
+            }
+
+            // Fast path: only after native ready (54) changed to accepted (51),
+            // overlap transaction settlement with page repair and verify later.
             if (UsePageFlipReset &&
                 _page3TransmuteClickTick != NoTick &&
                 unchecked(
@@ -3055,11 +3359,25 @@ namespace Turbo.Plugins.s7o
 
         private void SortItems(int page, List<IItem> items)
         {
-            if (page >= 7 && page <= 9) items.Sort((a, b) => { var r = a.Quality.CompareTo(b.Quality); return r != 0 ? r : InvOrd(a, b); });
-            else items.Sort(InvOrd);
+            // Material conversion is order-insensitive, so use the normal visual
+            // inventory sweep: left-to-right across each row, then top-to-bottom.
+            if (page >= 7 && page <= 9)
+                items.Sort(InvRowMajor);
+            else
+                items.Sort(InvOrd);
         }
 
-        private static int InvOrd(IItem a, IItem b) { var r = a.InventoryX.CompareTo(b.InventoryX); return r != 0 ? r : a.InventoryY.CompareTo(b.InventoryY); }
+        private static int InvOrd(IItem a, IItem b)
+        {
+            int x = a.InventoryX.CompareTo(b.InventoryX);
+            return x != 0 ? x : a.InventoryY.CompareTo(b.InventoryY);
+        }
+
+        private static int InvRowMajor(IItem a, IItem b)
+        {
+            int y = a.InventoryY.CompareTo(b.InventoryY);
+            return y != 0 ? y : a.InventoryX.CompareTo(b.InventoryX);
+        }
 
         private void SnapshotAncients()
         {
@@ -3098,9 +3416,9 @@ namespace Turbo.Plugins.s7o
             LogV("CLICKUI " + lbl + " rect=" + Rf(r));
 
             ReleaseMouseButtons();
-            return s7o_KanaiCubeInput.ClickRect(r, MouseButtons.Left);
+            return s7o_KanaiCubeInput.ClickRect(r, MouseButtons.Left, Hud.Window.Offset.X, Hud.Window.Offset.Y);
         }
-        private bool ClickRect(MouseButtons btn, RectangleF rect, string lbl) { if (rect.Width <= 0 || rect.Height <= 0) { LogV("CLICKRECT " + lbl + " invalid " + Rf(rect)); return false; } LogV("CLICKRECT " + lbl + " " + Rf(rect)); ReleaseMouseButtons(); return s7o_KanaiCubeInput.ClickRect(rect, btn); }
+        private bool ClickRect(MouseButtons btn, RectangleF rect, string lbl) { if (rect.Width <= 0 || rect.Height <= 0) { LogV("CLICKRECT " + lbl + " invalid " + Rf(rect)); return false; } LogV("CLICKRECT " + lbl + " " + Rf(rect)); ReleaseMouseButtons(); return s7o_KanaiCubeInput.ClickRect(rect, btn, Hud.Window.Offset.X, Hud.Window.Offset.Y); }
         private void InsertByDrag(IItem item) { if (item == null) return; var r = Hud.Inventory.GetItemRect(item); ClickRect(MouseButtons.Right, r, "item-rightclick-fallback"); }
 
         // =========================================================
@@ -3237,8 +3555,8 @@ namespace Turbo.Plugins.s7o
 
         private void RestoreCursor(int origX, int origY)
         {
-            if (_lastProcessedRect.Width > 0 && _lastProcessedRect.Height > 0) { var x = (int)(_lastProcessedRect.X + _lastProcessedRect.Width * 0.78f); var y = (int)(_lastProcessedRect.Y + _lastProcessedRect.Height * 0.22f); s7o_KanaiCubeInput.MouseMove(x, y); }
-            else if (RestoreCursorAfterRun) s7o_KanaiCubeInput.MouseMove(origX, origY);
+            if (_lastProcessedRect.Width > 0 && _lastProcessedRect.Height > 0) { var x = (int)(_lastProcessedRect.X + _lastProcessedRect.Width * 0.78f); var y = (int)(_lastProcessedRect.Y + _lastProcessedRect.Height * 0.22f); s7o_KanaiCubeInput.MouseMoveClient(x, y, Hud.Window.Offset.X, Hud.Window.Offset.Y); }
+            else if (RestoreCursorAfterRun) s7o_KanaiCubeInput.MouseMoveScreen(origX, origY);
         }
         private void RefreshOverlayCache(int page, int now)
         {
