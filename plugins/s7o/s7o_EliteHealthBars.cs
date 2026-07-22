@@ -4,11 +4,24 @@ using Turbo.Plugins.Default;
 
 namespace Turbo.Plugins.s7o
 {
+    // REV05 keeps the independent features and uses client coordinates for all HUD rendering.
     public class s7o_EliteHealthBars : BasePlugin, IInGameWorldPainter, IInGameTopPainter
     {
         private bool _defaultEliteMinimapCirclesAdjusted;
         private int _defaultEliteMinimapCircleAdjustAttempts;
         private IBrush _eliteMinimapCircleOutlineBrush;
+        private IBrush _eliteGroundCircleOutlineBrush;
+        private IBrush _eliteGroundChampionCircleBrush;
+        private IBrush _eliteGroundFinalChampionCircleBrush;
+        private IBrush _eliteGroundRareCircleBrush;
+        private IBrush _eliteGroundRareMinionCircleBrush;
+        private IBrush _eliteGroundJuggernautCircleBrush;
+        private IBrush _eliteGroundUniqueCircleBrush;
+        private IBrush _eliteGroundGoblinCircleBrush;
+        private IBrush _eliteGroundRiftGuardianCircleBrush;
+        private IBrush _eliteGroundUnavailableCircleBrush;
+        private int _eliteGroundCircleBrushAlpha = -1;
+        private float _eliteGroundCircleBrushThickness = -1.0f;
         private IBrush _mapOverlayBlackBrush;
         private IBrush _mapOverlayUnavailableBrush;
         private IBrush _mapOverlayChampionBrush;
@@ -63,8 +76,12 @@ namespace Turbo.Plugins.s7o
         public float EliteMinimapOverlayOutlineWidth { get; set; }
         public int EliteMinimapOverlayOutlineAlpha { get; set; }
 
+        public bool ShowEliteHealthBars { get; set; }
         public float BarWidth { get; set; }
         public float BarHeight { get; set; }
+        public bool ShowEliteGroundCircles { get; set; }
+        public int EliteGroundCircleAlpha { get; set; }
+        public float EliteGroundCircleThickness { get; set; }
         public float BarYOffset { get; set; }
         public float BarBorderPadding { get; set; }
         public bool AnchorBarsToFeet { get; set; }
@@ -217,8 +234,12 @@ namespace Turbo.Plugins.s7o
             EliteMinimapOverlayOutlineWidth = 2.35f;
             EliteMinimapOverlayOutlineAlpha = 205;
 
+            ShowEliteHealthBars = true;
             BarWidth = 270.0f;
             BarHeight = 22.0f;
+            ShowEliteGroundCircles = false;
+            EliteGroundCircleAlpha = 230;
+            EliteGroundCircleThickness = 3.0f;
             // Used only when AnchorBarsToFeet is false.
             BarYOffset = -92.0f;
             BarBorderPadding = 3.0f;
@@ -662,22 +683,32 @@ namespace Turbo.Plugins.s7o
             if (!_defaultEliteMinimapCirclesAdjusted)
                 AdjustDefaultEliteMinimapCircles();
 
-            if (!ShowOffscreenEliteLines) return;
-
             var monsters = Hud.Game.AliveMonsters;
             if (monsters == null) return;
 
             BuildChampionFallbackAliveCounts(monsters);
 
+            if (ShowEliteGroundCircles)
+                EnsureEliteGroundCircleBrushes();
+
+            if (!ShowEliteGroundCircles && !ShowOffscreenEliteLines)
+                return;
+
             int offscreenLinesDrawn = 0;
 
             foreach (var monster in monsters)
             {
-                // Visible HP bars are now drawn in PaintTopInGame so they appear above other world text.
-                if (ShouldDrawMonster(monster))
+                bool drawBar = ShouldDrawMonster(monster);
+                if (drawBar)
+                {
+                    if (ShowEliteGroundCircles)
+                        DrawEliteGroundCircle(monster);
                     continue;
+                }
 
-                if (offscreenLinesDrawn < MaxOffscreenLines && ShouldDrawOffscreenLine(monster))
+                if (ShowOffscreenEliteLines &&
+                    offscreenLinesDrawn < MaxOffscreenLines &&
+                    ShouldDrawOffscreenLine(monster))
                 {
                     DrawOffscreenLine(monster);
                     offscreenLinesDrawn++;
@@ -685,11 +716,79 @@ namespace Turbo.Plugins.s7o
             }
         }
 
+        private void EnsureEliteGroundCircleBrushes()
+        {
+            float thickness = Math.Max(0.5f, EliteGroundCircleThickness);
+            int alpha = Math.Max(0, Math.Min(255, EliteGroundCircleAlpha));
+
+            if (_eliteGroundCircleOutlineBrush != null &&
+                _eliteGroundChampionCircleBrush != null &&
+                _eliteGroundCircleBrushAlpha == alpha &&
+                Math.Abs(_eliteGroundCircleBrushThickness - thickness) < 0.001f)
+                return;
+
+            _eliteGroundCircleBrushAlpha = alpha;
+            _eliteGroundCircleBrushThickness = thickness;
+
+            _eliteGroundCircleOutlineBrush = Hud.Render.CreateBrush(245, 0, 0, 0, thickness + 3.5f);
+
+            // Keep these RGB values identical to the corresponding health-bar brushes.
+            _eliteGroundChampionCircleBrush = Hud.Render.CreateBrush(alpha, 70, 140, 255, thickness);
+            _eliteGroundFinalChampionCircleBrush = Hud.Render.CreateBrush(alpha, 88, 35, 135, thickness);
+            _eliteGroundRareCircleBrush = Hud.Render.CreateBrush(alpha, 255, 165, 35, thickness);
+            _eliteGroundRareMinionCircleBrush = Hud.Render.CreateBrush(alpha, 235, 135, 30, thickness);
+            _eliteGroundJuggernautCircleBrush = Hud.Render.CreateBrush(alpha, 235, 10, 10, thickness);
+            _eliteGroundUniqueCircleBrush = Hud.Render.CreateBrush(alpha, 175, 80, 255, thickness);
+            _eliteGroundGoblinCircleBrush = Hud.Render.CreateBrush(alpha, 105, 45, 175, thickness);
+            _eliteGroundRiftGuardianCircleBrush = Hud.Render.CreateBrush(alpha, 190, 70, 255, thickness);
+            _eliteGroundUnavailableCircleBrush = Hud.Render.CreateBrush(alpha, 105, 105, 105, thickness);
+        }
+
+        private IBrush GetEliteGroundCircleBrush(IMonster monster)
+        {
+            IBrush healthBrush = GetHealthBrush(monster);
+
+            if (ReferenceEquals(healthBrush, UnavailableEliteBrush)) return _eliteGroundUnavailableCircleBrush;
+            if (ReferenceEquals(healthBrush, ChampionBrush)) return _eliteGroundChampionCircleBrush;
+            if (ReferenceEquals(healthBrush, FinalChampionBrush)) return _eliteGroundFinalChampionCircleBrush;
+            if (ReferenceEquals(healthBrush, RareMinionBrush)) return _eliteGroundRareMinionCircleBrush;
+            if (ReferenceEquals(healthBrush, JuggernautBrush)) return _eliteGroundJuggernautCircleBrush;
+            if (ReferenceEquals(healthBrush, UniqueBrush)) return _eliteGroundUniqueCircleBrush;
+            if (ReferenceEquals(healthBrush, GoblinBrush)) return _eliteGroundGoblinCircleBrush;
+            if (ReferenceEquals(healthBrush, RiftGuardianBrush)) return _eliteGroundRiftGuardianCircleBrush;
+
+            return _eliteGroundRareCircleBrush;
+        }
+
+        private void DrawEliteGroundCircle(IMonster monster)
+        {
+            if (monster == null || monster.FloorCoordinate == null ||
+                !monster.FloorCoordinate.IsValid)
+                return;
+
+            IBrush brush = GetEliteGroundCircleBrush(monster);
+            if (brush == null)
+                return;
+
+            float radius;
+            try { radius = monster.RadiusBottom; }
+            catch { return; }
+
+            if (radius <= 0.0f || float.IsNaN(radius) || float.IsInfinity(radius))
+                return;
+
+            if (_eliteGroundCircleOutlineBrush != null)
+                _eliteGroundCircleOutlineBrush.DrawWorldEllipse(radius, -1, monster.FloorCoordinate);
+
+            brush.DrawWorldEllipse(radius, -1, monster.FloorCoordinate);
+        }
+
         public void PaintTopInGame(ClipState clipState)
         {
             if (clipState != ClipState.BeforeClip) return;
             if (!Enabled || Hud == null || Hud.Game == null || Hud.Game.Me == null) return;
             if (!Hud.Game.IsInGame || Hud.Game.IsLoading) return;
+            if (!ShowEliteHealthBars) return;
 
             var monsters = Hud.Game.AliveMonsters;
             if (monsters == null) return;
@@ -1517,10 +1616,10 @@ namespace Turbo.Plugins.s7o
 
             var windowSize = Hud.Window.Size;
 
-            float left = Hud.Window.Offset.X + OffscreenLineMargin;
-            float top = Hud.Window.Offset.Y + OffscreenLineMargin;
-            float right = Hud.Window.Offset.X + windowSize.Width - OffscreenLineMargin;
-            float bottom = Hud.Window.Offset.Y + windowSize.Height - OffscreenLineMargin;
+            float left = OffscreenLineMargin;
+            float top = OffscreenLineMargin;
+            float right = windowSize.Width - OffscreenLineMargin;
+            float bottom = windowSize.Height - OffscreenLineMargin;
 
             float startX = playerSc.X;
             float startY = playerSc.Y;
