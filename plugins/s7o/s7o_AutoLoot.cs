@@ -6,9 +6,7 @@ using Turbo.Plugins.Default;
 
 namespace Turbo.Plugins.s7o
 {
-    // REV02 preserves REV01's breadcrumb return, but latches a successful Urshi actor click
-    // so later breadcrumb clicks cannot replace Diablo's native path. A bounded coordinate
-    // watchdog disengages the automatic approach when an issued command is truly stalled.
+    // REV16 keeps unsafe AutoLoot-to-AutoGem handoffs inside Urshi recovery arbitration.
     public class s7o_AutoLoot : BasePlugin, IAfterCollectHandler, IItemPickedHandler, IItemLocationChangedHandler, INewAreaHandler
     {
         private const int RunRange = 5;
@@ -36,6 +34,9 @@ namespace Turbo.Plugins.s7o
         private const int ProtectedChestBlockYards = 45;
         private const int ProtectedChestRiskYards = 16;
         private const int VisionFightBlockYards = 70;
+        private const int GoblinPackMinCount = 2;
+        private const int GoblinPackBlockYards = 120;
+        private const int GoblinPackClearMs = 2000;
         private const int UrshiRiskYards = 16;
         private const int CleanupMonsterBlockYards = 45;
         private const int UrshiPanelRecoveryWindowMs = 2200;
@@ -48,6 +49,11 @@ namespace Turbo.Plugins.s7o
         private const int UrshiRiskRotateItemMs = 120;
         private const int UrshiSpaceRetryMs = 70;
         private const int UrshiSpaceMaxAttempts = 3;
+        private const int UrshiProblemItemMisclickLimit = 5;
+        private const int UrshiPortalCancelRetryMs = 120;
+        private const int UrshiPortalCancelMaxAttempts = 3;
+        private const int UrshiPortalArbitrationMs = 180;
+        private const int UrshiPortalFollowupMs = 700;
         private const int UrshiProblemItemSuppressMs = 1800;
         private const int UrshiFallbackRetryDelayMs = 70;
         private const int UrshiFallbackWindowMs = 2200;
@@ -69,7 +75,10 @@ namespace Turbo.Plugins.s7o
         private const int AutoUrshiReturnClickDelayMs = 120;
         private const int AutoUrshiReturnMaxClicks = 10;
         private const int AutoUrshiApproachStallMs = AutoUrshiTalkClickDelayMs * 2;
+        private const int AutoUrshiApproachHardLimitMs = AutoUrshiTalkClickDelayMs * 6;
         private const float AutoUrshiApproachProgressYards = 1.0f;
+        private const float AutoUrshiTalkSafeEdgeMarginPx = 48f;
+        private const float AutoUrshiTalkSafeBottomMarginPx = 150f;
         private const int DroppedItemIgnoreMs = 20000;
         private const int DroppedItemVisibilityGraceMs = 500;
         private const int CleanupStuckIgnoreMs = 8000;
@@ -133,13 +142,17 @@ namespace Turbo.Plugins.s7o
         private int _urshiSpaceAttempts;
         private int _urshiFallbackSeed;
         private long _urshiFallbackUntilMs;
-        private int _urshiRecoveryOpenSeed;
-        private long _urshiRecoveryOpenSeenMs;
-        private bool _urshiRecoveryMisclickRecorded;
         private int _genericUrshiRecoverySeed;
         private long _genericUrshiRecoveryUntilMs;
-        private int _genericUrshiRecoveryAttempts;
-        private bool _genericUrshiRecoveryMisclickRecorded;
+        private int _urshiPortalCancelAttempts;
+        private int _accidentalUrshiRecoverySeed;
+        private long _accidentalUrshiRecoveryUntilMs;
+        private long _accidentalUrshiPortalWatchUntilMs;
+        private bool _accidentalUrshiRecoveryArmed;
+        private bool _autoUrshiUnsafeHandoffRecoveryActive;
+        private bool _accidentalUrshiHasClickPoint;
+        private int _accidentalUrshiClickX;
+        private int _accidentalUrshiClickY;
         private long _autoUrshiNoLootSinceMs;
         private long _nextAutoUrshiTalkMs;
         private long _autoUrshiTalkCooldownUntilMs;
@@ -148,6 +161,9 @@ namespace Turbo.Plugins.s7o
         private int _autoUrshiHoverX;
         private int _autoUrshiHoverY;
         private bool _autoUrshiTalkDone;
+        private bool _autoUrshiGemHandoffActive;
+        private bool _autoUrshiHandoffPortalObserved;
+        private bool _autoUrshiHandoffTransformObserved;
         private long _autoUrshiRecentTalkOpenedUntilMs;
         private int _autoUrshiTalkLootCancelAttempts;
         private long _nextAutoUrshiTalkLootCancelMs;
@@ -167,9 +183,13 @@ namespace Turbo.Plugins.s7o
         private bool _autoUrshiReturning;
         private bool _autoUrshiActorPathActive;
         private bool _autoUrshiApproachAborted;
+        private bool _autoUrshiProbeFallbackPending;
+        private long _autoUrshiApproachStartedMs;
         private long _autoUrshiApproachSampleMs;
         private float _autoUrshiApproachSampleX;
         private float _autoUrshiApproachSampleY;
+        private float _autoUrshiApproachBestGoalDistance;
+        private bool _autoUrshiApproachHasGoalDistance;
         private bool _cleanupLatched;
         private bool _lastCleanupClickFar;
         private bool _enabled;
@@ -177,6 +197,9 @@ namespace Turbo.Plugins.s7o
         private bool _talkToUrshiAfterLoot;
         private bool _primals = true, _ancients = true, _legendaries = true, _gems = true, _gifts = true, _screams = true, _trash, _materials = true, _deathsBreath;
         private uint _lastAreaSno;
+        private bool _areaIsTown;
+        private bool _goblinPackPaused;
+        private long _goblinFreeSinceMs;
         private long _lootBurstCleanupUntilMs;
         private long _lastMovementSampleMs;
         private float _lastPlayerX;
@@ -208,7 +231,10 @@ namespace Turbo.Plugins.s7o
             _urshiConversationMain = Hud.Render.RegisterUiElement("Root.NormalLayer.conversation_dialog_main", null, null);
             _chatEditLine = Hud.Render.RegisterUiElement("Root.NormalLayer.chatentry_dialog_backgroundScreen.chatentry_content.chat_editline", null, null);
             if (Hud.Game.IsInGame && Hud.Game.Me != null && Hud.Game.Me.SnoArea != null)
+            {
                 _lastAreaSno = Hud.Game.Me.SnoArea.Sno;
+                _areaIsTown = Hud.Game.Me.SnoArea.IsTown;
+            }
         }
 
         public void ConfigureAutoLoot(bool enabled, bool primals, bool ancients, bool legendaries, bool gems, bool gifts, bool screams, bool trash, bool materials, bool deathsBreath)
@@ -261,6 +287,8 @@ namespace Turbo.Plugins.s7o
             _lastVisibleEligibleLootCount = -1;
             _lastCleanupClickFar = false;
             _cleanupLatched = false;
+            _goblinPackPaused = false;
+            _goblinFreeSinceMs = 0;
             _lootBurstCleanupUntilMs = 0;
             _lastMovementSampleMs = 0;
             _playerMoving = false;
@@ -275,10 +303,8 @@ namespace Turbo.Plugins.s7o
             _urshiFallbackTriesBySeed.Clear();
             _urshiFallbackSeed = 0;
             _urshiFallbackUntilMs = 0;
-            _urshiRecoveryOpenSeed = 0;
-            _urshiRecoveryOpenSeenMs = 0;
-            _urshiRecoveryMisclickRecorded = false;
             ClearGenericUrshiRecoveryState();
+            ClearAccidentalUrshiRecoveryState();
             _autoUrshiNoLootSinceMs = 0;
             _nextAutoUrshiTalkMs = 0;
             _autoUrshiTalkCooldownUntilMs = 0;
@@ -287,6 +313,8 @@ namespace Turbo.Plugins.s7o
             _autoUrshiHoverX = 0;
             _autoUrshiHoverY = 0;
             _autoUrshiTalkDone = false;
+            _autoUrshiGemHandoffActive = false;
+            ResetAutoUrshiGemHandoffWatch();
             _autoUrshiRecentTalkOpenedUntilMs = 0;
             _autoUrshiTalkLootCancelAttempts = 0;
             _nextAutoUrshiTalkLootCancelMs = 0;
@@ -318,6 +346,8 @@ namespace Turbo.Plugins.s7o
                 ClearUrshiArmedRecoveryState(true);
             if (_genericUrshiRecoverySeed == item.Seed)
                 ClearGenericUrshiRecoveryState();
+            if (_accidentalUrshiRecoverySeed == item.Seed)
+                ClearAccidentalUrshiRecoveryState();
         }
 
         public void OnItemLocationChanged(IItem item, ItemLocation from, ItemLocation to)
@@ -329,6 +359,8 @@ namespace Turbo.Plugins.s7o
 
                 if (item.Seed == _genericUrshiRecoverySeed)
                     ClearGenericUrshiRecoveryState();
+                if (item.Seed == _accidentalUrshiRecoverySeed)
+                    ClearAccidentalUrshiRecoveryState();
             }
             if (to != ItemLocation.Floor)
                 _cleanupStuckIgnoreUntilMs.Remove(item.Seed);
@@ -347,6 +379,8 @@ namespace Turbo.Plugins.s7o
                 _lastAreaSno = sno;
                 ResetRuntimeState();
             }
+
+            _areaIsTown = area != null && area.IsTown;
         }
 
         public void AfterCollect()
@@ -358,15 +392,62 @@ namespace Turbo.Plugins.s7o
                 return;
 
             long now = Hud.Game.CurrentRealTimeMilliseconds;
+            if (Hud.Game.IsLoading)
+                return;
+
+            IPlayer me = Hud.Game.Me;
+            if (me == null)
+                return;
+
+            if (HandlePendingAccidentalUrshiRecovery(now, me))
+                return;
+
+            if (me.Powers == null || me.Powers.CantMove)
+                return;
+
+            ISnoArea area = me.SnoArea;
+            uint areaSno = area != null ? area.Sno : 0;
+            if (areaSno != 0 && areaSno != _lastAreaSno)
+            {
+                _lastAreaSno = areaSno;
+                ResetRuntimeState();
+                _areaIsTown = area != null && area.IsTown;
+            }
+
+            ISnoArea sceneArea = me.Scene != null ? me.Scene.SnoArea : null;
+            if (area != null && sceneArea != null && area.IsTown != sceneArea.IsTown)
+            {
+                _lootBurstCleanupUntilMs = 0;
+                return;
+            }
+
+            bool townContext = _areaIsTown || Hud.Game.IsInTown || me.IsInTown ||
+                (area != null && area.IsTown) || (sceneArea != null && sceneArea.IsTown);
+            bool townLootBurst = false;
+            if (townContext)
+            {
+                IActor townProtectedChest = GetUnopenedProtectedChest();
+                townLootBurst = townProtectedChest == null && IsLootBurstCleanup(now, true);
+                if (!townLootBurst)
+                    return;
+            }
+
+            if (ShouldPauseForGoblinPack(now))
+            {
+                _lootBurstCleanupUntilMs = 0;
+                return;
+            }
+
             PurgeDroppedSuppressions(now);
             PurgeStackedLootSkips(now);
             PurgeRetryState(now);
             PurgeCleanupStuckIgnores(now);
-            PurgeResolvedUrshiArmedState(now);
 
             // Urshi recovery must run before inventory/vendor UI early returns because Urshi opens UI layers.
             if (HandleAutoLootUrshiRecovery(now))
                 return;
+
+            PurgeResolvedUrshiArmedState(now);
 
             if (Hud.Render.WorldMapUiElement != null && Hud.Render.WorldMapUiElement.Visible)
                 return;
@@ -374,23 +455,18 @@ namespace Turbo.Plugins.s7o
                 return;
             if (Hud.Inventory != null && Hud.Inventory.StashMainUiElement != null && Hud.Inventory.StashMainUiElement.Visible)
                 return;
-            if (Hud.Game.Me == null || Hud.Game.Me.Powers == null || Hud.Game.Me.Powers.CantMove)
-                return;
 
-            bool inTown = Hud.Game.IsInTown;
             IActor protectedChest = GetUnopenedProtectedChest();
             bool protectedChestBlocked = protectedChest != null;
-            bool postRiftCleanup = !inTown && !protectedChestBlocked && IsPostRiftCleanup();
+            bool postRiftCleanup = !townContext && !protectedChestBlocked && IsPostRiftCleanup();
             TrackPostRiftCleanupWindow(postRiftCleanup, now);
-            bool lootBurstCleanup = !protectedChestBlocked && IsLootBurstCleanup(now, inTown);
+            bool lootBurstCleanup = townLootBurst || (!protectedChestBlocked && IsLootBurstCleanup(now, false));
             bool wideCleanup = postRiftCleanup || lootBurstCleanup;
-            var state = Hud.Game.Me.AnimationState;
+            var state = me.AnimationState;
             bool combatAction = state == AcdAnimationState.Attacking || state == AcdAnimationState.Casting || state == AcdAnimationState.Channeling;
             bool playerMoving = UpdatePlayerMovement(now);
 
             if (state == AcdAnimationState.CastingPortal)
-                return;
-            if (inTown && !lootBurstCleanup)
                 return;
             if (!wideCleanup && combatAction && !playerMoving)
                 return;
@@ -510,8 +586,7 @@ namespace Turbo.Plugins.s7o
         {
             _genericUrshiRecoverySeed = 0;
             _genericUrshiRecoveryUntilMs = 0;
-            _genericUrshiRecoveryAttempts = 0;
-            _genericUrshiRecoveryMisclickRecorded = false;
+            _urshiPortalCancelAttempts = 0;
         }
 
         private void ArmGenericUrshiPickupRecovery(IItem item, bool cleanup, long now)
@@ -519,10 +594,11 @@ namespace Turbo.Plugins.s7o
             if (!_talkToUrshiAfterLoot || !cleanup || item == null)
                 return;
 
+            ClearAccidentalUrshiRecoveryState();
             _genericUrshiRecoverySeed = item.Seed;
             _genericUrshiRecoveryUntilMs = now + UrshiPanelRecoveryWindowMs;
-            _genericUrshiRecoveryAttempts = 0;
-            _genericUrshiRecoveryMisclickRecorded = false;
+            _urshiPortalCancelAttempts = 0;
+            CacheAccidentalUrshiClickPoint(GetUrshiActor());
         }
 
         private void ResetAutoUrshiReturnState()
@@ -538,6 +614,7 @@ namespace Turbo.Plugins.s7o
             _autoUrshiReturning = false;
             _autoUrshiActorPathActive = false;
             _autoUrshiApproachAborted = false;
+            _autoUrshiProbeFallbackPending = false;
             ResetAutoUrshiApproachSample();
         }
 
@@ -556,12 +633,15 @@ namespace Turbo.Plugins.s7o
                     _autoUrshiLastSeenZ = urshi.FloorCoordinate.Z;
                     _autoUrshiLastSeenMs = now;
 
-                    if (urshi.IsOnScreen && urshi.ScreenCoordinate != null)
+                    if (IsAutoUrshiTalkActorClickable(urshi))
                     {
                         _autoUrshiReturnClicks = 0;
                         _nextAutoUrshiReturnMs = 0;
                         if (_autoUrshiReturning)
+                        {
                             ResetAutoUrshiApproachSample();
+                            ResetAutoUrshiTalkProbesAfterReturn();
+                        }
                         _autoUrshiReturning = false;
                     }
                 }
@@ -1008,10 +1088,13 @@ namespace Turbo.Plugins.s7o
                         _urshiFallbackTriesBySeed[item.Seed] = fallbackTries + 1;
 
                     _nextUrshiRiskClickMs = now + UrshiRiskClickDelayMs;
+                    ClearAccidentalUrshiRecoveryState();
                     _urshiArmedUntilMs = now + UrshiPanelRecoveryWindowMs;
                     _urshiArmedSeed = item.Seed;
                     _nextUrshiSpaceMs = 0;
                     _urshiSpaceAttempts = 0;
+                    _urshiPortalCancelAttempts = 0;
+                    CacheAccidentalUrshiClickPoint(urshi);
 
                     MouseLeftClick();
 
@@ -1343,10 +1426,20 @@ namespace Turbo.Plugins.s7o
         {
             try
             {
-                return _talkToUrshiAfterLoot
-                    && urshi != null
-                    && urshi.IsOnScreen
-                    && urshi.ScreenCoordinate != null;
+                if (!_talkToUrshiAfterLoot || _autoUrshiProbeFallbackPending ||
+                    urshi == null || !urshi.IsOnScreen || urshi.ScreenCoordinate == null ||
+                    Hud == null || Hud.Window == null)
+                    return false;
+
+                float scale = UiScale();
+                double x = urshi.ScreenCoordinate.X + Hud.Window.Offset.X;
+                double y = urshi.ScreenCoordinate.Y + Hud.Window.Offset.Y;
+                double left = Hud.Window.Offset.X + AutoUrshiTalkSafeEdgeMarginPx * scale;
+                double top = Hud.Window.Offset.Y + AutoUrshiTalkSafeEdgeMarginPx * scale;
+                double right = Hud.Window.Offset.X + Hud.Window.Size.Width - AutoUrshiTalkSafeEdgeMarginPx * scale;
+                double bottom = Hud.Window.Offset.Y + Hud.Window.Size.Height - AutoUrshiTalkSafeBottomMarginPx * scale;
+
+                return x >= left && x <= right && y >= top && y <= bottom;
             }
             catch { return false; }
         }
@@ -1361,6 +1454,9 @@ namespace Turbo.Plugins.s7o
                 return false;
 
             _autoUrshiReturning = true;
+
+            if (_autoUrshiProbeFallbackPending && _autoUrshiReturnClicks > 0)
+                return true;
 
             if (_autoUrshiReturnClicks >= AutoUrshiReturnMaxClicks)
             {
@@ -1392,6 +1488,7 @@ namespace Turbo.Plugins.s7o
         {
             if (actorPath && !_autoUrshiActorPathActive)
             {
+                _autoUrshiProbeFallbackPending = false;
                 _autoUrshiActorPathActive = true;
                 _autoUrshiReturning = false;
                 _autoUrshiReturnTrail.Clear();
@@ -1407,7 +1504,10 @@ namespace Turbo.Plugins.s7o
             {
                 var me = Hud != null && Hud.Game != null ? Hud.Game.Me : null;
                 if (me != null && me.FloorCoordinate != null)
+                {
+                    _autoUrshiApproachStartedMs = now;
                     SeedAutoUrshiApproachSample(now, me.FloorCoordinate.X, me.FloorCoordinate.Y);
+                }
             }
             catch { }
         }
@@ -1423,14 +1523,58 @@ namespace Turbo.Plugins.s7o
                 if (me == null || me.FloorCoordinate == null)
                     return true;
 
+                if (_autoUrshiApproachStartedMs != 0
+                    && now - _autoUrshiApproachStartedMs >= AutoUrshiApproachHardLimitMs)
+                {
+                    AbortAutoUrshiApproach(now);
+                    return false;
+                }
+
                 float x = me.FloorCoordinate.X;
                 float y = me.FloorCoordinate.Y;
+
+                if (_autoUrshiActorPathActive && _autoUrshiHasLastSeenWorld)
+                {
+                    float goalDx = x - _autoUrshiLastSeenX;
+                    float goalDy = y - _autoUrshiLastSeenY;
+                    float goalDistance = (float)Math.Sqrt(goalDx * goalDx + goalDy * goalDy);
+
+                    if (!_autoUrshiApproachHasGoalDistance)
+                    {
+                        _autoUrshiApproachBestGoalDistance = goalDistance;
+                        _autoUrshiApproachHasGoalDistance = true;
+                    }
+                    else if (goalDistance <= _autoUrshiApproachBestGoalDistance - AutoUrshiApproachProgressYards)
+                    {
+                        _autoUrshiApproachBestGoalDistance = goalDistance;
+                        SeedAutoUrshiApproachSample(now, x, y);
+                        return true;
+                    }
+
+                    if (now - _autoUrshiApproachSampleMs < AutoUrshiApproachStallMs)
+                        return true;
+
+                    AbortAutoUrshiApproach(now);
+                    return false;
+                }
+
                 float dx = x - _autoUrshiApproachSampleX;
                 float dy = y - _autoUrshiApproachSampleY;
 
                 if (dx * dx + dy * dy >=
                     AutoUrshiApproachProgressYards * AutoUrshiApproachProgressYards)
                 {
+                    if (_autoUrshiProbeFallbackPending)
+                    {
+                        _autoUrshiProbeFallbackPending = false;
+                        _autoUrshiReturning = false;
+                        _autoUrshiReturnClicks = 0;
+                        _nextAutoUrshiReturnMs = 0;
+                        ResetAutoUrshiApproachSample();
+                        ResetAutoUrshiTalkProbesAfterReturn();
+                        return true;
+                    }
+
                     SeedAutoUrshiApproachSample(now, x, y);
                     return true;
                 }
@@ -1452,13 +1596,26 @@ namespace Turbo.Plugins.s7o
             _autoUrshiApproachSampleMs = now;
             _autoUrshiApproachSampleX = x;
             _autoUrshiApproachSampleY = y;
+
+            if (_autoUrshiActorPathActive && _autoUrshiHasLastSeenWorld)
+            {
+                float dx = x - _autoUrshiLastSeenX;
+                float dy = y - _autoUrshiLastSeenY;
+                float distance = (float)Math.Sqrt(dx * dx + dy * dy);
+                if (!_autoUrshiApproachHasGoalDistance || distance < _autoUrshiApproachBestGoalDistance)
+                    _autoUrshiApproachBestGoalDistance = distance;
+                _autoUrshiApproachHasGoalDistance = true;
+            }
         }
 
         private void ResetAutoUrshiApproachSample()
         {
+            _autoUrshiApproachStartedMs = 0;
             _autoUrshiApproachSampleMs = 0;
             _autoUrshiApproachSampleX = 0f;
             _autoUrshiApproachSampleY = 0f;
+            _autoUrshiApproachBestGoalDistance = 0f;
+            _autoUrshiApproachHasGoalDistance = false;
         }
 
         private void AbortAutoUrshiApproach(long now)
@@ -1466,11 +1623,16 @@ namespace Turbo.Plugins.s7o
             _autoUrshiApproachAborted = true;
             _autoUrshiActorPathActive = false;
             _autoUrshiReturning = false;
+            _autoUrshiProbeFallbackPending = false;
             _autoUrshiReturnTrail.Clear();
             _autoUrshiReturnClicks = 0;
             _nextAutoUrshiReturnMs = 0;
             ResetAutoUrshiApproachSample();
-            ClearAutoUrshiTalkHover();
+            _autoUrshiNoLootSinceMs = 0;
+            _nextAutoUrshiTalkMs = 0;
+            _autoUrshiTalkCooldownUntilMs = 0;
+            _autoUrshiTalkAttempts = 0;
+            ResetAutoUrshiTalkReadyState();
             RestoreAutoUrshiTalkCursor(now);
         }
 
@@ -1526,7 +1688,15 @@ namespace Turbo.Plugins.s7o
             _autoUrshiRecentTalkOpenedUntilMs = 0;
             _autoUrshiTalkLootCancelAttempts = 0;
             _nextAutoUrshiTalkLootCancelMs = 0;
+            _autoUrshiGemHandoffActive = false;
+            ResetAutoUrshiGemHandoffWatch();
             ClearAutoUrshiTalkHover();
+        }
+
+        private void ResetAutoUrshiGemHandoffWatch()
+        {
+            _autoUrshiHandoffPortalObserved = false;
+            _autoUrshiHandoffTransformObserved = false;
         }
 
         private void ClearAutoUrshiTalkHover()
@@ -1534,6 +1704,14 @@ namespace Turbo.Plugins.s7o
             _autoUrshiHoverClickAtMs = 0;
             _autoUrshiHoverX = 0;
             _autoUrshiHoverY = 0;
+        }
+
+        private void ResetAutoUrshiTalkProbesAfterReturn()
+        {
+            _autoUrshiTalkAttempts = 0;
+            _autoUrshiTalkCooldownUntilMs = 0;
+            _nextAutoUrshiTalkMs = 0;
+            ClearAutoUrshiTalkHover();
         }
 
         private void RestoreAutoUrshiTalkCursor(long now)
@@ -1549,6 +1727,7 @@ namespace Turbo.Plugins.s7o
             RestoreAutoUrshiTalkCursor(now);
             _autoUrshiActorPathActive = false;
             _autoUrshiReturning = false;
+            _autoUrshiProbeFallbackPending = false;
             ResetAutoUrshiApproachSample();
             _autoUrshiNoLootSinceMs = 0;
             _nextAutoUrshiTalkMs = 0;
@@ -1557,6 +1736,8 @@ namespace Turbo.Plugins.s7o
             _autoUrshiHoverX = 0;
             _autoUrshiHoverY = 0;
             _autoUrshiTalkDone = false;
+            _autoUrshiGemHandoffActive = false;
+            ResetAutoUrshiGemHandoffWatch();
             _autoUrshiRecentTalkOpenedUntilMs = 0;
             _autoUrshiTalkLootCancelAttempts = 0;
             _nextAutoUrshiTalkLootCancelMs = 0;
@@ -1620,6 +1801,8 @@ namespace Turbo.Plugins.s7o
 
                 if (urshi.IsSelected && IsInsideGameWindow(_autoUrshiHoverX, _autoUrshiHoverY) && SetCursorPos(_autoUrshiHoverX, _autoUrshiHoverY))
                 {
+                    ResetAutoUrshiGemHandoffWatch();
+                    CacheAccidentalUrshiClickPoint(urshi);
                     MouseLeftClick();
                     BeginAutoUrshiApproach(now, true);
 
@@ -1640,12 +1823,38 @@ namespace Turbo.Plugins.s7o
 
             if (_autoUrshiTalkAttempts >= AutoUrshiTalkMaxAttempts)
             {
+                if (TryFallbackAutoUrshiTalkToBreadcrumb(now))
+                    return true;
+
                 _autoUrshiTalkCooldownUntilMs = now + AutoUrshiTalkRetryCooldownMs;
                 RestoreAutoUrshiTalkCursor(now);
                 return false;
             }
 
             return BeginAutoUrshiTalkHoverProbe(now, urshi);
+        }
+
+        private bool TryFallbackAutoUrshiTalkToBreadcrumb(long now)
+        {
+            if (_autoUrshiActorPathActive || _autoUrshiApproachAborted ||
+                _autoUrshiReturnTrail.Count == 0)
+                return false;
+
+            ClearAutoUrshiTalkHover();
+            _autoUrshiReturning = false;
+            _autoUrshiReturnClicks = 0;
+            _nextAutoUrshiReturnMs = 0;
+            _autoUrshiProbeFallbackPending = true;
+            ResetAutoUrshiApproachSample();
+
+            if (!TryReturnTowardAutoUrshi(now))
+            {
+                _autoUrshiProbeFallbackPending = false;
+                return false;
+            }
+
+            RestoreAutoUrshiTalkCursor(now);
+            return true;
         }
 
         private bool BeginAutoUrshiTalkHoverProbe(long now, IActor urshi)
@@ -1775,6 +1984,43 @@ namespace Turbo.Plugins.s7o
             catch { return true; }
         }
 
+        private bool ShouldPauseForGoblinPack(long now)
+        {
+            int count = 0;
+            try
+            {
+                foreach (var monster in Hud.Game.AliveMonsters)
+                {
+                    if (monster == null || !monster.IsAlive || monster.Illusion ||
+                        monster.CentralXyDistanceToMe > GoblinPackBlockYards || !IsTreasureGoblin(monster))
+                        continue;
+                    if (++count >= GoblinPackMinCount) break;
+                }
+            }
+            catch { return _goblinPackPaused; }
+
+            if (!_goblinPackPaused)
+            {
+                if (count < GoblinPackMinCount) return false;
+                _goblinPackPaused = true;
+            }
+
+            if (count > 0)
+            {
+                _goblinFreeSinceMs = 0;
+                return true;
+            }
+
+            if (_goblinFreeSinceMs == 0)
+                _goblinFreeSinceMs = now;
+            if (now - _goblinFreeSinceMs < GoblinPackClearMs)
+                return true;
+
+            _goblinPackPaused = false;
+            _goblinFreeSinceMs = 0;
+            return false;
+        }
+
         private bool HasActiveVisionFight()
         {
             if (!IsVisionWorld()) return false;
@@ -1896,9 +2142,7 @@ namespace Turbo.Plugins.s7o
             _nextUrshiSpaceMs = 0;
             _urshiSpaceAttempts = 0;
             ClearUrshiRiskLootHover();
-            _urshiRecoveryOpenSeed = 0;
-            _urshiRecoveryOpenSeenMs = 0;
-            _urshiRecoveryMisclickRecorded = false;
+            _urshiPortalCancelAttempts = 0;
             _autoUrshiNoLootSinceMs = 0;
             _nextAutoUrshiTalkMs = 0;
             _autoUrshiTalkCooldownUntilMs = 0;
@@ -1907,6 +2151,7 @@ namespace Turbo.Plugins.s7o
             _autoUrshiHoverX = 0;
             _autoUrshiHoverY = 0;
             _autoUrshiTalkDone = false;
+            _autoUrshiGemHandoffActive = false;
             _autoUrshiHasRestorePoint = false;
             _autoUrshiRestorePoint = new NativePoint();
             if (clearFallback)
@@ -1922,20 +2167,7 @@ namespace Turbo.Plugins.s7o
                 return false;
 
             IItem item = FindVisibleFloorItemBySeed(_urshiArmedSeed);
-            if (item == null)
-                return false;
-
-            IActor urshi = GetUrshiActor();
-            if (urshi == null)
-                return false;
-
-            if (!IsUrshiRisk(item, urshi))
-                return false;
-
-            if (WantedPriority(item) < 0)
-                return false;
-
-            return true;
+            return item == null || WantedPriority(item) >= 0;
         }
 
         private bool HasRecentIntentionalUrshiTalk(long now)
@@ -1995,118 +2227,382 @@ namespace Turbo.Plugins.s7o
             return true;
         }
 
-        private bool ShouldRecoverAutoLootUrshiMisclick(long now)
+        private bool IsIntentionalAutoUrshiInteraction(long now)
         {
-            return _urshiArmedSeed != 0 && now <= _urshiArmedUntilMs;
+            return _autoUrshiGemHandoffActive || HasRecentIntentionalUrshiTalk(now);
+        }
+
+        private void CompleteAutoUrshiGemHandoff()
+        {
+            ClearAccidentalUrshiRecoveryState();
+            CacheAccidentalUrshiClickPoint(GetUrshiActor());
+            _autoUrshiActorPathActive = false;
+            _autoUrshiReturning = false;
+            ResetAutoUrshiApproachSample();
+            ClearAutoUrshiTalkHover();
+
+            // The real gem pane now belongs to Auto Gem Upgrade. Drop every AutoLoot
+            // recovery/cursor state that could send Space or move the cursor over it.
+            _urshiArmedSeed = 0;
+            _urshiArmedUntilMs = 0;
+            _nextUrshiSpaceMs = 0;
+            _urshiSpaceAttempts = 0;
+            _urshiFallbackSeed = 0;
+            _urshiFallbackUntilMs = 0;
+            ClearUrshiRiskLootHover();
+            ClearGenericUrshiRecoveryState();
+
+            _autoUrshiNoLootSinceMs = 0;
+            _nextAutoUrshiTalkMs = 0;
+            _autoUrshiTalkCooldownUntilMs = 0;
+            _autoUrshiTalkAttempts = 0;
+            _autoUrshiRecentTalkOpenedUntilMs = 0;
+            _autoUrshiTalkLootCancelAttempts = 0;
+            _nextAutoUrshiTalkLootCancelMs = 0;
+            _autoUrshiTalkDone = true;
+            _autoUrshiGemHandoffActive = true;
+
+            _autoUrshiHasRestorePoint = false;
+            _autoUrshiRestorePoint = new NativePoint();
+            _pendingCursorRestore = false;
+            _pendingCursorRestoreAtMs = 0;
+            _pendingCursorRestoreExpireMs = 0;
+        }
+
+        private bool ShouldRecoverUnsafeAutoUrshiGemHandoff()
+        {
+            try
+            {
+                IPlayer me = Hud != null && Hud.Game != null ? Hud.Game.Me : null;
+                if (me == null)
+                    return HasVisibleEligibleLootBlockingUrshiTalk();
+
+                AcdAnimationState state = me.AnimationState;
+                if (state == AcdAnimationState.Transform)
+                {
+                    _autoUrshiHandoffTransformObserved = true;
+                    return false;
+                }
+
+                if (state == AcdAnimationState.CastingPortal)
+                    _autoUrshiHandoffPortalObserved = true;
+
+                if (_autoUrshiHandoffTransformObserved)
+                    return false;
+
+                return HasVisibleEligibleLootBlockingUrshiTalk()
+                    || state == AcdAnimationState.Running
+                    || (_autoUrshiHandoffPortalObserved && state != AcdAnimationState.CastingPortal);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private bool BeginUnsafeAutoUrshiHandoffRecovery(long now)
+        {
+            bool hadClickPoint = _accidentalUrshiHasClickPoint;
+            int clickX = _accidentalUrshiClickX;
+            int clickY = _accidentalUrshiClickY;
+
+            ClearAccidentalUrshiRecoveryState();
+            _autoUrshiUnsafeHandoffRecoveryActive = true;
+            _accidentalUrshiRecoveryUntilMs = now + UrshiPanelRecoveryWindowMs + UrshiPortalFollowupMs;
+            _nextUrshiSpaceMs = now;
+            _urshiSpaceAttempts = 0;
+
+            if (hadClickPoint)
+            {
+                _accidentalUrshiHasClickPoint = true;
+                _accidentalUrshiClickX = clickX;
+                _accidentalUrshiClickY = clickY;
+            }
+            CacheAccidentalUrshiClickPoint(GetUrshiActor());
+
+            _autoUrshiTalkDone = false;
+            _autoUrshiGemHandoffActive = false;
+            _autoUrshiRecentTalkOpenedUntilMs = 0;
+            _autoUrshiTalkLootCancelAttempts = 0;
+            _nextAutoUrshiTalkLootCancelMs = 0;
+            ResetAutoUrshiGemHandoffWatch();
+
+            return HandlePendingAccidentalUrshiRecovery(now, Hud.Game.Me);
+        }
+
+        private void ClearAccidentalUrshiRecoveryState()
+        {
+            _accidentalUrshiRecoverySeed = 0;
+            _accidentalUrshiRecoveryUntilMs = 0;
+            _accidentalUrshiPortalWatchUntilMs = 0;
+            _accidentalUrshiRecoveryArmed = false;
+            _autoUrshiUnsafeHandoffRecoveryActive = false;
+            _accidentalUrshiHasClickPoint = false;
+            _accidentalUrshiClickX = 0;
+            _accidentalUrshiClickY = 0;
+            _urshiPortalCancelAttempts = 0;
+        }
+
+        private void CacheAccidentalUrshiClickPoint(IActor urshi)
+        {
+            int x, y;
+            if (urshi == null || !urshi.IsOnScreen || urshi.ScreenCoordinate == null
+                || !TryGetAutoUrshiTalkPoint(urshi, 0, out x, out y))
+                return;
+
+            _accidentalUrshiClickX = x;
+            _accidentalUrshiClickY = y;
+            _accidentalUrshiHasClickPoint = true;
+        }
+
+        private bool TryGetAccidentalUrshiClickPoint(int attempt, out int x, out int y)
+        {
+            IActor urshi = GetUrshiActor();
+            if (urshi == null)
+            {
+                IActor selectedActor = GetSelectedActorSafe();
+                if (IsUrshiActor(selectedActor))
+                    urshi = selectedActor;
+            }
+
+            if (urshi != null && urshi.IsOnScreen && urshi.ScreenCoordinate != null
+                && TryGetAutoUrshiTalkPoint(urshi, attempt, out x, out y))
+            {
+                _accidentalUrshiClickX = x;
+                _accidentalUrshiClickY = y;
+                _accidentalUrshiHasClickPoint = true;
+                return true;
+            }
+
+            x = _accidentalUrshiClickX;
+            y = _accidentalUrshiClickY;
+            return _accidentalUrshiHasClickPoint && IsInsideGameWindow(x, y);
+        }
+
+        private void BeginAccidentalUrshiRecovery(int seed, bool armed, long now)
+        {
+            if (_accidentalUrshiRecoverySeed == seed)
+            {
+                CacheAccidentalUrshiClickPoint(GetUrshiActor());
+                return;
+            }
+
+            bool hasCachedPoint = _accidentalUrshiHasClickPoint;
+            int cachedX = _accidentalUrshiClickX;
+            int cachedY = _accidentalUrshiClickY;
+            ClearAccidentalUrshiRecoveryState();
+            _accidentalUrshiRecoverySeed = seed;
+            _accidentalUrshiRecoveryUntilMs = now + UrshiPanelRecoveryWindowMs + UrshiPortalFollowupMs;
+            _accidentalUrshiRecoveryArmed = armed;
+            _nextUrshiSpaceMs = now + UrshiPortalArbitrationMs;
+            _urshiSpaceAttempts = 0;
+            if (hasCachedPoint)
+            {
+                _accidentalUrshiHasClickPoint = true;
+                _accidentalUrshiClickX = cachedX;
+                _accidentalUrshiClickY = cachedY;
+            }
+            CacheAccidentalUrshiClickPoint(GetUrshiActor());
+
+            if (armed)
+            {
+                HandleArmedUrshiMisclick(now);
+            }
+            else
+            {
+                HandleGenericUrshiPickupMisclick(now);
+            }
+        }
+
+        private void FinishAccidentalUrshiRecovery(long now)
+        {
+            int seed = _accidentalUrshiRecoverySeed;
+            bool armed = _accidentalUrshiRecoveryArmed;
+            ClearAccidentalUrshiRecoveryState();
+
+            if (armed && _urshiArmedSeed == seed)
+                ClearUrshiArmedRecoveryState(false);
+            if (!armed && _genericUrshiRecoverySeed == seed)
+                ClearGenericUrshiRecoveryState();
+
+            MarkUrshiPanelCloseForFastLootResume(now);
+        }
+
+        private bool HandlePendingAccidentalUrshiRecovery(long now, IPlayer me)
+        {
+            if (_accidentalUrshiRecoverySeed == 0 && !_autoUrshiUnsafeHandoffRecoveryActive)
+                return false;
+
+            if (now > _accidentalUrshiRecoveryUntilMs)
+            {
+                FinishAccidentalUrshiRecovery(now);
+                return false;
+            }
+
+            IItem item = _accidentalUrshiRecoverySeed != 0
+                ? FindVisibleFloorItemBySeed(_accidentalUrshiRecoverySeed)
+                : null;
+            if (item != null && WantedPriority(item) < 0)
+            {
+                FinishAccidentalUrshiRecovery(now);
+                return false;
+            }
+
+            if (me != null && me.AnimationState == AcdAnimationState.CastingPortal)
+                return HandleAccidentalUrshiPortalCancel(now);
+
+            bool recoveryUiVisible = IsUrshiRecoveryUiVisible();
+            if (recoveryUiVisible)
+            {
+                CacheAccidentalUrshiClickPoint(GetUrshiActor());
+
+                if (now < _nextUrshiSpaceMs || !CanSendUrshiRecoverySpace())
+                    return true;
+
+                if (_urshiSpaceAttempts >= UrshiSpaceMaxAttempts)
+                    return true;
+
+                SendSpace();
+                _urshiSpaceAttempts++;
+                _nextUrshiSpaceMs = now + UrshiSpaceRetryMs;
+                _accidentalUrshiPortalWatchUntilMs = now + UrshiPortalFollowupMs;
+                MarkUrshiPanelCloseForFastLootResume(now);
+                return true;
+            }
+
+            if (_urshiPortalCancelAttempts > 0)
+            {
+                FinishAccidentalUrshiRecovery(now);
+                return false;
+            }
+
+            if (_accidentalUrshiPortalWatchUntilMs != 0
+                && now <= _accidentalUrshiPortalWatchUntilMs)
+                return true;
+
+            FinishAccidentalUrshiRecovery(now);
+            return false;
+        }
+
+        private bool HandleAccidentalUrshiPortalCancel(long now)
+        {
+            IPlayer me = Hud.Game.Me;
+            if (me == null || me.AnimationState != AcdAnimationState.CastingPortal)
+                return false;
+
+            if (_urshiPortalCancelAttempts >= UrshiPortalCancelMaxAttempts
+                || IsChatEntryOpen()
+                || IsStashUiOpen())
+                return true;
+
+            if (now < _nextUrshiSpaceMs)
+                return true;
+
+            int x, y;
+            if (!TryGetAccidentalUrshiClickPoint(_urshiPortalCancelAttempts, out x, out y)
+                || !SetCursorPos(x, y))
+            {
+                _nextUrshiSpaceMs = now + UrshiPortalCancelRetryMs;
+                return true;
+            }
+
+            _pendingCursorRestore = false;
+            MouseLeftClick();
+            _urshiPortalCancelAttempts++;
+            _accidentalUrshiPortalWatchUntilMs = 0;
+            _nextUrshiSpaceMs = now + UrshiPortalCancelRetryMs;
+            _lastClickMs = now;
+            return true;
         }
 
         private bool HandleAutoLootUrshiRecovery(long now)
         {
-            bool recoveryUiVisible = IsUrshiRecoveryUiVisible();
+            bool gemPaneVisible = IsUrshiGemPaneVisible();
+            bool conversationVisible = IsUrshiConversationVisible();
+            bool recoveryUiVisible = gemPaneVisible || conversationVisible;
+            bool intentionalAutoTalk = IsIntentionalAutoUrshiInteraction(now);
+
             if (recoveryUiVisible)
             {
                 _autoUrshiActorPathActive = false;
                 _autoUrshiReturning = false;
                 ResetAutoUrshiApproachSample();
+
+                // Acknowledge the intentional actor click here, before the normal
+                // candidate pipeline can schedule another Urshi click during the
+                // conversation-to-gem-pane transition.
+                if (intentionalAutoTalk)
+                    _autoUrshiTalkDone = true;
             }
 
             if (!recoveryUiVisible)
             {
-                bool recoveryAttempted = _urshiSpaceAttempts > 0 || _nextUrshiSpaceMs != 0 || _genericUrshiRecoveryAttempts > 0;
+                if (_autoUrshiGemHandoffActive)
+                {
+                    _autoUrshiGemHandoffActive = false;
+                    ResetAutoUrshiGemHandoffWatch();
+                    ClearAccidentalUrshiRecoveryState();
+                    return false;
+                }
 
-                if (recoveryAttempted || (_urshiArmedSeed != 0 && now > _urshiArmedUntilMs))
+                // Auto Gem advances the conversation before the real pane appears.
+                // Keep AutoLoot inert during that short gap unless it intentionally
+                // cancelled the conversation because genuinely new loot appeared.
+                if (_autoUrshiTalkDone
+                    && _autoUrshiTalkLootCancelAttempts == 0
+                    && HasRecentIntentionalUrshiTalk(now))
+                {
+                    return true;
+                }
+
+                if (_urshiArmedSeed != 0 && now > _urshiArmedUntilMs)
                     ClearUrshiArmedRecoveryState(false);
 
-                if (_genericUrshiRecoveryAttempts > 0 || (_genericUrshiRecoverySeed != 0 && now > _genericUrshiRecoveryUntilMs))
+                if (_genericUrshiRecoverySeed != 0 && now > _genericUrshiRecoveryUntilMs)
                     ClearGenericUrshiRecoveryState();
 
-                _urshiRecoveryOpenSeed = 0;
-                _urshiRecoveryOpenSeenMs = 0;
-                _urshiRecoveryMisclickRecorded = false;
+                _urshiPortalCancelAttempts = 0;
                 return false;
             }
 
-            if (HandleAutoUrshiTalkInterruptedByNewLoot(now))
-                return true;
-
-            // Urshi UI is visible. Do not click floor loot behind it.
-            // Prefer the specific risky-loot recovery path when armed. If a normal
-            // AutoLoot pickup click opened Urshi and loot still remains, close it too.
-            if (!HasPendingArmedUrshiLoot(now))
+            if (intentionalAutoTalk)
             {
-                if (_urshiArmedSeed != 0 && (now > _urshiArmedUntilMs || FindVisibleFloorItemBySeed(_urshiArmedSeed) == null))
-                    ClearUrshiArmedRecoveryState(true);
+                // Keep a clean pane under Auto Gem control. If loot remains, movement
+                // resumes, or the portal drops before transform, re-enter the existing
+                // guarded Urshi recovery instead of consuming the handoff permanently.
+                if (gemPaneVisible)
+                {
+                    if (ShouldRecoverUnsafeAutoUrshiGemHandoff())
+                        return BeginUnsafeAutoUrshiHandoffRecovery(now);
 
-                if (HasPendingGenericUrshiPickupRecovery(now))
-                    return HandleGenericUrshiPickupRecovery(now);
+                    if (!_autoUrshiGemHandoffActive)
+                        CompleteAutoUrshiGemHandoff();
+                    return true;
+                }
 
-                ClearGenericUrshiRecoveryState();
-                return true;
-            }
+                if (HandleAutoUrshiTalkInterruptedByNewLoot(now))
+                    return true;
 
-            if (_urshiRecoveryOpenSeed != _urshiArmedSeed)
-            {
-                _urshiRecoveryOpenSeed = _urshiArmedSeed;
-                _urshiRecoveryOpenSeenMs = now;
-                _urshiRecoveryMisclickRecorded = false;
-                _nextUrshiSpaceMs = now + UrshiPanelConfirmDelayMs;
                 return true;
             }
 
-            if (!HasPendingArmedUrshiLoot(now))
+            if (HasPendingArmedUrshiLoot(now))
             {
+                BeginAccidentalUrshiRecovery(_urshiArmedSeed, true, now);
+                return HandlePendingAccidentalUrshiRecovery(now, Hud.Game.Me);
+            }
+
+            if (_urshiArmedSeed != 0
+                && (now > _urshiArmedUntilMs || FindVisibleFloorItemBySeed(_urshiArmedSeed) == null))
                 ClearUrshiArmedRecoveryState(true);
-                return true;
-            }
 
-            if (now < _nextUrshiSpaceMs)
-                return true;
-
-            if (!_urshiRecoveryMisclickRecorded)
+            if (HasPendingGenericUrshiPickupRecovery(now))
             {
-                HandleArmedUrshiMisclick(now);
-                _urshiRecoveryMisclickRecorded = true;
+                BeginAccidentalUrshiRecovery(_genericUrshiRecoverySeed, false, now);
+                return HandlePendingAccidentalUrshiRecovery(now, Hud.Game.Me);
             }
 
-            if (!CanSendUrshiRecoverySpace())
-                return true;
-
-            if (_urshiSpaceAttempts >= UrshiSpaceMaxAttempts)
-                return true;
-
-            if (_nextUrshiSpaceMs != 0 && now < _nextUrshiSpaceMs)
-                return true;
-
-            SendSpace();
-
-            _urshiSpaceAttempts++;
-            _nextUrshiSpaceMs = now + UrshiSpaceRetryMs;
-            MarkUrshiPanelCloseForFastLootResume(now);
-            return true;
-        }
-
-        private bool HandleGenericUrshiPickupRecovery(long now)
-        {
-            if (now < _nextUrshiSpaceMs)
-                return true;
-
-            if (!_genericUrshiRecoveryMisclickRecorded)
-            {
-                HandleGenericUrshiPickupMisclick(now);
-                _genericUrshiRecoveryMisclickRecorded = true;
-            }
-
-            if (!CanSendUrshiRecoverySpace())
-                return true;
-
-            if (_genericUrshiRecoveryAttempts >= UrshiSpaceMaxAttempts)
-                return true;
-
-            SendSpace();
-
-            _genericUrshiRecoveryAttempts++;
-            _nextUrshiSpaceMs = now + UrshiSpaceRetryMs;
-            MarkUrshiPanelCloseForFastLootResume(now);
+            ClearGenericUrshiRecoveryState();
             return true;
         }
 
@@ -2127,7 +2623,7 @@ namespace Turbo.Plugins.s7o
             if (_lastClickSeed == seed)
                 _lastClickSeed = 0;
 
-            if (closes >= 3)
+            if (closes >= UrshiProblemItemMisclickLimit)
             {
                 _retryAfterMs[seed] = now + UrshiProblemItemSuppressMs;
                 _cleanupStuckIgnoreUntilMs[seed] = now + CleanupStuckIgnoreMs;
@@ -2156,7 +2652,7 @@ namespace Turbo.Plugins.s7o
             if (_lastClickSeed == seed)
                 _lastClickSeed = 0;
 
-            if (closes >= 3)
+            if (closes >= UrshiProblemItemMisclickLimit)
             {
                 _retryAfterMs[seed] = now + UrshiProblemItemSuppressMs;
                 _cleanupStuckIgnoreUntilMs[seed] = now + CleanupStuckIgnoreMs;
