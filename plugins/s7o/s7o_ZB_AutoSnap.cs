@@ -1,10 +1,7 @@
 using System;
-using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
-using System.Reflection;
 using System.Runtime.InteropServices;
-using System.Threading;
 using System.Windows.Forms;
 using SharpDX.DirectInput;
 using Turbo.Plugins.Default;
@@ -16,10 +13,11 @@ namespace Turbo.Plugins.s7o
         - Keeps the v1 one-shot cast feel: one SPACE edge -> one snap -> one spear
         - Unstacked elite leaders first, then forward in-lane elite leaders, then far trash/density once leaders are stacked
         - Revalidates course-correction targets against the current cone and stacked-pack suppression before casting
-        - Refines blue/yellow pack overlap with native RadiusBottom ray validation while preserving a secure leader intersection
+        - Solves one native RadiusBottom ray across elite leaders first, then density after leaders are stacked
         - Uses native validity filters: illusion, knockback immunity, elite affixes, obstacles / elite walls
-        - Restores the pre-spear cursor and safely resumes physically held RMB Whirlwind after the spear interrupt
-        - No hold-repeat, tracked-elite pre-refine, or continuous-input arbitration
+        - Uses non-blocking cursor/input phases, manual-override detection, predictive restore, and held-RMB recovery
+        - Consumes SPACE while Urshi conversation/gem UI is visible so synthetic handoff input cannot cast Spear
+        - No hold-repeat or continuous cursor ownership
     */
     public class s7o_ZB_AutoSnap : BasePlugin, IKeyEventHandler, IAfterCollectHandler, IInGameWorldPainter, INewAreaHandler
     {
@@ -31,9 +29,6 @@ namespace Turbo.Plugins.s7o
 
         [DllImport("user32.dll")]
         private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
-
-        [DllImport("user32.dll")]
-        private static extern short GetAsyncKeyState(int vKey);
 
         private const byte VK_RBUTTON = 0x02;
         private const byte VK_SHIFT = 0x10;
@@ -83,6 +78,7 @@ namespace Turbo.Plugins.s7o
         // Keep held movement/channel input intact across the temporary spear cursor takeover.
         public bool RestoreCursorAfterSpear { get; set; } = true;
         public bool ResumeHeldRmbWhirlwindAfterSpear { get; set; } = true;
+        public bool PreferNativeHitboxPullPlan { get; set; } = true;
 
         // Rare minions are never standalone priority by default, but may contribute to a local yellow-pack overlap.
         public bool IncludeEliteMinions { get; set; } = false;
@@ -232,6 +228,13 @@ namespace Turbo.Plugins.s7o
         private const float SimpleLineCountLaneWidthYards = 5.75f;
         private const float SimplePathRejectThreshold = 18f;
         private const float SimpleFarEliteBandYards = 18f;
+        private const float PullRayExtraRadiusYards = 0.85f;
+        private const float PullPlanMaximumReachYards = 140f;
+        private const float PullPlanMinimumAimYards = 48f;
+        private const float PullPlanMaximumAimYards = 72f;
+        private const float CursorOwnershipTolerancePx = 12f;
+        private const float CursorRestoreMaximumLeadPx = 90f;
+        private const float CursorVelocityMaximumPxPerMs = 1.5f;
 
         private const float ObstaclePenaltyWeight = 10f;
         private const float EliteWallPenaltyWeight = 16f;
@@ -243,6 +246,8 @@ namespace Turbo.Plugins.s7o
 
         private IController Hud;
         private IUiElement _chatEdit;
+        private IUiElement _urshiConversationMain;
+        private IUiElement _urshiGemPane;
 
         private bool _hotkeyDownLatched;
         private bool _castingNow;
@@ -252,12 +257,37 @@ namespace Turbo.Plugins.s7o
         private int _whirlwindResumeUntilTick;
         private int _whirlwindResumeAttempts;
 
-        private bool _castPending;
-        private int _castTick;
+        private enum CastPhase
+        {
+            Idle,
+            CursorSettle,
+            ShiftSettle,
+            InputHold,
+        }
+
+        private CastPhase _castPhase;
+        private long _castPhaseDeadlineMs;
+        private long _castStartedMs;
         private float _aimX;
         private float _aimY;
         private IWorldCoordinate _pendingMarkerWorld;
         private uint _pendingMarkerTargetAcdId;
+        private bool _pendingMarkerFailed;
+        private bool _pendingResumeHeldWhirlwind;
+        private bool _nativePullPlanUsed;
+        private float _savedCursorX;
+        private float _savedCursorY;
+        private bool _cursorOwned;
+        private byte _syntheticKeyDown;
+        private uint _syntheticMouseUpFlag;
+        private bool _syntheticShiftOwned;
+
+        private bool _skipCursorMotionSample;
+        private long _lastCursorSampleMs;
+        private float _lastCursorSampleX;
+        private float _lastCursorSampleY;
+        private float _manualCursorVelocityX;
+        private float _manualCursorVelocityY;
 
         private ActionKey _spearKey = ActionKey.Unknown;
         private int _lastObservedGameTick = -1;
@@ -312,6 +342,35 @@ namespace Turbo.Plugins.s7o
             public uint TargetAcdId;
         }
 
+        private struct PullBody
+        {
+            public IMonster Monster;
+            public float Angle;
+            public float Distance;
+            public float Radius;
+            public int Tier;
+            public float Progression;
+        }
+
+        private struct PullPlan
+        {
+            public bool Valid;
+            public float Angle;
+            public float AimDistance;
+            public int PackHits;
+            public int LeaderHits;
+            public int MinionHits;
+            public int HighTrashHits;
+            public int TrashHits;
+            public float Progression;
+            public float Safety;
+            public float ManualDeviation;
+            public IMonster Marker;
+
+            public int BodyHits => LeaderHits + MinionHits + HighTrashHits + TrashHits;
+            public int WeightedDensity => (HighTrashHits * 3) + TrashHits;
+        }
+
         private sealed class BlockerCircle
         {
             public float X;
@@ -342,6 +401,8 @@ namespace Turbo.Plugins.s7o
             Hud = hud;
 
             _chatEdit = Hud.Render.GetUiElement("Root.NormalLayer.chatentry_dialog_backgroundScreen.chatentry_content.chat_editline");
+            _urshiConversationMain = Hud.Render.RegisterUiElement("Root.NormalLayer.conversation_dialog_main", null, null);
+            _urshiGemPane = Hud.Render.RegisterUiElement("Root.NormalLayer.vendor_dialog_mainPage.riftReward_dialog.LayoutRoot.gemUpgradePane", null, null);
             ResolveSpearKey();
 
             _circleGreen = new GroundCircleDecorator(Hud)
@@ -400,6 +461,7 @@ namespace Turbo.Plugins.s7o
             try
             {
                 tick = Hud.Game.CurrentGameTick;
+                long nowMs = Hud.Game.CurrentRealTimeMilliseconds;
 
                 if (_lastObservedGameTick >= 0 && tick < _lastObservedGameTick)
                     ResetTransientState(false);
@@ -418,10 +480,15 @@ namespace Turbo.Plugins.s7o
                     return;
                 }
 
+                ProcessPendingCast(tick, nowMs);
                 ProcessHeldWhirlwindResume(tick);
-                UpdateEliteCourseCorrectionCache(tick);
+                if (PreferNativeHitboxPullPlan)
+                    ClearEliteCourseCorrectionCache();
+                else
+                    UpdateEliteCourseCorrectionCache(tick);
                 UpdateSpearImpactProbe(tick);
                 PruneUnsafeImpactSamples(tick);
+                TrackManualCursorMotion(nowMs);
 
                 if (!hotkeyDown)
                 {
@@ -432,7 +499,7 @@ namespace Turbo.Plugins.s7o
                 {
                     // One physical down-edge = one spear.
                     _hotkeyDownLatched = true;
-                    StartOneCast(tick);
+                    StartOneCast(tick, nowMs);
                 }
             }
             catch
@@ -442,19 +509,12 @@ namespace Turbo.Plugins.s7o
         }
 
 
-        private void StartOneCast(int tick)
+        private void StartOneCast(int tick, long nowMs)
         {
-            if (_castingNow)
+            if (_castingNow || _castPhase != CastPhase.Idle)
                 return;
 
             _castingNow = true;
-
-            float cursorX = 0f;
-            float cursorY = 0f;
-            bool cursorCaptured = false;
-            bool cursorMoved = false;
-            bool spearAttempted = false;
-            bool resumeHeldWhirlwind = false;
 
             try
             {
@@ -472,11 +532,10 @@ namespace Turbo.Plugins.s7o
                 IWorldCoordinate markerWorld;
                 bool failed;
 
-                cursorX = Hud.Window.CursorX;
-                cursorY = Hud.Window.CursorY;
-                cursorCaptured = true;
+                float cursorX = Hud.Window.CursorX;
+                float cursorY = Hud.Window.CursorY;
 
-                resumeHeldWhirlwind =
+                bool resumeHeldWhirlwind =
                     ResumeHeldRmbWhirlwindAfterSpear &&
                     _spearKey != ActionKey.RightSkill &&
                     IsVirtualKeyDown(VK_RBUTTON) &&
@@ -492,16 +551,19 @@ namespace Turbo.Plugins.s7o
                     out failed);
 
                 uint courseCorrectTargetAcdId = 0;
-                TryApplyEliteCourseCorrection(
-                    me.FloorCoordinate,
-                    cursorX,
-                    cursorY,
-                    tick,
-                    ref aimX,
-                    ref aimY,
-                    ref markerWorld,
-                    ref failed,
-                    out courseCorrectTargetAcdId);
+                if (!_nativePullPlanUsed)
+                {
+                    TryApplyEliteCourseCorrection(
+                        me.FloorCoordinate,
+                        cursorX,
+                        cursorY,
+                        tick,
+                        ref aimX,
+                        ref aimY,
+                        ref markerWorld,
+                        ref failed,
+                        out courseCorrectTargetAcdId);
+                }
 
                 _aimX = aimX;
                 _aimY = aimY;
@@ -511,41 +573,246 @@ namespace Turbo.Plugins.s7o
                     ? courseCorrectTargetAcdId
                     : FindMarkerTargetAcdId(finalMarkerWorld, aimX, aimY, failed);
 
-                _markerFailed = failed;
+                _castStartedMs = nowMs;
+                _savedCursorX = cursorX;
+                _savedCursorY = cursorY;
+                _aimX = aimX;
+                _aimY = aimY;
+                _pendingMarkerWorld = finalMarkerWorld;
+                _pendingMarkerTargetAcdId = finalMarkerTargetAcdId;
+                _pendingMarkerFailed = failed;
+                _pendingResumeHeldWhirlwind = resumeHeldWhirlwind;
+                _cursorOwned = SafeMouseMove(aimX, aimY);
+                _skipCursorMotionSample = true;
 
-                SafeMouseMove(aimX, aimY);
-                cursorMoved = true;
-
-                int settleMs = ClampInt(SpearPreCastSettleMs, 0, 35);
-                if (settleMs > 0)
-                    Thread.Sleep(settleMs);
-
-                BeginSpearImpactProbe(tick, me.FloorCoordinate, finalMarkerWorld, finalMarkerTargetAcdId);
-
-                spearAttempted = true;
-                TapSpear();
-
-                if (DrawCastMarker)
-                {
-                    _markerWorld = finalMarkerWorld;
-                    _markerTargetAcdId = finalMarkerTargetAcdId;
-                    _markerStartTick = tick;
-                    _markerUntilTick = tick + MarkerDurationTicks;
-                }
+                _castPhase = CastPhase.CursorSettle;
+                _castPhaseDeadlineMs = nowMs + ClampInt(SpearPreCastSettleMs, 0, 35);
+                ProcessPendingCast(tick, nowMs);
             }
             catch
             {
+                ClearPendingCastOnly();
             }
             finally
             {
-                if (cursorCaptured && cursorMoved && RestoreCursorAfterSpear)
-                    SafeMouseMove(cursorX, cursorY);
-
-                if (spearAttempted && resumeHeldWhirlwind)
-                    QueueHeldWhirlwindResume(tick);
-
-                _castingNow = false;
+                if (_castPhase == CastPhase.Idle)
+                    _castingNow = false;
             }
+        }
+
+        private void ProcessPendingCast(int tick, long nowMs)
+        {
+            if (_castPhase == CastPhase.Idle)
+                return;
+
+            if (_cursorOwned && !IsCursorNear(_aimX, _aimY, CursorOwnershipTolerancePx))
+                _cursorOwned = false;
+
+            if (nowMs < _castPhaseDeadlineMs)
+                return;
+
+            if (_castPhase == CastPhase.CursorSettle)
+            {
+                if ((_spearKey == ActionKey.LeftSkill || _spearKey == ActionKey.RightSkill)
+                    && AllowAutoShiftFallback
+                    && !IsVirtualKeyDown(VK_SHIFT))
+                {
+                    keybd_event(VK_SHIFT, 0, 0, UIntPtr.Zero);
+                    _syntheticShiftOwned = true;
+                    _castPhase = CastPhase.ShiftSettle;
+                    _castPhaseDeadlineMs = nowMs + ClampInt(ShiftPreHoldMs, 0, 25);
+                    if (nowMs < _castPhaseDeadlineMs)
+                        return;
+                }
+
+                BeginPendingSpearInput(tick, nowMs);
+                return;
+            }
+
+            if (_castPhase == CastPhase.ShiftSettle)
+            {
+                BeginPendingSpearInput(tick, nowMs);
+                return;
+            }
+
+            if (_castPhase == CastPhase.InputHold)
+                CompletePendingCast(tick, nowMs);
+        }
+
+        private void BeginPendingSpearInput(int tick, long nowMs)
+        {
+            bool inputStarted = false;
+
+            switch (_spearKey)
+            {
+                case ActionKey.Skill1:
+                    inputStarted = PressSyntheticKeyboardKey((byte)Keys.D1);
+                    break;
+                case ActionKey.Skill2:
+                    inputStarted = PressSyntheticKeyboardKey((byte)Keys.D2);
+                    break;
+                case ActionKey.Skill3:
+                    inputStarted = PressSyntheticKeyboardKey((byte)Keys.D3);
+                    break;
+                case ActionKey.Skill4:
+                    inputStarted = PressSyntheticKeyboardKey((byte)Keys.D4);
+                    break;
+                case ActionKey.LeftSkill:
+                    inputStarted = PressSyntheticMouse(MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP);
+                    break;
+                case ActionKey.RightSkill:
+                    inputStarted = PressSyntheticMouse(MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP);
+                    break;
+            }
+
+            if (!inputStarted)
+            {
+                ClearPendingCastOnly();
+                return;
+            }
+
+            BeginSpearImpactProbe(tick, Hud.Game.Me.FloorCoordinate, _pendingMarkerWorld, _pendingMarkerTargetAcdId);
+
+            if (DrawCastMarker)
+            {
+                _markerWorld = _pendingMarkerWorld;
+                _markerTargetAcdId = _pendingMarkerTargetAcdId;
+                _markerStartTick = tick;
+                _markerUntilTick = tick + MarkerDurationTicks;
+                _markerFailed = _pendingMarkerFailed;
+            }
+
+            _castPhase = CastPhase.InputHold;
+            _castPhaseDeadlineMs = nowMs + ClampInt(SpearInputHoldMs, 20, 90);
+        }
+
+        private bool PressSyntheticKeyboardKey(byte virtualKey)
+        {
+            try
+            {
+                keybd_event(virtualKey, 0, 0, UIntPtr.Zero);
+                _syntheticKeyDown = virtualKey;
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private bool PressSyntheticMouse(uint downFlag, uint upFlag)
+        {
+            try
+            {
+                mouse_event(downFlag, 0, 0, 0, UIntPtr.Zero);
+                _syntheticMouseUpFlag = upFlag;
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private void CompletePendingCast(int tick, long nowMs)
+        {
+            bool resumeHeldWhirlwind = _pendingResumeHeldWhirlwind;
+            ReleaseSyntheticInput();
+            RestoreOwnedCursor(nowMs);
+            ClearPendingCastState();
+
+            if (resumeHeldWhirlwind)
+                QueueHeldWhirlwindResume(tick);
+        }
+
+        private void ReleaseSyntheticInput()
+        {
+            if (_syntheticKeyDown != 0)
+            {
+                try { keybd_event(_syntheticKeyDown, 0, KEYEVENTF_KEYUP_SIMPLE, UIntPtr.Zero); }
+                catch { }
+                _syntheticKeyDown = 0;
+            }
+
+            if (_syntheticMouseUpFlag != 0)
+            {
+                try { mouse_event(_syntheticMouseUpFlag, 0, 0, 0, UIntPtr.Zero); }
+                catch { }
+                _syntheticMouseUpFlag = 0;
+            }
+
+            if (_syntheticShiftOwned)
+            {
+                try { keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP_SIMPLE, UIntPtr.Zero); }
+                catch { }
+                _syntheticShiftOwned = false;
+            }
+        }
+
+        private void RestoreOwnedCursor(long nowMs)
+        {
+            if (!RestoreCursorAfterSpear || !_cursorOwned || !Hud.Window.IsForeground
+                || !IsCursorNear(_aimX, _aimY, CursorOwnershipTolerancePx))
+                return;
+
+            double elapsedMs = Math.Max(0.0d, nowMs - _castStartedMs);
+            float leadX = _manualCursorVelocityX * (float)elapsedMs;
+            float leadY = _manualCursorVelocityY * (float)elapsedMs;
+            float leadLength = (float)Math.Sqrt((leadX * leadX) + (leadY * leadY));
+            if (leadLength > CursorRestoreMaximumLeadPx && leadLength > 0.001f)
+            {
+                float scale = CursorRestoreMaximumLeadPx / leadLength;
+                leadX *= scale;
+                leadY *= scale;
+            }
+
+            SafeMouseMove(_savedCursorX + leadX, _savedCursorY + leadY);
+            _skipCursorMotionSample = true;
+        }
+
+        private void TrackManualCursorMotion(long nowMs)
+        {
+            if (_castPhase != CastPhase.Idle)
+                return;
+
+            float x = Hud.Window.CursorX;
+            float y = Hud.Window.CursorY;
+
+            if (_skipCursorMotionSample || _lastCursorSampleMs <= 0 || nowMs <= _lastCursorSampleMs)
+            {
+                _skipCursorMotionSample = false;
+                _lastCursorSampleMs = nowMs;
+                _lastCursorSampleX = x;
+                _lastCursorSampleY = y;
+                return;
+            }
+
+            long elapsedMs = nowMs - _lastCursorSampleMs;
+            if (elapsedMs > 250)
+            {
+                _manualCursorVelocityX = 0f;
+                _manualCursorVelocityY = 0f;
+            }
+            else
+            {
+                float vx = ClampFloat((x - _lastCursorSampleX) / elapsedMs,
+                    -CursorVelocityMaximumPxPerMs, CursorVelocityMaximumPxPerMs);
+                float vy = ClampFloat((y - _lastCursorSampleY) / elapsedMs,
+                    -CursorVelocityMaximumPxPerMs, CursorVelocityMaximumPxPerMs);
+                _manualCursorVelocityX = (_manualCursorVelocityX * 0.65f) + (vx * 0.35f);
+                _manualCursorVelocityY = (_manualCursorVelocityY * 0.65f) + (vy * 0.35f);
+            }
+
+            _lastCursorSampleMs = nowMs;
+            _lastCursorSampleX = x;
+            _lastCursorSampleY = y;
+        }
+
+        private bool IsCursorNear(float x, float y, float radius)
+        {
+            float dx = Hud.Window.CursorX - x;
+            float dy = Hud.Window.CursorY - y;
+            return (dx * dx) + (dy * dy) <= radius * radius;
         }
 
 
@@ -558,10 +825,31 @@ namespace Turbo.Plugins.s7o
             aimX = cursorX;
             aimY = cursorY;
             failed = false;
+            _nativePullPlanUsed = false;
 
             var cursorWorld = GetScreenWorld(cursorX, cursorY);
             markerWorld = cursorWorld ?? mePos;
             if (cursorWorld == null) return;
+
+            bool nativePlanReady = false;
+            try
+            {
+                nativePlanReady = PreferNativeHitboxPullPlan
+                    && TryNativeHitboxPullPlan(mePos, cursorWorld, cursorX, cursorY,
+                        out aimX, out aimY, out markerWorld);
+            }
+            catch
+            {
+                aimX = cursorX;
+                aimY = cursorY;
+                markerWorld = cursorWorld;
+            }
+
+            if (nativePlanReady)
+            {
+                _nativePullPlanUsed = true;
+                return;
+            }
 
             float vx = cursorWorld.X - mePos.X;
             float vy = cursorWorld.Y - mePos.Y;
@@ -595,6 +883,332 @@ namespace Turbo.Plugins.s7o
             if (result == LocalAimResult.Chosen) return;
 
             TrySimpleForwardEliteAim(mePos, cursorWorld, useCone, vx, vy, cursorX, cursorY, out aimX, out aimY, out markerWorld);
+        }
+
+        private bool TryNativeHitboxPullPlan(
+            IWorldCoordinate mePos,
+            IWorldCoordinate cursorWorld,
+            float cursorX,
+            float cursorY,
+            out float aimX,
+            out float aimY,
+            out IWorldCoordinate markerWorld)
+        {
+            aimX = cursorX;
+            aimY = cursorY;
+            markerWorld = cursorWorld;
+
+            if (mePos == null || cursorWorld == null || Hud?.Game?.AliveMonsters == null)
+                return false;
+
+            float manualX = cursorWorld.X - mePos.X;
+            float manualY = cursorWorld.Y - mePos.Y;
+            float manualDistance = (float)Math.Sqrt((manualX * manualX) + (manualY * manualY));
+            if (manualDistance <= 0.1f)
+                return false;
+
+            float manualAngle = (float)Math.Atan2(manualY, manualX);
+            float maximumAngle = ClampFloat(MaxSnapAngleDegrees, 8f, 45f) * (float)Math.PI / 180f;
+            float maximumReach = Math.Max(ForwardEliteScanMaxYards, LinearTrashMaxYards);
+            maximumReach = Math.Max(maximumReach, ForwardEliteCommittedMaxYards);
+            maximumReach = ClampFloat(maximumReach, 30f, PullPlanMaximumReachYards);
+            if (MaxPlayerDistanceYards > 0f)
+                maximumReach = Math.Min(maximumReach, MaxPlayerDistanceYards);
+
+            bool aimingPastStack = manualDistance > StackedLeaderSuppressYards + 3f;
+            var bodies = new List<PullBody>(96);
+
+            foreach (IMonster monster in Hud.Game.AliveMonsters)
+            {
+                if (monster == null || !monster.IsAlive || monster.FloorCoordinate == null)
+                    continue;
+
+                float relX = monster.FloorCoordinate.X - mePos.X;
+                float relY = monster.FloorCoordinate.Y - mePos.Y;
+                float distance = (float)Math.Sqrt((relX * relX) + (relY * relY));
+                if (distance <= 1.5f || distance > maximumReach)
+                    continue;
+                if (MinPlayerDistanceYards > 0f && distance < MinPlayerDistanceYards)
+                    continue;
+
+                int tier;
+                if (IsLeaderElite(monster))
+                {
+                    if (IsEliteBlocked(monster) || !IsEliteAllowed(monster))
+                        continue;
+                    if (aimingPastStack && IsStackedLeaderElite(monster, mePos))
+                        continue;
+                    tier = 3;
+                }
+                else if (IsEliteMinion(monster))
+                {
+                    if (!IsPullableTrashAllowed(monster))
+                        continue;
+                    tier = 2;
+                }
+                else
+                {
+                    if (!monster.IsOnScreen || !IsPullableTrashAllowed(monster))
+                        continue;
+                    tier = IsHighValueTrash(monster) ? 1 : 0;
+                }
+
+                float radius = Math.Max(0.35f, GetMonsterRadiusBottom(monster));
+                float angle = (float)Math.Atan2(relY, relX);
+                float relativeAngle = NormalizeAngle(angle - manualAngle);
+                float halfWidth = (float)Math.Asin(Math.Min(0.95f, (radius + PullRayExtraRadiusYards) / distance));
+                if (relativeAngle + halfWidth < -maximumAngle || relativeAngle - halfWidth > maximumAngle)
+                    continue;
+
+                float progression = 0f;
+                try
+                {
+                    if (monster.SnoMonster != null && monster.SnoMonster.RiftProgression > 0f)
+                        progression = monster.SnoMonster.RiftProgression;
+                }
+                catch { }
+
+                bodies.Add(new PullBody
+                {
+                    Monster = monster,
+                    Angle = angle,
+                    Distance = distance,
+                    Radius = radius,
+                    Tier = tier,
+                    Progression = progression,
+                });
+            }
+
+            bool hasLeader = bodies.Any(body => body.Tier == 3);
+            if (!hasLeader)
+                bodies.RemoveAll(body => body.Tier == 2);
+            if (bodies.Count == 0)
+                return false;
+
+            var relativeCandidates = new List<float>(bodies.Count * 4 + 4)
+            {
+                -maximumAngle,
+                0f,
+                maximumAngle,
+            };
+
+            foreach (PullBody body in bodies)
+            {
+                float relativeAngle = NormalizeAngle(body.Angle - manualAngle);
+                float halfWidth = (float)Math.Asin(Math.Min(0.95f,
+                    (body.Radius + PullRayExtraRadiusYards) / body.Distance));
+                relativeCandidates.Add(ClampFloat(relativeAngle, -maximumAngle, maximumAngle));
+                relativeCandidates.Add(ClampFloat(relativeAngle - halfWidth, -maximumAngle, maximumAngle));
+                relativeCandidates.Add(ClampFloat(relativeAngle + halfWidth, -maximumAngle, maximumAngle));
+            }
+
+            relativeCandidates = relativeCandidates
+                .OrderBy(value => value)
+                .Aggregate(new List<float>(), (unique, value) =>
+                {
+                    if (unique.Count == 0 || Math.Abs(unique[unique.Count - 1] - value) > 0.00025f)
+                        unique.Add(value);
+                    return unique;
+                });
+
+            var evaluationAngles = new List<float>(relativeCandidates.Count * 2);
+            for (int i = 0; i < relativeCandidates.Count; i++)
+            {
+                evaluationAngles.Add(relativeCandidates[i]);
+                if (i + 1 < relativeCandidates.Count)
+                    evaluationAngles.Add((relativeCandidates[i] + relativeCandidates[i + 1]) * 0.5f);
+            }
+
+            PullPlan manualPlan = EvaluatePullPlan(bodies, mePos, manualAngle, manualAngle, maximumReach, hasLeader);
+            PullPlan bestPlan = new PullPlan();
+            foreach (float relativeAngle in evaluationAngles)
+            {
+                PullPlan candidate = EvaluatePullPlan(
+                    bodies,
+                    mePos,
+                    manualAngle + relativeAngle,
+                    manualAngle,
+                    maximumReach,
+                    hasLeader);
+                if (IsBetterPullPlan(candidate, bestPlan, hasLeader))
+                    bestPlan = candidate;
+            }
+
+            if (!bestPlan.Valid)
+                return false;
+
+            if (hasLeader)
+            {
+                if (manualPlan.Valid
+                    && manualPlan.PackHits >= bestPlan.PackHits
+                    && manualPlan.LeaderHits >= bestPlan.LeaderHits
+                    && manualPlan.MinionHits >= bestPlan.MinionHits)
+                    bestPlan = manualPlan;
+            }
+            else
+            {
+                int minimumBodies = Math.Max(2, LinearTrashMinBodies);
+                if (bestPlan.BodyHits < minimumBodies)
+                    return false;
+
+                int preserveWithin = Math.Max(0, LinearTrashPreferWithinBodies);
+                if (manualPlan.Valid
+                    && manualPlan.WeightedDensity + preserveWithin >= bestPlan.WeightedDensity
+                    && manualPlan.BodyHits + preserveWithin >= bestPlan.BodyHits)
+                    bestPlan = manualPlan;
+            }
+
+            if (bestPlan.ManualDeviation <= 0.00025f)
+            {
+                markerWorld = bestPlan.Marker != null ? bestPlan.Marker.FloorCoordinate : cursorWorld;
+                return true;
+            }
+
+            IWorldCoordinate aimWorld = Hud.Window.CreateWorldCoordinate(
+                mePos.X + ((float)Math.Cos(bestPlan.Angle) * bestPlan.AimDistance),
+                mePos.Y + ((float)Math.Sin(bestPlan.Angle) * bestPlan.AimDistance),
+                mePos.Z);
+            if (aimWorld == null)
+                return false;
+
+            IScreenCoordinate aimScreen = aimWorld.ToScreenCoordinate();
+            if (aimScreen == null)
+                return false;
+
+            aimX = ClampFloat(aimScreen.X, 8f, Math.Max(8f, Hud.Window.Size.Width - 8f));
+            aimY = ClampFloat(aimScreen.Y, 8f, Math.Max(8f, Hud.Window.Size.Height - 8f));
+            markerWorld = bestPlan.Marker != null ? bestPlan.Marker.FloorCoordinate : aimWorld;
+            return true;
+        }
+
+        private PullPlan EvaluatePullPlan(
+            List<PullBody> bodies,
+            IWorldCoordinate mePos,
+            float angle,
+            float manualAngle,
+            float maximumReach,
+            bool requireLeader)
+        {
+            var plan = new PullPlan
+            {
+                Angle = angle,
+                ManualDeviation = Math.Abs(NormalizeAngle(angle - manualAngle)),
+                AimDistance = PullPlanMinimumAimYards,
+                Safety = float.MaxValue,
+            };
+
+            float directionX = (float)Math.Cos(angle);
+            float directionY = (float)Math.Sin(angle);
+            float farthestProjection = 0f;
+            var packs = new HashSet<IMonsterPack>();
+            int leaderWithoutPack = 0;
+            float markerPriority = float.MinValue;
+
+            foreach (PullBody body in bodies)
+            {
+                float relX = body.Monster.FloorCoordinate.X - mePos.X;
+                float relY = body.Monster.FloorCoordinate.Y - mePos.Y;
+                float projection = (relX * directionX) + (relY * directionY);
+                if (projection < 1.5f || projection > maximumReach + 4f)
+                    continue;
+
+                float lateral = Math.Abs((relX * directionY) - (relY * directionX));
+                if (lateral > body.Radius + PullRayExtraRadiusYards)
+                    continue;
+
+                farthestProjection = Math.Max(farthestProjection, projection);
+                plan.Progression += body.Progression;
+
+                if (body.Tier == 3)
+                {
+                    plan.LeaderHits++;
+                    IMonsterPack pack = null;
+                    try { pack = body.Monster.Pack; } catch { }
+                    if (pack != null)
+                        packs.Add(pack);
+                    else
+                        leaderWithoutPack++;
+                }
+                else if (body.Tier == 2)
+                    plan.MinionHits++;
+                else if (body.Tier == 1)
+                    plan.HighTrashHits++;
+                else
+                    plan.TrashHits++;
+
+                float markerScore = (body.Tier * 1000f) + (body.Progression * 100f) + projection;
+                if (markerScore > markerPriority)
+                {
+                    markerPriority = markerScore;
+                    plan.Marker = body.Monster;
+                }
+            }
+
+            plan.PackHits = packs.Count + leaderWithoutPack;
+            if (requireLeader && plan.LeaderHits <= 0)
+                return plan;
+            if (!requireLeader && plan.BodyHits <= 0)
+                return plan;
+
+            plan.AimDistance = ClampFloat(
+                farthestProjection + 4f,
+                PullPlanMinimumAimYards,
+                PullPlanMaximumAimYards);
+
+            float safetyDistance = Math.Min(maximumReach, farthestProjection + 4f);
+            IWorldCoordinate aimWorld = Hud.Window.CreateWorldCoordinate(
+                mePos.X + (directionX * safetyDistance),
+                mePos.Y + (directionY * safetyDistance),
+                mePos.Z);
+            if (aimWorld == null)
+                return plan;
+
+            plan.Safety = Math.Max(0f, ComputeLineSafetyPenalty(mePos, aimWorld));
+            if (plan.Safety >= SimplePathRejectThreshold)
+                return plan;
+
+            plan.Valid = true;
+            return plan;
+        }
+
+        private static bool IsBetterPullPlan(PullPlan candidate, PullPlan current, bool leadersPresent)
+        {
+            if (!candidate.Valid) return false;
+            if (!current.Valid) return true;
+
+            if (leadersPresent)
+            {
+                if (candidate.PackHits != current.PackHits)
+                    return candidate.PackHits > current.PackHits;
+                if (candidate.LeaderHits != current.LeaderHits)
+                    return candidate.LeaderHits > current.LeaderHits;
+                if (candidate.MinionHits != current.MinionHits)
+                    return candidate.MinionHits > current.MinionHits;
+                if (candidate.HighTrashHits != current.HighTrashHits)
+                    return candidate.HighTrashHits > current.HighTrashHits;
+                if (candidate.TrashHits != current.TrashHits)
+                    return candidate.TrashHits > current.TrashHits;
+            }
+            else
+            {
+                if (candidate.WeightedDensity != current.WeightedDensity)
+                    return candidate.WeightedDensity > current.WeightedDensity;
+                if (candidate.BodyHits != current.BodyHits)
+                    return candidate.BodyHits > current.BodyHits;
+            }
+
+            if (Math.Abs(candidate.Progression - current.Progression) > 0.001f)
+                return candidate.Progression > current.Progression;
+            if (Math.Abs(candidate.Safety - current.Safety) > 0.01f)
+                return candidate.Safety < current.Safety;
+            return candidate.ManualDeviation < current.ManualDeviation;
+        }
+
+        private static float NormalizeAngle(float angle)
+        {
+            while (angle > Math.PI) angle -= (float)(Math.PI * 2.0);
+            while (angle < -Math.PI) angle += (float)(Math.PI * 2.0);
+            return angle;
         }
 
         private LocalAimResult TryLocalAim(
@@ -2657,8 +3271,6 @@ namespace Turbo.Plugins.s7o
             if (!UseGeometrySafety || fromWorld == null || toWorld == null || Hud?.Game == null) return 0f;
 
             float penalty = 0f;
-            penalty += AccumulateBlockerPenalty(SafeGetGameEnumerable("Obstacles"), fromWorld, toWorld, ObstaclePenaltyWeight);
-            penalty += AccumulateBlockerPenalty(SafeGetEliteWallEffects(), fromWorld, toWorld, EliteWallPenaltyWeight);
             penalty += AccumulateBlockerPenalty(SafeGetWallerBlockers(), fromWorld, toWorld, EliteWallPenaltyWeight * 1.20f);
             penalty += AccumulateBlockerPenalty(SafeGetPylonBlockers(), fromWorld, toWorld, EliteWallPenaltyWeight * 0.95f);
             penalty += AccumulateBlockerPenalty(SafeGetProjectileBlockingActors(), fromWorld, toWorld, ObstaclePenaltyWeight * 1.10f);
@@ -2679,7 +3291,7 @@ namespace Turbo.Plugins.s7o
             return penalty < 0f ? 0f : penalty;
         }
 
-        private float AccumulateBlockerPenalty(IEnumerable collection, IWorldCoordinate fromWorld, IWorldCoordinate toWorld, float weight)
+        private float AccumulateBlockerPenalty(IEnumerable<BlockerCircle> collection, IWorldCoordinate fromWorld, IWorldCoordinate toWorld, float weight)
         {
             if (collection == null || fromWorld == null || toWorld == null) return 0f;
 
@@ -2693,14 +3305,12 @@ namespace Turbo.Plugins.s7o
             float len2 = dx * dx + dy * dy;
             if (len2 <= 0.001f) return 0f;
 
-            foreach (var o in collection)
+            foreach (BlockerCircle blocker in collection)
             {
-                if (o == null) continue;
-
-                float ox;
-                float oy;
-                float radius;
-                if (!TryGetBlockerWorldCircle(o, out ox, out oy, out radius)) continue;
+                if (blocker == null) continue;
+                float ox = blocker.X;
+                float oy = blocker.Y;
+                float radius = blocker.Radius;
 
                 float tproj = ((ox - ax) * dx + (oy - ay) * dy) / len2;
                 if (tproj < 0f) tproj = 0f;
@@ -2729,29 +3339,7 @@ namespace Turbo.Plugins.s7o
             return penalty;
         }
 
-        private IEnumerable SafeGetGameEnumerable(string propertyName)
-        {
-            try
-            {
-                if (Hud == null || Hud.Game == null || string.IsNullOrWhiteSpace(propertyName))
-                    return null;
-
-                var prop = Hud.Game.GetType().GetProperty(
-                    propertyName,
-                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-
-                if (prop == null)
-                    return null;
-
-                return prop.GetValue(Hud.Game, null) as IEnumerable;
-            }
-            catch
-            {
-                return null;
-            }
-        }
-
-        private IEnumerable SafeGetPylonBlockers()
+        private IEnumerable<BlockerCircle> SafeGetPylonBlockers()
         {
             var list = new List<BlockerCircle>(8);
             if (!IncludePylonsAsPullBlockers) return list;
@@ -2769,7 +3357,7 @@ namespace Turbo.Plugins.s7o
             return list;
         }
 
-        private IEnumerable SafeGetWallerBlockers()
+        private IEnumerable<BlockerCircle> SafeGetWallerBlockers()
         {
             var list = new List<BlockerCircle>(24);
             if (!IncludeWallerAsPullBlockers) return list;
@@ -2801,7 +3389,7 @@ namespace Turbo.Plugins.s7o
             return list;
         }
 
-        private IEnumerable SafeGetProjectileBlockingActors()
+        private IEnumerable<BlockerCircle> SafeGetProjectileBlockingActors()
         {
             var list = new List<BlockerCircle>(32);
             if (!IncludeProjectileBlockingActors) return list;
@@ -2831,90 +3419,6 @@ namespace Turbo.Plugins.s7o
                 Y = cc.Y,
                 Radius = Math.Max(0.9f, radius),
             };
-        }
-
-        private IEnumerable SafeGetEliteWallEffects()
-        {
-            try
-            {
-                if (Hud == null || Hud.Game == null)
-                    return null;
-
-                var actorQueryProp = Hud.Game.GetType().GetProperty(
-                    "ActorQuery",
-                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-
-                object actorQuery = actorQueryProp != null
-                    ? actorQueryProp.GetValue(Hud.Game, null)
-                    : null;
-
-                if (actorQuery == null)
-                    return null;
-
-                var method = actorQuery.GetType().GetMethod(
-                    "GetSkillEffectActors",
-                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
-                    null,
-                    new[] { typeof(SkillEffectType) },
-                    null);
-
-                if (method == null)
-                    return null;
-
-                return method.Invoke(actorQuery, new object[] { SkillEffectType.elite_wall }) as IEnumerable;
-            }
-            catch
-            {
-                return null;
-            }
-        }
-
-        private bool TryGetBlockerWorldCircle(object o, out float ox, out float oy, out float radius)
-        {
-            ox = 0f;
-            oy = 0f;
-            radius = 1.5f;
-            if (o == null) return false;
-
-            try
-            {
-                var circle = o as BlockerCircle;
-                if (circle != null)
-                {
-                    ox = circle.X;
-                    oy = circle.Y;
-                    radius = Math.Max(radius, circle.Radius);
-                    return true;
-                }
-
-                var actor = o as IActor;
-                if (actor != null)
-                {
-                    var cc = actor.CollisionCoordinate ?? actor.FloorCoordinate;
-                    if (cc == null) return false;
-                    ox = cc.X;
-                    oy = cc.Y;
-                    radius = Math.Max(radius, actor.RadiusScaled * 1.20f);
-                    return true;
-                }
-
-                var t = o.GetType();
-                object ccObj = t.GetProperty("CollisionCoordinate")?.GetValue(o, null) ?? t.GetProperty("FloorCoordinate")?.GetValue(o, null);
-                if (ccObj == null) return false;
-
-                ox = Convert.ToSingle(ccObj.GetType().GetProperty("X")?.GetValue(ccObj, null));
-                oy = Convert.ToSingle(ccObj.GetType().GetProperty("Y")?.GetValue(ccObj, null));
-
-                var rp = t.GetProperty("RadiusScaled");
-                if (rp != null)
-                    radius = Math.Max(radius, Convert.ToSingle(rp.GetValue(o, null)) * 1.20f);
-
-                return true;
-            }
-            catch
-            {
-                return false;
-            }
         }
 
         // =========================
@@ -3177,100 +3681,11 @@ namespace Turbo.Plugins.s7o
             catch { }
         }
 
-        private void TapSpear()
-        {
-            TapAction(_spearKey);
-        }
-
-        private void TapAction(ActionKey key)
-        {
-            try
-            {
-                switch (key)
-                {
-                    case ActionKey.Skill1:
-                        TapKeyboardKey(Keys.D1);
-                        return;
-
-                    case ActionKey.Skill2:
-                        TapKeyboardKey(Keys.D2);
-                        return;
-
-                    case ActionKey.Skill3:
-                        TapKeyboardKey(Keys.D3);
-                        return;
-
-                    case ActionKey.Skill4:
-                        TapKeyboardKey(Keys.D4);
-                        return;
-
-                    case ActionKey.LeftSkill:
-                        TapMouse(MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, AllowAutoShiftFallback);
-                        return;
-
-                    case ActionKey.RightSkill:
-                        TapMouse(MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, AllowAutoShiftFallback);
-                        return;
-                }
-            }
-            catch
-            {
-            }
-        }
-
-        private void TapKeyboardKey(Keys key)
-        {
-            int holdMs = ClampInt(SpearInputHoldMs, 20, 90);
-            byte vk = (byte)key;
-
-            try
-            {
-                keybd_event(vk, 0, 0, UIntPtr.Zero);
-                Thread.Sleep(holdMs);
-                keybd_event(vk, 0, KEYEVENTF_KEYUP_SIMPLE, UIntPtr.Zero);
-            }
-            catch
-            {
-                try { keybd_event(vk, 0, KEYEVENTF_KEYUP_SIMPLE, UIntPtr.Zero); }
-                catch { }
-            }
-        }
-
         private static int ClampInt(int value, int min, int max)
         {
             if (value < min) return min;
             if (value > max) return max;
             return value;
-        }
-
-        private void TapMouse(uint downFlag, uint upFlag, bool holdShift)
-        {
-            bool shiftOwned = false;
-
-            try
-            {
-                if (holdShift && !IsVirtualKeyDown(VK_SHIFT))
-                {
-                    keybd_event(VK_SHIFT, 0, 0, UIntPtr.Zero);
-                    shiftOwned = true;
-                    Thread.Sleep(ClampInt(ShiftPreHoldMs, 0, 25));
-                }
-
-                mouse_event(downFlag, 0, 0, 0, UIntPtr.Zero);
-                Thread.Sleep(ClampInt(SpearInputHoldMs, 20, 90));
-                mouse_event(upFlag, 0, 0, 0, UIntPtr.Zero);
-            }
-            catch
-            {
-            }
-            finally
-            {
-                if (shiftOwned)
-                {
-                    try { keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP_SIMPLE, UIntPtr.Zero); }
-                    catch { }
-                }
-            }
         }
 
         public void PaintWorld(WorldLayer layer)
@@ -3385,9 +3800,9 @@ namespace Turbo.Plugins.s7o
             return false;
         }
 
-        private static bool IsVirtualKeyDown(int virtualKey)
+        private bool IsVirtualKeyDown(int virtualKey)
         {
-            try { return (GetAsyncKeyState(virtualKey) & 0x8000) != 0; }
+            try { return Hud?.Input != null && Hud.Input.IsKeyDown((Keys)virtualKey); }
             catch { return false; }
         }
 
@@ -3418,12 +3833,24 @@ namespace Turbo.Plugins.s7o
             }
         }
 
+        private static bool IsUiVisible(IUiElement element)
+        {
+            try
+            {
+                if (element == null) return false;
+                element.Refresh();
+                return element.Visible;
+            }
+            catch { return false; }
+        }
+
         private bool CanRun()
         {
             if (!Hud.Window.IsForeground) return false;
             if (!Hud.Game.IsInGame || Hud.Game.IsLoading) return false;
             if (Hud.Game.Me == null || Hud.Game.Me.IsDead) return false;
-            if (_chatEdit != null && _chatEdit.Visible) return false;
+            if (IsUiVisible(_chatEdit)) return false;
+            if (IsUiVisible(_urshiConversationMain) || IsUiVisible(_urshiGemPane)) return false;
             if (Hud.Inventory != null && Hud.Inventory.InventoryMainUiElement != null && Hud.Inventory.InventoryMainUiElement.Visible) return false;
             return true;
         }
@@ -3435,12 +3862,27 @@ namespace Turbo.Plugins.s7o
 
         private void ClearPendingCastOnly()
         {
-            _castPending = false;
-            _castTick = 0;
+            ReleaseSyntheticInput();
+            RestoreOwnedCursor(Hud?.Game != null ? Hud.Game.CurrentRealTimeMilliseconds : _castStartedMs);
+            ClearPendingCastState();
+        }
+
+        private void ClearPendingCastState()
+        {
+            _castPhase = CastPhase.Idle;
+            _castPhaseDeadlineMs = 0;
+            _castStartedMs = 0;
             _aimX = 0f;
             _aimY = 0f;
             _pendingMarkerWorld = null;
             _pendingMarkerTargetAcdId = 0;
+            _pendingMarkerFailed = false;
+            _pendingResumeHeldWhirlwind = false;
+            _nativePullPlanUsed = false;
+            _savedCursorX = 0f;
+            _savedCursorY = 0f;
+            _cursorOwned = false;
+            _castingNow = false;
         }
 
         private void ResetTransientState(bool resetHotkeyState)
@@ -3449,7 +3891,6 @@ namespace Turbo.Plugins.s7o
                 _hotkeyDownLatched = false;
 
             _lastObservedGameTick = -1;
-            _castingNow = false;
             ClearHeldWhirlwindResume();
 
             ClearPendingCastOnly();
@@ -3466,6 +3907,13 @@ namespace Turbo.Plugins.s7o
 
             if (resetHotkeyState)
                 _spearKey = ActionKey.Unknown;
+
+            _lastCursorSampleMs = 0;
+            _lastCursorSampleX = 0f;
+            _lastCursorSampleY = 0f;
+            _manualCursorVelocityX = 0f;
+            _manualCursorVelocityY = 0f;
+            _skipCursorMotionSample = true;
         }
 
 
@@ -3475,7 +3923,7 @@ namespace Turbo.Plugins.s7o
             catch { return null; }
         }
 
-        private void SafeMouseMove(float x, float y)
+        private bool SafeMouseMove(float x, float y)
         {
             float w = 1920f;
             float h = 1080f;
@@ -3488,8 +3936,19 @@ namespace Turbo.Plugins.s7o
             if (x > w - 1) x = w - 1;
             if (y > h - 1) y = h - 1;
 
-            try { SetCursorPos((int)Math.Round(x), (int)Math.Round(y)); }
-            catch { }
+            try
+            {
+                long screenX = (long)Math.Round(x) + Hud.Window.Offset.X;
+                long screenY = (long)Math.Round(y) + Hud.Window.Offset.Y;
+                if (screenX < int.MinValue || screenX > int.MaxValue
+                    || screenY < int.MinValue || screenY > int.MaxValue)
+                    return false;
+                return SetCursorPos((int)screenX, (int)screenY);
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private bool IsWithinWindow(float x, float y)
@@ -3607,82 +4066,12 @@ namespace Turbo.Plugins.s7o
                 if (k == Keys.None)
                     return false;
 
-                return IsVirtualKeyDown((int)k);
+                return Hud?.Input != null && Hud.Input.IsKeyDown(k);
             }
             catch
             {
                 return false;
             }
-        }
-
-
-        private bool IsKeyPhysicallyDown(Key dxKey, Keys winKey)
-        {
-            try
-            {
-                var input = Hud.Input;
-                if (input == null) return false;
-
-                var t = input.GetType();
-
-                var miDx = t.GetMethod("IsKeyDown", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
-                    null, new[] { typeof(Key) }, null);
-                if (miDx != null && miDx.ReturnType == typeof(bool))
-                    return (bool)miDx.Invoke(input, new object[] { dxKey });
-
-                var miWin = t.GetMethod("IsKeyDown", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
-                    null, new[] { typeof(Keys) }, null);
-                if (miWin != null && miWin.ReturnType == typeof(bool))
-                    return (bool)miWin.Invoke(input, new object[] { winKey });
-            }
-            catch { }
-            return false;
-        }
-
-        private static bool TryInvokeVoidAction(object obj, string methodName, ActionKey key)
-        {
-            if (obj == null || methodName == null) return false;
-
-            try
-            {
-                var t = obj.GetType();
-
-                var mi = t.GetMethod(methodName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
-                    null, new[] { typeof(ActionKey) }, null);
-                if (mi != null && mi.ReturnType == typeof(void))
-                {
-                    mi.Invoke(obj, new object[] { key });
-                    return true;
-                }
-
-                foreach (var m in t.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
-                {
-                    if (!string.Equals(m.Name, methodName, StringComparison.Ordinal) || m.ReturnType != typeof(void)) continue;
-                    var ps = m.GetParameters();
-                    if (ps.Length != 1) continue;
-
-                    object arg = key;
-                    var p0 = ps[0].ParameterType;
-
-                    if (!p0.IsAssignableFrom(typeof(ActionKey)))
-                    {
-                        if (p0.IsEnum)
-                        {
-                            try { arg = Enum.Parse(p0, key.ToString(), true); }
-                            catch { continue; }
-                        }
-                        else if (p0 == typeof(int)) arg = Convert.ToInt32(key);
-                        else if (p0 == typeof(object)) arg = key;
-                        else continue;
-                    }
-
-                    m.Invoke(obj, new object[] { arg });
-                    return true;
-                }
-            }
-            catch { }
-
-            return false;
         }
 
         // =========================
@@ -3728,18 +4117,8 @@ namespace Turbo.Plugins.s7o
 
         private static bool IsShieldingActive(IMonster m)
         {
-            if (m == null) return false;
-
-            if (TryGetBool(m, "IsShielding", out var b) && b) return true;
-            if (TryGetBool(m, "Shielding", out b) && b) return true;
-            if (TryGetBool(m, "ShieldingActive", out b) && b) return true;
-            if (TryGetBool(m, "HasShielding", out b) && b) return true;
-            if (TryGetBool(m, "Invulnerable", out b) && b) return true;
-            if (TryGetBool(m, "IsInvulnerable", out b) && b) return true;
-            if (TryGetBool(m, "IsShielded", out b) && b) return true;
-            if (TryGetBool(m, "Shielded", out b) && b) return true;
-
-            return false;
+            try { return m != null && m.Invulnerable; }
+            catch { return false; }
         }
 
         private static bool IsKnownUnpullableFamily(IMonster m)
@@ -3770,29 +4149,5 @@ namespace Turbo.Plugins.s7o
             return false;
         }
 
-        private static bool TryGetBool(object obj, string propName, out bool value)
-        {
-            value = false;
-            if (obj == null) return false;
-            try
-            {
-                var pi = obj.GetType().GetProperty(propName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-                if (pi != null && pi.PropertyType == typeof(bool))
-                {
-                    value = (bool)pi.GetValue(obj, null);
-                    return true;
-                }
-
-                var fi = obj.GetType().GetField(propName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-                if (fi != null && fi.FieldType == typeof(bool))
-                {
-                    value = (bool)fi.GetValue(obj);
-                    return true;
-                }
-            }
-            catch { }
-
-            return false;
-        }
     }
 }
