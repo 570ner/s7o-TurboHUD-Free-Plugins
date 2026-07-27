@@ -11,6 +11,8 @@ using Turbo.Plugins.Default;
 
 namespace Turbo.Plugins.s7o
 {
+    // REV08 paints live actors directly from native CoE time and learns the native phase rate for out-of-range continuation.
+    // When a remote actor leaves collection range, the last validated 4-second element cycle continues until death or authoritative revalidation.
     public class s7o_PartyInspector : BasePlugin, IInGameTopPainter, IInGameWorldPainter, IKeyEventHandler
     {
         public IKeyEvent ToggleKeyEvent { get; set; }
@@ -195,6 +197,12 @@ namespace Turbo.Plugins.s7o
 
         private const int MovableCoeGoPulseFontSteps = 7;
         private const int MovableCoeGoPulsePeriodMs = 900;
+        private const double MovableCoeElementSeconds = 4.0d;
+        private const double MovableCoeDefaultPhaseRate = 1.0d;
+        private const double MovableCoeMinimumPhaseRate = 0.25d;
+        private const double MovableCoeMaximumPhaseRate = 3.0d;
+        private const double MovableCoePhaseRateBlend = 0.35d;
+        private const int MovableCoeNativeLossGraceTicks = 30;
 
         private sealed class MovableCoeLayer
         {
@@ -209,6 +217,22 @@ namespace Turbo.Plugins.s7o
             public int PreferredElementTick;
             public bool PreferredElementActive;
             public double PreferredElementCountdown;
+
+            public bool TrackerSynchronized;
+            public bool WasDead;
+            public HeroClass TrackedHeroClass;
+            public int AnchorTick;
+            public int AnchorElement;
+            public double AnchorTimeLeft;
+            public long AnchorRealTimeMs;
+            public int LastNativeSyncTick;
+            public double PredictionPhaseRate = MovableCoeDefaultPhaseRate;
+            public bool PredictionRateSynchronized;
+            public double LastNativeCyclePhase;
+            public long LastNativeCyclePhaseMs;
+            public readonly List<int> ElementOrder = new List<int>();
+            public readonly Dictionary<int, BuffPaintInfo> ElementTemplates = new Dictionary<int, BuffPaintInfo>();
+            public readonly List<BuffPaintInfo> PaintInfoList = new List<BuffPaintInfo>();
         }
 
         private readonly Dictionary<string, MovableCoeLayer> _movableCoeLayers =
@@ -223,6 +247,7 @@ namespace Turbo.Plugins.s7o
         private float _movableCoeStartY;
         private float _movableCoeOffsetX;
         private float _movableCoeOffsetY;
+        private int _movableCoeLastGameTick;
 
         private readonly Dictionary<string, PortraitHoverPlayerStatsSnapshot> _portraitHoverStatsCache =
             new Dictionary<string, PortraitHoverPlayerStatsSnapshot>();
@@ -747,6 +772,12 @@ namespace Turbo.Plugins.s7o
             if (_movableCoePainter == null || _movableCoeRules == null)
                 return;
 
+            int currentTick = GetCurrentGameTickSafe();
+            if (_movableCoeLastGameTick > 0 && currentTick > 0 && currentTick < _movableCoeLastGameTick)
+                InvalidateAllMovableCoeTrackers();
+            if (currentTick > 0)
+                _movableCoeLastGameTick = currentTick;
+
             // Apply live public settings before layout so a later HUD Menu binding updates immediately.
             _movableCoeRules.SizeMultiplier = Math.Max(0.20f, Math.Min(1.50f, MovableCoESizeMultiplier));
 
@@ -810,6 +841,13 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
+            List<BuffPaintInfo> paintInfo = layer.PaintInfoList;
+            if (paintInfo == null || paintInfo.Count == 0)
+            {
+                layer.Rectangle = new DXRectangleF();
+                return;
+            }
+
             _movableCoePainter.Opacity = Math.Max(0.1f, Math.Min(1.0f, MovableCoEOpacity));
             float standardSize = _movableCoeRules.StandardIconSize;
             float width = 0;
@@ -818,10 +856,10 @@ namespace Turbo.Plugins.s7o
                 layer.ElementRectangles[i] = new DXRectangleF();
 
             float x = layer.X;
-            foreach (var info in _movableCoeRules.PaintInfoList)
+            foreach (BuffPaintInfo info in paintInfo)
             {
                 float y = layer.Y + (standardSize - info.Size) * 0.5f;
-                int element = info.Rule.IconIndex.GetValueOrDefault();
+                int element = info.Rule != null ? info.Rule.IconIndex.GetValueOrDefault() : 0;
                 if (element > 0 && element < layer.ElementRectangles.Length)
                     layer.ElementRectangles[element] = new DXRectangleF(x, y, info.Size, info.Size);
                 width += info.Size;
@@ -830,7 +868,7 @@ namespace Turbo.Plugins.s7o
             }
 
             layer.Rectangle = new DXRectangleF(layer.X, layer.Y - (height - standardSize) * 0.5f, width, height);
-            _movableCoePainter.PaintHorizontal(_movableCoeRules.PaintInfoList, layer.X, layer.Y, standardSize, 0);
+            _movableCoePainter.PaintHorizontal(paintInfo, layer.X, layer.Y, standardSize, 0);
 
             if (layer.PreferredElement <= 0 || layer.PreferredElement >= layer.ElementRectangles.Length) return;
             DXRectangleF r = layer.ElementRectangles[layer.PreferredElement];
@@ -877,49 +915,376 @@ namespace Turbo.Plugins.s7o
 
         private bool PrepareMovableCoEPaintInfo(IPlayer player, MovableCoeLayer layer)
         {
-            if (!PlayerHasActiveCoE(player)) return false;
-            _movableCoeRules.CalculatePaintInfo(player, GetMovableCoERules(player.HeroClassDefinition.HeroClass));
-            if (_movableCoeRules.PaintInfoList.Count == 0 || !_movableCoeRules.PaintInfoList.Any(i => i.TimeLeft > 0)) return false;
-
-            for (int i = 0; i < _movableCoeRules.PaintInfoList.Count; i++)
-            {
-                var info = _movableCoeRules.PaintInfoList[0];
-                if (info.TimeLeft > 0) break;
-                _movableCoeRules.PaintInfoList.RemoveAt(0);
-                _movableCoeRules.PaintInfoList.Add(info);
-            }
+            if (player == null || layer == null || player.HeroClassDefinition == null)
+                return false;
 
             int tick = GetCurrentGameTickSafe();
+            if (tick <= 0)
+                return false;
+            long nowMs = GetCurrentRealTimeMillisecondsSafe();
+
+            if (IsMovableCoePlayerDead(player))
+            {
+                layer.WasDead = true;
+                InvalidateMovableCoeTracker(layer);
+                return false;
+            }
+
+            if (layer.WasDead)
+            {
+                layer.WasDead = false;
+                InvalidateMovableCoeTracker(layer);
+            }
+
+            bool hasValidActor = HasMovableCoeValidActor(player);
+            // Only re-anchor from an authoritative live actor. Remote buff objects can
+            // remain stale after actor collection ends, so out-of-range frames advance
+            // the last validated phase locally instead of repeatedly trusting cached data.
+            bool nativeSynchronized = hasValidActor && TrySynchronizeMovableCoeFromNative(player, layer, tick, nowMs);
+            if (!nativeSynchronized)
+            {
+                // A visible actor without a readable CoE buff is authoritative after a
+                // short collection grace. Out of actor range, keep the last validated phase.
+                if (hasValidActor && (!layer.TrackerSynchronized
+                    || tick - layer.LastNativeSyncTick > MovableCoeNativeLossGraceTicks))
+                {
+                    InvalidateMovableCoeTracker(layer);
+                    return false;
+                }
+
+                if (!BuildPredictedMovableCoePaintInfo(player, layer, tick, nowMs))
+                    return false;
+            }
+
+            ApplyMovableCoePreferredElement(player, layer, tick);
+            return layer.PaintInfoList.Count > 0;
+        }
+
+        private bool TrySynchronizeMovableCoeFromNative(
+            IPlayer player,
+            MovableCoeLayer layer,
+            int tick,
+            long nowMs)
+        {
+            if (!PlayerHasActiveCoE(player))
+                return false;
+
+            try
+            {
+                HeroClass heroClass = player.HeroClassDefinition.HeroClass;
+                List<BuffRule> rules = GetMovableCoERules(heroClass).ToList();
+                _movableCoeRules.CalculatePaintInfo(player, rules);
+                if (_movableCoeRules.PaintInfoList.Count == 0
+                    || !_movableCoeRules.PaintInfoList.Any(info => info != null && info.TimeLeft > 0))
+                    return false;
+
+                for (int i = 0; i < _movableCoeRules.PaintInfoList.Count; i++)
+                {
+                    BuffPaintInfo info = _movableCoeRules.PaintInfoList[0];
+                    if (info != null && info.TimeLeft > 0)
+                        break;
+                    _movableCoeRules.PaintInfoList.RemoveAt(0);
+                    _movableCoeRules.PaintInfoList.Add(info);
+                }
+
+                BuffPaintInfo active = _movableCoeRules.PaintInfoList[0];
+                if (active == null || active.Rule == null || !active.Rule.IconIndex.HasValue || active.TimeLeft <= 0)
+                    return false;
+
+                layer.ElementOrder.Clear();
+                foreach (BuffRule rule in rules)
+                {
+                    if (rule != null && rule.IconIndex.HasValue)
+                        layer.ElementOrder.Add(rule.IconIndex.Value);
+                }
+
+                int activeElement = active.Rule.IconIndex.Value;
+                if (layer.ElementOrder.Count == 0 || !layer.ElementOrder.Contains(activeElement))
+                    return false;
+
+                foreach (BuffPaintInfo info in _movableCoeRules.PaintInfoList)
+                    CaptureMovableCoeTemplate(layer, info);
+
+                if (layer.ElementTemplates.Count < layer.ElementOrder.Count)
+                    return false;
+
+                bool orderChanged = layer.TrackedHeroClass != heroClass
+                    || layer.ElementOrder.Count != rules.Count
+                    || !layer.ElementOrder.Contains(activeElement);
+                if (orderChanged)
+                    ResetMovableCoePredictionRate(layer);
+
+                layer.TrackedHeroClass = heroClass;
+                layer.AnchorTick = tick;
+                layer.AnchorElement = activeElement;
+                layer.AnchorTimeLeft = Math.Max(0.001d, Math.Min(MovableCoeElementSeconds, active.TimeLeft));
+                layer.AnchorRealTimeMs = nowMs;
+                layer.LastNativeSyncTick = tick;
+                layer.TrackerSynchronized = true;
+
+                int activePosition = layer.ElementOrder.IndexOf(activeElement);
+                double cyclePhase = (activePosition * MovableCoeElementSeconds)
+                    + (MovableCoeElementSeconds - layer.AnchorTimeLeft);
+                UpdateMovableCoePredictionRate(
+                    layer,
+                    cyclePhase,
+                    layer.ElementOrder.Count * MovableCoeElementSeconds,
+                    nowMs);
+
+                return BuildNativeMovableCoePaintInfo(layer, _movableCoeRules.PaintInfoList);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private void CaptureMovableCoeTemplate(MovableCoeLayer layer, BuffPaintInfo source)
+        {
+            if (layer == null || source == null || source.Rule == null || !source.Rule.IconIndex.HasValue)
+                return;
+
+            int element = source.Rule.IconIndex.Value;
+            BuffPaintInfo template;
+            if (!layer.ElementTemplates.TryGetValue(element, out template) || template == null)
+            {
+                template = new BuffPaintInfo();
+                layer.ElementTemplates[element] = template;
+            }
+
+            template.Id = source.Id;
+            template.SnoPower = source.SnoPower;
+            template.Elapsed = source.Elapsed;
+            template.TimeLeft = source.TimeLeft;
+            template.Stacks = source.Stacks;
+            template.Icons = source.Icons != null ? new List<SnoPowerIcon>(source.Icons) : new List<SnoPowerIcon>();
+            template.Rule = source.Rule;
+            template.BackgroundTexture = source.BackgroundTexture;
+            template.Texture = source.Texture;
+            template.Size = source.Size;
+            template.TimeLeftNumbersOverride = false;
+        }
+
+        private bool BuildNativeMovableCoePaintInfo(
+            MovableCoeLayer layer,
+            IEnumerable<BuffPaintInfo> nativePaintInfo)
+        {
+            if (layer == null || nativePaintInfo == null)
+                return false;
+
+            layer.PaintInfoList.Clear();
+            foreach (BuffPaintInfo source in nativePaintInfo)
+            {
+                if (source == null || source.Rule == null || !source.Rule.IconIndex.HasValue)
+                    continue;
+
+                BuffPaintInfo template;
+                if (!layer.ElementTemplates.TryGetValue(source.Rule.IconIndex.Value, out template)
+                    || template == null)
+                    continue;
+
+                template.Elapsed = source.Elapsed;
+                template.TimeLeft = source.TimeLeft;
+                template.Stacks = source.Stacks;
+                template.Size = source.Size;
+                template.TimeLeftNumbersOverride = false;
+                layer.PaintInfoList.Add(template);
+            }
+
+            return layer.PaintInfoList.Count == layer.ElementOrder.Count;
+        }
+
+        private void UpdateMovableCoePredictionRate(
+            MovableCoeLayer layer,
+            double cyclePhase,
+            double cycleDuration,
+            long nowMs)
+        {
+            if (layer == null || cycleDuration <= 0.0d || nowMs <= 0)
+                return;
+
+            if (layer.LastNativeCyclePhaseMs > 0 && nowMs > layer.LastNativeCyclePhaseMs)
+            {
+                double phaseAdvance = cyclePhase - layer.LastNativeCyclePhase;
+                if (phaseAdvance < -0.001d)
+                    phaseAdvance += cycleDuration;
+
+                long elapsedMs = nowMs - layer.LastNativeCyclePhaseMs;
+                if (phaseAdvance > 0.001d && elapsedMs >= 8 && elapsedMs <= 2000)
+                {
+                    double observedRate = phaseAdvance * 1000.0d / elapsedMs;
+                    if (observedRate >= MovableCoeMinimumPhaseRate
+                        && observedRate <= MovableCoeMaximumPhaseRate)
+                    {
+                        layer.PredictionPhaseRate = layer.PredictionRateSynchronized
+                            ? (layer.PredictionPhaseRate * (1.0d - MovableCoePhaseRateBlend))
+                                + (observedRate * MovableCoePhaseRateBlend)
+                            : observedRate;
+                        layer.PredictionRateSynchronized = true;
+                    }
+                }
+
+                if (phaseAdvance > 0.001d || elapsedMs >= 250)
+                {
+                    layer.LastNativeCyclePhase = cyclePhase;
+                    layer.LastNativeCyclePhaseMs = nowMs;
+                }
+            }
+            else
+            {
+                layer.LastNativeCyclePhase = cyclePhase;
+                layer.LastNativeCyclePhaseMs = nowMs;
+            }
+        }
+
+        private void ResetMovableCoePredictionRate(MovableCoeLayer layer)
+        {
+            if (layer == null)
+                return;
+
+            layer.PredictionPhaseRate = MovableCoeDefaultPhaseRate;
+            layer.PredictionRateSynchronized = false;
+            layer.LastNativeCyclePhase = 0.0d;
+            layer.LastNativeCyclePhaseMs = 0;
+        }
+
+        private bool BuildPredictedMovableCoePaintInfo(
+            IPlayer player,
+            MovableCoeLayer layer,
+            int tick,
+            long nowMs)
+        {
+            if (player == null || layer == null || !layer.TrackerSynchronized
+                || layer.ElementOrder.Count == 0 || layer.AnchorTick <= 0 || tick < layer.AnchorTick
+                || layer.AnchorRealTimeMs <= 0 || nowMs < layer.AnchorRealTimeMs)
+                return false;
+
+            HeroClass heroClass;
+            try { heroClass = player.HeroClassDefinition.HeroClass; }
+            catch { return false; }
+            if (heroClass != layer.TrackedHeroClass)
+            {
+                InvalidateMovableCoeTracker(layer);
+                return false;
+            }
+
+            int anchorPosition = layer.ElementOrder.IndexOf(layer.AnchorElement);
+            if (anchorPosition < 0)
+                return false;
+
+            double elapsedSeconds = ((nowMs - layer.AnchorRealTimeMs) / 1000.0d)
+                * Math.Max(MovableCoeMinimumPhaseRate,
+                    Math.Min(MovableCoeMaximumPhaseRate, layer.PredictionPhaseRate));
+            double phaseSeconds = (MovableCoeElementSeconds - layer.AnchorTimeLeft) + Math.Max(0.0d, elapsedSeconds);
+            int advancedElements = (int)Math.Floor(phaseSeconds / MovableCoeElementSeconds);
+            double elapsedInElement = phaseSeconds - (advancedElements * MovableCoeElementSeconds);
+            if (elapsedInElement < 0.0d)
+                elapsedInElement = 0.0d;
+
+            int activePosition = (anchorPosition + advancedElements) % layer.ElementOrder.Count;
+            double activeTimeLeft = MovableCoeElementSeconds - elapsedInElement;
+            if (activeTimeLeft <= 0.0001d || activeTimeLeft > MovableCoeElementSeconds)
+                activeTimeLeft = MovableCoeElementSeconds;
+
+            layer.PaintInfoList.Clear();
+            float standardSize = _movableCoeRules.StandardIconSize;
+            for (int offset = 0; offset < layer.ElementOrder.Count; offset++)
+            {
+                int element = layer.ElementOrder[(activePosition + offset) % layer.ElementOrder.Count];
+                BuffPaintInfo info;
+                if (!layer.ElementTemplates.TryGetValue(element, out info) || info == null
+                    || info.Texture == null || info.Icons == null || info.Icons.Count == 0)
+                {
+                    layer.PaintInfoList.Clear();
+                    return false;
+                }
+
+                float sizeMultiplier = info.Rule != null ? info.Rule.IconSizeMultiplier : 1.0f;
+                info.Size = standardSize * sizeMultiplier;
+                info.Elapsed = offset == 0 ? MovableCoeElementSeconds - activeTimeLeft : 0.0d;
+                info.TimeLeft = offset == 0 ? activeTimeLeft : 0.0d;
+                info.TimeLeftNumbersOverride = false;
+                layer.PaintInfoList.Add(info);
+            }
+
+            return layer.PaintInfoList.Count > 0;
+        }
+
+        private void ApplyMovableCoePreferredElement(IPlayer player, MovableCoeLayer layer, int tick)
+        {
             if (layer.ManualPreferredElement > 0)
             {
                 layer.PreferredElement = layer.ManualPreferredElement;
             }
-            else if (layer.PreferredElementTick == 0 || tick <= 0 || tick - layer.PreferredElementTick >= 60)
+            else if (layer.PreferredElementTick == 0 || tick - layer.PreferredElementTick >= 60)
             {
-                layer.PreferredElement = GetPreferredMovableCoEElement(player);
+                int preferred = GetPreferredMovableCoEElement(player);
+                if (preferred > 0)
+                    layer.PreferredElement = preferred;
                 layer.PreferredElementTick = tick;
             }
 
             layer.PreferredElementActive = false;
             layer.PreferredElementCountdown = 0.0d;
-            double activeTimeLeft = Math.Max(0.0d, _movableCoeRules.PaintInfoList[0].TimeLeft);
+            double activeTimeLeft = layer.PaintInfoList.Count > 0
+                ? Math.Max(0.0d, layer.PaintInfoList[0].TimeLeft)
+                : 0.0d;
 
-            for (int i = 0; i < _movableCoeRules.PaintInfoList.Count; i++)
+            for (int i = 0; i < layer.PaintInfoList.Count; i++)
             {
-                var info = _movableCoeRules.PaintInfoList[i];
-                bool preferred = info.Rule.IconIndex.GetValueOrDefault() == layer.PreferredElement;
-                info.TimeLeftNumbersOverride = false;
-                if (!preferred) continue;
+                BuffPaintInfo info = layer.PaintInfoList[i];
+                int element = info != null && info.Rule != null
+                    ? info.Rule.IconIndex.GetValueOrDefault()
+                    : 0;
+                bool preferred = element == layer.PreferredElement;
+                if (info != null)
+                    info.TimeLeftNumbersOverride = false;
+                if (!preferred)
+                    continue;
 
                 layer.PreferredElementActive = i == 0;
                 layer.PreferredElementCountdown = i == 0
                     ? 0.0d
-                    : ((i - 1) * 4.0d) + activeTimeLeft;
+                    : ((i - 1) * MovableCoeElementSeconds) + activeTimeLeft;
 
                 if (layer.PreferredElementActive && HighlightMovableCoEBestElement)
                     info.Size *= Math.Max(1.0f, Math.Min(1.75f, MovableCoEActiveElementScale));
             }
-            return true;
+        }
+
+        private bool IsMovableCoePlayerDead(IPlayer player)
+        {
+            try { return player == null || player.IsDead || player.IsDeadSafeCheck; }
+            catch { return false; }
+        }
+
+        private bool HasMovableCoeValidActor(IPlayer player)
+        {
+            try { return player != null && player.HasValidActor; }
+            catch { return false; }
+        }
+
+        private void InvalidateMovableCoeTracker(MovableCoeLayer layer)
+        {
+            if (layer == null)
+                return;
+
+            layer.TrackerSynchronized = false;
+            layer.AnchorTick = 0;
+            layer.AnchorElement = 0;
+            layer.AnchorTimeLeft = 0.0d;
+            layer.AnchorRealTimeMs = 0;
+            layer.LastNativeSyncTick = 0;
+            ResetMovableCoePredictionRate(layer);
+            layer.PaintInfoList.Clear();
+            layer.PreferredElementActive = false;
+            layer.PreferredElementCountdown = 0.0d;
+        }
+
+        private void InvalidateAllMovableCoeTrackers()
+        {
+            foreach (MovableCoeLayer layer in _movableCoeLayers.Values)
+                InvalidateMovableCoeTracker(layer);
         }
 
         private IEnumerable<BuffRule> GetMovableCoERules(HeroClass heroClass)
@@ -1341,6 +1706,20 @@ namespace Turbo.Plugins.s7o
             try
             {
                 return Hud != null && Hud.Game != null ? Hud.Game.CurrentGameTick : 0;
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        private long GetCurrentRealTimeMillisecondsSafe()
+        {
+            try
+            {
+                return Hud != null && Hud.Game != null
+                    ? Hud.Game.CurrentRealTimeMilliseconds
+                    : 0;
             }
             catch
             {
