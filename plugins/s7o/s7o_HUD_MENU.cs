@@ -17,7 +17,6 @@ namespace Turbo.Plugins.s7o
 {
     // s7o HUD MENU - FREEHUD in-game manager for plugin controls,
     // macros, visual helpers, hotkeys, and persistent global plugin states.
-    // REV78 keeps REV77 behavior and binds the existing Siphon Debuff Circle toggle to the Inarius remote-primary ring.
     public class s7o_HUD_MENU : BasePlugin, IKeyEventHandler, IAfterCollectHandler, IInGameWorldPainter, IInGameTopPainter, IMouseClickHandler
     {
         private const string SettingsFileName = "s7o_HUD_MENU.ini";
@@ -358,6 +357,41 @@ namespace Turbo.Plugins.s7o
         private bool  _visSiphonEnabled = false;         private bool  _visSiphonExpanded = false;
         private int   _visSiphonColorIdx = 5;            private int   _visSiphonTone = 5;
         private float _visSiphonDotSize = 3.35f;
+
+        private const int VisualRemoteSiphonConfirmSamples = 2;
+        private const int VisualRemoteSiphonActivityHoldMs = 500;
+        private static readonly uint[] VisualRemoteSiphonIdentityModifiers =
+        {
+            0u, 0xFFFFFu, 0xFFFFFFFFu, 2147483647u
+        };
+
+        private sealed class VisualRemoteSiphonState
+        {
+            public uint CandidateIdentity;
+            public int CandidateSamples;
+            public uint TargetIdentity;
+            public long ActivityUntilMs;
+            public long TargetUntilMs;
+            public int LastPlayerSeenTick;
+            public int LastSampleTick;
+            public bool IsDeathNovaRole;
+        }
+
+        private sealed class VisualRemoteSiphonRenderEntry
+        {
+            public ulong PlayerKey;
+            public bool IsDeathNovaRole;
+            public uint TargetIdentity;
+            public IMonster Target;
+        }
+
+        private readonly Dictionary<ulong, VisualRemoteSiphonState> _visualRemoteSiphonStates =
+            new Dictionary<ulong, VisualRemoteSiphonState>();
+        private readonly List<VisualRemoteSiphonRenderEntry> _visualRemoteSiphonRenderEntries =
+            new List<VisualRemoteSiphonRenderEntry>();
+        private readonly Dictionary<uint, int> _visualRemoteSiphonTargetRoles =
+            new Dictionary<uint, int>();
+        private readonly List<ulong> _visualRemoteSiphonRemovalKeys = new List<ulong>();
 
         private bool  _visGuardianSentryEnabled = false; private bool  _visGuardianSentryExpanded = false;
         private int   _visGuardianSentryColorIdx = 0;    private int   _visGuardianSentryTone = 10;
@@ -1019,6 +1053,7 @@ namespace Turbo.Plugins.s7o
 
             // Public-test safety: never restore an open overlay/Profile session after HUD reload.
             _visible = false;
+            _editMode = false;
             _capturingHotkey = false;
             _tipsPlayerMarkerHotkeyCapture = false;
             _playerCoeHotkeyCapture = false;
@@ -1887,6 +1922,7 @@ namespace Turbo.Plugins.s7o
             {
                 EnsureResources();
                 try { DrawVisualSiphonDebuffRing(); } catch { }
+                try { DrawVisualRemoteSiphonPrimaryTargetRings(); } catch { }
                 return;
             }
 
@@ -5529,7 +5565,7 @@ namespace Turbo.Plugins.s7o
 
             if (_editMode)
             {
-                _fSmall.DrawText("MOVE MODE: drag the title bar or menu dot, then click MOVE again.", l.Window.Left + 20f, l.Window.Bottom - 18f);
+                _fSmall.DrawText("MOVE MODE: drag the title bar or menu dot; click MOVE again or close the menu to finish.", l.Window.Left + 20f, l.Window.Bottom - 18f);
             }
         }
 
@@ -6616,7 +6652,7 @@ namespace Turbo.Plugins.s7o
             if (!_autoLootEnabled)
                 return;
 
-            _autoLootToastText = _autoLootPaused ? "PAUSED" : "ENABLED";
+            _autoLootToastText = _autoLootPaused ? "AutoLoot Paused" : "AutoLoot Enabled";
             _autoLootToastStartTick = Environment.TickCount;
         }
 
@@ -6811,7 +6847,8 @@ namespace Turbo.Plugins.s7o
                     _pestilenceRgkRgAssist);
 
                 plugin.ShowTargetLineReticle = _pestilenceRgkShowTargetLineReticle;
-                plugin.ShowRemoteSiphonPrimaryTargetRing = _visSiphonEnabled;
+                // HUD Menu owns this shared visual so it remains available on every local class.
+                plugin.ShowRemoteSiphonPrimaryTargetRing = false;
 
                 plugin.ConfigureZeiCircle(
                     _pestilenceRgkZeiCircle,
@@ -7158,7 +7195,8 @@ namespace Turbo.Plugins.s7o
 
                 plugin.ShowRangeIndicator = _inariusRgkShowRangeIndicator;
                 plugin.ShowTargetLineReticle = _inariusRgkShowTargetLineReticle;
-                plugin.ShowRemoteSiphonPrimaryTargetRing = _visSiphonEnabled;
+                // HUD Menu owns this shared visual so it remains available on every local class.
+                plugin.ShowRemoteSiphonPrimaryTargetRing = false;
             }
             catch { }
         }
@@ -8229,8 +8267,14 @@ namespace Turbo.Plugins.s7o
 
         private void DrawAutoLootIndicatorTooltip(RectangleF dot)
         {
-            string text = _autoLootPaused ? "Paused - Click to Resume" : "Active - Click to Pause";
-            float w = 170f;
+            string hotkey = CaptureKeyLabel(_autoLootPauseHotkey);
+            if (hotkey.Length >= 2 && hotkey[0] == '[' && hotkey[hotkey.Length - 1] == ']')
+                hotkey = hotkey.Substring(1, hotkey.Length - 2);
+
+            string text = _autoLootPaused
+                ? "AutoLoot: Paused (" + hotkey + " to Activate)"
+                : "AutoLoot: Active (" + hotkey + " to Pause)";
+            float w = 210f;
             float h = 24f;
             RectangleF tip = new RectangleF(dot.Right + 8f, dot.Top - 4f, w, h);
 
@@ -8261,7 +8305,7 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
-            bool pausedToast = string.Equals(_autoLootToastText, "PAUSED", StringComparison.OrdinalIgnoreCase);
+            bool pausedToast = string.Equals(_autoLootToastText, "AutoLoot Paused", StringComparison.OrdinalIgnoreCase);
             IFont main = GetAutoLootToastFont(pausedToast, age, false);
             IFont shadow = GetAutoLootToastFont(pausedToast, age, true);
             if (main == null && shadow == null)
@@ -8276,7 +8320,7 @@ namespace Turbo.Plugins.s7o
             }
             catch { }
 
-            float w = 128f * scale;
+            float w = 210f * scale;
             float h = 32f * scale;
 
             float dotX = targetDot.Left + targetDot.Width * 0.5f;
@@ -8468,6 +8512,373 @@ namespace Turbo.Plugins.s7o
                 }
             }
             catch { }
+        }
+
+        private void DrawVisualRemoteSiphonPrimaryTargetRings()
+        {
+            if (!_visSiphonEnabled || Hud == null || Hud.Game == null || !Hud.Game.IsInGame
+                || Hud.Game.IsInTown || Hud.Game.Players == null || Hud.Game.AliveMonsters == null)
+            {
+                ClearVisualRemoteSiphonStates();
+                return;
+            }
+
+            int tick = Hud.Game.CurrentGameTick;
+            long now = Hud.Game.CurrentRealTimeMilliseconds;
+            try
+            {
+                List<IPlayer> remoteNecromancers = Hud.Game.Players
+                    .Where(IsVisualRemoteSiphonNecromancer)
+                    .OrderBy(GetVisualRemoteSiphonRoleOrder)
+                    .ThenBy(GetVisualRemoteSiphonPortraitIndex)
+                    .ThenBy(GetVisualRemoteSiphonHeroId)
+                    .ToList();
+
+                foreach (IPlayer player in remoteNecromancers)
+                {
+                    ulong playerKey = GetVisualRemoteSiphonPlayerKey(player);
+                    if (playerKey == 0UL)
+                        continue;
+
+                    VisualRemoteSiphonState state;
+                    if (!_visualRemoteSiphonStates.TryGetValue(playerKey, out state))
+                    {
+                        state = new VisualRemoteSiphonState();
+                        _visualRemoteSiphonStates[playerKey] = state;
+                    }
+
+                    state.IsDeathNovaRole = IsVisualRemoteSiphonDeathNovaRole(player);
+                    state.LastPlayerSeenTick = tick;
+                    if (state.LastSampleTick == tick)
+                        continue;
+
+                    state.LastSampleTick = tick;
+                    if (HasVisualRemoteSiphonActivity(player))
+                        state.ActivityUntilMs = now + VisualRemoteSiphonActivityHoldMs;
+
+                    uint identity = 0u;
+                    if (state.ActivityUntilMs > 0L && now <= state.ActivityUntilMs)
+                    {
+                        identity = ReadVisualRemoteSiphonIdentity(player);
+                        IMonster candidate = FindVisualRemoteSiphonMonster(identity);
+                        if (!IsVisualRemoteSiphonTarget(candidate))
+                            identity = 0u;
+                    }
+
+                    UpdateVisualRemoteSiphonState(state, identity, now);
+                }
+            }
+            catch { }
+
+            _visualRemoteSiphonRenderEntries.Clear();
+            _visualRemoteSiphonTargetRoles.Clear();
+            _visualRemoteSiphonRemovalKeys.Clear();
+
+            foreach (KeyValuePair<ulong, VisualRemoteSiphonState> pair in _visualRemoteSiphonStates)
+            {
+                VisualRemoteSiphonState state = pair.Value;
+                if (state == null)
+                {
+                    _visualRemoteSiphonRemovalKeys.Add(pair.Key);
+                    continue;
+                }
+
+                if (state.LastPlayerSeenTick != tick)
+                {
+                    state.CandidateIdentity = 0u;
+                    state.CandidateSamples = 0;
+                }
+
+                if (state.TargetIdentity == 0u || now > state.TargetUntilMs)
+                {
+                    state.TargetIdentity = 0u;
+                    state.TargetUntilMs = 0L;
+                    if (state.LastPlayerSeenTick != tick)
+                        _visualRemoteSiphonRemovalKeys.Add(pair.Key);
+                    continue;
+                }
+
+                IMonster target = FindVisualRemoteSiphonMonster(state.TargetIdentity);
+                if (!IsVisualRemoteSiphonTarget(target))
+                {
+                    state.TargetIdentity = 0u;
+                    state.TargetUntilMs = 0L;
+                    continue;
+                }
+
+                uint drawIdentity = target.AcdId != 0u ? target.AcdId : target.AnnId;
+                if (drawIdentity == 0u)
+                    continue;
+
+                _visualRemoteSiphonRenderEntries.Add(new VisualRemoteSiphonRenderEntry
+                {
+                    PlayerKey = pair.Key,
+                    IsDeathNovaRole = state.IsDeathNovaRole,
+                    TargetIdentity = drawIdentity,
+                    Target = target,
+                });
+            }
+
+            // One ring per role per target. Death Nova owns the bright outer ring;
+            // the other Siphon role owns the dark inner ring. Separate targets each
+            // receive only their role's single ring.
+            foreach (VisualRemoteSiphonRenderEntry entry in _visualRemoteSiphonRenderEntries
+                .OrderByDescending(e => e.IsDeathNovaRole)
+                .ThenBy(e => e.PlayerKey))
+            {
+                int roleBit = entry.IsDeathNovaRole ? 1 : 2;
+                int renderedRoles;
+                if (!_visualRemoteSiphonTargetRoles.TryGetValue(entry.TargetIdentity, out renderedRoles))
+                    renderedRoles = 0;
+
+                if ((renderedRoles & roleBit) != 0)
+                    continue;
+
+                _visualRemoteSiphonTargetRoles[entry.TargetIdentity] = renderedRoles | roleBit;
+                DrawVisualRemoteSiphonPrimaryTargetRing(entry.Target, tick, entry.IsDeathNovaRole);
+            }
+
+            for (int i = 0; i < _visualRemoteSiphonRemovalKeys.Count; i++)
+                _visualRemoteSiphonStates.Remove(_visualRemoteSiphonRemovalKeys[i]);
+        }
+
+        private bool IsVisualRemoteSiphonDeathNovaRole(IPlayer player)
+        {
+            try
+            {
+                return player != null
+                    && player.Powers != null
+                    && player.Powers.GetUsedSkill(Hud.Sno.SnoPowers.Necromancer_DeathNova) != null;
+            }
+            catch { return false; }
+        }
+
+        private int GetVisualRemoteSiphonRoleOrder(IPlayer player)
+        {
+            return IsVisualRemoteSiphonDeathNovaRole(player) ? 0 : 1;
+        }
+
+        private static int GetVisualRemoteSiphonPortraitIndex(IPlayer player)
+        {
+            try { return player != null ? player.PortraitIndex : int.MaxValue; }
+            catch { return int.MaxValue; }
+        }
+
+        private static uint GetVisualRemoteSiphonHeroId(IPlayer player)
+        {
+            try { return player != null ? player.HeroId : uint.MaxValue; }
+            catch { return uint.MaxValue; }
+        }
+
+        private bool IsVisualRemoteSiphonNecromancer(IPlayer player)
+        {
+            try
+            {
+                return player != null
+                    && !player.IsMe
+                    && player.IsInGame
+                    && player.HeroClassDefinition != null
+                    && player.HeroClassDefinition.HeroClass == HeroClass.Necromancer
+                    && player.Powers != null
+                    && player.Powers.GetUsedSkill(Hud.Sno.SnoPowers.Necromancer_SiphonBlood) != null;
+            }
+            catch { return false; }
+        }
+
+        private bool HasVisualRemoteSiphonActivity(IPlayer player)
+        {
+            try
+            {
+                if (player == null)
+                    return false;
+
+                AnimSnoEnum animation = player.Animation;
+                return animation == AnimSnoEnum._p6_necro_male_hth_cast_bloodsiphon
+                    || animation == AnimSnoEnum._p6_necro_female_hth_cast_bloodsiphon
+                    || player.AnimationState == AcdAnimationState.Channeling;
+            }
+            catch { return false; }
+        }
+
+        private ulong GetVisualRemoteSiphonPlayerKey(IPlayer player)
+        {
+            try
+            {
+                if (player != null && player.HeroId != 0u)
+                    return 0x100000000UL | player.HeroId;
+
+                if (player != null)
+                    return (ulong)(uint)Math.Max(0, player.Index) + 1UL;
+            }
+            catch { }
+
+            return 0UL;
+        }
+
+        private uint ReadVisualRemoteSiphonIdentity(IActor actor)
+        {
+            if (actor == null || Hud == null || Hud.Sno == null || Hud.Sno.Attributes == null)
+                return 0u;
+
+            IAttribute attribute = Hud.Sno.Attributes.Last_ACD_Attacked;
+            if (attribute == null)
+                return 0u;
+
+            for (int i = 0; i < VisualRemoteSiphonIdentityModifiers.Length; i++)
+            {
+                try
+                {
+                    uint value = actor.GetAttributeValueAsUInt(
+                        attribute,
+                        VisualRemoteSiphonIdentityModifiers[i],
+                        0u);
+
+                    if (value != 0u && value != uint.MaxValue)
+                        return value;
+                }
+                catch { }
+            }
+
+            return 0u;
+        }
+
+        private IMonster FindVisualRemoteSiphonMonster(uint identity)
+        {
+            if (identity == 0u || Hud == null || Hud.Game == null || Hud.Game.AliveMonsters == null)
+                return null;
+
+            try
+            {
+                foreach (IMonster monster in Hud.Game.AliveMonsters)
+                {
+                    if (monster != null && (monster.AnnId == identity || monster.AcdId == identity))
+                        return monster;
+                }
+            }
+            catch { }
+
+            return null;
+        }
+
+        private bool IsVisualRemoteSiphonTarget(IMonster monster)
+        {
+            // Player activity plus two exact Last_ACD_Attacked samples is the
+            // authority here; target-side visual attributes vary by rune.
+            return monster != null && monster.IsAlive && monster.FloorCoordinate != null;
+        }
+
+        private void UpdateVisualRemoteSiphonState(VisualRemoteSiphonState state, uint identity, long now)
+        {
+            if (state == null)
+                return;
+
+            if (identity == 0u)
+            {
+                if (now > state.ActivityUntilMs)
+                {
+                    state.CandidateIdentity = 0u;
+                    state.CandidateSamples = 0;
+                }
+                return;
+            }
+
+            if (state.CandidateIdentity == identity)
+                state.CandidateSamples = Math.Min(99, state.CandidateSamples + 1);
+            else
+            {
+                state.CandidateIdentity = identity;
+                state.CandidateSamples = 1;
+            }
+
+            if (identity == state.TargetIdentity
+                || state.CandidateSamples >= VisualRemoteSiphonConfirmSamples)
+            {
+                state.TargetIdentity = identity;
+                state.TargetUntilMs = state.ActivityUntilMs;
+            }
+        }
+
+        private void DrawVisualRemoteSiphonPrimaryTargetRing(IMonster target, int tick, bool deathNovaRole)
+        {
+            if (target == null || target.FloorCoordinate == null)
+                return;
+
+            int red;
+            int green;
+            int blue;
+            GetVisualRemoteSiphonRingColor(deathNovaRole, out red, out green, out blue);
+
+            float phase = deathNovaRole ? 0f : 0.75f;
+            float pulse = (float)Math.Sin((tick * 0.22f) + phase) * 2.2f;
+            float radius = deathNovaRole ? 70f - pulse * 0.35f : 58f + pulse;
+            int dots = deathNovaRole ? 22 : 18;
+            float rotation = deathNovaRole ? -tick * 0.38f : tick * 0.50f;
+            float dotRadius = deathNovaRole ? 3.5f : 3.9f;
+
+            DrawVisualRemoteSiphonDottedEllipse(
+                target.FloorCoordinate,
+                radius,
+                dots,
+                rotation,
+                dotRadius,
+                red,
+                green,
+                blue);
+        }
+
+        private static void GetVisualRemoteSiphonRingColor(bool deathNovaRole, out int red, out int green, out int blue)
+        {
+            if (deathNovaRole)
+            {
+                red = 255;
+                green = 35;
+                blue = 35;
+                return;
+            }
+
+            red = 150;
+            green = 12;
+            blue = 35;
+        }
+
+        private void DrawVisualRemoteSiphonDottedEllipse(
+            IWorldCoordinate center,
+            float radius,
+            int dots,
+            float rotation,
+            float dotRadius,
+            int red,
+            int green,
+            int blue)
+        {
+            if (center == null || dots <= 0)
+                return;
+
+            IBrush outlineBrush = GetVisualBrush(245, 0, 0, 0, 4.8f);
+            IBrush ringBrush = GetVisualBrush(250, red, green, blue, 3.5f);
+            if (ringBrush == null)
+                return;
+
+            IScreenCoordinate screen = center.ToScreenCoordinate();
+            for (int i = 0; i < dots; i++)
+            {
+                float angle = rotation + (float)(Math.PI * 2.0d * i / dots);
+                float x = screen.X + (float)Math.Cos(angle) * radius;
+                float y = screen.Y + (float)Math.Sin(angle) * radius * 0.74f;
+
+                if (outlineBrush != null)
+                    outlineBrush.DrawEllipse(x, y, dotRadius + 2.0f, dotRadius + 2.0f);
+
+                ringBrush.DrawEllipse(x, y, dotRadius, dotRadius);
+            }
+        }
+
+        private void ClearVisualRemoteSiphonStates()
+        {
+            _visualRemoteSiphonStates.Clear();
+            _visualRemoteSiphonRenderEntries.Clear();
+            _visualRemoteSiphonTargetRoles.Clear();
+            _visualRemoteSiphonRemovalKeys.Clear();
         }
 
         private void DrawVisualClickAnimation()
@@ -8917,6 +9328,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 _visSiphonEnabled = !_visSiphonEnabled;
                 _visSiphonExpanded = _visSiphonEnabled;
                 ApplyPestilenceRgkSettingsToPlugin();
+                ApplyInariusRgkSettingsToPlugin();
                 return;
             }
         }
@@ -10844,7 +11256,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 "Animated three-ring reticle on selected monster. Adjustable color and size.",
                 "Outer ring drawn around selected monster. Adjustable color and thickness.",
                 "Draws ground circles on elite minions.",
-                "Shows Siphon debuffs and the other Necro's primary target."
+                "Shows Siphon debuffs and other Necromancers' primary targets on any class."
             };
 
             bool[] fenabled =
@@ -13652,6 +14064,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             ReleaseLeftMouseForMenuBoundary();
 
             _visible = false;
+            _editMode = false;
             _capturingHotkey = false;
             _capturingHudHotkeyIdx = -1;
             _ttsCustomMessageHotkeyCaptureIndex = -1;
