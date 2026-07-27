@@ -8,13 +8,15 @@ using Turbo.Plugins.Default;
 
 namespace Turbo.Plugins.s7o
 {
-    // Blood Rush cast identity survives area transfers; native cooldown and
-    // recharge shifts validate Blood is Power without duplicating Life costs.
-    public class s7o_TipsHelper : BasePlugin, IInGameWorldPainter, IInGameTopPainter, IAfterCollectHandler, INewAreaHandler, ITransparentCollection, IKeyEventHandler, ISkillCooldownHandler
+    // REV68 preserves REV67's drop-once notification state and renders simultaneous
+    // above-player alerts as a compact upward-growing list.
+    public class s7o_TipsHelper : BasePlugin, IInGameWorldPainter, IInGameTopPainter, IAfterCollectHandler, INewAreaHandler, IItemLocationChangedHandler, ITransparentCollection, IKeyEventHandler, ISkillCooldownHandler
     {
         private const int AncientRank = 1;
         private const int PrimalRank = 2;
         private const int PlayerMarkerSlots = 4;
+        private const int TownSnapshotSettleMs = 1500;
+        private const int TownSnapshotExtendMs = 300;
         private const uint BloodIsPowerSno = 465037u;
         private const uint ArmyOfTheDeadSno = 460358u;
         private const uint LandOfTheDeadSno = 465839u;
@@ -417,9 +419,14 @@ namespace Turbo.Plugins.s7o
 
         private const ActorSnoEnum ValleyOfDeathActorSno = ActorSnoEnum._dh_markedfordeath_proxyactor;
         private readonly Dictionary<string, ItemMarker> _items = new Dictionary<string, ItemMarker>();
+        private readonly HashSet<string> _townSeenKeys = new HashSet<string>();
+        private readonly HashSet<string> _townFreshKeys = new HashSet<string>();
+        private readonly HashSet<string> _townRearmKeys = new HashSet<string>();
         private readonly List<PlayerMark> _players = new List<PlayerMark>();
         private long _alertSequence;
-        private long _latestAbovePlayerSequence;
+        private bool _townAreaExpected;
+        private bool _townVisitActive;
+        private long _townSnapshotReadyMs;
         private string _resourceSignature;
         private RotatingTriangleShapePainter _trianglePainter;
         private StandardPingRadiusTransformator _mapPulse;
@@ -526,6 +533,8 @@ namespace Turbo.Plugins.s7o
         public void OnNewArea(bool newGame, ISnoArea area)
         {
             ClearItems();
+            ResetTownVisit();
+            _townAreaExpected = area != null && area.IsTown;
             ResetBloodIsPowerTrackerForArea(newGame);
             if (newGame && IsNewGameSession())
             {
@@ -534,15 +543,47 @@ namespace Turbo.Plugins.s7o
             }
         }
 
+        public void OnItemLocationChanged(IItem item, ItemLocation from, ItemLocation to)
+        {
+            if (item == null)
+                return;
+
+            string key = GetDropKeySafe(item);
+            if (to != ItemLocation.Floor)
+            {
+                if (!string.IsNullOrEmpty(key))
+                {
+                    _townSeenKeys.Remove(key);
+                    _townFreshKeys.Remove(key);
+                    _townRearmKeys.Remove(key);
+                }
+                return;
+            }
+
+            if (string.IsNullOrEmpty(key) || !IsTownContext(item) || !IsTownDropCandidate(item))
+                return;
+
+            long now;
+            try { now = Hud.Game.CurrentRealTimeMilliseconds; }
+            catch { return; }
+
+            EnsureTownVisit(now);
+            _townSeenKeys.Add(key);
+            _townFreshKeys.Add(key);
+            _townRearmKeys.Add(key);
+        }
+
         public void AfterCollect()
         {
             if (!IsGameReady())
             {
                 ClearItems();
+                ResetTownVisit();
                 return;
             }
 
             UpdateGameSession(false);
+            UpdateTownDropState();
 
             if (!VisualHelpersEnabled)
             {
@@ -788,6 +829,8 @@ namespace Turbo.Plugins.s7o
         private void ClearRuntime()
         {
             ClearItems();
+            ResetTownVisit();
+            _townAreaExpected = false;
             _players.Clear();
             ClearSessionTrackers();
             ResetBloodIsPowerTracker();
@@ -819,7 +862,98 @@ namespace Turbo.Plugins.s7o
         {
             _items.Clear();
             _alertSequence = 0;
-            _latestAbovePlayerSequence = 0;
+        }
+
+        private void UpdateTownDropState()
+        {
+            if (!IsTownContext(null))
+            {
+                ResetTownVisit();
+                return;
+            }
+
+            long now;
+            try { now = Hud.Game.CurrentRealTimeMilliseconds; }
+            catch { return; }
+
+            EnsureTownVisit(now);
+            if (Hud.Game.Items == null)
+                return;
+
+            try
+            {
+                foreach (IItem item in Hud.Game.Items)
+                {
+                    if (item == null || item.Location != ItemLocation.Floor || !IsTownDropCandidate(item))
+                        continue;
+
+                    string key = GetDropKeySafe(item);
+                    if (string.IsNullOrEmpty(key) || _townSeenKeys.Contains(key))
+                        continue;
+
+                    _townSeenKeys.Add(key);
+                    if (now < _townSnapshotReadyMs)
+                    {
+                        _townSnapshotReadyMs = Math.Max(_townSnapshotReadyMs, now + TownSnapshotExtendMs);
+                        continue;
+                    }
+
+                    _townFreshKeys.Add(key);
+                    _townRearmKeys.Add(key);
+                }
+            }
+            catch { }
+        }
+
+        private void EnsureTownVisit(long now)
+        {
+            if (_townVisitActive)
+                return;
+
+            _townVisitActive = true;
+            _townSnapshotReadyMs = now + TownSnapshotSettleMs;
+            _townSeenKeys.Clear();
+            _townFreshKeys.Clear();
+            _townRearmKeys.Clear();
+        }
+
+        private void ResetTownVisit()
+        {
+            _townVisitActive = false;
+            _townSnapshotReadyMs = 0;
+            _townSeenKeys.Clear();
+            _townFreshKeys.Clear();
+            _townRearmKeys.Clear();
+        }
+
+        private bool IsTownContext(IItem item)
+        {
+            if (_townAreaExpected)
+                return true;
+
+            try
+            {
+                if (Hud.Game.IsInTown || (Hud.Game.Me != null && Hud.Game.Me.SnoArea != null && Hud.Game.Me.SnoArea.IsTown))
+                    return true;
+                return item != null && item.Scene != null && item.Scene.SnoArea != null && item.Scene.SnoArea.IsTown;
+            }
+            catch { return _townAreaExpected; }
+        }
+
+        private static bool IsTownDropCandidate(IItem item)
+        {
+            return item != null
+                && item.FloorCoordinate != null
+                && item.SnoItem != null
+                && item.IsLegendary
+                && item.SnoItem.Kind != ItemKind.craft
+                && (item.AncientRank == AncientRank || item.AncientRank == PrimalRank);
+        }
+
+        private string GetDropKeySafe(IItem item)
+        {
+            try { return IsTownDropCandidate(item) ? GetDropKey(item) : null; }
+            catch { return null; }
         }
 
         private void RegisterVisitedWaypointActFallbackElements()
@@ -3632,11 +3766,8 @@ namespace Turbo.Plugins.s7o
             if (alerts.Count == 0)
                 return;
 
-            if (ShowItemAlertTextAbovePlayer && alerts[0].Sequence >= _latestAbovePlayerSequence)
-            {
-                _latestAbovePlayerSequence = alerts[0].Sequence;
-                DrawAbovePlayerAlert(alerts[0]);
-            }
+            if (ShowItemAlertTextAbovePlayer)
+                DrawAbovePlayerAlerts(alerts);
 
             if (ShowItemAlertText && ShowItemAlertTextNearMinimap)
                 DrawMinimapAlerts(alerts.Where(a => IsRankTextEnabled(a.Marker.Rank)).ToList());
@@ -3649,7 +3780,8 @@ namespace Turbo.Plugins.s7o
 
             foreach (var marker in _items.Values)
             {
-                if (!IsRankEnabled(marker.Rank) || !IsRankNotificationEnabled(marker.Rank))
+                if (marker == null || marker.SuppressNotification
+                    || !IsRankEnabled(marker.Rank) || !IsRankNotificationEnabled(marker.Rank))
                     continue;
 
                 var elapsed = now - marker.FirstSeenMs;
@@ -3702,17 +3834,29 @@ namespace Turbo.Plugins.s7o
             return fade[alphaBucket];
         }
 
-        private void DrawAbovePlayerAlert(ItemAlert alert)
+        private void DrawAbovePlayerAlerts(List<ItemAlert> alerts)
         {
-            if (alert == null || Hud.Game.Me == null || Hud.Game.Me.FloorCoordinate == null)
+            if (alerts == null || alerts.Count == 0 || Hud.Game.Me == null || Hud.Game.Me.FloorCoordinate == null)
                 return;
 
             var sc = Hud.Game.Me.FloorCoordinate.ToScreenCoordinate(true, true);
             if (!IsValid(sc))
                 return;
 
-            var y = sc.Y + Lerp(ItemAlertPlayerStartYOffset, ItemAlertPlayerSettledYOffset, GetTravelProgress(alert.ElapsedMs));
-            DrawAlertLine(alert, sc.X + ItemAlertPlayerXOffset, y, true, true);
+            float x = sc.X + ItemAlertPlayerXOffset;
+            float y = sc.Y + Lerp(ItemAlertPlayerStartYOffset, ItemAlertPlayerSettledYOffset, GetTravelProgress(alerts[0].ElapsedMs));
+            float newestY = y;
+            float newestHeight = 0.0f;
+
+            for (int i = 0; i < alerts.Count; i++)
+            {
+                float lineHeight = DrawAlertLine(alerts[i], x, y, true, false);
+                if (i == 0)
+                    newestHeight = lineHeight;
+                y -= lineHeight + 2.0f;
+            }
+
+            DrawAlertDirectionArrow(alerts[0], x, newestY + newestHeight + ItemAlertArrowYOffset);
         }
 
         private void DrawMinimapAlerts(List<ItemAlert> alerts)
@@ -3815,16 +3959,23 @@ namespace Turbo.Plugins.s7o
                 live.Add(key);
                 var liveKey = GetLiveKey(item);
                 var coord = item.FloorCoordinate;
+                bool inTown = IsTownContext(item);
+                bool suppressNotification = inTown && !_townFreshKeys.Contains(key);
+                bool forceRearm = inTown && !suppressNotification && _townRearmKeys.Remove(key);
                 ItemMarker marker;
 
                 if (!_items.TryGetValue(key, out marker))
                 {
                     marker = FindReusableMarker(item, key) ?? NewMarker(now);
                 }
-                else if (ShouldRearmLiveMarker(marker, item, liveKey, now))
+                else if (forceRearm || (!inTown && ShouldRearmLiveMarker(marker, item, liveKey, now)))
                 {
                     RearmMarker(marker, now);
                 }
+
+                if (marker.SuppressNotification && !suppressNotification && !forceRearm)
+                    RearmMarker(marker, now);
+                marker.SuppressNotification = suppressNotification;
 
                 marker.Key = key;
                 marker.LiveKey = liveKey;
@@ -3951,7 +4102,11 @@ namespace Turbo.Plugins.s7o
             }
 
             foreach (var key in remove)
+            {
                 _items.Remove(key);
+                _townFreshKeys.Remove(key);
+                _townRearmKeys.Remove(key);
+            }
         }
 
         private bool ShouldRemoveMissingMarker(ItemMarker marker, long now)
@@ -6913,6 +7068,7 @@ namespace Turbo.Plugins.s7o
             public long LastSeenMs;
             public long MissingSinceMs;
             public bool MissingNearPlayer;
+            public bool SuppressNotification;
             public long Sequence;
             public string Name;
             public string Label;
