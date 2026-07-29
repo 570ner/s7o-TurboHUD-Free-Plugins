@@ -686,7 +686,7 @@ namespace Turbo.Plugins.s7o
 
             string status = GetStatusText();
             if (!string.IsNullOrEmpty(status) && _smallFont != null)
-                _smallFont.DrawText(status, _panelRect.Right + 10.0f, _panelRect.Y + 10.0f);
+                DrawText(_smallFont, status, _panelRect.Right + 10.0f, _panelRect.Y + 10.0f);
         }
 
         private bool UpdatePanelLayout()
@@ -764,12 +764,14 @@ namespace Turbo.Plugins.s7o
 
         private void DrawText(IFont font, string text, float x, float y)
         {
+            text = s7o_Localization.Display(text);
             if (font == null || string.IsNullOrEmpty(text)) return;
             font.DrawText(text, x, y);
         }
 
         private void DrawCenteredText(IFont font, System.Drawing.RectangleF rect, string text)
         {
+            text = s7o_Localization.DisplayButton(text);
             if (font == null || string.IsNullOrEmpty(text) || rect.Width <= 0 || rect.Height <= 0) return;
             try
             {
@@ -867,6 +869,7 @@ namespace Turbo.Plugins.s7o
 
         private float MeasureTextWidth(IFont font, string text)
         {
+            text = s7o_Localization.Display(text);
             if (font == null || string.IsNullOrEmpty(text))
                 return 0.0f;
 
