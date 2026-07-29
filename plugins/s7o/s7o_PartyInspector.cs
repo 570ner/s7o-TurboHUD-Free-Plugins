@@ -889,7 +889,7 @@ namespace Turbo.Plugins.s7o
             if (font == null) return;
 
             string text = active
-                ? "GO!"
+                ? s7o_Localization.Display("GO!")
                 : Math.Max(0.0d, Math.Ceiling(layer.PreferredElementCountdown)).ToString("F0", CultureInfo.InvariantCulture);
 
             var textLayout = font.GetTextLayout(text);
@@ -2147,7 +2147,7 @@ namespace Turbo.Plugins.s7o
             {
                 try
                 {
-                    Hud.Render.SetHint(item != null ? item.NameLocalized : "Nemesis Bracers");
+                    Hud.Render.SetHint(item != null ? item.NameLocalized : s7o_Localization.Display("Nemesis Bracers"));
                 }
                 catch
                 {
@@ -2220,6 +2220,7 @@ namespace Turbo.Plugins.s7o
             string text = seconds > 0.0d
                 ? "ARCHON: " + Math.Ceiling(seconds).ToString("F0", CultureInfo.InvariantCulture)
                 : "ARCHON";
+            text = s7o_Localization.Display(text);
 
             var textLayout = font.GetTextLayout(text);
             float x = layout.X + ((width - textLayout.Metrics.Width) * 0.5f);
@@ -2909,36 +2910,50 @@ namespace Turbo.Plugins.s7o
         private string GetLocalLegendaryGemDisplayName(IItem item)
         {
             if (item == null)
-                return "Legendary Gem";
+                return s7o_Localization.Display("Legendary Gem");
 
+            bool english = string.Equals(s7o_Localization.LanguageCode, "enUS", StringComparison.OrdinalIgnoreCase);
             try
             {
-                if (item.SnoItem != null && !string.IsNullOrEmpty(item.SnoItem.NameEnglish))
+                if (!english && item.SnoItem != null && !string.IsNullOrEmpty(item.SnoItem.NameLocalized))
+                    return item.SnoItem.NameLocalized;
+                if (english && item.SnoItem != null && !string.IsNullOrEmpty(item.SnoItem.NameEnglish))
                     return item.SnoItem.NameEnglish;
             }
-            catch
-            {
-            }
+            catch { }
 
             try
             {
-                if (!string.IsNullOrEmpty(item.FullNameEnglish))
+                if (!english && !string.IsNullOrEmpty(item.FullNameLocalized))
+                    return item.FullNameLocalized;
+                if (english && !string.IsNullOrEmpty(item.FullNameEnglish))
                     return item.FullNameEnglish;
             }
-            catch
-            {
-            }
+            catch { }
 
             try
             {
                 if (item.SnoItem != null && !string.IsNullOrEmpty(item.SnoItem.NameLocalized))
                     return item.SnoItem.NameLocalized;
             }
-            catch
+            catch { }
+
+            return s7o_Localization.Display("Legendary Gem");
+        }
+
+        private string GetSnoItemDisplayName(ISnoItem item, string englishName)
+        {
+            if (!string.Equals(s7o_Localization.LanguageCode, "enUS", StringComparison.OrdinalIgnoreCase))
             {
+                try
+                {
+                    if (item != null && !string.IsNullOrEmpty(item.NameLocalized))
+                        return item.NameLocalized;
+                }
+                catch { }
             }
 
-            return "Legendary Gem";
+            return englishName ?? string.Empty;
         }
 
         private string GetLocalLegendaryGemShortName(IItem item)
@@ -2991,7 +3006,7 @@ namespace Turbo.Plugins.s7o
 
             result.Add(new LegendaryGemDisplayInfo()
             {
-                Name        = name,
+                Name        = GetSnoItemDisplayName(snoItem, name),
                 ShortName   = shortName,
                 SnoItem     = snoItem,
                 Primary     = primary,
@@ -3272,7 +3287,7 @@ namespace Turbo.Plugins.s7o
 
             if (!drew)
             {
-                string fallback = !string.IsNullOrEmpty(gem.ShortName) ? gem.ShortName : "Gem";
+                string fallback = !string.IsNullOrEmpty(gem.ShortName) ? gem.ShortName : s7o_Localization.Display("Gem");
                 IFont font = _smallFont ?? _portraitSmallFont;
                 if (font != null)
                 {
@@ -3333,7 +3348,7 @@ namespace Turbo.Plugins.s7o
                 ? "+" + left.ToString(CultureInfo.InvariantCulture)
                 : "0";
 
-            string text = "Gem Ups: " + valueText;
+            string text = s7o_Localization.Display("Gem Ups: " + valueText);
 
             IFont font = player.IsMe ? _selfGemFont : _otherGemFont;
             if (font == null)
@@ -3375,8 +3390,9 @@ namespace Turbo.Plugins.s7o
                     continue;
 
                 string name = GetPlayerDisplayName(player);
-                lines.Add(name + " has " + left.ToString(CultureInfo.InvariantCulture)
-                    + " gem upgrade" + (left == 1 ? "" : "s") + " left");
+                string reminder = name + " has " + left.ToString(CultureInfo.InvariantCulture)
+                    + " gem upgrade" + (left == 1 ? "" : "s") + " left";
+                lines.Add(s7o_Localization.Display(reminder));
             }
 
             if (lines.Count == 0)
@@ -3605,10 +3621,14 @@ namespace Turbo.Plugins.s7o
                 if (_portraitHoverBorderBrush != null)
                     _portraitHoverBorderBrush.DrawRectangle(cellX, y, width, rowHeight);
 
+                string cellText = header
+                    ? s7o_Localization.Display(cell.Header)
+                    : cell.Value;
+
                 if (cell.IsHardCc)
                 {
                     DrawPortraitHoverHardCcCellText(
-                        header ? cell.Header : cell.Value,
+                        cellText,
                         header,
                         cellX,
                         y,
@@ -3618,7 +3638,7 @@ namespace Turbo.Plugins.s7o
                 else
                 {
                     DrawPortraitHoverCellText(
-                        header ? cell.Header : cell.Value,
+                        cellText,
                         header ? _portraitHoverHeaderFont : _portraitHoverValueFont,
                         cellX,
                         y,
@@ -3970,7 +3990,7 @@ namespace Turbo.Plugins.s7o
 
             if (header)
             {
-                DrawPortraitHoverCellText("CC", _portraitHoverHeaderFont, x, y, width, height, true);
+                DrawPortraitHoverCellText(s7o_Localization.Display("CC"), _portraitHoverHeaderFont, x, y, width, height, true);
                 return;
             }
 
@@ -5003,21 +5023,21 @@ namespace Turbo.Plugins.s7o
             List<string> parts = new List<string>();
 
             if ((flags & HardCcFlags.Pull) != 0)
-                parts.Add("PULL");
+                parts.Add(s7o_Localization.Display("PULL"));
             if ((flags & HardCcFlags.Knockback) != 0)
-                parts.Add("KB");
+                parts.Add(s7o_Localization.Display("KB"));
             if ((flags & HardCcFlags.Stun) != 0)
-                parts.Add("STN");
+                parts.Add(s7o_Localization.Display("STN"));
             if ((flags & HardCcFlags.Freeze) != 0)
-                parts.Add("FRZ");
+                parts.Add(s7o_Localization.Display("FRZ"));
             if ((flags & HardCcFlags.Blind) != 0)
-                parts.Add("BLD");
+                parts.Add(s7o_Localization.Display("BLD"));
             if ((flags & HardCcFlags.Fear) != 0)
-                parts.Add("FEAR");
+                parts.Add(s7o_Localization.Display("FEAR"));
             if ((flags & HardCcFlags.Charm) != 0)
-                parts.Add("CHM");
+                parts.Add(s7o_Localization.Display("CHM"));
             if ((flags & HardCcFlags.Taunt) != 0)
-                parts.Add("TAUNT");
+                parts.Add(s7o_Localization.Display("TAUNT"));
 
             return string.Join(" ", parts.ToArray());
         }
@@ -5076,14 +5096,14 @@ namespace Turbo.Plugins.s7o
             if (_borderBrush != null)
                 _borderBrush.DrawRectangle(PanelX, PanelY, PanelWidth, height);
 
-            var titleLayout = _titleFont.GetTextLayout("s7o Party Inspector  (F12 expanded)");
+            var titleLayout = _titleFont.GetTextLayout(s7o_Localization.Display("s7o Party Inspector  (F12 expanded)"));
             _titleFont.DrawText(titleLayout, PanelX + 8.0f, PanelY + 6.0f);
 
             float y = PanelY + headerHeight;
 
             if (players.Count == 0)
             {
-                var empty = _smallFont.GetTextLayout("No party players found.");
+                var empty = _smallFont.GetTextLayout(s7o_Localization.Display("No party players found."));
                 _smallFont.DrawText(empty, PanelX + 8.0f, y + 8.0f);
                 return;
             }
@@ -5115,6 +5135,7 @@ namespace Turbo.Plugins.s7o
                 string gemText = gemLeft > 0
                     ? "Gem upgrades left: " + gemLeft.ToString(CultureInfo.InvariantCulture)
                     : "Gem upgrades: 0";
+                gemText = s7o_Localization.Display(gemText);
 
                 var gemFont   = gemLeft > 0 ? _warningFont : _smallFont;
                 var gemLayout = gemFont.GetTextLayout(gemText);
@@ -5150,7 +5171,7 @@ namespace Turbo.Plugins.s7o
         {
             try
             {
-                return " - " + player.HeroClassDefinition.HeroClass.ToString();
+                return " - " + s7o_Localization.Display(player.HeroClassDefinition.HeroClass.ToString());
             }
             catch
             {
@@ -5171,7 +5192,7 @@ namespace Turbo.Plugins.s7o
                 {
                     float areaDamage = player.Offense.AreaDamageBonus;
                     if (areaDamage > 0.0f)
-                        parts.Add("AD " + FormatPercent(areaDamage));
+                        parts.Add(s7o_Localization.Display("AD") + " " + FormatPercent(areaDamage));
                 }
             }
             catch
@@ -5184,11 +5205,11 @@ namespace Turbo.Plugins.s7o
                 {
                     float cdr = player.Stats.CooldownReduction;
                     if (cdr > 0.0f)
-                        parts.Add("CDR " + FormatPercent(cdr));
+                        parts.Add(s7o_Localization.Display("CDR") + " " + FormatPercent(cdr));
 
                     float rcr = player.Stats.ResourceCostReduction;
                     if (rcr > 0.0f)
-                        parts.Add("RCR " + FormatPercent(rcr));
+                        parts.Add(s7o_Localization.Display("RCR") + " " + FormatPercent(rcr));
                 }
             }
             catch
@@ -5323,8 +5344,13 @@ namespace Turbo.Plugins.s7o
 
             try
             {
-                if (!string.IsNullOrEmpty(skill.RuneNameEnglish))
-                    rune = skill.RuneNameEnglish.Substring(0, 1);
+                string runeName = string.Equals(s7o_Localization.LanguageCode, "enUS", StringComparison.OrdinalIgnoreCase)
+                    ? skill.RuneNameEnglish
+                    : skill.RuneNameLocalized;
+                if (string.IsNullOrEmpty(runeName))
+                    runeName = skill.RuneNameEnglish;
+                if (!string.IsNullOrEmpty(runeName))
+                    rune = runeName.Substring(0, 1);
             }
             catch
             {
