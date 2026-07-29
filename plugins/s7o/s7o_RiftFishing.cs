@@ -958,6 +958,7 @@ namespace Turbo.Plugins.s7o
                 return;
 
             string name = string.IsNullOrEmpty(_lastFoundMapName) ? "Good map" : _lastFoundMapName;
+            name = s7o_Localization.Display(name);
 
             try
             {
@@ -1358,10 +1359,15 @@ namespace Turbo.Plugins.s7o
             float x = r.X + r.Width * 0.10f;
             float y = r.Y + r.Height * 0.065f;
 
-            string prefix = "Select GR level, press ";
-            string suffix = " to start OpenGR";
-            string hotkeyText = _capturingHotkey ? "Press key..." : FishKey.ToString();
-
+            string prefix = s7o_Localization.Get(
+                "overlay.rift_fishing.select_level",
+                "Select GR level, press") + " ";
+            string suffix = " " + s7o_Localization.Get(
+                "overlay.rift_fishing.start_tail",
+                "to start OpenGR");
+            string hotkeyText = _capturingHotkey
+                ? s7o_Localization.Get("overlay.rift_fishing.press_key", "Press key...")
+                : FishKey.ToString();
             var prefixLayout = InfoFont.GetTextLayout(prefix);
             var keyLayout = ButtonFont.GetTextLayout(hotkeyText);
             var suffixLayout = InfoFont.GetTextLayout(suffix);
@@ -1509,6 +1515,7 @@ namespace Turbo.Plugins.s7o
 
         private void DrawCenteredButtonText(RectangleF rect, string text)
         {
+            text = s7o_Localization.DisplayButton(text);
             if (ButtonFont == null) return;
 
             var layout = ButtonFont.GetTextLayout(text ?? string.Empty);
@@ -1528,6 +1535,7 @@ namespace Turbo.Plugins.s7o
             // Keep the text width stable while running; only the side fireballs animate.
             string display = Running ? "Auto searching GR" : _status;
 
+            display = s7o_Localization.Display(display);
             var layout = InfoFont.GetTextLayout(display);
             float x = Hud.Window.Size.Width * 0.5f - layout.Metrics.Width * 0.5f;
             float y = Hud.Window.Size.Height * 0.5f - layout.Metrics.Height * 0.5f;
@@ -2222,7 +2230,8 @@ namespace Turbo.Plugins.s7o
 
             try
             {
-                var layout = InfoFont.GetTextLayout(_fortressDebugLine);
+                string debugLine = s7o_Localization.Display(_fortressDebugLine);
+                var layout = InfoFont.GetTextLayout(debugLine);
                 float x = Hud.Window.Size.Width * 0.36f;
                 float y = Hud.Window.Size.Height * 0.12f;
                 InfoFont.DrawText(layout, x, y);
