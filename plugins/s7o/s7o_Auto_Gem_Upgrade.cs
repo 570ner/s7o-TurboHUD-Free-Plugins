@@ -1705,6 +1705,7 @@ public static class s7o_AutoGemUpgradeState
     internal sealed class AutoGemOverlayRenderer
     {
         private bool _ready;
+        private IController _hud;
         private IBrush _bShadow, _bFrame, _bFrameBorder, _bInner, _bTitle, _bPane, _bPaneBorder;
         private IBrush _bStatus, _bRow, _bRowAlt, _bGemListBg, _bGemListBorder;
         private IBrush _bBtnNormal, _bBtnActive, _bBtnDanger, _bBtnGloss, _bBtnEdge;
@@ -1786,6 +1787,7 @@ public static class s7o_AutoGemUpgradeState
 
         public void Draw(IController hud, AutoGemOverlayModel model, AutoGemOverlayLayout layout, string hotkeyLabel, bool infoPopupVisible, bool journeyMaskVisible)
         {
+            _hud = hud;
             if (model.ShowMenuDot) DrawOpenDot(layout.Indicator, model);
             if (!model.Visible) return;
 
@@ -1807,8 +1809,8 @@ public static class s7o_AutoGemUpgradeState
             _bTitle.DrawRectangle(layout.TitleBar.Left, layout.TitleBar.Top, layout.TitleBar.Width, layout.TitleBar.Height);
             _bFrameBorder.DrawRectangle(layout.TitleBar.Left, layout.TitleBar.Top, layout.TitleBar.Width, layout.TitleBar.Height);
 
-            _fTitle.DrawText("Auto Gem Upgrade", rect.Left + 14f, rect.Top + 14f);
-            _fLabel.DrawText("Menu Hotkey =", Math.Max(rect.Left + 188f, layout.HotkeyButton.Left - 92f), rect.Top + 15f);
+            _fTitle.DrawText(s7o_Localization.Get("overlay.autogem.title", "Auto Gem Upgrade"), rect.Left + 14f, rect.Top + 14f);
+            _fLabel.DrawText(s7o_Localization.Get("overlay.autogem.menu_hotkey", "Menu Hotkey ="), Math.Max(rect.Left + 188f, layout.HotkeyButton.Left - 92f), rect.Top + 15f);
             DrawGlossButton(layout.HotkeyButton, hotkeyLabel, false, false, true);
             DrawGlossButton(layout.MenuDotButton, "MENU BUTTON", model.ShowMenuDot, false, false);
             DrawGlossButton(layout.EditButton, "MOVE", model.EditMode, false, true);
@@ -1817,13 +1819,13 @@ public static class s7o_AutoGemUpgradeState
             RectangleF mainRect = layout.MainPane;
             _bPane.DrawRectangle(mainRect.Left, mainRect.Top, mainRect.Width, mainRect.Height);
             _bPaneBorder.DrawRectangle(mainRect.Left, mainRect.Top, mainRect.Width, mainRect.Height);
-            _fSection.DrawText("Auto Gem Controls", mainRect.Left + 12f, mainRect.Top + 10f);
+            _fSection.DrawText(s7o_Localization.Get("overlay.autogem.controls", "Auto Gem Controls"), mainRect.Left + 12f, mainRect.Top + 10f);
             DrawInfoCircle(layout.InfoButton);
             DrawStaticLogo(mainRect.Right - 36f, mainRect.Top + 10f);
             if (model.EditMode)
             {
                 DrawRect(layout.Panel.Left + 2f, layout.Panel.Top + 2f, layout.Panel.Width - 4f, layout.Panel.Height - 4f, _bEditDash);
-                _fInfoSub.DrawText("DRAG TITLE OR MENU BUTTON TO MOVE", rect.Left + 10f, rect.Bottom - 16f);
+                _fInfoSub.DrawText(s7o_Localization.Get("overlay.autogem.drag_hint", "DRAG TITLE OR MENU BUTTON TO MOVE"), rect.Left + 10f, rect.Bottom - 16f);
             }
 
             float contentX = mainRect.Left + 12f;
@@ -1833,15 +1835,20 @@ public static class s7o_AutoGemUpgradeState
             _bStatus.DrawRectangle(layout.StatusRow.Left, layout.StatusRow.Top, layout.StatusRow.Width, layout.StatusRow.Height);
             string modeText = ModeName(s7o_AutoGemUpgradeState.AutoGemMode);
             string tpTimingLabel = AutoGemAnchorText(s7o_AutoGemUpgradeState.GetConfiguredPortalAnchorRemaining()) + "+" + s7o_AutoGemUpgradeState.AutoGemTPDelayMs.ToString(CultureInfo.InvariantCulture) + "ms";
-            _fText.DrawText(TrimToWidth("Status: " + (s7o_AutoGemUpgradeState.AutoGemUpgradeEnabled ? "Enabled" : "Disabled") + "   Mode: " + modeText + "   TP: " + tpTimingLabel + (s7o_AutoGemUpgradeState.AutoGemTPLagBoost ? "   LAG" : ""), 70), contentX + 6f, y + 3f);
+            string stateText = s7o_Localization.Display(s7o_AutoGemUpgradeState.AutoGemUpgradeEnabled ? "Enabled" : "Disabled");
+            string modeDisplay = s7o_Localization.DisplayButton(modeText);
+            string statusText = s7o_AutoGemUpgradeState.AutoGemTPLagBoost
+                ? s7o_Localization.Format("overlay.autogem.status_lag", "Status: {0}   Mode: {1}   TP: {2}   LAG", stateText, modeDisplay, tpTimingLabel)
+                : s7o_Localization.Format("overlay.autogem.status", "Status: {0}   Mode: {1}   TP: {2}", stateText, modeDisplay, tpTimingLabel);
+            _fText.DrawText(TrimToWidth(statusText, 70), contentX + 6f, y + 3f);
             DrawSquareCheckPassive(layout.NoClickCheck, model.NoClickBackground);
-            _fText.DrawText("No-Click Background", layout.NoClickLabel.Left, layout.NoClickLabel.Top + 2f);
+            _fText.DrawText(s7o_Localization.Get("overlay.autogem.no_click", "No-Click Background"), layout.NoClickLabel.Left, layout.NoClickLabel.Top + 2f);
             y += 24f;
 
             RectangleF gemTitleRow = new RectangleF(contentX, y, contentW, 20f);
             _bRowAlt.DrawRectangle(gemTitleRow.Left, gemTitleRow.Top, gemTitleRow.Width, gemTitleRow.Height);
             DrawSquareCheckPassive(layout.EnabledCheck, s7o_AutoGemUpgradeState.AutoGemUpgradeEnabled);
-            _fSection.DrawText("Auto Gem Upgrade", gemTitleRow.Left + 24f, gemTitleRow.Top + 2f);
+            _fSection.DrawText(s7o_Localization.Get("overlay.autogem.title", "Auto Gem Upgrade"), gemTitleRow.Left + 24f, gemTitleRow.Top + 2f);
             DrawGlossButton(layout.SectionToggle, model.AutoGemExpanded ? "-" : "+", s7o_AutoGemUpgradeState.AutoGemUpgradeEnabled && model.AutoGemExpanded, false, true);
             y += 24f;
 
@@ -1858,28 +1865,28 @@ public static class s7o_AutoGemUpgradeState
 
                 RectangleF anchorRow = new RectangleF(contentX, y, contentW, 22f);
                 _bRowAlt.DrawRectangle(anchorRow.Left, anchorRow.Top, anchorRow.Width, anchorRow.Height);
-                _fText.DrawText("TP Anchor", anchorRow.Left + 8f, anchorRow.Top + 4f);
+                _fText.DrawText(s7o_Localization.Get("overlay.autogem.tp_anchor", "TP Anchor"), anchorRow.Left + 8f, anchorRow.Top + 4f);
                 int tpAnchor = s7o_AutoGemUpgradeState.GetConfiguredPortalAnchorRemaining();
                 DrawGlossButton(layout.Anchor3, "3RD GEM", tpAnchor == 3, false, true);
                 DrawGlossButton(layout.Anchor4, "4TH GEM", tpAnchor == 4, false, true);
-                _fText.DrawText("Timer starts when that upgrade begins", layout.Anchor4.Right + 10f, anchorRow.Top + 4f);
+                _fText.DrawText(s7o_Localization.Get("overlay.autogem.anchor_timer", "Timer starts when that upgrade begins"), layout.Anchor4.Right + 10f, anchorRow.Top + 4f);
                 y += 26f;
 
                 RectangleF delayRow = new RectangleF(contentX, y, contentW, 22f);
                 _bRow.DrawRectangle(delayRow.Left, delayRow.Top, delayRow.Width, delayRow.Height);
-                _fText.DrawText("TP Delay", delayRow.Left + 8f, delayRow.Top + 4f);
+                _fText.DrawText(s7o_Localization.Get("overlay.autogem.tp_delay", "TP Delay"), delayRow.Left + 8f, delayRow.Top + 4f);
                 int tpDelay = s7o_AutoGemUpgradeState.AutoGemTPDelayMs;
                 DrawGlossButton(layout.DelayMinus, "-", false, false, true);
                 DrawGlossButton(layout.DelayValue, tpDelay.ToString(CultureInfo.InvariantCulture) + "ms", false, false, true);
                 DrawGlossButton(layout.DelayPlus, "+", false, false, true);
                 DrawGlossButton(layout.LagBoost, "LAG", s7o_AutoGemUpgradeState.AutoGemTPLagBoost, false, true);
-                _fText.DrawText("0-1500ms after anchor; default = 3RD + 1000ms", layout.LagBoost.Right + 10f, delayRow.Top + 4f);
+                _fText.DrawText(s7o_Localization.Get("overlay.autogem.delay_hint", "0-1500ms after anchor; default = 3RD + 1000ms"), layout.LagBoost.Right + 10f, delayRow.Top + 4f);
                 y += 26f;
 
                 RectangleF specificRow = new RectangleF(contentX, y, contentW, 22f);
                 _bRow.DrawRectangle(specificRow.Left, specificRow.Top, specificRow.Width, specificRow.Height);
-                _fText.DrawText("Specific Gem", specificRow.Left + 8f, specificRow.Top + 4f);
-                DrawGlossButton(layout.SpecificValue, TrimToWidth(s7o_AutoGemUpgradeState.AutoGemSpecificName ?? string.Empty, 28), false, false, true);
+                _fText.DrawText(s7o_Localization.Get("overlay.autogem.specific_gem", "Specific Gem"), specificRow.Left + 8f, specificRow.Top + 4f);
+                DrawGlossButton(layout.SpecificValue, TrimToWidth(GetAutoGemDisplayName(s7o_AutoGemUpgradeState.AutoGemSpecificName), 28), false, false, true);
                 DrawGlossButton(layout.SpecificSubMode, s7o_AutoGemUpgradeState.AutoGemSpecificSubMode == 1 ? "HIGH" : "AUTO", true, false, true);
                 DrawGlossButton(layout.SpecificToggle, model.SpecificExpanded ? "-" : "+", model.SpecificExpanded, false, true);
                 y += 26f;
@@ -1893,7 +1900,7 @@ public static class s7o_AutoGemUpgradeState
                         GemOptionLayout opt = layout.GemOptions[i];
                         string name = AutoGemOverlayModel.AutoGemNames[opt.Index];
                         bool selected = string.Equals(name, s7o_AutoGemUpgradeState.AutoGemSpecificName, StringComparison.OrdinalIgnoreCase);
-                        DrawGlossButton(opt.Rect, TrimToWidth(name, 40), selected, false, true);
+                        DrawGlossButton(opt.Rect, TrimToWidth(GetAutoGemDisplayName(opt.Index), 40), selected, false, true);
                     }
                     DrawScrollBar(layout);
                     y = layout.SpecificList.Bottom + 8f;
@@ -1903,7 +1910,7 @@ public static class s7o_AutoGemUpgradeState
             RectangleF debugRow = new RectangleF(contentX, y, contentW, 22f);
             _bRow.DrawRectangle(debugRow.Left, debugRow.Top, debugRow.Width, debugRow.Height);
             DrawSquareCheckPassive(layout.DebugCheck, s7o_AutoGemUpgradeState.DebugEnabled);
-            _fText.DrawText("Debug Logging", layout.DebugLabel.Left, layout.DebugLabel.Top + 2f);
+            _fText.DrawText(s7o_Localization.Get("overlay.autogem.debug", "Debug Logging"), layout.DebugLabel.Left, layout.DebugLabel.Top + 2f);
             y += 24f;
 
 
@@ -1915,13 +1922,13 @@ public static class s7o_AutoGemUpgradeState
             _bShadow.DrawRectangle(r.Left + 4f, r.Top + 4f, r.Width, r.Height);
             _bInfoPanelBg.DrawRectangle(r.Left, r.Top, r.Width, r.Height);
             _bInfoPanelEdge.DrawRectangle(r.Left, r.Top, r.Width, r.Height);
-            _fSection.DrawText("Auto Gem Upgrade Info", r.Left + 10f, r.Top + 8f);
+            _fSection.DrawText(s7o_Localization.Get("overlay.autogem.info_title", "Auto Gem Upgrade Info"), r.Left + 10f, r.Top + 8f);
             float y = r.Top + 30f;
-            _fText.DrawText("Menu hotkey [" + hotkeyLabel + "] opens or closes this menu.", r.Left + 12f, y); y += 18f;
-            _fText.DrawText("No-Click Background opens Journey behind this overlay to absorb game clicks.", r.Left + 12f, y); y += 18f;
-            _fText.DrawText("MOVE lets you drag the title bar or the small menu button.", r.Left + 12f, y); y += 18f;
-            _fText.DrawText("Urshi upgrade behavior is controlled by the Auto Gem Upgrade section.", r.Left + 12f, y); y += 18f;
-            _fInfoSub.DrawText("Click the green info icon again, Escape, or outside this popup to close it.", r.Left + 12f, y + 3f);
+            _fText.DrawText(s7o_Localization.Format("overlay.autogem.info_hotkey", "Menu hotkey [{0}] opens or closes this menu.", hotkeyLabel), r.Left + 12f, y); y += 18f;
+            _fText.DrawText(s7o_Localization.Get("overlay.autogem.info_no_click", "No-Click Background opens Journey behind this overlay to absorb game clicks."), r.Left + 12f, y); y += 18f;
+            _fText.DrawText(s7o_Localization.Get("overlay.autogem.info_move", "MOVE lets you drag the title bar or the small menu button."), r.Left + 12f, y); y += 18f;
+            _fText.DrawText(s7o_Localization.Get("overlay.autogem.info_urshi", "Urshi upgrade behavior is controlled by the Auto Gem Upgrade section."), r.Left + 12f, y); y += 18f;
+            _fInfoSub.DrawText(s7o_Localization.Get("overlay.autogem.info_close", "Click the green info icon again, Escape, or outside this popup to close it."), r.Left + 12f, y + 3f);
         }
 
         private void DrawJourneyCloseMask(RectangleF r)
@@ -1987,6 +1994,7 @@ public static class s7o_AutoGemUpgradeState
 
         private void DrawGlossButton(RectangleF rect, string text, bool active, bool danger, bool compact)
         {
+            text = s7o_Localization.DisplayButton(text);
             IBrush body = active ? _bBtnActive : danger ? _bBtnDanger : _bBtnNormal;
             IFont font = compact ? _fBtnCompact : _fBtnNormal;
             body.DrawRectangle(rect.Left, rect.Top, rect.Width, rect.Height);
@@ -2027,6 +2035,61 @@ public static class s7o_AutoGemUpgradeState
         private void DrawRect(float x, float y, float w, float h, IBrush b)
         {
             b.DrawRectangle(x, y, w, 1f); b.DrawRectangle(x, y + h - 1f, w, 1f); b.DrawRectangle(x, y, 1f, h); b.DrawRectangle(x + w - 1f, y, 1f, h);
+        }
+
+        private string GetAutoGemDisplayName(int index)
+        {
+            if (index < 0 || index >= AutoGemOverlayModel.AutoGemNames.Length)
+                return string.Empty;
+
+            if (string.Equals(s7o_Localization.LanguageCode, "enUS", StringComparison.OrdinalIgnoreCase))
+                return AutoGemOverlayModel.AutoGemNames[index];
+
+            try
+            {
+                ISnoItem snoItem = null;
+                switch (index)
+                {
+                    case 0:  snoItem = _hud.Sno.SnoItems.Unique_Gem_001_x1; break;
+                    case 1:  snoItem = _hud.Sno.SnoItems.Unique_Gem_018_x1; break;
+                    case 2:  snoItem = _hud.Sno.SnoItems.Unique_Gem_002_x1; break;
+                    case 3:  snoItem = _hud.Sno.SnoItems.Unique_Gem_014_x1; break;
+                    case 4:  snoItem = _hud.Sno.SnoItems.Unique_Gem_020_x1; break;
+                    case 5:  snoItem = _hud.Sno.SnoItems.Unique_Gem_010_x1; break;
+                    case 6:  snoItem = _hud.Sno.SnoItems.Unique_Gem_016_x1; break;
+                    case 7:  snoItem = _hud.Sno.SnoItems.Unique_Gem_003_x1; break;
+                    case 8:  snoItem = _hud.Sno.SnoItems.Unique_Gem_005_x1; break;
+                    case 9:  snoItem = _hud.Sno.SnoItems.Unique_Gem_008_x1; break;
+                    case 10: snoItem = _hud.Sno.SnoItems.Unique_Gem_021_x1; break;
+                    case 11: snoItem = _hud.Sno.SnoItems.Unique_Gem_009_x1; break;
+                    case 12: snoItem = _hud.Sno.SnoItems.Unique_Gem_023_x1; break;
+                    case 13: snoItem = _hud.Sno.SnoItems.Unique_Gem_007_x1; break;
+                    case 14: snoItem = _hud.Sno.SnoItems.Unique_Gem_017_x1; break;
+                    case 15: snoItem = _hud.Sno.SnoItems.Unique_Gem_011_x1; break;
+                    case 16: snoItem = _hud.Sno.SnoItems.Unique_Gem_019_x1; break;
+                    case 17: snoItem = _hud.Sno.SnoItems.Unique_Gem_006_x1; break;
+                    case 18: snoItem = _hud.Sno.SnoItems.Unique_Gem_013_x1; break;
+                    case 19: snoItem = _hud.Sno.SnoItems.Unique_Gem_015_x1; break;
+                    case 20: snoItem = _hud.Sno.SnoItems.Unique_Gem_004_x1; break;
+                    case 21: snoItem = _hud.Sno.SnoItems.P73_Unique_Gem_150; break;
+                    case 22: snoItem = _hud.Sno.SnoItems.Unique_Gem_012_x1; break;
+                }
+
+                if (snoItem != null && !string.IsNullOrWhiteSpace(snoItem.NameLocalized))
+                    return snoItem.NameLocalized;
+            }
+            catch { }
+
+            return s7o_Localization.Display(AutoGemOverlayModel.AutoGemNames[index]);
+        }
+
+        private string GetAutoGemDisplayName(string englishName)
+        {
+            for (int i = 0; i < AutoGemOverlayModel.AutoGemNames.Length; i++)
+                if (string.Equals(AutoGemOverlayModel.AutoGemNames[i], englishName, StringComparison.OrdinalIgnoreCase))
+                    return GetAutoGemDisplayName(i);
+
+            return s7o_Localization.Display(englishName ?? string.Empty);
         }
 
         private static string ModeName(int mode)
@@ -2272,6 +2335,8 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
         private IUiElement _chatEditLine;
         private int _lastConversationCloseTick = int.MinValue;
         private int _lastGemPaneChatCloseTick = int.MinValue;
+        private bool _townRewardDialogSpaceSent;
+        private bool _townRewardDialogArmed;
         private int _chatCloseFadeWaitUntilTick = int.MinValue;
         private bool _chatCloseFadePendingDialogSpace;
         private int _chatCloseFadePendingAttempts = int.MinValue;
@@ -2786,6 +2851,8 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
 
             if (!AutoStartEnabled)
             {
+                _townRewardDialogSpaceSent = false;
+                _townRewardDialogArmed = false;
                 ResetState();
                 ClearSoftRestartWait(true);
                 return;
@@ -2793,6 +2860,24 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
 
             if (!Hud.Game.IsInGame || !Hud.Window.IsForeground)
             {
+                _lastConversationCloseTick = int.MinValue;
+                _townRewardDialogSpaceSent = false;
+                if (!Hud.Game.IsInGame)
+                    _townRewardDialogArmed = false;
+                ResetState();
+                ClearSoftRestartWait(true);
+                return;
+            }
+
+            if (_gemUpgradePane?.Visible == true)
+            {
+                _townRewardDialogArmed = true;
+                _townRewardDialogSpaceSent = false;
+            }
+
+            if (Hud.Game.IsInTown)
+            {
+                TryCloseTownRewardDialogOnce();
                 _lastConversationCloseTick = int.MinValue;
                 ResetState();
                 ClearSoftRestartWait(true);
@@ -7805,6 +7890,38 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             return true;
         }
 
+        private bool TryCloseTownRewardDialogOnce()
+        {
+            try
+            {
+                if (_conversationDialogMain == null || !_conversationDialogMain.Visible)
+                {
+                    _townRewardDialogSpaceSent = false;
+                    return false;
+                }
+
+                if (!_townRewardDialogArmed || _townRewardDialogSpaceSent)
+                    return true;
+
+                if (IsChatEntryOpen())
+                {
+                    UpdateSharedDebugState("skip-town-reward-space-chat-open", "conversation_dialog_main", -1);
+                    return true;
+                }
+
+                _townRewardDialogSpaceSent = true;
+                _townRewardDialogArmed = false;
+                FreeHudInput.SendSpace();
+                MarkAutomationInputAction(ConversationCloseThrottleMs + 30);
+                UpdateSharedDebugState("space-town-reward-dialog-once", "conversation_dialog_main", -1);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         private bool TryCloseChatBeforeGemPaneAutomation(int remainingAttempts)
         {
             try
@@ -9558,7 +9675,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             float warningBottom = 470f;
             float maxWidth = Math.Max(110f, warningRight - warningLeft);
 
-            var wrappedLines = WrapPaneWarningLines(_paneWarningMessage, maxWidth);
+            var wrappedLines = WrapPaneWarningLines(LocalizeMultilineDisplayText(_paneWarningMessage), maxWidth);
             if (wrappedLines == null || wrappedLines.Count == 0)
                 return;
 
@@ -9581,6 +9698,18 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
                 _warningFont.DrawText(layout, warningLeft, y);
                 y += layout.Metrics.Height * 1.02f;
             }
+        }
+
+        private static string LocalizeMultilineDisplayText(string text)
+        {
+            if (string.IsNullOrEmpty(text))
+                return text;
+
+            string[] lines = text.Replace("\r", string.Empty).Split('\n');
+            for (int i = 0; i < lines.Length; i++)
+                lines[i] = s7o_Localization.Display(lines[i]);
+
+            return string.Join("\n", lines);
         }
 
         private List<string> WrapPaneWarningLines(string text, float maxWidth)
