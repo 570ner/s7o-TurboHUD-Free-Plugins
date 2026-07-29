@@ -541,12 +541,14 @@ namespace Turbo.Plugins.s7o
                 return false;
             }
 
-            if (PreferTtsBroadcastService && TrySpeakViaTtsBroadcast(BannerSpeechText))
+            string speechText = s7o_Localization.Display(BannerSpeechText);
+
+            if (PreferTtsBroadcastService && TrySpeakViaTtsBroadcast(speechText))
             {
                 _lastGlobalAlertMs = nowMs;
 
                 if (shouldLog)
-                    Log("TryAlert SPOKE VIA TTS_BROADCAST \"" + BannerSpeechText + "\" source=" + source + " player=" + playerIndex + " anim=" + animName + " hasCoord=" + hasCoordinate);
+                    Log("TryAlert SPOKE VIA TTS_BROADCAST \"" + speechText + "\" source=" + source + " player=" + playerIndex + " anim=" + animName + " hasCoord=" + hasCoordinate);
 
                 return true;
             }
@@ -585,11 +587,11 @@ namespace Turbo.Plugins.s7o
 
             try
             {
-                Hud.Sound.Speak(BannerSpeechText);
+                Hud.Sound.Speak(speechText);
                 _lastGlobalAlertMs = nowMs;
 
                 if (shouldLog)
-                    Log("TryAlert SPOKE VIA Hud.Sound \"" + BannerSpeechText + "\" source=" + source + " player=" + playerIndex + " anim=" + animName + " hasCoord=" + hasCoordinate);
+                    Log("TryAlert SPOKE VIA Hud.Sound \"" + speechText + "\" source=" + source + " player=" + playerIndex + " anim=" + animName + " hasCoord=" + hasCoordinate);
 
                 return true;
             }
@@ -1123,7 +1125,7 @@ namespace Turbo.Plugins.s7o
 
             try
             {
-                string text = BannerArrowLabelText;
+                string text = s7o_Localization.Display(BannerArrowLabelText);
                 var layout = BannerArrowLabelFont.GetTextLayout(text);
                 if (layout == null)
                     return;
