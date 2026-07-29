@@ -467,6 +467,8 @@ namespace Turbo.Plugins.s7o
 
         private bool TrySpeak(string text)
         {
+            text = s7o_Localization.Display(text);
+
             if (!UseTTS || !_globalTtsEnabled)
                 return false;
 
