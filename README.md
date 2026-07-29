@@ -47,6 +47,7 @@ Use the HUD Menu to toggle plugins, change visual options, manage TTS alerts, se
 | **s7o_ItemSalvage**            | Salvage helper with item protections, repair/fallback handling, and speed settings.                                                                                     |
 | **s7o_KadalaHelper**           | Kadala gambling helper. Hover a Kadala item and press **F2** to mark/unmark it, then press **F3** to spend shards on saved targets.                                     |
 | **s7o_KanaiCube**              | Kanai helper for common cube tasks like reforge, upgrade rare, and material conversion.                                                                                 |
+| **s7o_Localization**           | Shared localization helper for the HUD Menu and supported plugin overlays, with editable language files and persistent personal translation overrides.                 |
 | **s7o_MysticEnchant**          | Mystic reroll helper. Select the stat you want to roll, then press the hotkey (**F3** by default).                                                                      |
 | **s7o_Oculus_Triune**          | Oculus/Triune circle visuals.                                                                                                                                           |
 | **s7o_Paragon_Builds**         | Saves and restores Paragon layouts per hero and Armory loadout.                                                 |
