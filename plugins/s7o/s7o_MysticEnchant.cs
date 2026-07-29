@@ -1940,7 +1940,7 @@ namespace Turbo.Plugins.s7o
             float groupX = vr.X + HeaderLeftOffset;
             float topY = vr.Y + HeaderTopOffset;
 
-            string label = "MYSTIC";
+            string label = s7o_Localization.Get("overlay.mystic.title", "MYSTIC");
             var layout = _headerFont.GetTextLayout(label);
 
             float labelX = groupX + HeaderHotkeyGroupWidth * 0.5f - layout.Metrics.Width * 0.5f;
@@ -1961,7 +1961,7 @@ namespace Turbo.Plugins.s7o
             float attemptX = vr.X + vr.Width - AttemptToggleRightOffset - AttemptToggleWidth;
             float labelY = vr.Y + AttemptToggleTopOffset;
 
-            string label = "Attempts";
+            string label = s7o_Localization.Get("overlay.mystic.attempts", "Attempts");
             var labelLayout = _headerFont.GetTextLayout(label);
             float labelX = attemptX + AttemptToggleWidth * 0.5f - labelLayout.Metrics.Width * 0.5f;
             _headerFont.DrawText(labelLayout, labelX, labelY);
@@ -2077,6 +2077,9 @@ namespace Turbo.Plugins.s7o
 
             if (ShowCycleTimingOverlay)
                 lines.Add("Last cycle: " + _lastCycleElapsedMs.ToString(CultureInfo.InvariantCulture) + " ms | " + CurrentProfile());
+
+            for (int i = 0; i < lines.Count; i++)
+                lines[i] = s7o_Localization.Display(lines[i]);
 
             var text = string.Join("\r\n", lines.ToArray());
             var panel = new RectangleF(x - 8.0f, y - 6.0f, 420.0f, 28.0f + (lines.Count * 11.0f));
@@ -2280,6 +2283,7 @@ namespace Turbo.Plugins.s7o
 
         private void DrawCenteredText(RectangleF rect, string text, IFont font)
         {
+            text = s7o_Localization.DisplayButton(text);
             if (font == null || rect.Width <= 0 || rect.Height <= 0)
                 return;
 
