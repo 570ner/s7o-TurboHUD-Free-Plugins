@@ -566,7 +566,8 @@ namespace Turbo.Plugins.s7o
             if (supported)
             {
                 BuildOverlayText(page);
-                var h = HeaderFont.GetTextLayout(_header);
+                string header = s7o_Localization.Display(_header);
+                var h = HeaderFont.GetTextLayout(header);
                 HeaderFont.DrawText(h, x0, y);
                 y += h.Metrics.Height * 1.25f;
             }
@@ -579,7 +580,7 @@ namespace Turbo.Plugins.s7o
                 Hud.Inventory.InventoryLockArea.Width <= 0)
             {
                 InfoFont.DrawText(
-                    InfoFont.GetTextLayout(_lockMissing),
+                    InfoFont.GetTextLayout(s7o_Localization.Display(_lockMissing)),
                     x0,
                     y);
 
@@ -594,10 +595,23 @@ namespace Turbo.Plugins.s7o
                     ? (Running ? _running : _info)
                     : _cachedStatusText;
 
+            txt = LocalizeMultilineDisplayText(txt);
             InfoFont.DrawText(
                 InfoFont.GetTextLayout(txt),
                 x0,
                 y);
+        }
+
+        private static string LocalizeMultilineDisplayText(string text)
+        {
+            if (string.IsNullOrEmpty(text))
+                return text;
+
+            string[] lines = text.Replace("\r", string.Empty).Split('\n');
+            for (int i = 0; i < lines.Length; i++)
+                lines[i] = s7o_Localization.Display(lines[i]);
+
+            return string.Join("\r\n", lines);
         }
 
         private void DrawUpgradeIneligibleMarks()
@@ -2652,7 +2666,7 @@ namespace Turbo.Plugins.s7o
             float groupX = pane.X + HeaderLeftOffset;
             float topY = pane.Y + HeaderTopOffset;
 
-            string label = "KANAI CUBE";
+            string label = s7o_Localization.Get("overlay.kanai.title", "KANAI CUBE");
             var layout = _yellowFont.GetTextLayout(label);
             float labelX = groupX + HeaderHotkeyGroupWidth * 0.5f - layout.Metrics.Width * 0.5f;
 
@@ -2699,7 +2713,7 @@ namespace Turbo.Plugins.s7o
             if (_yellowFont == null || _speedControlRect.Width <= 0 || _speedControlRect.Height <= 0)
                 return;
 
-            var layout = _yellowFont.GetTextLayout("SPEED");
+            var layout = _yellowFont.GetTextLayout(s7o_Localization.Get("overlay.kanai.speed", "SPEED"));
             float x = _speedControlRect.X + _speedControlRect.Width * 0.5f - layout.Metrics.Width * 0.5f;
             float y = _speedControlRect.Y - SpeedControlHeight + 2.0f;
             _yellowFont.DrawText(layout, x, y);
@@ -2907,6 +2921,7 @@ namespace Turbo.Plugins.s7o
 
         private void DrawCenteredText(RectangleF rect, string text)
         {
+            text = s7o_Localization.DisplayButton(text);
             if (_buttonFont == null)
                 return;
 
