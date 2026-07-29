@@ -1083,7 +1083,7 @@ namespace Turbo.Plugins.s7o
                                 result,
                                 actor.WorldId,
                                 actor.FloorCoordinate,
-                                actor.SnoActor != null ? actor.SnoActor.NameLocalized : "Pylon");
+                                actor.SnoActor != null ? actor.SnoActor.NameLocalized : s7o_Localization.Get("overlay.rift_info.pylon", "Pylon"));
                         }
                     }
                 }
@@ -1120,7 +1120,7 @@ namespace Turbo.Plugins.s7o
                                 result,
                                 marker.WorldId,
                                 marker.FloorCoordinate,
-                                !string.IsNullOrEmpty(marker.Name) ? marker.Name : "Pylon");
+                                !string.IsNullOrEmpty(marker.Name) ? marker.Name : s7o_Localization.Get("overlay.rift_info.pylon", "Pylon"));
                         }
                     }
                 }
@@ -1283,14 +1283,14 @@ namespace Turbo.Plugins.s7o
             if (missingNames.Count == 0)
             {
                 status.Ready = true;
-                status.Text = "READY";
-                status.Lines.Add("READY");
+                status.Text = s7o_Localization.Get("overlay.rift_info.ready", "READY");
+                status.Lines.Add(status.Text);
             }
             else
             {
                 status.Ready = false;
-                status.Text = "MISSING:";
-                status.Lines.Add("MISSING:");
+                status.Text = s7o_Localization.Get("overlay.rift_info.missing", "MISSING:");
+                status.Lines.Add(status.Text);
 
                 foreach (var missingName in missingNames)
                     status.Lines.Add(missingName);
@@ -1625,16 +1625,16 @@ namespace Turbo.Plugins.s7o
             switch (kind)
             {
                 case SpawnAlertKind.EliteOnly:
-                    return "KILL ELITE";
+                    return s7o_Localization.Get("overlay.rift_info.kill_elite", "KILL ELITE");
 
                 case SpawnAlertKind.TrashOnly:
-                    return "KILL TRASH";
+                    return s7o_Localization.Get("overlay.rift_info.kill_trash", "KILL TRASH");
 
                 case SpawnAlertKind.EitherEliteOrTrash:
-                    return "KILL ELITE OR TRASH";
+                    return s7o_Localization.Get("overlay.rift_info.kill_either", "KILL ELITE OR TRASH");
 
                 case SpawnAlertKind.EliteAndTrash:
-                    return "KILL ELITE AND TRASH";
+                    return s7o_Localization.Get("overlay.rift_info.kill_both", "KILL ELITE AND TRASH");
 
                 default:
                     return "";
@@ -1857,13 +1857,14 @@ namespace Turbo.Plugins.s7o
 
         private void DrawRpLine(string label, double pct, float x, float y, IFont font)
         {
+            label = s7o_Localization.Display(label);
             string timeStr = "--";
 
             if (_killRate > 0.001 && pct > 0)
             {
                 double sec = pct / _killRate;
                 var ts = TimeSpan.FromSeconds(sec);
-                timeStr = string.Format("{0}m {1:D2}s", (int)ts.TotalMinutes, ts.Seconds);
+                timeStr = s7o_Localization.Format("overlay.rift_info.duration", "{0}m {1:D2}s", (int)ts.TotalMinutes, ts.Seconds);
             }
 
             string text = string.Format(
@@ -2013,14 +2014,14 @@ namespace Turbo.Plugins.s7o
             if (drawBoss)
             {
                 var ts = TimeSpan.FromSeconds(bossTicks / 60.0);
-                var bossText = string.Format("Boss: {0}:{1:D2}", (int)ts.TotalMinutes, ts.Seconds);
+                var bossText = s7o_Localization.Format("overlay.rift_info.boss", "Boss: {0}:{1:D2}", (int)ts.TotalMinutes, ts.Seconds);
                 bossLayout = BossFont.GetTextLayout(bossText);
             }
 
             if (drawElapsed)
             {
                 var ts = TimeSpan.FromSeconds(elapsedTicks / 60.0);
-                var elapsedText = string.Format("Elapsed: {0}:{1:D2}", (int)ts.TotalMinutes, ts.Seconds);
+                var elapsedText = s7o_Localization.Format("overlay.rift_info.elapsed", "Elapsed: {0}:{1:D2}", (int)ts.TotalMinutes, ts.Seconds);
                 elapsedLayout = TimeFont.GetTextLayout(elapsedText);
             }
 
