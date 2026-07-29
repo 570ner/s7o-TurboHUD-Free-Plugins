@@ -65,6 +65,7 @@ namespace Turbo.Plugins.s7o
         public int BuffCastDelayMinMs = 150;
         public int BuffCastDelayMaxMs = 250;
         public int BuffRecheckMs = 50;
+        public int SteedChargeRenewalLeadMs = 200;
 
         public bool EnableFastMissingBuffRetry = true;
         public int MissingBuffRetryMs = 100;
@@ -124,6 +125,7 @@ namespace Turbo.Plugins.s7o
         private int _nextBlockedLogTick;
         private int _blockingRiftDialogVisibleSinceTick;
         private int _nextBlockingRiftDialogCloseTick;
+        private SteedRenewalStage _steedRenewalStage;
 
         private int _hoverSlotIndex = -1;
         private int _hoverStartTick;
@@ -227,6 +229,13 @@ namespace Turbo.Plugins.s7o
             public int Value;
         }
 
+        private enum SteedRenewalStage
+        {
+            Idle,
+            WaitingForDismount,
+            WaitingForRemount
+        }
+
         #endregion
 
         #region Load / Reset
@@ -276,6 +285,7 @@ namespace Turbo.Plugins.s7o
             _lastWorldMapVisibleTick = 0;
             _blockingRiftDialogVisibleSinceTick = 0;
             _nextBlockingRiftDialogCloseTick = 0;
+            _steedRenewalStage = SteedRenewalStage.Idle;
             _lastCommandSkeletonsRequestTick = 0;
             _commandSkeletonsBloodsongLotdCast = false;
             _lastBlockedReason = null;
@@ -918,7 +928,10 @@ namespace Turbo.Plugins.s7o
             }
 
             if (!deferredSteedCharge)
+            {
+                _steedRenewalStage = SteedRenewalStage.Idle;
                 return false;
+            }
 
             for (int slotIndex = 0; slotIndex < _enabledSlots.Length; slotIndex++)
             {
@@ -936,11 +949,72 @@ namespace Turbo.Plugins.s7o
                 if (skill == null || skill.SnoPower == null || !IsCrusaderSteedChargeSkill(skill))
                     continue;
 
-                if (TryManualCastSlot(slotIndex, slot, skill, now))
+                if (TryRunSteedChargeSlot(slotIndex, slot, skill, now))
                     return true;
             }
 
             return false;
+        }
+
+        private bool TryRunSteedChargeSlot(int slotIndex, SkillSlotState slot, IPlayerSkill skill, int now)
+        {
+            bool active;
+            double remaining;
+            if (!TryGetBuffRemainingSeconds(skill, -1, out active, out remaining))
+            {
+                _steedRenewalStage = SteedRenewalStage.Idle;
+                return TryManualCastSlot(slotIndex, slot, skill, now);
+            }
+
+            if (_steedRenewalStage == SteedRenewalStage.WaitingForDismount)
+            {
+                if (active)
+                    return false;
+
+                _steedRenewalStage = SteedRenewalStage.WaitingForRemount;
+            }
+
+            if (_steedRenewalStage == SteedRenewalStage.WaitingForRemount)
+            {
+                if (active)
+                {
+                    _steedRenewalStage = SteedRenewalStage.Idle;
+                    LogDebug("Steed Charge renewal confirmed.");
+                    return false;
+                }
+
+                return TryManualCastSlot(slotIndex, slot, skill, now);
+            }
+
+            if (!active)
+            {
+                if (!TryManualCastSlot(slotIndex, slot, skill, now))
+                    return false;
+
+                _steedRenewalStage = SteedRenewalStage.WaitingForRemount;
+                return true;
+            }
+
+            if (!IsFiniteBuffTime(remaining) ||
+                remaining > Math.Max(0, SteedChargeRenewalLeadMs) / 1000.0d)
+            {
+                return false;
+            }
+
+            if (!IsActionCursorSafe(slot.ActionKey) ||
+                (uint)(now - _lastGlobalCastTick) < (uint)Math.Max(0, GlobalCastDelayMs))
+            {
+                return false;
+            }
+
+            if (!DoAction(slot.ActionKey, UseForceStandstillForCasts))
+                return false;
+
+            MarkSkillCast(skill, now, slot.ActionKey);
+            _steedRenewalStage = SteedRenewalStage.WaitingForDismount;
+            LogDebug("Steed Charge renewal dismount requested, remaining="
+                + remaining.ToString("0.000", CultureInfo.InvariantCulture));
+            return true;
         }
 
         private bool TryManualCastSlot(int slotIndex, SkillSlotState slot, IPlayerSkill skill, int now)
@@ -2514,7 +2588,9 @@ namespace Turbo.Plugins.s7o
                 return false;
             }
 
-            if (actionKey != ActionKey.Heal && IsCrusaderSteedChargeActive())
+            if (actionKey != ActionKey.Heal &&
+                IsCrusaderSteedChargeActive() &&
+                !IsAutomatedSteedChargeNearExpiry())
             {
                 reason = "steed charge active";
                 return false;
@@ -2583,6 +2659,44 @@ namespace Turbo.Plugins.s7o
             {
                 return false;
             }
+        }
+
+        private bool IsAutomatedSteedChargeNearExpiry()
+        {
+            try
+            {
+                if (!IsLocalCrusader())
+                    return false;
+
+                uint sno = GetSno(Hud.Sno.SnoPowers.Crusader_SteedCharge, CrusaderSteedChargePowerSno);
+                var slot = FindEquippedSkillBySno(sno);
+                if (slot == null ||
+                    slot.Skill == null ||
+                    slot.SlotIndex < 0 ||
+                    slot.SlotIndex >= _enabledSlots.Length ||
+                    !_enabledSlots[slot.SlotIndex])
+                {
+                    return false;
+                }
+
+                bool active;
+                double remaining;
+                return TryGetBuffRemainingSeconds(slot.Skill, -1, out active, out remaining)
+                    && active
+                    && IsFiniteBuffTime(remaining)
+                    && remaining <= Math.Max(0, SteedChargeRenewalLeadMs) / 1000.0d;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool IsFiniteBuffTime(double seconds)
+        {
+            return !double.IsNaN(seconds)
+                && !double.IsInfinity(seconds)
+                && seconds != double.MaxValue;
         }
 
         private bool IsLocalCrusader()
