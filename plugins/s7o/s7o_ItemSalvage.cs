@@ -358,6 +358,7 @@ namespace Turbo.Plugins.s7o
         private int _confirmVisibleSinceTick = NoTick;
         private int _lastConfirmPressTick = NoTick;
         private int _confirmPressAttempts;
+        private bool _awaitingSalvageConfirm;
 
         private bool _cachedBlacksmithPaneVisible;
         private bool _stickyBlacksmithPaneVisible;
@@ -602,6 +603,21 @@ namespace Turbo.Plugins.s7o
 
         public void AfterCollect()
         {
+            try
+            {
+                AfterCollectSafe();
+            }
+            catch (Exception ex)
+            {
+                _runEndReason = "Item Salvage cancelled: runtime state reset after UI interruption";
+                LogDebug(_runEndReason + ". " + ex);
+                ResetBlacksmithContextCache();
+                CancelRun(false, true);
+            }
+        }
+
+        private void AfterCollectSafe()
+        {
             int now = Environment.TickCount;
             UpdateBlacksmithActorLatch(now);
 
@@ -613,10 +629,21 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
+            if (IsGenericConfirmationVisible() && !IsSalvageConfirmVisible())
+            {
+                _runEndReason = "Item Salvage cancelled: unrelated confirmation dialog interrupted salvage";
+                ResetBlacksmithContextCache();
+                CancelRun(false, true);
+                return;
+            }
+
             if (!IsValidContext())
             {
-                _runEndReason = "Item Salvage cancelled: invalid context";
-                CancelRun(!ShouldRestoreCursorOnCancel(), true);
+                _runEndReason = IsGenericConfirmationVisible()
+                    ? "Item Salvage cancelled: external dialog interrupted the blacksmith pane"
+                    : "Item Salvage cancelled: blacksmith pane closed";
+                ResetBlacksmithContextCache();
+                CancelRun(false, true);
                 return;
             }
 
@@ -825,10 +852,12 @@ namespace Turbo.Plugins.s7o
                     continue;
 
                 _activeItemKey = key;
+                _awaitingSalvageConfirm = item.IsLegendary;
                 if (!ClickInventoryItem(item))
                 {
                     _runResolveSkipCount++;
                     _activeItemKey = null;
+                    _awaitingSalvageConfirm = false;
                     continue;
                 }
 
@@ -859,6 +888,7 @@ namespace Turbo.Plugins.s7o
                 _runGoneCount++;
                 LogDebug("Item gone observed before confirmation. clickToGone=" + (now - _lastItemClickTick) + "ms.");
                 _activeItemKey = null;
+                _awaitingSalvageConfirm = false;
                 _activeRetryCount = 0;
                 if (_pendingItemKeys.Count == 0)
                 {
@@ -897,6 +927,7 @@ namespace Turbo.Plugins.s7o
                 _runGoneCount++;
                 LogDebug("Item gone observed. confirmToGone=" + (now - _lastConfirmTick) + "ms, clickToGone=" + (now - _lastItemClickTick) + "ms.");
                 _activeItemKey = null;
+                _awaitingSalvageConfirm = false;
                 _activeRetryCount = 0;
                 if (_pendingItemKeys.Count == 0)
                 {
@@ -929,6 +960,7 @@ namespace Turbo.Plugins.s7o
                     if (!TryRegisterItemClickAttempt(_activeItemKey, retryItem))
                     {
                         _activeItemKey = null;
+                        _awaitingSalvageConfirm = false;
                         _activeRetryCount = 0;
                         _state = State.ClickItem;
                         _nextStepTick = now + GetStepDelay();
@@ -937,6 +969,7 @@ namespace Turbo.Plugins.s7o
 
                     if (ClickInventoryItem(retryItem))
                     {
+                        _awaitingSalvageConfirm = retryItem.IsLegendary;
                         _lastItemClickTick = now;
                         _runClickedCount++;
                         _confirmStartTick = now;
@@ -956,6 +989,7 @@ namespace Turbo.Plugins.s7o
                     + (_activeItemKey ?? string.Empty));
 
                 _activeItemKey = null;
+                _awaitingSalvageConfirm = false;
                 _activeRetryCount = 0;
                 _state = State.ClickItem;
                 _nextStepTick = now + GetStepDelay();
@@ -1056,6 +1090,17 @@ namespace Turbo.Plugins.s7o
 
         private bool IsSalvageConfirmVisible()
         {
+            if (!_awaitingSalvageConfirm)
+                return false;
+
+            if (!IsSalvageDialogVisible())
+                return false;
+
+            return IsGenericConfirmationVisible();
+        }
+
+        private bool IsGenericConfirmationVisible()
+        {
             try
             {
                 if (_okButton == null) return false;
@@ -1100,6 +1145,7 @@ namespace Turbo.Plugins.s7o
                 || _state == State.TurboAwaitLegendaryConfirm
                 || _state == State.TurboSettle
                 || _state == State.TurboFinalCleanupValidate
+                || _awaitingSalvageConfirm
                 || !string.IsNullOrEmpty(_activeItemKey)
                 || _turboClickedKeys.Count > 0
                 || TickSet(_confirmStartTick)
@@ -1113,6 +1159,9 @@ namespace Turbo.Plugins.s7o
 
             if (!IsSalvageConfirmVisible())
             {
+                if (!IsGenericConfirmationVisible() && TickSet(_confirmVisibleSinceTick))
+                    _awaitingSalvageConfirm = false;
+
                 _confirmVisibleSinceTick = NoTick;
                 _lastConfirmPressTick = NoTick;
                 _confirmPressAttempts = 0;
@@ -1281,6 +1330,7 @@ namespace Turbo.Plugins.s7o
                 if (TurboImmediateLegendaryEnter && item.IsLegendary)
                 {
                     _activeItemKey = key;
+                    _awaitingSalvageConfirm = true;
                     _confirmStartTick = clickTick;
 
                     if (TryConfirmSalvageDialogWithEnter(clickTick, "turbo post-click"))
@@ -1355,6 +1405,7 @@ namespace Turbo.Plugins.s7o
                     + "ms.");
 
                 _activeItemKey = null;
+                _awaitingSalvageConfirm = false;
                 ScheduleNextTurboStepAfterItem(now, Math.Max(GetActiveTurboClickDelay(), Math.Max(0, TurboPostConfirmSettleMs)));
                 return;
             }
@@ -1376,6 +1427,7 @@ namespace Turbo.Plugins.s7o
             }
 
             _activeItemKey = null;
+            _awaitingSalvageConfirm = false;
             ScheduleNextTurboStepAfterItem(now, GetActiveTurboClickDelay());
         }
 
@@ -1635,6 +1687,7 @@ namespace Turbo.Plugins.s7o
             _confirmVisibleSinceTick = NoTick;
             _lastConfirmPressTick = NoTick;
             _confirmPressAttempts = 0;
+            _awaitingSalvageConfirm = false;
             _cancelRequested = false;
             _salvageTabClickSent = false;
             _repairTabClickSent = false;
@@ -1731,6 +1784,7 @@ namespace Turbo.Plugins.s7o
             _confirmVisibleSinceTick = NoTick;
             _lastConfirmPressTick = NoTick;
             _confirmPressAttempts = 0;
+            _awaitingSalvageConfirm = false;
             _cancelRequested = false;
             _salvageTabClickSent = false;
             _repairCheckedThisRun = false;
@@ -3057,7 +3111,7 @@ namespace Turbo.Plugins.s7o
             float groupX = pane.X + HeaderLeftOffset;
             float topY = pane.Y + HeaderTopOffset;
 
-            string label = "SALVAGE";
+            string label = s7o_Localization.Get("overlay.salvage.title", "SALVAGE");
             var layout = _yellowFont.GetTextLayout(label);
             float labelX = groupX + HeaderHotkeyGroupWidth * 0.5f - layout.Metrics.Width * 0.5f;
             _yellowFont.DrawText(layout, labelX, topY);
@@ -3354,6 +3408,7 @@ namespace Turbo.Plugins.s7o
 
         private void DrawCenteredText(RectangleF rect, string text)
         {
+            text = s7o_Localization.DisplayButton(text);
             if (_buttonFont == null) return;
 
             var layout = _buttonFont.GetTextLayout(text ?? string.Empty);
