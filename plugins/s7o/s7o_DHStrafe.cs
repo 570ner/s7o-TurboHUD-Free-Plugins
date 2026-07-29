@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Linq;
 using System.Runtime.InteropServices;
 using SharpDX.DirectInput;
@@ -494,6 +494,7 @@ namespace Turbo.Plugins.s7o
             if (font == null)
                 return;
 
+            text = s7o_Localization.Display(text);
             var layout = font.GetTextLayout(text);
 
             float x = Hud.Window.Size.Width * StatusTextCenterXFrac - (layout.Metrics.Width / 2.0f);
