@@ -6,7 +6,7 @@ using Turbo.Plugins.Default;
 
 namespace Turbo.Plugins.s7o
 {
-    // REV16 keeps unsafe AutoLoot-to-AutoGem handoffs inside Urshi recovery arbitration.
+    // REV20 commits to Urshi as soon as the established primary reward pile is clear.
     public class s7o_AutoLoot : BasePlugin, IAfterCollectHandler, IItemPickedHandler, IItemLocationChangedHandler, INewAreaHandler
     {
         private const int RunRange = 5;
@@ -58,8 +58,8 @@ namespace Turbo.Plugins.s7o
         private const int UrshiFallbackRetryDelayMs = 70;
         private const int UrshiFallbackWindowMs = 2200;
         private const int UrshiFallbackMaxTries = 8;
-        private const int AutoUrshiTalkNoLootSettleMs = 220;
-        private const int AutoUrshiTalkWaitForLootDropMs = 1800;
+        private const int AutoUrshiRewardWaveMinimum = 10;
+        private const int AutoUrshiRewardFallbackMs = 4000;
         private const int AutoUrshiTalkClickDelayMs = 700;
         private const int AutoUrshiTalkMaxAttempts = 12;
         private const int AutoUrshiTalkRetryCooldownMs = 8000;
@@ -121,6 +121,7 @@ namespace Turbo.Plugins.s7o
         private readonly Dictionary<int, long> _stackedLootSkipUntilMs = new Dictionary<int, long>();
         private readonly Dictionary<int, int> _urshiMisclicksBySeed = new Dictionary<int, int>();
         private readonly Dictionary<int, int> _urshiFallbackTriesBySeed = new Dictionary<int, int>();
+        private readonly HashSet<int> _autoUrshiRewardSeedsSeen = new HashSet<int>();
         private IUiElement _urshiGemPane;
         private IUiElement _urshiConversationMain;
         private IUiElement _chatEditLine;
@@ -133,7 +134,6 @@ namespace Turbo.Plugins.s7o
         private int _urshiRiskHoverY;
         private long _nextUrshiSpaceMs;
         private int _lastClickSeed;
-        private int _stackedLootClickPhase;
         private int _lootProgressSerial;
         private int _lastRetryRefreshSerial;
         private int _lastCleanupIgnoreSerial;
@@ -153,7 +153,6 @@ namespace Turbo.Plugins.s7o
         private bool _accidentalUrshiHasClickPoint;
         private int _accidentalUrshiClickX;
         private int _accidentalUrshiClickY;
-        private long _autoUrshiNoLootSinceMs;
         private long _nextAutoUrshiTalkMs;
         private long _autoUrshiTalkCooldownUntilMs;
         private long _autoUrshiHoverClickAtMs;
@@ -161,6 +160,7 @@ namespace Turbo.Plugins.s7o
         private int _autoUrshiHoverX;
         private int _autoUrshiHoverY;
         private bool _autoUrshiTalkDone;
+        private bool _autoUrshiHandoffCommitted;
         private bool _autoUrshiGemHandoffActive;
         private bool _autoUrshiHandoffPortalObserved;
         private bool _autoUrshiHandoffTransformObserved;
@@ -170,8 +170,7 @@ namespace Turbo.Plugins.s7o
         private bool _autoUrshiHasRestorePoint;
         private NativePoint _autoUrshiRestorePoint;
         private long _postRiftCleanupStartedMs;
-        private long _autoUrshiLootDropGateStartedMs;
-        private bool _autoUrshiSawEligibleLootThisCleanup;
+        private long _autoUrshiRewardGateStartedMs;
         private readonly List<AutoUrshiReturnPoint> _autoUrshiReturnTrail = new List<AutoUrshiReturnPoint>(AutoUrshiBreadcrumbMax);
         private bool _autoUrshiHasLastSeenWorld;
         private float _autoUrshiLastSeenX;
@@ -255,6 +254,11 @@ namespace Turbo.Plugins.s7o
             _materials = materials;
             _deathsBreath = deathsBreath;
             _talkToUrshiAfterLoot = talkToUrshiAfterLoot;
+            if (!_talkToUrshiAfterLoot)
+            {
+                _autoUrshiHandoffCommitted = false;
+                ResetAutoUrshiRewardBatch();
+            }
             if (!_enabled)
             {
                 _paused = false;
@@ -280,7 +284,6 @@ namespace Turbo.Plugins.s7o
                 _droppedSuppress.Clear();
             _cleanupStuckIgnoreUntilMs.Clear();
             _lastClickSeed = 0;
-            _stackedLootClickPhase = 0;
             _lootProgressSerial = 0;
             _lastRetryRefreshSerial = 0;
             _lastCleanupIgnoreSerial = 0;
@@ -305,7 +308,6 @@ namespace Turbo.Plugins.s7o
             _urshiFallbackUntilMs = 0;
             ClearGenericUrshiRecoveryState();
             ClearAccidentalUrshiRecoveryState();
-            _autoUrshiNoLootSinceMs = 0;
             _nextAutoUrshiTalkMs = 0;
             _autoUrshiTalkCooldownUntilMs = 0;
             _autoUrshiTalkAttempts = 0;
@@ -313,6 +315,7 @@ namespace Turbo.Plugins.s7o
             _autoUrshiHoverX = 0;
             _autoUrshiHoverY = 0;
             _autoUrshiTalkDone = false;
+            _autoUrshiHandoffCommitted = false;
             _autoUrshiGemHandoffActive = false;
             ResetAutoUrshiGemHandoffWatch();
             _autoUrshiRecentTalkOpenedUntilMs = 0;
@@ -321,14 +324,14 @@ namespace Turbo.Plugins.s7o
             _autoUrshiHasRestorePoint = false;
             _autoUrshiRestorePoint = new NativePoint();
             _postRiftCleanupStartedMs = 0;
-            _autoUrshiLootDropGateStartedMs = 0;
-            _autoUrshiSawEligibleLootThisCleanup = false;
+            ResetAutoUrshiRewardBatch();
             ResetAutoUrshiReturnState();
         }
 
         public void OnItemPicked(IItem item)
         {
             if (item == null) return;
+            TrackAutoUrshiRewardPickup(item);
             MarkLootPickupProgress();
             _attempts.Remove(item.Seed);
             _retryAfterMs.Remove(item.Seed);
@@ -355,6 +358,8 @@ namespace Turbo.Plugins.s7o
             if (item == null) return;
             if (from == ItemLocation.Floor && to != ItemLocation.Floor)
             {
+                if (to == ItemLocation.Inventory)
+                    TrackAutoUrshiRewardPickup(item);
                 MarkLootPickupProgress();
 
                 if (item.Seed == _genericUrshiRecoverySeed)
@@ -475,18 +480,24 @@ namespace Turbo.Plugins.s7o
             int freeSlots = SafeFreeSlots();
             IActor urshi = GetUrshiActor();
             TrackAutoUrshiReturnState(postRiftCleanup, now, urshi);
+            BeginAutoUrshiRewardBatch(postRiftCleanup, now, urshi != null);
 
             var candidates = Hud.Game.Items
                 .Where(i => i != null && i.Location == ItemLocation.Floor && i.IsOnScreen && !IsExcludedPickup(i) && !IsSuppressedDroppedItem(i, now) && !IsCleanupStuckIgnored(i, now) && !IsProtectedChestRisk(i, protectedChest) && i.CentralXyDistanceToMe <= range)
                 .Select(i => new LootCandidate(i, WantedPriority(i), IsUrshiRisk(i, urshi)))
-                .Where(c => c.Priority >= 0 && CanFit(c.Item, freeSlots))
+                .Where(c => c.Priority >= 0 && CanFit(c.Item, freeSlots) && IsAutoUrshiHandoffLoot(c.Item))
                 .ToList();
+
+            TrackAutoUrshiRewardItems(candidates);
+
+            // Once the established gem/legendary pile is clear, commit before
+            // ordinary late drops can hold the Urshi handoff open.
+            if (postRiftCleanup && TryCommitAutoUrshiHandoff(now) && candidates.Count > 0)
+                candidates = candidates.Where(c => IsAutoUrshiHandoffLoot(c.Item)).ToList();
 
             TrackVisibleEligibleLootProgress(candidates.Count);
             if (postRiftCleanup && candidates.Count > 0)
             {
-                _autoUrshiSawEligibleLootThisCleanup = true;
-                _autoUrshiLootDropGateStartedMs = 0;
                 _autoUrshiReturning = false;
             }
 
@@ -495,6 +506,9 @@ namespace Turbo.Plugins.s7o
                 if (postRiftCleanup)
                 {
                     if (_autoUrshiApproachAborted)
+                        return;
+
+                    if (!TryCommitAutoUrshiHandoff(now))
                         return;
 
                     if ((_autoUrshiActorPathActive || _autoUrshiReturning) &&
@@ -571,15 +585,56 @@ namespace Turbo.Plugins.s7o
                 if (_postRiftCleanupStartedMs == 0)
                 {
                     _postRiftCleanupStartedMs = now;
-                    _autoUrshiSawEligibleLootThisCleanup = false;
+                    _autoUrshiHandoffCommitted = false;
+                    ResetAutoUrshiRewardBatch();
                 }
                 return;
             }
 
             _postRiftCleanupStartedMs = 0;
-            _autoUrshiLootDropGateStartedMs = 0;
-            _autoUrshiSawEligibleLootThisCleanup = false;
+            _autoUrshiHandoffCommitted = false;
+            ResetAutoUrshiRewardBatch();
             ResetAutoUrshiReturnState();
+        }
+
+        private void ResetAutoUrshiRewardBatch()
+        {
+            _autoUrshiRewardSeedsSeen.Clear();
+            _autoUrshiRewardGateStartedMs = 0;
+        }
+
+        private void BeginAutoUrshiRewardBatch(bool postRiftCleanup, long now, bool urshiAvailable)
+        {
+            if (!_talkToUrshiAfterLoot || !postRiftCleanup || _autoUrshiHandoffCommitted || !urshiAvailable)
+                return;
+
+            if (_autoUrshiRewardGateStartedMs == 0)
+                _autoUrshiRewardGateStartedMs = now;
+        }
+
+        private void TrackAutoUrshiRewardItems(List<LootCandidate> candidates)
+        {
+            if (_autoUrshiRewardGateStartedMs == 0 || _autoUrshiHandoffCommitted || candidates == null)
+                return;
+
+            foreach (var candidate in candidates)
+            {
+                IItem item = candidate != null ? candidate.Item : null;
+                if (!IsAutoUrshiPrimaryReward(item))
+                    continue;
+
+                _autoUrshiRewardSeedsSeen.Add(item.Seed);
+            }
+        }
+
+        private void TrackAutoUrshiRewardPickup(IItem item)
+        {
+            if (!_talkToUrshiAfterLoot || _postRiftCleanupStartedMs == 0 ||
+                _autoUrshiRewardGateStartedMs == 0 || _autoUrshiHandoffCommitted ||
+                !IsAutoUrshiPrimaryReward(item))
+                return;
+
+            _autoUrshiRewardSeedsSeen.Add(item.Seed);
         }
 
         private void ClearGenericUrshiRecoveryState()
@@ -977,7 +1032,7 @@ namespace Turbo.Plugins.s7o
 
             int x, y;
             if ((stackedLoot || IsNoSpaceMaterialPickup(item)) && !riskyUrshi)
-                GetStackedLootClickPoint(item, _stackedLootClickPhase++, cleanup, out x, out y);
+                GetStackedLootClickPoint(item, tries, cleanup, out x, out y);
             else
                 GetClickPoint(item, tries, cleanup, out x, out y);
 
@@ -1038,7 +1093,7 @@ namespace Turbo.Plugins.s7o
                     if (item == null || item.Location != ItemLocation.Floor || !item.IsOnScreen) continue;
                     if (IsExcludedPickup(item) || IsSuppressedDroppedItem(item, now) || IsCleanupStuckIgnored(item, now)) continue;
                     if (IsProtectedChestRisk(item, protectedChest)) continue;
-                    if (WantedPriority(item) < 0 || !CanFit(item, freeSlots)) continue;
+                    if (WantedPriority(item) < 0 || !CanFit(item, freeSlots) || !IsAutoUrshiHandoffLoot(item)) continue;
                     return true;
                 }
             }
@@ -1332,6 +1387,29 @@ namespace Turbo.Plugins.s7o
             if (item.IsLegendary || item.Quality == ItemQuality.Legendary) return true;
             if (item.SetSno != 0 && item.SetSno != uint.MaxValue) return true;
             return item.SnoItem != null && (item.SnoItem.LegendaryPower != null || (item.SnoItem.SetItemBonusesSno != 0 && item.SnoItem.SetItemBonusesSno != uint.MaxValue));
+        }
+
+        private static bool IsAutoUrshiPrimaryReward(IItem item)
+        {
+            if (item == null)
+                return false;
+            if (IsGem(item))
+                return true;
+            if (item.SnoItem == null || item.SnoItem.Kind != ItemKind.loot)
+                return false;
+
+            ActorSnoEnum actor = item.SnoActor != null ? item.SnoActor.Sno : 0;
+            if (item.SnoItem.Sno == PetrifiedScreamSno || actor == ActorSnoEnum._swarmriftkey)
+                return false;
+
+            return IsLegendaryLike(item);
+        }
+
+        private bool IsAutoUrshiHandoffLoot(IItem item)
+        {
+            return !_talkToUrshiAfterLoot
+                || !_autoUrshiHandoffCommitted
+                || (item != null && item.AncientRank >= 1 && IsLegendaryLike(item));
         }
 
         private static bool IsWhisper(IItem item)
@@ -1628,7 +1706,6 @@ namespace Turbo.Plugins.s7o
             _autoUrshiReturnClicks = 0;
             _nextAutoUrshiReturnMs = 0;
             ResetAutoUrshiApproachSample();
-            _autoUrshiNoLootSinceMs = 0;
             _nextAutoUrshiTalkMs = 0;
             _autoUrshiTalkCooldownUntilMs = 0;
             _autoUrshiTalkAttempts = 0;
@@ -1684,13 +1761,71 @@ namespace Turbo.Plugins.s7o
 
         private void ResetAutoUrshiTalkReadyState()
         {
-            _autoUrshiNoLootSinceMs = 0;
             _autoUrshiRecentTalkOpenedUntilMs = 0;
             _autoUrshiTalkLootCancelAttempts = 0;
             _nextAutoUrshiTalkLootCancelMs = 0;
             _autoUrshiGemHandoffActive = false;
             ResetAutoUrshiGemHandoffWatch();
             ClearAutoUrshiTalkHover();
+        }
+
+        private bool IsAutoUrshiRewardBatchReady(long now)
+        {
+            if (!_talkToUrshiAfterLoot || _postRiftCleanupStartedMs == 0 ||
+                _autoUrshiRewardGateStartedMs == 0)
+                return false;
+
+            long gateAge = now - _autoUrshiRewardGateStartedMs;
+
+            if (_autoUrshiRewardSeedsSeen.Count < AutoUrshiRewardWaveMinimum &&
+                gateAge < AutoUrshiRewardFallbackMs)
+                return false;
+
+            if (HasLiveAutoUrshiPrimaryReward())
+                return false;
+
+            return true;
+        }
+
+        private bool HasLiveAutoUrshiPrimaryReward()
+        {
+            try
+            {
+                if (Hud == null || Hud.Game == null || Hud.Game.Items == null)
+                    return false;
+
+                long now = Hud.Game.CurrentRealTimeMilliseconds;
+                IActor protectedChest = GetUnopenedProtectedChest();
+                int freeSlots = SafeFreeSlots();
+
+                foreach (var item in Hud.Game.Items)
+                {
+                    if (item == null || item.Location != ItemLocation.Floor || !item.IsOnScreen)
+                        continue;
+                    if (!IsAutoUrshiPrimaryReward(item) || IsExcludedPickup(item) ||
+                        IsSuppressedDroppedItem(item, now))
+                        continue;
+                    if (IsProtectedChestRisk(item, protectedChest) ||
+                        WantedPriority(item) < 0 || !CanFit(item, freeSlots))
+                        continue;
+                    return true;
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        private bool TryCommitAutoUrshiHandoff(long now)
+        {
+            if (_autoUrshiHandoffCommitted)
+                return true;
+
+            if (!IsAutoUrshiRewardBatchReady(now))
+                return false;
+
+            _autoUrshiHandoffCommitted = true;
+            return true;
         }
 
         private void ResetAutoUrshiGemHandoffWatch()
@@ -1729,7 +1864,6 @@ namespace Turbo.Plugins.s7o
             _autoUrshiReturning = false;
             _autoUrshiProbeFallbackPending = false;
             ResetAutoUrshiApproachSample();
-            _autoUrshiNoLootSinceMs = 0;
             _nextAutoUrshiTalkMs = 0;
             _autoUrshiTalkAttempts = 0;
             _autoUrshiHoverClickAtMs = 0;
@@ -1775,23 +1909,13 @@ namespace Turbo.Plugins.s7o
                 return false;
             }
 
-            if (!_autoUrshiSawEligibleLootThisCleanup)
+            if (!TryCommitAutoUrshiHandoff(now))
             {
-                if (_autoUrshiLootDropGateStartedMs == 0)
-                    _autoUrshiLootDropGateStartedMs = now;
-                if (now - _autoUrshiLootDropGateStartedMs < AutoUrshiTalkWaitForLootDropMs)
-                {
-                    ResetAutoUrshiTalkReadyState();
-                    return false;
-                }
+                ResetAutoUrshiTalkReadyState();
+                return false;
             }
 
             if (now < _autoUrshiTalkCooldownUntilMs || now < _nextAutoUrshiTalkMs)
-                return false;
-
-            if (_autoUrshiNoLootSinceMs == 0)
-                _autoUrshiNoLootSinceMs = now;
-            if (AutoUrshiTalkNoLootSettleMs > 0 && now - _autoUrshiNoLootSinceMs < AutoUrshiTalkNoLootSettleMs)
                 return false;
 
             if (_autoUrshiHoverClickAtMs != 0)
@@ -2143,7 +2267,6 @@ namespace Turbo.Plugins.s7o
             _urshiSpaceAttempts = 0;
             ClearUrshiRiskLootHover();
             _urshiPortalCancelAttempts = 0;
-            _autoUrshiNoLootSinceMs = 0;
             _nextAutoUrshiTalkMs = 0;
             _autoUrshiTalkCooldownUntilMs = 0;
             _autoUrshiTalkAttempts = 0;
@@ -2200,7 +2323,6 @@ namespace Turbo.Plugins.s7o
 
             // This was not a failed pickup. Do not increment Urshi misclick counters.
             // Reset only talk state so visible loot can be picked up after the panel closes.
-            _autoUrshiNoLootSinceMs = 0;
             _nextAutoUrshiTalkMs = 0;
             _autoUrshiTalkAttempts = 0;
             ClearAutoUrshiTalkHover();
@@ -2214,17 +2336,7 @@ namespace Turbo.Plugins.s7o
             if (_genericUrshiRecoverySeed == 0 || now > _genericUrshiRecoveryUntilMs)
                 return false;
 
-            if (!HasVisibleEligibleLootBlockingUrshiTalk())
-                return false;
-
-            IItem item = FindVisibleFloorItemBySeed(_genericUrshiRecoverySeed);
-            if (item == null)
-                return false;
-
-            if (WantedPriority(item) < 0)
-                return false;
-
-            return true;
+            return HasVisibleEligibleLootBlockingUrshiTalk();
         }
 
         private bool IsIntentionalAutoUrshiInteraction(long now)
@@ -2252,7 +2364,6 @@ namespace Turbo.Plugins.s7o
             ClearUrshiRiskLootHover();
             ClearGenericUrshiRecoveryState();
 
-            _autoUrshiNoLootSinceMs = 0;
             _nextAutoUrshiTalkMs = 0;
             _autoUrshiTalkCooldownUntilMs = 0;
             _autoUrshiTalkAttempts = 0;
@@ -2260,6 +2371,7 @@ namespace Turbo.Plugins.s7o
             _autoUrshiTalkLootCancelAttempts = 0;
             _nextAutoUrshiTalkLootCancelMs = 0;
             _autoUrshiTalkDone = true;
+            _autoUrshiHandoffCommitted = true;
             _autoUrshiGemHandoffActive = true;
 
             _autoUrshiHasRestorePoint = false;
@@ -2269,10 +2381,13 @@ namespace Turbo.Plugins.s7o
             _pendingCursorRestoreExpireMs = 0;
         }
 
-        private bool ShouldRecoverUnsafeAutoUrshiGemHandoff()
+        private bool ShouldRecoverUnsafeAutoUrshiGemHandoff(long now)
         {
             try
             {
+                if (!TryCommitAutoUrshiHandoff(now))
+                    return true;
+
                 IPlayer me = Hud != null && Hud.Game != null ? Hud.Game.Me : null;
                 if (me == null)
                     return HasVisibleEligibleLootBlockingUrshiTalk();
@@ -2291,8 +2406,9 @@ namespace Turbo.Plugins.s7o
                     return false;
 
                 return HasVisibleEligibleLootBlockingUrshiTalk()
-                    || state == AcdAnimationState.Running
-                    || (_autoUrshiHandoffPortalObserved && state != AcdAnimationState.CastingPortal);
+                    || (!_autoUrshiHandoffCommitted
+                        && (state == AcdAnimationState.Running
+                            || (_autoUrshiHandoffPortalObserved && state != AcdAnimationState.CastingPortal)));
             }
             catch
             {
@@ -2527,6 +2643,7 @@ namespace Turbo.Plugins.s7o
                 _autoUrshiActorPathActive = false;
                 _autoUrshiReturning = false;
                 ResetAutoUrshiApproachSample();
+                BeginAutoUrshiRewardBatch(_postRiftCleanupStartedMs != 0, now, true);
 
                 // Acknowledge the intentional actor click here, before the normal
                 // candidate pipeline can schedule another Urshi click during the
@@ -2565,6 +2682,15 @@ namespace Turbo.Plugins.s7o
                 return false;
             }
 
+            if (gemPaneVisible && _autoUrshiRewardGateStartedMs != 0 && !intentionalAutoTalk)
+            {
+                if (ShouldRecoverUnsafeAutoUrshiGemHandoff(now))
+                    return BeginUnsafeAutoUrshiHandoffRecovery(now);
+
+                CompleteAutoUrshiGemHandoff();
+                return true;
+            }
+
             if (intentionalAutoTalk)
             {
                 // Keep a clean pane under Auto Gem control. If loot remains, movement
@@ -2572,7 +2698,7 @@ namespace Turbo.Plugins.s7o
                 // guarded Urshi recovery instead of consuming the handoff permanently.
                 if (gemPaneVisible)
                 {
-                    if (ShouldRecoverUnsafeAutoUrshiGemHandoff())
+                    if (ShouldRecoverUnsafeAutoUrshiGemHandoff(now))
                         return BeginUnsafeAutoUrshiHandoffRecovery(now);
 
                     if (!_autoUrshiGemHandoffActive)
