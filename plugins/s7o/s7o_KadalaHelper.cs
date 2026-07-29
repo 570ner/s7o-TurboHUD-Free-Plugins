@@ -993,6 +993,7 @@ namespace Turbo.Plugins.s7o
 
         private float MeasureTextWidth(IFont font, string text)
         {
+            text = s7o_Localization.Display(text);
             if (font == null || string.IsNullOrEmpty(text))
                 return 0.0f;
 
@@ -1002,6 +1003,7 @@ namespace Turbo.Plugins.s7o
 
         private void DrawSelectedText(RectangleF rect, string text)
         {
+            text = s7o_Localization.Display(text);
             if (string.IsNullOrEmpty(text) || rect.Width <= 0 || rect.Height <= 0)
                 return;
 
@@ -1107,12 +1109,14 @@ namespace Turbo.Plugins.s7o
 
         private void DrawText(IFont font, string text, float x, float y)
         {
+            text = s7o_Localization.Display(text);
             if (font == null || string.IsNullOrEmpty(text)) return;
             font.DrawText(text, x, y);
         }
 
         private void DrawCenteredText(IFont font, RectangleF rect, string text)
         {
+            text = s7o_Localization.DisplayButton(text);
             if (font == null || string.IsNullOrEmpty(text) || rect.Width <= 0 || rect.Height <= 0) return;
             var layout = font.GetTextLayout(text);
             font.DrawText(layout, rect.X + (rect.Width - layout.Metrics.Width) * 0.5f, rect.Y + (rect.Height - layout.Metrics.Height) * 0.5f);
