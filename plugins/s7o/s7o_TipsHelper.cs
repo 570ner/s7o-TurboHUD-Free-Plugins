@@ -506,6 +506,7 @@ namespace Turbo.Plugins.s7o
         public override void Load(IController hud)
         {
             base.Load(hud);
+            s7o_Localization.Load();
             SetPlayerMarkerHotkey(PlayerMarkerHotkeyKey);
             RebuildResources(true);
             RegisterVisitedWaypointActFallbackElements();
@@ -4406,13 +4407,13 @@ namespace Turbo.Plugins.s7o
             if (!string.IsNullOrEmpty(item.FullNameLocalized)) return item.FullNameLocalized;
             if (item.SnoItem != null && !string.IsNullOrEmpty(item.SnoItem.NameEnglish)) return item.SnoItem.NameEnglish;
             if (!string.IsNullOrEmpty(item.FullNameEnglish)) return item.FullNameEnglish;
-            return "item";
+            return s7o_Localization.Get("item.unknown", "item");
         }
 
         private string BuildAlertText(string name, string label)
         {
             var suffix = string.IsNullOrEmpty(label) ? string.Empty : " (" + label + ")";
-            var text = (string.IsNullOrEmpty(name) ? "item" : name) + suffix;
+            var text = (string.IsNullOrEmpty(name) ? s7o_Localization.Get("item.unknown", "item") : name) + suffix;
             if (ItemAlertTextMaxCharacters <= 0 || text.Length <= ItemAlertTextMaxCharacters)
                 return text;
             if (ItemAlertTextMaxCharacters <= 3)
@@ -4442,23 +4443,74 @@ namespace Turbo.Plugins.s7o
             var guard = 0;
             while (type != null && guard++ < 8)
             {
-                var label = ExactLabel(type.Code);
-                if (!string.IsNullOrEmpty(label)) return label;
-                label = ExactLabel(type.NameEnglish);
-                if (!string.IsNullOrEmpty(label)) return label;
+                LabelRule rule = ExactRule(type.Code) ?? ExactRule(type.NameEnglish);
+                if (rule != null)
+                {
+                    string localizedTypeName = CleanLocalizedItemTypeName(type.NameLocalized);
+                    if (!string.IsNullOrEmpty(localizedTypeName))
+                        return localizedTypeName;
+
+                    return LocalizedRuleLabel(rule);
+                }
+
                 type = type.ParentSnoType;
             }
+
             return null;
         }
 
-        private string ExactLabel(string value)
+        private static string CleanLocalizedItemTypeName(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return null;
+
+            string text = value.Trim();
+            int firstTagLength = ItemTypeVariantTagLength(text, 0);
+            if (firstTagLength > 0)
+            {
+                int valueStart = firstTagLength;
+                while (valueStart < text.Length && char.IsWhiteSpace(text[valueStart]))
+                    valueStart++;
+
+                int nextTag = -1;
+                for (int i = valueStart; i < text.Length; i++)
+                {
+                    if (ItemTypeVariantTagLength(text, i) > 0)
+                    {
+                        nextTag = i;
+                        break;
+                    }
+                }
+
+                text = (nextTag >= 0
+                    ? text.Substring(valueStart, nextTag - valueStart)
+                    : text.Substring(valueStart)).Trim();
+            }
+
+            return string.IsNullOrWhiteSpace(text) ? null : text;
+        }
+
+        private static int ItemTypeVariantTagLength(string text, int index)
+        {
+            if (string.IsNullOrEmpty(text) || index < 0 || index + 3 >= text.Length ||
+                text[index] != '[' || text[index + 3] != ']')
+                return 0;
+
+            char first = char.ToUpperInvariant(text[index + 1]);
+            char second = char.ToUpperInvariant(text[index + 2]);
+            return (first == 'M' || first == 'F') && (second == 'P' || second == 'S') ? 4 : 0;
+        }
+
+        private LabelRule ExactRule(string value)
         {
             var key = Normalize(value);
             if (string.IsNullOrEmpty(key))
                 return null;
+
             foreach (var rule in ExactLabels)
                 if (rule.MatchesExact(key))
-                    return rule.Label;
+                    return rule;
+
             return null;
         }
 
@@ -4466,10 +4518,23 @@ namespace Turbo.Plugins.s7o
         {
             if (string.IsNullOrEmpty(text))
                 return null;
+
             foreach (var rule in SearchLabels)
                 if (rule.Contains(text))
-                    return rule.Label;
+                    return LocalizedRuleLabel(rule);
+
             return null;
+        }
+
+        private string LocalizedRuleLabel(LabelRule rule)
+        {
+            if (rule == null)
+                return null;
+
+            string key = "item.type." + ItemTypeTranslationToken(rule.Label);
+            return string.Equals(s7o_Localization.LanguageCode, "enUS", StringComparison.OrdinalIgnoreCase)
+                ? s7o_Localization.Get(key, rule.Label)
+                : s7o_Localization.GetSelected(key);
         }
 
         private string BuildItemSearchText(ISnoItem sno)
@@ -4501,23 +4566,55 @@ namespace Turbo.Plugins.s7o
         {
             switch (location)
             {
-                case ItemLocation.Head: return "Helm";
-                case ItemLocation.Torso: return "Chest";
-                case ItemLocation.Hands: return "Gloves";
-                case ItemLocation.Waist: return "Belt";
-                case ItemLocation.Feet: return "Boots";
-                case ItemLocation.Shoulders: return "Shoulders";
-                case ItemLocation.Legs: return "Pants";
-                case ItemLocation.Bracers: return "Bracers";
+                case ItemLocation.Head: return LocalizedLocationLabel("item.location.head", "Helm");
+                case ItemLocation.Torso: return LocalizedLocationLabel("item.location.torso", "Chest");
+                case ItemLocation.Hands: return LocalizedLocationLabel("item.location.hands", "Gloves");
+                case ItemLocation.Waist: return LocalizedLocationLabel("item.location.waist", "Belt");
+                case ItemLocation.Feet: return LocalizedLocationLabel("item.location.feet", "Boots");
+                case ItemLocation.Shoulders: return LocalizedLocationLabel("item.location.shoulders", "Shoulders");
+                case ItemLocation.Legs: return LocalizedLocationLabel("item.location.legs", "Pants");
+                case ItemLocation.Bracers: return LocalizedLocationLabel("item.location.bracers", "Bracers");
                 case ItemLocation.LeftRing:
-                case ItemLocation.RightRing: return "Ring";
-                case ItemLocation.Neck: return "Amulet";
-                case ItemLocation.PetSpecial: return "Follower Token";
-                case ItemLocation.PetNeck: return "Follower Amulet";
+                case ItemLocation.RightRing: return LocalizedLocationLabel("item.location.ring", "Ring");
+                case ItemLocation.Neck: return LocalizedLocationLabel("item.location.neck", "Amulet");
+                case ItemLocation.PetSpecial: return LocalizedLocationLabel("item.location.follower_token", "Follower Token");
+                case ItemLocation.PetNeck: return LocalizedLocationLabel("item.location.follower_amulet", "Follower Amulet");
                 case ItemLocation.PetRightRing:
-                case ItemLocation.PetLeftRing: return "Follower Ring";
+                case ItemLocation.PetLeftRing: return LocalizedLocationLabel("item.location.follower_ring", "Follower Ring");
                 default: return null;
             }
+        }
+
+        private string LocalizedLocationLabel(string key, string english)
+        {
+            return string.Equals(s7o_Localization.LanguageCode, "enUS", StringComparison.OrdinalIgnoreCase)
+                ? s7o_Localization.Get(key, english)
+                : s7o_Localization.GetSelected(key);
+        }
+
+        private static string ItemTypeTranslationToken(string label)
+        {
+            if (string.IsNullOrEmpty(label))
+                return string.Empty;
+
+            var token = new System.Text.StringBuilder(label.Length);
+            bool separator = false;
+            for (int i = 0; i < label.Length; i++)
+            {
+                char c = label[i];
+                if (char.IsLetterOrDigit(c))
+                {
+                    if (separator && token.Length > 0) token.Append('_');
+                    token.Append(char.ToLowerInvariant(c));
+                    separator = false;
+                }
+                else
+                {
+                    separator = true;
+                }
+            }
+
+            return token.ToString();
         }
 
         private void DrawOutlineTriangle(float x, float y, float radius, float angle, IBrush brush, IBrush outline)
@@ -6341,11 +6438,11 @@ namespace Turbo.Plugins.s7o
             if (missing.Count == 0)
             {
                 status.Ready = true;
-                status.Lines.Add("READY");
+                status.Lines.Add(s7o_Localization.Get("overlay.rift_info.ready", "READY"));
             }
             else
             {
-                status.Lines.Add("MISSING:");
+                status.Lines.Add(s7o_Localization.Get("overlay.rift_info.missing", "MISSING:"));
                 status.Lines.AddRange(missing);
             }
             return status;
@@ -6509,15 +6606,15 @@ namespace Turbo.Plugins.s7o
         private string BuildPoolLocationLabel(string prefix, PoolSpot spot, bool uncertain)
         {
             if (spot == null)
-                return "A? - pool";
+                return s7o_Localization.Display("A? - pool");
 
             var name = ResolvePoolWaypointDisplayName(spot.AreaName);
             if (string.IsNullOrEmpty(name))
-                name = "current area";
+                name = s7o_Localization.Display("current area");
             var actNumber = GetActNumber(spot.Act);
             if (actNumber <= 0)
                 actNumber = Math.Max(1, Hud.Game.CurrentAct);
-            return "A" + actNumber.ToString() + " - " + name + (uncertain ? " (?)" : string.Empty);
+            return s7o_Localization.Display("A" + actNumber.ToString() + " - " + name + (uncertain ? " (?)" : string.Empty));
         }
 
         private static string ResolvePoolWaypointDisplayName(string name)
