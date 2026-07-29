@@ -954,7 +954,7 @@ namespace Turbo.Plugins.s7o
             if (sc == null)
                 return;
 
-            string text = profile.LabelText ?? profile.Code;
+            string text = s7o_Localization.Display(profile.LabelText ?? profile.Code);
             var layout = profile.LabelFont.GetTextLayout(text);
             profile.LabelFont.DrawText(
                 layout,
@@ -1008,7 +1008,8 @@ namespace Turbo.Plugins.s7o
                 && profile.LabelText != null
                 && profile.LabelText.Length > 0)
             {
-                var descLayout = profile.DescriptorFont.GetTextLayout(profile.LabelText);
+                string descriptor = s7o_Localization.Display(profile.LabelText);
+                var descLayout = profile.DescriptorFont.GetTextLayout(descriptor);
                 profile.DescriptorFont.DrawText(
                     descLayout,
                     sc.X - descLayout.Metrics.Width  * 0.5f,
