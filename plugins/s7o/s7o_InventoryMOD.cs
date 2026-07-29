@@ -152,6 +152,7 @@ namespace Turbo.Plugins.s7o
         private DropAllStage _dropAllStage = DropAllStage.Idle;
         private bool _dropAllRunUsesFilters;
         private bool _geometryDrawFailed;
+        private bool _storagePanelTwoRows;
 
         private string _settingsPath;
 
@@ -2468,6 +2469,7 @@ namespace Turbo.Plugins.s7o
             if (PreferredItemTab > maxTab)
                 PreferredItemTab = maxTab;
 
+            _storagePanelTwoRows = false;
             var panel = GetStoragePanelRect();
             if (panel.Width <= 0 || panel.Height <= 0)
                 return false;
@@ -2492,13 +2494,42 @@ namespace Turbo.Plugins.s7o
             float primalW = GetToggleWidth("Primals");
             float ancientW = GetToggleWidth("Ancients");
             float toggleTotalW = stackW + toggleGap + legendaryGemW + toggleGap + primalW + toggleGap + ancientW;
-            float toggleX = centerX - toggleTotalW * 0.5f;
-            _stackablesRect = new RectangleF(toggleX, toggleY, stackW, SmallButtonHeight);
-            _legendaryGemsRect = new RectangleF(_stackablesRect.Right + toggleGap, toggleY, legendaryGemW, SmallButtonHeight);
-            _primalsRect = new RectangleF(_legendaryGemsRect.Right + toggleGap, toggleY, primalW, SmallButtonHeight);
-            _ancientsRect = new RectangleF(_primalsRect.Right + toggleGap, toggleY, ancientW, SmallButtonHeight);
+            float availableToggleW = Math.Max(1.0f, panel.Width - 20.0f);
 
-            float tabY = panel.Y + 52.0f;
+            if (toggleTotalW > availableToggleW)
+            {
+                toggleGap = 6.0f;
+                toggleTotalW = stackW + toggleGap + legendaryGemW + toggleGap + primalW + toggleGap + ancientW;
+            }
+
+            float tabY;
+            if (toggleTotalW <= availableToggleW)
+            {
+                float toggleX = centerX - toggleTotalW * 0.5f;
+                _stackablesRect = new RectangleF(toggleX, toggleY, stackW, SmallButtonHeight);
+                _legendaryGemsRect = new RectangleF(_stackablesRect.Right + toggleGap, toggleY, legendaryGemW, SmallButtonHeight);
+                _primalsRect = new RectangleF(_legendaryGemsRect.Right + toggleGap, toggleY, primalW, SmallButtonHeight);
+                _ancientsRect = new RectangleF(_primalsRect.Right + toggleGap, toggleY, ancientW, SmallButtonHeight);
+                tabY = panel.Y + 52.0f;
+            }
+            else
+            {
+                _storagePanelTwoRows = true;
+                panel = GetStoragePanelRect();
+                centerX = panel.X + panel.Width * 0.5f;
+
+                const float rowGap = 10.0f;
+                float firstRowW = stackW + rowGap + legendaryGemW;
+                float secondRowW = primalW + rowGap + ancientW;
+                float firstX = centerX - firstRowW * 0.5f;
+                float secondX = centerX - secondRowW * 0.5f;
+
+                _stackablesRect = new RectangleF(firstX, toggleY, stackW, SmallButtonHeight);
+                _legendaryGemsRect = new RectangleF(_stackablesRect.Right + rowGap, toggleY, legendaryGemW, SmallButtonHeight);
+                _primalsRect = new RectangleF(secondX, toggleY + 19.0f, primalW, SmallButtonHeight);
+                _ancientsRect = new RectangleF(_primalsRect.Right + rowGap, toggleY + 19.0f, ancientW, SmallButtonHeight);
+                tabY = panel.Y + 70.0f;
+            }
             float tabLabelW = MeasureTextWidth(SmallFont, "Preferred item tab:");
             float tabGap = 11.0f;
             float tabTotalW = tabLabelW + tabGap + TabControlWidth;
@@ -2511,7 +2542,7 @@ namespace Turbo.Plugins.s7o
             _tabValueRect = new RectangleF(tabX + side, tabY, Math.Max(1.0f, TabControlWidth - side * 2.0f), SmallButtonHeight);
             _tabPlusRect = new RectangleF(_tabValueRect.Right, tabY, side, SmallButtonHeight);
 
-            _statusY = panel.Y + 69.0f;
+            _statusY = panel.Y + (_storagePanelTwoRows ? 89.0f : 69.0f);
             return true;
         }
 
@@ -2532,7 +2563,9 @@ namespace Turbo.Plugins.s7o
                 x = left;
 
             float y = r.Top + PanelTopOffset;
-            float h = Math.Max(82.0f, PanelHeight);
+            float h = _storagePanelTwoRows
+                ? Math.Max(106.0f, PanelHeight + 20.0f)
+                : Math.Max(82.0f, PanelHeight);
             return new RectangleF(x, y, w, h);
         }
 
@@ -2616,6 +2649,7 @@ namespace Turbo.Plugins.s7o
 
         private void DrawCenteredText(IFont font, RectangleF rect, string text)
         {
+            text = s7o_Localization.DisplayButton(text);
             if (font == null || string.IsNullOrEmpty(text))
                 return;
 
@@ -2717,6 +2751,7 @@ namespace Turbo.Plugins.s7o
 
         private float MeasureTextWidth(IFont font, string text)
         {
+            text = s7o_Localization.Display(text);
             if (font == null || string.IsNullOrEmpty(text))
                 return 0.0f;
 
@@ -2726,6 +2761,7 @@ namespace Turbo.Plugins.s7o
 
         private void DrawText(IFont font, string text, float x, float y)
         {
+            text = s7o_Localization.Display(text);
             if (font == null || string.IsNullOrEmpty(text))
                 return;
 
