@@ -685,6 +685,7 @@ namespace Turbo.Plugins.s7o
                         buildName + "\"";
             }
 
+            label = s7o_Localization.Display(label);
             if (_smallFont != null)
             {
                 _smallFont.DrawText(
@@ -723,7 +724,7 @@ namespace Turbo.Plugins.s7o
                         cursorY));
             }
 
-            string status = GetStatus();
+            string status = s7o_Localization.Display(GetStatus());
             if (!string.IsNullOrEmpty(status))
             {
                 if (_instructionFont != null)
@@ -742,6 +743,7 @@ namespace Turbo.Plugins.s7o
                         paragonEnabled,
                         autoCastEnabled,
                         out setupSaved);
+                setupState = s7o_Localization.Display(setupState);
                 IFont stateFont = setupSaved
                     ? _profileSavedFont
                     : _profileMissingFont;
@@ -4891,10 +4893,11 @@ namespace Turbo.Plugins.s7o
             float right = Math.Max(coreToggle.Right, vitalityToggle.Right);
             float top = Math.Min(coreToggle.Top, vitalityToggle.Top);
             float x = left;
+            string promptText = s7o_Localization.Display(OverflowPromptText);
 
             try
             {
-                var layout = _instructionFont.GetTextLayout(OverflowPromptText);
+                var layout = _instructionFont.GetTextLayout(promptText);
                 if (layout != null)
                     x = left + Math.Max(0.0f, (right - left - layout.Metrics.Width) * 0.5f);
             }
@@ -4903,7 +4906,7 @@ namespace Turbo.Plugins.s7o
                 x = left;
             }
 
-            _instructionFont.DrawText(OverflowPromptText, x, top - 19.0f);
+            _instructionFont.DrawText(promptText, x, top - 19.0f);
         }
 
         private System.Drawing.RectangleF GetArmoryHeroToggleRect()
@@ -4998,6 +5001,7 @@ namespace Turbo.Plugins.s7o
 
             try
             {
+                labelText = s7o_Localization.Display(labelText);
                 var layout =
                     _smallFont.GetTextLayout(
                         labelText ?? string.Empty);
@@ -5071,8 +5075,8 @@ namespace Turbo.Plugins.s7o
             if (_smallFont == null)
                 return;
 
-            string text =
-                enabled ? "ON" : "OFF";
+            string text = s7o_Localization.DisplayButton(
+                enabled ? "ON" : "OFF");
 
             try
             {
@@ -5202,7 +5206,7 @@ namespace Turbo.Plugins.s7o
             if (_smallFont != null)
             {
                 _smallFont.DrawText(
-                    label,
+                    s7o_Localization.DisplayButton(label),
                     indicator.Right + 7.0f,
                     rect.Top + 5.0f);
             }
@@ -7168,7 +7172,7 @@ namespace Turbo.Plugins.s7o
 
         private void DrawGlobalWarning()
         {
-            string warning = GetWarning();
+            string warning = s7o_Localization.Display(GetWarning());
             if (string.IsNullOrEmpty(warning) ||
                 _warningFont == null ||
                 _warningOutlineFont == null ||
