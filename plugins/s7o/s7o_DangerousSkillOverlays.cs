@@ -1856,7 +1856,7 @@ namespace Turbo.Plugins.s7o
             }
             else
             {
-                InWormholeDecorator.Paint(layer, actor, actor.FloorCoordinate, InWormholeText);
+                InWormholeDecorator.Paint(layer, actor, actor.FloorCoordinate, string.Equals(InWormholeText, "In Wormhole", StringComparison.Ordinal) ? s7o_Localization.Get("overlay.dangerous.in_wormhole", "In Wormhole") : s7o_Localization.Display(InWormholeText));
             }
         }
 
