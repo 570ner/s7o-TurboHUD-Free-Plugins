@@ -1,3 +1,5 @@
+// s7o HUD MENU - FREEHUD in-game manager for plugin controls,
+// macros, visual helpers, hotkeys, and persistent global plugin states.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -205,6 +207,7 @@ namespace Turbo.Plugins.s7o
         private readonly List<FavoriteEntry> _favorites = new List<FavoriteEntry>();
         private readonly List<PluginRow> _plugins = new List<PluginRow>();
         private readonly Dictionary<string, RectangleF> _lastHitRects = new Dictionary<string, RectangleF>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, string> _localizedPowerNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         private readonly MenuLayout _layout = new MenuLayout();
         private readonly List<PluginRow> _activeRows = new List<PluginRow>();
@@ -279,17 +282,16 @@ namespace Turbo.Plugins.s7o
 
         private static readonly string[] HudLanguageNames =
         {
-            "German", "English", "Spanish (Europe)", "Spanish (Latin America)",
-            "French", "Italian", "Korean", "Polish", "Portuguese (Brazil)",
-            "Portuguese (Portugal)", "Russian", "Chinese (Traditional)",
-            "Chinese (Simplified)"
+            "Deutsch", "English", "Español (Europa)", "Español (Latinoamérica)",
+            "Français", "Italiano", "한국어", "Polski", "Português (Brasil)",
+            "Português (Portugal)", "Русский", "繁體中文", "简体中文"
         };
 
         private static readonly string[] HudLanguageButtonNames =
         {
-            "GERMAN", "ENGLISH", "SPANISH EU", "SPANISH MX", "FRENCH", "ITALIAN",
-            "KOREAN", "POLISH", "PORTUGUESE BR", "PORTUGUESE PT", "RUSSIAN",
-            "CHINESE TW", "CHINESE CN"
+            "DEUTSCH", "ENGLISH", "ESPAÑOL EU", "ESPAÑOL MX", "FRANÇAIS", "ITALIANO",
+            "한국어", "POLSKI", "PORTUGUÊS BR", "PORTUGUÊS PT", "РУССКИЙ",
+            "繁體中文", "简体中文"
         };
 
         // ── VISUAL / movable player Convention of Elements overlay ────────────────────
@@ -945,6 +947,58 @@ namespace Turbo.Plugins.s7o
             "Zei's Stone of Vengeance",
         };
 
+        private string GetAutoGemDisplayName(int index)
+        {
+            if (index < 0 || index >= AutoGemNames.Length)
+                return string.Empty;
+
+            try
+            {
+                ISnoItem snoItem = null;
+                switch (index)
+                {
+                    case 0:  snoItem = Hud.Sno.SnoItems.Unique_Gem_001_x1; break;
+                    case 1:  snoItem = Hud.Sno.SnoItems.Unique_Gem_018_x1; break;
+                    case 2:  snoItem = Hud.Sno.SnoItems.Unique_Gem_002_x1; break;
+                    case 3:  snoItem = Hud.Sno.SnoItems.Unique_Gem_014_x1; break;
+                    case 4:  snoItem = Hud.Sno.SnoItems.Unique_Gem_020_x1; break;
+                    case 5:  snoItem = Hud.Sno.SnoItems.Unique_Gem_010_x1; break;
+                    case 6:  snoItem = Hud.Sno.SnoItems.Unique_Gem_016_x1; break;
+                    case 7:  snoItem = Hud.Sno.SnoItems.Unique_Gem_003_x1; break;
+                    case 8:  snoItem = Hud.Sno.SnoItems.Unique_Gem_005_x1; break;
+                    case 9:  snoItem = Hud.Sno.SnoItems.Unique_Gem_008_x1; break;
+                    case 10: snoItem = Hud.Sno.SnoItems.Unique_Gem_021_x1; break;
+                    case 11: snoItem = Hud.Sno.SnoItems.Unique_Gem_009_x1; break;
+                    case 12: snoItem = Hud.Sno.SnoItems.Unique_Gem_023_x1; break;
+                    case 13: snoItem = Hud.Sno.SnoItems.Unique_Gem_007_x1; break;
+                    case 14: snoItem = Hud.Sno.SnoItems.Unique_Gem_017_x1; break;
+                    case 15: snoItem = Hud.Sno.SnoItems.Unique_Gem_011_x1; break;
+                    case 16: snoItem = Hud.Sno.SnoItems.Unique_Gem_019_x1; break;
+                    case 17: snoItem = Hud.Sno.SnoItems.Unique_Gem_006_x1; break;
+                    case 18: snoItem = Hud.Sno.SnoItems.Unique_Gem_013_x1; break;
+                    case 19: snoItem = Hud.Sno.SnoItems.Unique_Gem_015_x1; break;
+                    case 20: snoItem = Hud.Sno.SnoItems.Unique_Gem_004_x1; break;
+                    case 21: snoItem = Hud.Sno.SnoItems.P73_Unique_Gem_150; break;
+                    case 22: snoItem = Hud.Sno.SnoItems.Unique_Gem_012_x1; break;
+                }
+
+                if (snoItem != null && !string.IsNullOrWhiteSpace(snoItem.NameLocalized))
+                    return snoItem.NameLocalized;
+            }
+            catch { }
+
+            return DisplayText(AutoGemNames[index]);
+        }
+
+        private string GetAutoGemDisplayName(string englishName)
+        {
+            for (int i = 0; i < AutoGemNames.Length; i++)
+                if (string.Equals(AutoGemNames[i], englishName, StringComparison.OrdinalIgnoreCase))
+                    return GetAutoGemDisplayName(i);
+
+            return DisplayText(englishName ?? string.Empty);
+        }
+
         private bool _profileOpenedByHudMenu;
         private bool _profileWasVisibleBeforeMenu;
         private bool _profileBackgroundActiveForMenu;
@@ -1018,6 +1072,7 @@ namespace Turbo.Plugins.s7o
         private IFont _fTitle, _fLabel, _fSection, _fText, _fSmall, _fButton, _fButtonActive;
         private IFont _fSmallShadow, _fButtonShadow;
         private IFont _fButtonLarge, _fButtonLargeActive, _fButtonLargeShadow;
+        private IFont _fButtonTiny, _fButtonTinyActive, _fButtonTinyShadow;
         private IFont[] _fAutoLootToastGreenFade, _fAutoLootToastRedFade, _fAutoLootToastShadowFade;
         private IFont[] _fAutoLootToastGreenPop, _fAutoLootToastRedPop, _fAutoLootToastShadowPop;
         // Larger outlined row fonts for TOGGLES detail rows only.
@@ -1031,9 +1086,50 @@ namespace Turbo.Plugins.s7o
             Order = 95000;
         }
 
+        private static string T(string key, string fallback)
+        {
+            return s7o_Localization.Get(key, fallback);
+        }
+
+        private static string TF(string key, string fallback, params object[] args)
+        {
+            return s7o_Localization.Format(key, fallback, args);
+        }
+
+        private static string DisplayText(string englishText)
+        {
+            return s7o_Localization.Display(englishText);
+        }
+
+        private void BuildLocalizedPowerNameCache()
+        {
+            _localizedPowerNames.Clear();
+
+            try
+            {
+                if (Hud == null || Hud.Sno == null || Hud.Sno.AllSnoPower == null)
+                    return;
+
+                foreach (ISnoPower power in Hud.Sno.AllSnoPower)
+                {
+                    if (power == null || string.IsNullOrWhiteSpace(power.NameEnglish) || string.IsNullOrWhiteSpace(power.NameLocalized))
+                        continue;
+
+                    if (!_localizedPowerNames.ContainsKey(power.NameEnglish))
+                        _localizedPowerNames.Add(power.NameEnglish, power.NameLocalized);
+                }
+            }
+            catch
+            {
+                _localizedPowerNames.Clear();
+            }
+        }
+
         public override void Load(IController hud)
         {
             base.Load(hud);
+            s7o_Localization.Load();
+            BuildLocalizedPowerNameCache();
             ResetTurboHudLogsDirectory();
             LoadSettings();
             RefreshHudLanguageAvailability();
@@ -2982,7 +3078,7 @@ namespace Turbo.Plugins.s7o
                             s7o_AutoGemUpgradeState.AutoGemSpecificName = AutoGemNames[idx];
                             s7o_AutoGemUpgradeState.AutoGemMode = 4;
                             _autoGemSpecificExpanded = false;
-                            _status = "AUTO GEM SPECIFIC: " + AutoGemNames[idx];
+                            _status = "AUTO GEM SPECIFIC: " + GetAutoGemDisplayName(idx);
                             SaveAutoGemState();
                         }
                     }
@@ -5549,7 +5645,7 @@ namespace Turbo.Plugins.s7o
             _bTitle.DrawRectangle(l.Title.Left, l.Title.Top, l.Title.Width, l.Title.Height);
             _bFrameBorder.DrawRectangle(l.Title.Left, l.Title.Top, l.Title.Width, l.Title.Height);
 
-            _fTitle.DrawText("s7o HUD Manager", l.Window.Left + 18f, l.Window.Top + 14f);
+            _fTitle.DrawText(DisplayText("s7o HUD Manager"), l.Window.Left + 18f, l.Window.Top + 14f);
 
             DrawCenteredText(_fSmall, "HOTKEY =", l.HotkeyLabel);
             DrawGlossButton(l.HotkeyButton, _capturingHotkey ? "PRESS..." : MenuHotkey.ToString(), _capturingHotkey, false, true);
@@ -5565,7 +5661,7 @@ namespace Turbo.Plugins.s7o
 
             if (_editMode)
             {
-                _fSmall.DrawText("MOVE MODE: drag the title bar or menu dot; click MOVE again or close the menu to finish.", l.Window.Left + 20f, l.Window.Bottom - 18f);
+                _fSmall.DrawText(DisplayText("MOVE MODE: drag the title bar or menu dot; click MOVE again or close the menu to finish."), l.Window.Left + 20f, l.Window.Bottom - 18f);
             }
         }
 
@@ -5577,7 +5673,7 @@ namespace Turbo.Plugins.s7o
             _bPaneBorder.DrawRectangle(l.StatusBar.Left, l.StatusBar.Top, l.StatusBar.Width, l.StatusBar.Height);
 
             _fSmall.DrawText(
-                "Status: " + Trim(_status, 120),
+                TF("common.status", "Status: {0}", Trim(DisplayText(_status), 120)),
                 l.StatusBar.Left + 8f,
                 l.StatusBar.Top + 6f);
         }
@@ -5598,11 +5694,11 @@ namespace Turbo.Plugins.s7o
             DrawSquareCheck(check, _globalTtsEnabled);
             RegisterGlobalHit("global:tts-toggle", new RectangleF(x, l.TopControlBar.Top, 130f, l.TopControlBar.Height));
 
-            _fText.DrawText("Global TTS", x + 22f, cy - 8f);
+            _fText.DrawText(DisplayText("Global TTS"), x + 22f, cy - 8f);
 
             x += 140f;
 
-            _fText.DrawText("Volume", x, cy - 8f);
+            _fText.DrawText(DisplayText("Volume"), x, cy - 8f);
             x += 68f;
 
             RectangleF minus = new RectangleF(x, btnTop, 28f, btnH);
@@ -5637,7 +5733,7 @@ namespace Turbo.Plugins.s7o
 
             float labelLeft = _globalTtsSliderTrack.Right + 12f;
             if (labelLeft < l.TopControlBar.Right - 10f)
-                _fSmall.DrawText("TTS speech volume", labelLeft, cy - 7f);
+                _fSmall.DrawText(DisplayText("TTS speech volume"), labelLeft, cy - 7f);
         }
 
         private RectangleF GetSimpleSliderThumb(RectangleF track, int value, int min, int max)
@@ -5950,8 +6046,8 @@ namespace Turbo.Plugins.s7o
             float y = r.Top + 7f;
             float rowH = 26f;
 
-            _fSection.DrawText("AutoSnap", r.Left + pad, y + 4f);
-            _fSmall.DrawText("Experimental auto targeting for selected skill slots.", r.Left + 118f, y + 10f);
+            _fSection.DrawText(DisplayText("AutoSnap"), r.Left + pad, y + 4f);
+            _fSmall.DrawText(DisplayText("Experimental auto targeting for selected skill slots."), r.Left + 118f, y + 10f);
 
             RectangleF expand = new RectangleF(r.Right - 34f, y + 4f, 24f, 24f);
             DrawGlossButton(expand, _autoSnapExpanded ? "-" : "+", _autoSnapExpanded, false, true);
@@ -6015,7 +6111,7 @@ namespace Turbo.Plugins.s7o
             DrawSquareCheck(restore, _autoSnapRestoreCursor);
             RegisterMainHit("autosnap:restore", new RectangleF(restore.Left, row.Top, 140f, row.Height));
 
-            _fText.DrawText("Cursor Restore", restore.Right + 6f, row.Top + 6f);
+            _fText.DrawText(DisplayText("Cursor Restore"), restore.Right + 6f, row.Top + 6f);
         }
 
         private void DrawAutoSnapBehaviorRow(RectangleF row)
@@ -6026,14 +6122,14 @@ namespace Turbo.Plugins.s7o
             RectangleF jug = new RectangleF(x, y, 13f, 13f);
             DrawSquareCheck(jug, _autoSnapIgnoreJuggernauts);
             RegisterMainHit("autosnap:ignore-jug", new RectangleF(jug.Left, row.Top, 160f, row.Height));
-            _fText.DrawText("Ignore Juggernauts", jug.Right + 6f, row.Top + 6f);
+            _fText.DrawText(DisplayText("Ignore Juggernauts"), jug.Right + 6f, row.Top + 6f);
 
             x += 180f;
 
             RectangleF min = new RectangleF(x, y, 13f, 13f);
             DrawSquareCheck(min, _autoSnapIgnoreMinions);
             RegisterMainHit("autosnap:ignore-minion", new RectangleF(min.Left, row.Top, 140f, row.Height));
-            _fText.DrawText("Ignore Minions", min.Right + 6f, row.Top + 6f);
+            _fText.DrawText(DisplayText("Ignore Minions"), min.Right + 6f, row.Top + 6f);
         }
 
         private void DrawAutoSnapHotkeyToggleRow(RectangleF row)
@@ -6044,14 +6140,14 @@ namespace Turbo.Plugins.s7o
             RectangleF use = new RectangleF(x, y, 13f, 13f);
             DrawSquareCheck(use, _asHotkeysEnabled);
             RegisterMainHit("autosnap:hotkeys-enabled", new RectangleF(use.Left, row.Top, 105f, row.Height));
-            _fText.DrawText("Use Hotkeys", use.Right + 6f, row.Top + 6f);
+            _fText.DrawText(DisplayText("Use Hotkeys"), use.Right + 6f, row.Top + 6f);
 
             x += 130f;
 
             RectangleF only = new RectangleF(x, y, 13f, 13f);
             DrawSquareCheck(only, _asHotkeysOnly);
             RegisterMainHit("autosnap:hotkeys-only", new RectangleF(only.Left, row.Top, 105f, row.Height));
-            _fText.DrawText("Hotkey Only", only.Right + 6f, row.Top + 6f);
+            _fText.DrawText(DisplayText("Hotkey Only"), only.Right + 6f, row.Top + 6f);
 
             RectangleF expand = new RectangleF(row.Right - 26f, row.Top + 3f, 22f, 20f);
             DrawGlossButton(expand, _autoSnapHotkeysExpanded ? "-" : "+", _autoSnapHotkeysExpanded, false, true);
@@ -6070,7 +6166,7 @@ namespace Turbo.Plugins.s7o
                 RectangleF labelR = new RectangleF(x, row.Top + 3f, cellW, 16f);
                 RectangleF btnR = new RectangleF(x, row.Top + 21f, cellW, 20f);
 
-                _fSmall.DrawText(_autoSnapLabels[i], labelR.Left + 2f, labelR.Top);
+                _fSmall.DrawText(DisplayText(_autoSnapLabels[i]), labelR.Left + 2f, labelR.Top);
                 DrawGlossButton(btnR, _asHotkeyCaptureActive[i] ? "..." : _asHotkeyLabels[i], _asHotkeyCaptureActive[i], false, true);
                 RegisterMainHit("autosnap:hotkey:" + i.ToString(CultureInfo.InvariantCulture), btnR);
 
@@ -6107,7 +6203,7 @@ namespace Turbo.Plugins.s7o
             RectangleF stand = new RectangleF(x, y + 4f, 13f, 13f);
             DrawSquareCheck(stand, _autoSnapLeftClickForceStandStill);
             RegisterMainHit("autosnap:left-stand", new RectangleF(stand.Left, row.Top, row.Right - stand.Left, row.Height));
-            _fText.DrawText("Force Stand Still (L only)", stand.Right + 6f, row.Top + 6f);
+            _fText.DrawText(DisplayText("Force Stand Still (L only)"), stand.Right + 6f, row.Top + 6f);
         }
 
         private void DrawMainStepper(ref float x, float y, float w, float h, string label, string minusAction, string plusAction)
@@ -6138,28 +6234,33 @@ namespace Turbo.Plugins.s7o
             float buttonH = 26f;
             float y = r.Top + 8f;
 
-            string modeText = AutoGemModeText(s7o_AutoGemUpgradeState.AutoGemMode);
+            string modeText = s7o_Localization.DisplayButton(AutoGemModeText(s7o_AutoGemUpgradeState.AutoGemMode));
             string tpTimingLabel =
-                AutoGemAnchorText(s7o_AutoGemUpgradeState.GetConfiguredPortalAnchorRemaining())
+                s7o_Localization.DisplayButton(AutoGemAnchorText(s7o_AutoGemUpgradeState.GetConfiguredPortalAnchorRemaining()))
                 + "+"
                 + s7o_AutoGemUpgradeState.AutoGemTPDelayMs.ToString(CultureInfo.InvariantCulture)
-                + "ms"
-                + (s7o_AutoGemUpgradeState.AutoGemTPLagBoost ? " LAG" : string.Empty);
+                + T("hud.ui.milliseconds", "ms")
+                + (s7o_AutoGemUpgradeState.AutoGemTPLagBoost ? " " + s7o_Localization.DisplayButton("LAG") : string.Empty);
 
             var enableRect = new RectangleF(r.Left + pad, y + (headerH - 16f) * 0.5f, 16f, 16f);
             DrawSquareCheck(enableRect, s7o_AutoGemUpgradeState.AutoGemUpgradeEnabled);
             RegisterMainHit("autogem:toggle", enableRect);
 
-            _fSection.DrawText("Auto Gem Upgrade", r.Left + pad + 24f, y + 5f);
-
-            string status =
-                (s7o_AutoGemUpgradeState.AutoGemUpgradeEnabled ? "Enabled" : "Disabled")
-                + "   Mode: " + modeText
-                + "   TP: " + tpTimingLabel;
-
-            _fLabel.DrawText(Trim(status, 100), r.Left + 210f, y + 7f);
-
             var expandRect = new RectangleF(r.Right - 36f, y + 4f, 26f, buttonH);
+            RectangleF titleRect = new RectangleF(r.Left + pad + 24f, y + 2f, 174f, headerH - 4f);
+            RectangleF statusRect = new RectangleF(titleRect.Right + 8f, y + 2f, Math.Max(40f, expandRect.Left - titleRect.Right - 16f), headerH - 4f);
+
+            DrawLeftFittedText(_fSection, _fText, DisplayText("Auto Gem Upgrade"), titleRect);
+
+            string status = TF(
+                "hud.main.auto_gem.status",
+                "{0}  Mode: {1}  TP: {2}",
+                DisplayText(s7o_AutoGemUpgradeState.AutoGemUpgradeEnabled ? "Enabled" : "Disabled"),
+                modeText,
+                tpTimingLabel);
+
+            DrawLeftFittedText(_fLabel, _fSmall, status, statusRect);
+
             DrawGlossButton(expandRect, _autoGemExpanded ? "-" : "+", _autoGemExpanded, false, true);
             RegisterMainHit("autogem:expand", expandRect);
 
@@ -6193,11 +6294,14 @@ namespace Turbo.Plugins.s7o
 
             var anchorRow = new RectangleF(rowX, y, rowW, rowH);
             _bRowAlt.DrawRectangle(anchorRow.Left, anchorRow.Top, anchorRow.Width, anchorRow.Height);
-            _fText.DrawText("TP Anchor", anchorRow.Left + 8f, anchorRow.Top + 8f);
-
             int anchor = s7o_AutoGemUpgradeState.GetConfiguredPortalAnchorRemaining();
 
             var anchor3 = new RectangleF(anchorRow.Left + 100f, anchorRow.Top + 4f, 80f, buttonH);
+            DrawLeftFittedText(
+                _fText,
+                _fSmall,
+                DisplayText("TP Anchor"),
+                new RectangleF(anchorRow.Left + 8f, anchorRow.Top + 3f, Math.Max(20f, anchor3.Left - anchorRow.Left - 16f), rowH - 6f));
             var anchor4 = new RectangleF(anchor3.Right + 6f, anchorRow.Top + 4f, 80f, buttonH);
 
             DrawGlossButton(anchor3, "3RD", anchor == 3, false, false);
@@ -6205,17 +6309,24 @@ namespace Turbo.Plugins.s7o
             RegisterMainHit("autogem:anchor3", anchor3);
             RegisterMainHit("autogem:anchor4", anchor4);
 
-            _fSmall.DrawText("Timer starts when that upgrade begins", anchor4.Right + 10f, anchorRow.Top + 10f);
+            DrawLeftFittedText(
+                _fSmall,
+                _fButtonTiny,
+                DisplayText("Timer starts when that upgrade begins"),
+                new RectangleF(anchor4.Right + 10f, anchorRow.Top + 3f, Math.Max(20f, anchorRow.Right - anchor4.Right - 18f), rowH - 6f));
 
             y += rowH + rowGap;
 
             var delayRow = new RectangleF(rowX, y, rowW, rowH);
             _bRow.DrawRectangle(delayRow.Left, delayRow.Top, delayRow.Width, delayRow.Height);
-            _fText.DrawText("TP Delay", delayRow.Left + 8f, delayRow.Top + 8f);
-
             int delay = s7o_AutoGemUpgradeState.AutoGemTPDelayMs;
 
             var delayMinus = new RectangleF(delayRow.Left + 100f, delayRow.Top + 4f, 28f, buttonH);
+            DrawLeftFittedText(
+                _fText,
+                _fSmall,
+                DisplayText("TP Delay"),
+                new RectangleF(delayRow.Left + 8f, delayRow.Top + 3f, Math.Max(20f, delayMinus.Left - delayRow.Left - 16f), rowH - 6f));
             var delayValue = new RectangleF(delayMinus.Right + 6f, delayRow.Top + 4f, 82f, buttonH);
             var delayPlus  = new RectangleF(delayValue.Right + 6f, delayRow.Top + 4f, 28f, buttonH);
             var lagBtn     = new RectangleF(delayPlus.Right + 6f,  delayRow.Top + 4f, 54f, buttonH);
@@ -6229,14 +6340,16 @@ namespace Turbo.Plugins.s7o
             RegisterMainHit("autogem:delay+", delayPlus);
             RegisterMainHit("autogem:lag", lagBtn);
 
-            _fSmall.DrawText("0-1500ms after anchor; default = 3RD + 1000ms", lagBtn.Right + 10f, delayRow.Top + 10f);
+            DrawLeftFittedText(
+                _fSmall,
+                _fButtonTiny,
+                DisplayText("0-1500ms after anchor; default = 3RD + 1000ms"),
+                new RectangleF(lagBtn.Right + 10f, delayRow.Top + 3f, Math.Max(20f, delayRow.Right - lagBtn.Right - 18f), rowH - 6f));
 
             y += rowH + rowGap;
 
             var specificRow = new RectangleF(rowX, y, rowW, rowH);
             _bRowAlt.DrawRectangle(specificRow.Left, specificRow.Top, specificRow.Width, specificRow.Height);
-            _fText.DrawText("Specific Gem", specificRow.Left + 8f, specificRow.Top + 8f);
-
             var listBtn    = new RectangleF(specificRow.Right - 34f, specificRow.Top + 4f, 26f, buttonH);
             var subModeBtn = new RectangleF(listBtn.Left - 64f, specificRow.Top + 4f, 58f, buttonH);
             bool subHighest = s7o_AutoGemUpgradeState.AutoGemSpecificSubMode == 1;
@@ -6247,7 +6360,13 @@ namespace Turbo.Plugins.s7o
                 Math.Max(100f, subModeBtn.Left - (specificRow.Left + 100f) - 6f),
                 buttonH);
 
-            DrawGlossButton(gemValueBtn, Trim(s7o_AutoGemUpgradeState.AutoGemSpecificName ?? string.Empty, 44), false, false, false, true);
+            DrawLeftFittedText(
+                _fText,
+                _fSmall,
+                DisplayText("Specific Gem"),
+                new RectangleF(specificRow.Left + 8f, specificRow.Top + 3f, Math.Max(20f, gemValueBtn.Left - specificRow.Left - 16f), rowH - 6f));
+
+            DrawGlossButton(gemValueBtn, GetAutoGemDisplayName(s7o_AutoGemUpgradeState.AutoGemSpecificName), false, false, false, true);
             DrawGlossButton(subModeBtn, subHighest ? "HIGH" : "AUTO", true, false, false);
             DrawGlossButton(listBtn, _autoGemSpecificExpanded ? "-" : "+", _autoGemSpecificExpanded, false, true);
 
@@ -6331,10 +6450,11 @@ namespace Turbo.Plugins.s7o
             {
                 var opt = new RectangleF(r.Left + pad, y, r.Width - scrollW - 20f, itemH);
                 string name = AutoGemNames[i];
+                string displayName = GetAutoGemDisplayName(i);
 
                 DrawGlossButton(
                     opt,
-                    Trim(name, 58),
+                    displayName,
                     string.Equals(name, s7o_AutoGemUpgradeState.AutoGemSpecificName, StringComparison.OrdinalIgnoreCase),
                     false,
                     false);
@@ -7714,18 +7834,19 @@ namespace Turbo.Plugins.s7o
             float textRight = stateR.Left - 12f;
             float textW = Math.Max(40f, textRight - textX);
 
-            DrawOutlinedTextAt(_fRowTitle, _fRowTitleShadow,
-                Trim(title, ApproxCharsForWidth(textW, 5.8f)), textX, r.Top + 8f);
+            DrawOutlinedFittedText(_fRowTitle, _fRowTitleShadow, _fRowText, _fRowTextShadow,
+                title, textX, r.Top + 8f, textW);
 
             if (!string.IsNullOrWhiteSpace(description))
             {
-                string[] lines = WrapToggleDescription(description, ApproxCharsForToggleDescription(textW), 2);
-                if (lines.Length > 0) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[0], textX, r.Top + 31f);
-                if (lines.Length > 1) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[1], textX, r.Top + 49f);
+                string[] lines = WrapToggleDescription(description, ApproxCharsForToggleDescription(textW), 3);
+                if (lines.Length > 0) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[0], textX, r.Top + 29f);
+                if (lines.Length > 1) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[1], textX, r.Top + 44f);
+                if (lines.Length > 2) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[2], textX, r.Top + 59f);
             }
 
             string state = installed ? (enabled ? "ON" : "OFF") : "NOT INSTALLED";
-            DrawGlossButton(stateR, FitButtonLabel(state, stateR.Width), enabled, false, false);
+            DrawGlossButton(stateR, state, enabled, false, false);
 
             // Only the right-side button is clickable.
             if (installed && !string.IsNullOrWhiteSpace(actionKey))
@@ -7734,10 +7855,16 @@ namespace Turbo.Plugins.s7o
 
         private float DrawToggleDetailHeader(RectangleF detail, string title, string description)
         {
-            _fSection.DrawText(title, detail.Left + 14f, detail.Top + 10f);
+            _fSection.DrawText(DisplayText(title), detail.Left + 14f, detail.Top + 10f);
 
             if (!string.IsNullOrWhiteSpace(description))
-                _fLabel.DrawText(Trim(description, 114), detail.Left + 14f, detail.Top + 34f);
+            {
+                DrawLeftFittedText(
+                    _fLabel,
+                    _fSmall,
+                    DisplayText(description),
+                    new RectangleF(detail.Left + 14f, detail.Top + 28f, Math.Max(40f, detail.Width - 28f), 28f));
+            }
 
             return detail.Top + 64f;
         }
@@ -8272,8 +8399,8 @@ namespace Turbo.Plugins.s7o
                 hotkey = hotkey.Substring(1, hotkey.Length - 2);
 
             string text = _autoLootPaused
-                ? "AutoLoot: Paused (" + hotkey + " to Activate)"
-                : "AutoLoot: Active (" + hotkey + " to Pause)";
+                ? TF("hud.tooltip.autoloot_paused", "AutoLoot: Paused ({0} to Activate)", hotkey)
+                : TF("hud.tooltip.autoloot_active", "AutoLoot: Active ({0} to Pause)", hotkey);
             float w = 210f;
             float h = 24f;
             RectangleF tip = new RectangleF(dot.Right + 8f, dot.Top - 4f, w, h);
@@ -9630,7 +9757,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             int index = HudLanguageIndex(code);
             if (index < 0)
             {
-                _status = "UNSUPPORTED HUD LANGUAGE";
+                _status = T("status.language_unsupported", "UNSUPPORTED HUD LANGUAGE");
                 return;
             }
 
@@ -9638,7 +9765,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             string resourcePath = HudLanguageResourcePath(selectedCode);
             if (!_hudLanguageAvailable[index])
             {
-                _status = "MISSING " + Path.GetFileName(resourcePath);
+                _status = TF("status.language_missing", "MISSING {0}", Path.GetFileName(resourcePath));
                 return;
             }
 
@@ -9651,12 +9778,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     new UTF8Encoding(false));
 
                 _hudLanguageCode = selectedCode;
-                _status = "HUD LANGUAGE SET TO " + HudLanguageName(selectedCode).ToUpperInvariant() + " - RESTART HUD";
+                _status = TF("status.language_set", "HUD LANGUAGE SET TO {0} - RESTART HUD", HudLanguageName(selectedCode).ToUpperInvariant());
                 MarkLayoutDirty();
             }
             catch (Exception ex)
             {
-                _status = "HUD LANGUAGE SAVE FAILED";
+                _status = T("status.language_save_failed", "HUD LANGUAGE SAVE FAILED");
                 LogDebug("HUD language save failed: " + ex.Message);
             }
         }
@@ -9678,13 +9805,14 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             float textX = r.Left + 12f;
             float textW = Math.Max(40f, stateR.Left - textX - 12f);
 
-            DrawOutlinedTextAt(_fRowTitle, _fRowTitleShadow, "HUD Language", textX, r.Top + 8f);
-            string[] lines = WrapToggleDescription("Changes FreeHUD localized text. Restart HUD after selecting a language.", ApproxCharsForToggleDescription(textW), 2);
-            if (lines.Length > 0) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[0], textX, r.Top + 31f);
-            if (lines.Length > 1) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[1], textX, r.Top + 49f);
+            DrawOutlinedTextAt(_fRowTitle, _fRowTitleShadow, T("menu.language.title", "HUD Language"), textX, r.Top + 8f);
+            string[] lines = WrapToggleDescription(T("menu.language.description", "Changes FreeHUD localized text. Restart HUD after selecting a language."), ApproxCharsForToggleDescription(textW), 3);
+            if (lines.Length > 0) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[0], textX, r.Top + 29f);
+            if (lines.Length > 1) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[1], textX, r.Top + 44f);
+            if (lines.Length > 2) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[2], textX, r.Top + 59f);
 
             string expandAction = "visual:expand:hudlanguage";
-            DrawGlossButton(stateR, FitButtonLabel(HudLanguageButtonName(_hudLanguageCode), stateR.Width), true, false, false);
+            DrawGlossButton(stateR, HudLanguageButtonName(_hudLanguageCode), true, false, false);
             RegisterToggleHit(expandAction, stateR);
 
             DrawGlossButton(expandR, expanded ? "-" : "+", expanded, false, true);
@@ -9708,8 +9836,9 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             float textX = r.Left + 28f;
             float textW = Math.Max(40f, buttonR.Left - textX - 12f);
 
-            DrawOutlinedTextAt(_fRowTitle, _fRowTitleShadow, Trim(name, ApproxCharsForWidth(textW, 5.8f)), textX, r.Top + 9f);
-            DrawOutlinedTextAt(_fRowText, _fRowTextShadow, code + " - Restart required", textX, r.Top + 37f);
+            DrawOutlinedFittedText(_fRowTitle, _fRowTitleShadow, _fRowText, _fRowTextShadow,
+                name, textX, r.Top + 9f, textW);
+            DrawOutlinedTextAt(_fRowText, _fRowTextShadow, TF("menu.language.restart_required", "{0} - Restart required", code), textX, r.Top + 37f);
 
             string buttonText = !available ? "MISSING" : selected ? "SELECTED" : "SELECT";
             DrawGlossButton(buttonR, buttonText, selected, false, false);
@@ -9738,8 +9867,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             DrawStarButton(starR, _visualFavorites.Contains(feature));
             RegisterToggleHit("visual:star:" + feature, starR);
 
-            DrawOutlinedTextAt(_fRowTitle, _fRowTitleShadow,
-                Trim(title, ApproxCharsForWidth(textW, 5.8f)), textX, r.Top + 8f);
+            DrawOutlinedFittedText(_fRowTitle, _fRowTitleShadow, _fRowText, _fRowTextShadow,
+                title, textX, r.Top + 8f, textW);
 
             if (!string.IsNullOrWhiteSpace(description))
             {
@@ -9749,9 +9878,10 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     ? ApproxCharsForWidth(Math.Max(40f, textW - 8f), 6.2f)
                     : ApproxCharsForToggleDescription(textW);
 
-                string[] lines = WrapToggleDescription(description, wrapChars, 2);
-                if (lines.Length > 0) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[0], textX, r.Top + 31f);
-                if (lines.Length > 1) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[1], textX, r.Top + 49f);
+                string[] lines = WrapToggleDescription(description, wrapChars, 3);
+                if (lines.Length > 0) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[0], textX, r.Top + 29f);
+                if (lines.Length > 1) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[1], textX, r.Top + 44f);
+                if (lines.Length > 2) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[2], textX, r.Top + 59f);
             }
 
             DrawGlossButton(stateR, enabled ? "ON" : "OFF", enabled, false, false);
@@ -9903,7 +10033,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             RectangleF plus  = new RectangleF(r.Right - btnW, r.Top, btnW, r.Height);
             RectangleF val   = new RectangleF(minus.Right + 4f, r.Top, Math.Max(30f, r.Width - btnW * 2f - 8f), r.Height);
             DrawGlossButton(minus, "-", IsVisualButtonFlashActive(minusAction), false, true);
-            DrawGlossButton(val,   FitButtonLabel(label + " " + valueText, val.Width), false, false, true);
+            DrawGlossButton(val,   s7o_Localization.DisplayButton(label) + " " + valueText, false, false, true);
             DrawGlossButton(plus,  "+", IsVisualButtonFlashActive(plusAction), false, true);
             RegisterToggleHit(minusAction, minus);
             RegisterToggleHit(plusAction,  plus);
@@ -10155,8 +10285,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             float textW = Math.Max(30f, btn.Left - textX - 10f);
 
-            DrawOutlinedTextAt(_fRowTitle, _fRowTitleShadow, Trim(title, ApproxCharsForWidth(textW, 5.8f)), textX, r.Top + 8f);
-            DrawOutlinedTextAt(_fRowText, _fRowTextShadow, Trim(desc, ApproxCharsForWidth(textW, 5.0f)), textX, r.Top + 30f);
+            DrawOutlinedFittedText(_fRowTitle, _fRowTitleShadow, _fRowText, _fRowTextShadow,
+                title, textX, r.Top + 8f, textW);
+            string[] lines = WrapToggleDescription(desc, ApproxCharsForToggleDescription(textW), 3);
+            if (lines.Length > 0) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[0], textX, r.Top + 28f);
+            if (lines.Length > 1) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[1], textX, r.Top + 44f);
+            if (lines.Length > 2) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[2], textX, r.Top + 60f);
 
             DrawGlossButton(btn, enabled ? "ON" : "OFF", enabled || IsVisualButtonFlashActive(action), false, true);
             RegisterToggleHit(action, btn);
@@ -10184,8 +10318,10 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             DrawCenteredTextExact(_fSection, "Elite Health Bar Preview (1:1 pixels)", labelR);
             DrawCenteredTextExact(_fRowText,
-                "Default: " + FormatVisualFloat(EliteHpBarDefaultWidth) + " x " +
-                FormatVisualFloat(EliteHpBarDefaultHeight) + " pixels", defaultR);
+                TF("hud.visual.elite_hp.default_size", "Default: {0} x {1} pixels",
+                    FormatVisualFloat(EliteHpBarDefaultWidth),
+                    FormatVisualFloat(EliteHpBarDefaultHeight)),
+                defaultR);
             DrawEliteHpPreviewBar(previewR, IsEliteHealthBarsFeatureEnabled(),
                 _eliteHpBarWidth, _eliteHpBarHeight);
         }
@@ -10208,8 +10344,10 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             DrawCenteredTextExact(_fSection, "Elite Health Bar Dimensions", labelR);
             DrawCenteredTextExact(_fRowText,
-                "Defaults: Width " + FormatVisualFloat(EliteHpBarDefaultWidth) +
-                "  |  Height " + FormatVisualFloat(EliteHpBarDefaultHeight), defaultR);
+                TF("hud.visual.elite_hp.defaults", "Defaults: Width {0} | Height {1}",
+                    FormatVisualFloat(EliteHpBarDefaultWidth),
+                    FormatVisualFloat(EliteHpBarDefaultHeight)),
+                defaultR);
             DrawVisualStepperWide(widthR, "Width", FormatVisualFloat(_eliteHpBarWidth),
                 "visual:elitehp:width:-1", "visual:elitehp:width:+1");
             DrawVisualStepperWide(heightR, "Height", FormatVisualFloat(_eliteHpBarHeight),
@@ -10228,8 +10366,9 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             DrawCenteredTextExact(_fRowText,
                 "Uses each elite's native RadiusBottom and matching health-bar color.", line1R);
             DrawCenteredTextExact(_fRowText,
-                "Default line thickness: " + FormatVisualFloat(EliteGroundCircleDefaultThickness) +
-                "  |  Thick black contrast outline", line2R);
+                TF("hud.visual.elite_circle.default_thickness", "Default line thickness: {0} | Thick black contrast outline",
+                    FormatVisualFloat(EliteGroundCircleDefaultThickness)),
+                line2R);
         }
 
         private void DrawEliteGroundCirclePreviewRow(RectangleF r, int rowIdx)
@@ -10254,7 +10393,9 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             DrawCenteredTextExact(_fSection, "Elite Hitbox Circle Thickness", labelR);
             DrawCenteredTextExact(_fRowText,
-                "Default: " + FormatVisualFloat(EliteGroundCircleDefaultThickness), defaultR);
+                TF("hud.visual.elite_circle.default_value", "Default: {0}",
+                    FormatVisualFloat(EliteGroundCircleDefaultThickness)),
+                defaultR);
 
             DrawVisualStepperWide(lineR, "Line", FormatVisualFloat(_eliteGroundCircleThickness),
                 "visual:thick:elitecircle:-1", "visual:thick:elitecircle:+1");
@@ -10597,8 +10738,9 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             DrawOutlinedTextAt(
                 _fRowText,
                 _fRowTextShadow,
-                ((int)Math.Round(transparency * 100f)).ToString(CultureInfo.InvariantCulture) + "% transparent  |  " +
-                    _playerCoeSizeMultiplier.ToString("0.00", CultureInfo.InvariantCulture) + "x size",
+                TF("hud.visual.player_coe.preview_values", "{0}% transparent | {1}x size",
+                    ((int)Math.Round(transparency * 100f)).ToString(CultureInfo.InvariantCulture),
+                    _playerCoeSizeMultiplier.ToString("0.00", CultureInfo.InvariantCulture)),
                 labelR.Left,
                 labelR.Top + 28f);
 
@@ -10702,8 +10844,9 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             DrawCenteredOutlinedTextExact(
                 _fRowText,
                 _fRowTextShadow,
-                "Defaults: Transparency " + defaultTransparencyPercent.ToString(CultureInfo.InvariantCulture) +
-                    "%  |  Size " + PlayerCoeDefaultSizeMultiplier.ToString("0.00", CultureInfo.InvariantCulture) + "x",
+                TF("hud.visual.player_coe.defaults", "Defaults: Transparency {0}% | Size {1}x",
+                    defaultTransparencyPercent.ToString(CultureInfo.InvariantCulture),
+                    PlayerCoeDefaultSizeMultiplier.ToString("0.00", CultureInfo.InvariantCulture)),
                 defaultsR);
         }
 
@@ -10715,9 +10858,10 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             float textW = Math.Max(40f, r.Width - 28f);
             DrawOutlinedTextAt(_fRowTitle, _fRowTitleShadow, title, textX, r.Top + 8f);
 
-            string[] lines = WrapToggleDescription(description, ApproxCharsForToggleDescription(textW), 2);
-            if (lines.Length > 0) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[0], textX, r.Top + 31f);
-            if (lines.Length > 1) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[1], textX, r.Top + 49f);
+            string[] lines = WrapToggleDescription(description, ApproxCharsForToggleDescription(textW), 3);
+            if (lines.Length > 0) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[0], textX, r.Top + 29f);
+            if (lines.Length > 1) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[1], textX, r.Top + 44f);
+            if (lines.Length > 2) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[2], textX, r.Top + 59f);
         }
 
         private void DrawPlayerCoeHotkeyRow(RectangleF r, int rowIdx, bool elementKey)
@@ -10731,21 +10875,25 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             string title = elementKey ? "Highest-Damage Element" : "Add / Remove Player Overlay";
             string description = elementKey
-                ? "Hover an element in a placed overlay and press the hotkey to mark that player's strongest damage element."
-                : "Tap the hotkey on a portrait or CoE row to add it below your hero.\nTap the source or overlay again to remove it.";
+                ? T("hud.player_coe.strongest_element_description", "Hover an element in a placed overlay and press the hotkey to mark that player's strongest damage element.")
+                : T("hud.indirect.player_coe_add_instruction", "Tap the hotkey on a portrait or CoE row to add it below your hero.") + "\n" +
+                  T("hud.indirect.player_coe_remove_instruction", "Tap the source or overlay again to remove it.");
 
             DrawOutlinedTextAt(_fRowTitle, _fRowTitleShadow, title, textX, r.Top + 8f);
             int wrapChars = elementKey
                 ? ApproxCharsForToggleDescription(textW)
                 : ApproxCharsForWidth(Math.Max(40f, textW - 8f), 6.2f);
-            string[] lines = WrapToggleDescription(description, wrapChars, 2);
-            if (lines.Length > 0) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[0], textX, r.Top + 31f);
-            if (lines.Length > 1) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[1], textX, r.Top + 49f);
+            string[] lines = WrapToggleDescription(description, wrapChars, 3);
+            if (lines.Length > 0) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[0], textX, r.Top + 29f);
+            if (lines.Length > 1) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[1], textX, r.Top + 44f);
+            if (lines.Length > 2) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[2], textX, r.Top + 59f);
 
             bool capture = elementKey ? _playerCoeElementHotkeyCapture : _playerCoeHotkeyCapture;
             Key key = elementKey ? _playerCoeElementHotkey : _playerCoeHotkey;
             string action = elementKey ? "visual:hotkey:playercoeelement" : "visual:hotkey:playercoe";
-            string label = capture ? "PRESS..." : "HOTKEY " + CaptureKeyLabel(key);
+            string label = capture
+                ? "PRESS..."
+                : TF("hud.button.hotkey_value", "HOTKEY {0}", CaptureKeyLabel(key));
 
             DrawGlossButton(hotkeyR, label, capture, false, true);
             RegisterToggleHit(action, hotkeyR);
@@ -10765,12 +10913,19 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             float textX = r.Left + 14f;
             float textW = Math.Max(30f, hotkeyR.Left - textX - 12f);
 
-            DrawOutlinedTextAt(_fRowTitle, _fRowTitleShadow, "Hotkey", textX, r.Top + 8f);
-            DrawOutlinedTextAt(_fRowText, _fRowTextShadow,
-                Trim("Press to change the Party Inspector expanded-panel key.", ApproxCharsForWidth(textW, 5.0f)),
-                textX, r.Top + 30f);
+            DrawOutlinedFittedText(_fRowTitle, _fRowTitleShadow, _fRowText, _fRowTextShadow,
+                "Hotkey", textX, r.Top + 8f, textW);
+            string[] descriptionLines = WrapToggleDescription(
+                "Press to change the Party Inspector expanded-panel key.",
+                ApproxCharsForToggleDescription(textW),
+                3);
+            if (descriptionLines.Length > 0) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, descriptionLines[0], textX, r.Top + 29f);
+            if (descriptionLines.Length > 1) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, descriptionLines[1], textX, r.Top + 44f);
+            if (descriptionLines.Length > 2) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, descriptionLines[2], textX, r.Top + 59f);
 
-            string label = _partyInspectorHotkeyCapture ? "PRESS..." : "Hotkey = " + PartyInspectorHotkeyLabel();
+            string label = _partyInspectorHotkeyCapture
+                ? "PRESS..."
+                : TF("hud.button.hotkey_equals", "Hotkey = {0}", PartyInspectorHotkeyLabel());
             DrawGlossButton(hotkeyR, label, _partyInspectorHotkeyCapture, false, true);
             RegisterToggleHit("visual:hotkey:partyinspector", hotkeyR);
 
@@ -10795,11 +10950,13 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             float textX = r.Left + 14f;
             float textW = Math.Max(30f, arrowBtn.Left - textX - 12f);
-            DrawOutlinedTextAt(_fRowTitle, _fRowTitleShadow, Trim(title, ApproxCharsForWidth(textW, 5.8f)), textX, r.Top + 7f);
+            DrawOutlinedFittedText(_fRowTitle, _fRowTitleShadow, _fRowText, _fRowTextShadow,
+                title, textX, r.Top + 7f, textW);
 
-            string[] lines = WrapToggleDescription(desc, ApproxCharsForToggleDescription(textW), 2);
-            if (lines.Length > 0) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[0], textX, r.Top + 29f);
-            if (lines.Length > 1) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[1], textX, r.Top + 47f);
+            string[] lines = WrapToggleDescription(desc, ApproxCharsForToggleDescription(textW), 3);
+            if (lines.Length > 0) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[0], textX, r.Top + 27f);
+            if (lines.Length > 1) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[1], textX, r.Top + 43f);
+            if (lines.Length > 2) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[2], textX, r.Top + 59f);
 
             DrawGlossButton(arrowBtn, arrows ? "Arrows" : "No", arrows || IsVisualButtonFlashActive(arrowsAction), false, true);
             DrawGlossButton(textBtn, text ? "Text" : "No", text || IsVisualButtonFlashActive(textAction), false, true);
@@ -10847,11 +11004,13 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             float textX = r.Left + 14f;
             float textW = Math.Max(30f, stepR.Left - textX - 24f);
-            DrawOutlinedTextAt(_fRowTitle, _fRowTitleShadow, Trim(title, ApproxCharsForWidth(textW, 5.8f)), textX, r.Top + 8f);
+            DrawOutlinedFittedText(_fRowTitle, _fRowTitleShadow, _fRowText, _fRowTextShadow,
+                title, textX, r.Top + 8f, textW);
 
-            string[] lines = WrapToggleDescription(desc, ApproxCharsForToggleDescription(textW), 2);
-            if (lines.Length > 0) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[0], textX, r.Top + 30f);
-            if (lines.Length > 1) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[1], textX, r.Top + 48f);
+            string[] lines = WrapToggleDescription(desc, ApproxCharsForToggleDescription(textW), 3);
+            if (lines.Length > 0) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[0], textX, r.Top + 28f);
+            if (lines.Length > 1) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[1], textX, r.Top + 44f);
+            if (lines.Length > 2) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[2], textX, r.Top + 60f);
 
             DrawVisualStepperWide(stepR, "Size", FormatVisualFloat(size), "visual:size:" + sizeFeature + ":-1", "visual:size:" + sizeFeature + ":+1");
             DrawGlossButton(btnR, enabled ? "ON" : "OFF", enabled || IsVisualButtonFlashActive(action), false, true);
@@ -10873,11 +11032,15 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             float textW = Math.Max(30f, hotkeyR.Left - textX - 12f);
             DrawOutlinedTextAt(_fRowTitle, _fRowTitleShadow, "Player Markers", textX, r.Top + 7f);
 
-            string[] lines = WrapToggleDescription("Default F7: hover a party portrait and press the key to mark or unmark that player.", ApproxCharsForToggleDescription(textW), 2);
-            if (lines.Length > 0) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[0], textX, r.Top + 29f);
-            if (lines.Length > 1) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[1], textX, r.Top + 47f);
+            string[] lines = WrapToggleDescription("Default F7: hover a party portrait and press the key to mark or unmark that player.", ApproxCharsForToggleDescription(textW), 3);
+            if (lines.Length > 0) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[0], textX, r.Top + 27f);
+            if (lines.Length > 1) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[1], textX, r.Top + 43f);
+            if (lines.Length > 2) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[2], textX, r.Top + 59f);
 
-            DrawGlossButton(hotkeyR, _tipsPlayerMarkerHotkeyCapture ? "PRESS..." : "Key " + CaptureKeyLabel(_tipsPlayerMarkerHotkey), _tipsPlayerMarkerHotkeyCapture, false, true);
+            string markerHotkeyLabel = _tipsPlayerMarkerHotkeyCapture
+                ? "PRESS..."
+                : TF("hud.button.key_value", "Key {0}", CaptureKeyLabel(_tipsPlayerMarkerHotkey));
+            DrawGlossButton(hotkeyR, markerHotkeyLabel, _tipsPlayerMarkerHotkeyCapture, false, true);
             RegisterToggleHit("visual:hotkey:tipsplayer", hotkeyR);
 
             DrawGlossButton(btnR, _tipsPlayerMarkers ? "ON" : "OFF", _tipsPlayerMarkers || IsVisualButtonFlashActive("visual:tipstoggle:playermarkers"), false, true);
@@ -10897,11 +11060,13 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             float textX = r.Left + 14f;
             float textW = Math.Max(30f, btn.Left - textX - 12f);
 
-            DrawOutlinedTextAt(_fRowTitle, _fRowTitleShadow, Trim(title, ApproxCharsForWidth(textW, 5.8f)), textX, r.Top + 7f);
+            DrawOutlinedFittedText(_fRowTitle, _fRowTitleShadow, _fRowText, _fRowTextShadow,
+                title, textX, r.Top + 7f, textW);
 
-            string[] lines = WrapToggleDescription(desc, ApproxCharsForToggleDescription(textW), 2);
-            if (lines.Length > 0) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[0], textX, r.Top + 29f);
-            if (lines.Length > 1) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[1], textX, r.Top + 47f);
+            string[] lines = WrapToggleDescription(desc, ApproxCharsForToggleDescription(textW), 3);
+            if (lines.Length > 0) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[0], textX, r.Top + 27f);
+            if (lines.Length > 1) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[1], textX, r.Top + 43f);
+            if (lines.Length > 2) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[2], textX, r.Top + 59f);
 
             DrawGlossButton(btn, enabled ? "ON" : "OFF", enabled || IsVisualButtonFlashActive(action), false, true);
             RegisterToggleHit(action, btn);
@@ -10930,10 +11095,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             float textX = r.Left + 14f;
             float textW = Math.Max(30f, groundR.Left - textX - 24f);
 
-            DrawOutlinedTextAt(_fRowTitle, _fRowTitleShadow, Trim("Player Marker Sizes", ApproxCharsForWidth(textW, 5.8f)), textX, r.Top + 8f);
-            string[] lines = WrapToggleDescription("Shared size for player foot ovals and minimap dots.", ApproxCharsForToggleDescription(textW), 2);
-            if (lines.Length > 0) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[0], textX, r.Top + 30f);
-            if (lines.Length > 1) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[1], textX, r.Top + 48f);
+            DrawOutlinedFittedText(_fRowTitle, _fRowTitleShadow, _fRowText, _fRowTextShadow,
+                "Player Marker Sizes", textX, r.Top + 8f, textW);
+            string[] lines = WrapToggleDescription("Shared size for player foot ovals and minimap dots.", ApproxCharsForToggleDescription(textW), 3);
+            if (lines.Length > 0) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[0], textX, r.Top + 28f);
+            if (lines.Length > 1) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[1], textX, r.Top + 44f);
+            if (lines.Length > 2) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[2], textX, r.Top + 60f);
             DrawVisualStepperWide(groundR, "Ground", FormatVisualFloat(_tipsPlayerGroundSize), "visual:size:tipsplayerground:-1", "visual:size:tipsplayerground:+1");
             DrawVisualStepperWide(mapR, "Map Dot", FormatVisualFloat(_tipsPlayerMinimapDotSize), "visual:size:tipsplayermapdot:-1", "visual:size:tipsplayermapdot:+1");
         }
@@ -11183,8 +11350,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             // Fixed header (not scrolled)
             float headerY = detail.Top + 8f;
-            _fSection.DrawText("VISUAL", x + 10f, headerY + 4f);
-            _fLabel.DrawText("Overlays for player circles, elite affixes, skill indicators, and others.", x + 10f, headerY + 30f);
+            _fSection.DrawText(DisplayText("VISUAL"), x + 10f, headerY + 4f);
+            _fLabel.DrawText(DisplayText("Overlays for player circles, elite affixes, skill indicators, and others."), x + 10f, headerY + 30f);
 
             float listTop = headerY + 58f;
             float clipTop = listTop;
@@ -11239,7 +11406,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             string[] fdescs =
             {
                 "Changes FreeHUD localized text. Restart HUD after selecting a language.",
-                "Movable Convention of Elements overlays for party members.\nAdjust transparency, size, placement, and damage element.",
+                T("hud.indirect.player_coe_party_overlays", "Movable Convention of Elements overlays for party members.") + "\n" +
+                    T("hud.indirect.player_coe_adjustments", "Adjust transparency, size, placement, and damage element."),
                 "Ancient/primal alerts, globe dots, and party markers.",
                 "Enable or disable elite affix/danger visual effects.",
                 "Customize elite health-bar width and height.",
@@ -11699,8 +11867,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
         private void DrawMacrosFixedHeader(RectangleF detail)
         {
-            _fSection.DrawText("MACROS", detail.Left + 14f, detail.Top + 10f);
-            _fLabel.DrawText("Autocast conditional rules and utility macros.", detail.Left + 14f, detail.Top + 34f);
+            _fSection.DrawText(DisplayText("MACROS"), detail.Left + 14f, detail.Top + 10f);
+            _fLabel.DrawText(DisplayText("Autocast conditional rules and utility macros."), detail.Left + 14f, detail.Top + 34f);
         }
 
         private void DrawMacroSectionItem(RectangleF r, string title)
@@ -11709,7 +11877,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             _bTitle.DrawRectangle(rr.Left, rr.Top, rr.Width, rr.Height);
             _bPaneBorder.DrawRectangle(rr.Left, rr.Top, rr.Width, rr.Height);
-            _fSection.DrawText(title, rr.Left + 12f, rr.Top + 7f);
+            _fSection.DrawText(DisplayText(title), rr.Left + 12f, rr.Top + 7f);
         }
 
         private void DrawMacroEntryRow(RectangleF slot, MacroEntry entry, int rowIdx, bool isFav)
@@ -11836,19 +12004,30 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             float textRight = entry.HasHotkeyButton ? hotkeyR.Left - 10f : ((entry.IsPestilenceSelector || entry.IsInariusSelector || entry.IsAutoLootSelector || entry.IsInventoryDropSelector) ? expandR.Left - 10f : stateR.Left - 10f);
             float textW = Math.Max(40f, textRight - textX);
 
-            DrawOutlinedTextAt(_fRowTitle, _fRowTitleShadow,
-                Trim(entry.Title, ApproxCharsForWidth(textW, 5.8f)), textX, rr.Top + 7f);
+            string localizedTitle = GetMacroTitleDisplay(entry);
+            DrawOutlinedTextAtRaw(
+                _fRowTitle,
+                _fRowTitleShadow,
+                FitTextToWidth(_fRowTitle, localizedTitle, textW),
+                textX,
+                rr.Top + 7f);
 
             if (!string.IsNullOrWhiteSpace(entry.Description))
             {
-                string[] descLines = WrapToggleDescription(
-                    entry.Description, ApproxCharsForToggleDescription(textW), 2);
+                string localizedDescription = GetMacroDescriptionDisplay(entry);
+                string[] descLines = WrapTextApprox(
+                    localizedDescription,
+                    ApproxCharsForToggleDescription(textW),
+                    3);
 
                 if (descLines.Length > 0)
-                    DrawOutlinedTextAt(_fRowText, _fRowTextShadow, descLines[0], textX, rr.Top + 30f);
+                    DrawOutlinedTextAtRaw(_fRowText, _fRowTextShadow, descLines[0], textX, rr.Top + 28f);
 
                 if (descLines.Length > 1)
-                    DrawOutlinedTextAt(_fRowText, _fRowTextShadow, descLines[1], textX, rr.Top + 47f);
+                    DrawOutlinedTextAtRaw(_fRowText, _fRowTextShadow, descLines[1], textX, rr.Top + 44f);
+
+                if (descLines.Length > 2)
+                    DrawOutlinedTextAtRaw(_fRowText, _fRowTextShadow, descLines[2], textX, rr.Top + 60f);
             }
 
             string stateLabel;
@@ -11890,7 +12069,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             if (entry.HasHotkeyButton)
             {
                 string hotkeyLabel = GetZBarbAutoSnapHotkeyLabel();
-                DrawGlossButton(hotkeyR, FitButtonLabel(hotkeyLabel, hotkeyR.Width), _zbarbAutoSnapHotkeyCapture, false, false);
+                DrawGlossButton(hotkeyR, hotkeyLabel, _zbarbAutoSnapHotkeyCapture, false, false);
                 RegisterToggleHit(entry.HotkeyAction, hotkeyR);
             }
 
@@ -11951,6 +12130,52 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
         }
 
 
+        private string GetMacroTitleDisplay(MacroEntry entry)
+        {
+            string english = entry.Title ?? string.Empty;
+            string translated = DisplayText(english);
+
+            if (string.Equals(s7o_Localization.LanguageCode, "enUS", StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(translated, english, StringComparison.Ordinal))
+            {
+                return translated;
+            }
+
+            if (entry.IsPlugin || entry.IsOpenGrMapSelector || entry.IsOpenGrMapChild ||
+                entry.IsAutoSkillKeybindSelector || entry.IsAutoSkillKeybindChild ||
+                entry.IsAutoLootSelector || entry.IsAutoLootChild ||
+                entry.IsInventoryDropSelector || entry.IsInventoryDropChild ||
+                entry.IsPestilenceSelector || entry.IsPestilenceChild ||
+                entry.IsInariusSelector || entry.IsInariusChild ||
+                entry.IsZBarbSelector || entry.IsZBarbChild)
+            {
+                return translated;
+            }
+
+            string powerName = english;
+            int colon = powerName.IndexOf(':');
+            if (colon > 0)
+                powerName = powerName.Substring(0, colon).Trim();
+
+            if (string.Equals(powerName, "DH Strafe", StringComparison.OrdinalIgnoreCase))
+                powerName = "Strafe";
+
+            string nativeName;
+            return _localizedPowerNames.TryGetValue(powerName, out nativeName) && !string.IsNullOrWhiteSpace(nativeName)
+                ? nativeName
+                : translated;
+        }
+
+        private string GetMacroDescriptionDisplay(MacroEntry entry)
+        {
+            string english = entry.Description ?? string.Empty;
+            if (english.Length == 0)
+                return string.Empty;
+
+            string key = "macro.entry." + TranslationKeyToken(entry.Code) + ".description";
+            return T(key, DisplayText(english));
+        }
+
         private void DrawMacroStateButton(RectangleF r, string label, bool enabled)
         {
             if (string.Equals(label, "NOT INSTALLED", StringComparison.OrdinalIgnoreCase))
@@ -11969,7 +12194,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 return;
             }
 
-            DrawGlossButton(r, FitButtonLabel(label, r.Width), enabled, false, false);
+            DrawGlossButton(r, label, enabled, false, false);
         }
 
         private List<MacroListItem> BuildMacroListItems(List<MacroEntry> allEntries, int[] classStarts, string[] classNames)
@@ -11990,7 +12215,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 items.Add(new MacroListItem
                 {
                     Kind = MacroListItemKind.Section,
-                    SectionTitle = "★  Favorites"
+                    SectionTitle = "★  FAVORITES"
                 });
 
                 foreach (MacroEntry entry in favEntries)
@@ -12329,12 +12554,15 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             float textX = check.Right + 7f;
             float textW = cell.Right - textX - 6f;
 
-            DrawOutlinedTextAt(
+            DrawOutlinedFittedText(
                 _fRowText,
                 _fRowTextShadow,
-                Trim(group.Title ?? string.Empty, ApproxCharsForWidth(textW, 5.2f)),
+                _fSmall,
+                _fSmallShadow,
+                group.Title ?? string.Empty,
                 textX,
-                cell.Top + (cell.Height - 12f) * 0.5f);
+                cell.Top + (cell.Height - 12f) * 0.5f,
+                textW);
 
             RegisterToggleHit(
                 "riftmap:" + group.Key,
@@ -12366,7 +12594,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 bool capturing = _autoSkillKeybindCaptureSlot == i;
                 string label = capturing ? "..." : GetAutoSkillKeybindButtonLabel(i);
 
-                DrawGlossButton(btnR, FitButtonLabel(label, btnR.Width), capturing, false, true);
+                DrawGlossButton(btnR, label, capturing, false, true);
 
                 if (!fixedMouse)
                     RegisterToggleHit("autoskill:keybind:" + i.ToString(CultureInfo.InvariantCulture), btnR);
@@ -12477,8 +12705,9 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             float textX = r.Left + pad;
             float textW = Math.Max(40f, stateR.Left - textX - 10f);
 
-            DrawOutlinedTextAt(_fRowText, _fRowTextShadow, Trim("• " + entry.Title, ApproxCharsForWidth(textW, 5.4f)), textX, r.Top + 10f);
-            DrawGlossButton(stateR, FitButtonLabel(label, stateR.Width), on, false, entry.AutoLootOptionKind == 0);
+            DrawOutlinedFittedText(_fRowText, _fRowTextShadow, _fSmall, _fSmallShadow,
+                "• " + entry.Title, textX, r.Top + 10f, textW);
+            DrawGlossButton(stateR, label, on, false, entry.AutoLootOptionKind == 0);
 
             if (installed)
             {
@@ -12503,8 +12732,9 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             float textX = r.Left + pad;
             float textW = Math.Max(40f, stateR.Left - textX - 10f);
 
-            DrawOutlinedTextAt(_fRowText, _fRowTextShadow, Trim("• " + entry.Title, ApproxCharsForWidth(textW, 5.4f)), textX, r.Top + 10f);
-            DrawGlossButton(stateR, FitButtonLabel(label, stateR.Width), on, false, false);
+            DrawOutlinedFittedText(_fRowText, _fRowTextShadow, _fSmall, _fSmallShadow,
+                "• " + entry.Title, textX, r.Top + 10f, textW);
+            DrawGlossButton(stateR, label, on, false, false);
 
             if (installed)
                 RegisterToggleHit("inventorydrop:option:" + entry.InventoryDropOptionKind.ToString(CultureInfo.InvariantCulture), stateR);
@@ -12561,8 +12791,9 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             RectangleF stateR = new RectangleF(r.Right - stateW - 8f, r.Top + 5f, stateW, r.Height - 10f);
             float textW = Math.Max(40f, stateR.Left - textX - 10f);
 
-            DrawOutlinedTextAt(_fRowText, _fRowTextShadow, Trim("• " + entry.Title, ApproxCharsForWidth(textW, 5.4f)), textX, r.Top + 10f);
-            DrawGlossButton(stateR, FitButtonLabel(label, stateR.Width), hotkeyRow ? _inariusRgkJuggerHotkeyCapture : on, false, hotkeyRow);
+            DrawOutlinedFittedText(_fRowText, _fRowTextShadow, _fSmall, _fSmallShadow,
+                "• " + entry.Title, textX, r.Top + 10f, textW);
+            DrawGlossButton(stateR, label, hotkeyRow ? _inariusRgkJuggerHotkeyCapture : on, false, hotkeyRow);
 
             if (installed)
                 RegisterToggleHit("inarius:option:" + kind.ToString(CultureInfo.InvariantCulture), stateR);
@@ -12598,12 +12829,13 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             float textRightDefault = kind == 16 ? expandR.Left : stateRDefault.Left;
             float textWDefault = Math.Max(40f, textRightDefault - textX - 10f);
-            DrawOutlinedTextAt(_fRowText, _fRowTextShadow, Trim("• " + entry.Title, ApproxCharsForWidth(textWDefault, 5.4f)), textX, r.Top + 10f);
+            DrawOutlinedFittedText(_fRowText, _fRowTextShadow, _fSmall, _fSmallShadow,
+                "• " + entry.Title, textX, r.Top + 10f, textWDefault);
 
             if (kind == 16)
                 DrawGlossButton(expandR, _pestilenceRgkZeiExpanded ? "-" : "+", _pestilenceRgkZeiExpanded, false, false);
 
-            DrawGlossButton(stateRDefault, FitButtonLabel(label, stateRDefault.Width), hotkeyRow ? _pestilenceRgkJuggerHotkeyCapture : on, false, hotkeyRow);
+            DrawGlossButton(stateRDefault, label, hotkeyRow ? _pestilenceRgkJuggerHotkeyCapture : on, false, hotkeyRow);
 
             if (installed)
             {
@@ -12725,7 +12957,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             allEntries.Add(new MacroEntry
             {
                 Title="Inventory Item Drop",
-                Description="Shift+F2 drops all items.\nShift+F3 only drops filtered items.",
+                Description=T("hud.ui.shift_f2_drops_all_items", "Shift+F2 drops all items.") + "\n" +
+                    T("hud.indirect.shift_f3_filtered_drop", "Shift+F3 only drops filtered items."),
                 Code="inventory_drop_feature",
                 IsInventoryDropSelector=true
             });
@@ -12779,7 +13012,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 // ── Barbarian ──────────────────────────────────────────────────
                 new MacroEntry {
                     Title="Z-Barb Autosnap",
-                    Description="Spear-pull assist.\nCone controls drift from aim.",
+                    Description=T("hud.ui.spear_pull_assist", "Spear-pull assist.") + "\n" +
+                        T("hud.indirect.spear_cone_drift", "Cone controls drift from aim."),
                     Code="zbarb_autosnap_plugin",
                     IsPlugin=true,
                     IsZBarbSelector=true,
@@ -12972,11 +13206,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
         private void DrawTtsAlertsFixedHeader(RectangleF detail)
         {
-            _fSection.DrawText("TTS ALERTS", detail.Left + 14f, detail.Top + 10f);
-            _fLabel.DrawText(
-                Trim("TTS alert notifications for long range banners, pylons, and messages.", 114),
-                detail.Left + 14f,
-                detail.Top + 34f);
+            _fSection.DrawText(DisplayText("TTS ALERTS"), detail.Left + 14f, detail.Top + 10f);
+            DrawLeftFittedText(
+                _fLabel,
+                _fSmall,
+                DisplayText("TTS alert notifications for long range banners, pylons, and messages."),
+                new RectangleF(detail.Left + 14f, detail.Top + 29f, Math.Max(40f, detail.Width - 28f), 24f));
         }
 
         private void DrawToggleTtsAlertsCategory(RectangleF detail)
@@ -13062,18 +13297,19 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 float textRight = expandR.Left - 12f;
                 float textW = Math.Max(40f, textRight - textX);
 
-                DrawOutlinedTextAt(_fRowTitle, _fRowTitleShadow,
-                    Trim("TTS Broadcast", ApproxCharsForWidth(textW, 5.8f)), textX, r.Top + 8f);
+                DrawOutlinedFittedText(_fRowTitle, _fRowTitleShadow, _fRowText, _fRowTextShadow,
+                    "TTS Broadcast", textX, r.Top + 8f, textW);
 
-                string[] lines = WrapToggleDescription("Type \".tts message\" in chat, or add hotkey messages below.", ApproxCharsForToggleDescription(textW), 2);
-                if (lines.Length > 0) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[0], textX, r.Top + 31f);
-                if (lines.Length > 1) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[1], textX, r.Top + 49f);
+                string[] lines = WrapToggleDescription("Type \".tts message\" in chat, or add hotkey messages below.", ApproxCharsForToggleDescription(textW), 3);
+                if (lines.Length > 0) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[0], textX, r.Top + 29f);
+                if (lines.Length > 1) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[1], textX, r.Top + 44f);
+                if (lines.Length > 2) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[2], textX, r.Top + 59f);
 
                 DrawGlossButton(expandR, _ttsBroadcastExpanded ? "-" : "+", _ttsBroadcastExpanded, false, true);
                 RegisterToggleHit("tts:expand", expandR);
 
                 string state = installed ? (enabled ? "ON" : "OFF") : "NOT INSTALLED";
-                DrawGlossButton(stateR, FitButtonLabel(state, stateR.Width), enabled, false, false);
+                DrawGlossButton(stateR, state, enabled, false, false);
                 if (installed)
                     RegisterToggleHit("toggles:plugin:ttsbroadcast", stateR);
             }
@@ -13193,7 +13429,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             string hk = capturing ? "PRESS" : (msg.Hotkey == Key.Unknown ? "SET" : CaptureKeyLabel(msg.Hotkey));
             string hotkeyAction = "tts:hotkey:" + i.ToString(CultureInfo.InvariantCulture);
 
-            DrawGlossButton(hotR, FitButtonLabel(hk, hotR.Width), capturing || IsTtsButtonFlashActive(hotkeyAction), false, true);
+            DrawGlossButton(hotR, hk, capturing || IsTtsButtonFlashActive(hotkeyAction), false, true);
             RegisterToggleHit(hotkeyAction, hotR);
 
             string resetAction = "tts:reset:" + i.ToString(CultureInfo.InvariantCulture);
@@ -13275,7 +13511,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                         string keyAction = "tts:key:" + TtsKeyboardToken(label);
                         bool flash = IsTtsButtonFlashActive(keyAction);
 
-                        DrawGlossButton(keyR, FitButtonLabel(label, keyR.Width), active || flash, false, true);
+                        DrawGlossButton(keyR, label, active || flash, false, true);
                         RegisterToggleHit(keyAction, keyR);
                     }
 
@@ -13362,7 +13598,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
         private void DrawNoClickToggle(MenuLayout l)
         {
             DrawSquareCheck(l.NoClickCheck, _noClickBackground);
-            _fSmall.DrawText("No-Click Background", l.NoClickLabel.Left, l.NoClickLabel.Top + 4f);
+            _fSmall.DrawText(DisplayText("No-Click Background"), l.NoClickLabel.Left, l.NoClickLabel.Top + 4f);
         }
 
         private void DrawProfileCloseMask(MenuLayout l)
@@ -13403,7 +13639,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             var rows = GetActiveRowsCached();
             ClampScroll(l, rows.Count);
 
-            string title = TabLabel(_activeTab) + " Plugins";
+            string title = TF("hud.plugins.title", "{0} Plugins", DisplayText(TabLabel(_activeTab)));
             _fSection.DrawText(title, l.MainPane.Left + 14f, l.MainPane.Top + 14f);
 
             _bPaneBorder.DrawRectangle(l.ListRect.Left, l.ListRect.Top, l.ListRect.Width, l.ListRect.Height);
@@ -13416,7 +13652,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             if (rows.Count == 0)
             {
-                _fText.DrawText("No plugins in this section yet. Add some favorites to populate the list.", l.ListRect.Left + 14f, l.ListRect.Top + 16f);
+                _fText.DrawText(DisplayText("No plugins in this section yet. Add some favorites to populate the list."), l.ListRect.Left + 14f, l.ListRect.Top + 16f);
                 return;
             }
 
@@ -13440,10 +13676,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     Math.Max(40f, catRect.Left - star.Right - 16f), 20f);
 
                 DrawStarButton(star, row.IsFavorite);
-                _fText.DrawText(Trim(row.DisplayName, ApproxCharsForWidth(nameRect.Width, 5.5f)),
-                    nameRect.Left, nameRect.Top + 2f);
-                _fSmall.DrawText(Trim(TabLabel(row.Category), ApproxCharsForWidth(catRect.Width, 5.0f)),
-                    catRect.Left, catRect.Top + 3f);
+                DrawLeftFittedText(_fText, _fSmall, GetPluginDisplayName(row), nameRect);
+                DrawLeftFittedText(_fSmall, _fButtonTiny, DisplayText(TabLabel(row.Category)), catRect);
                 DrawGlossButton(statusRect, enabled ? "ON" : "OFF", enabled, false, true);
 
                 // Star = favorite; right button = only plugin toggle
@@ -13454,6 +13688,49 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             }
 
             DrawScrollThumb(l, rows.Count, visible);
+        }
+
+        private string GetPluginDisplayName(PluginRow row)
+        {
+            if (row == null || string.IsNullOrWhiteSpace(row.DisplayName))
+                return string.Empty;
+
+            string displayKey = "plugin." + TranslationKeyToken(row.DisplayName);
+            string displayFallback = T(displayKey, DisplayText(row.DisplayName));
+
+            string classKey = "plugin.class." + TranslationKeyToken(row.TypeName);
+            return T(classKey, displayFallback);
+        }
+
+        private static string TranslationKeyToken(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return string.Empty;
+
+            var sb = new StringBuilder(text.Length);
+            bool separator = false;
+            for (int i = 0; i < text.Length; i++)
+            {
+                char c = text[i];
+                if (c >= 'A' && c <= 'Z')
+                {
+                    if (separator && sb.Length > 0) sb.Append('_');
+                    sb.Append((char)(c + ('a' - 'A')));
+                    separator = false;
+                }
+                else if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))
+                {
+                    if (separator && sb.Length > 0) sb.Append('_');
+                    sb.Append(c);
+                    separator = false;
+                }
+                else
+                {
+                    separator = true;
+                }
+            }
+
+            return sb.ToString();
         }
 
         private int CountForTab(ManagerTab tab)
@@ -13568,8 +13845,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             float y     = r.Top + 7f;
 
             // ── Header row ─────────────────────────────────────────────────────
-            _fSection.DrawText("HUD Hotkeys", r.Left + pad, y + 4f);
-            _fSmall.DrawText("Click a key to rebind  ·  Restart HUD to apply", r.Left + 160f, y + 10f);
+            _fSection.DrawText(DisplayText("HUD Hotkeys"), r.Left + pad, y + 4f);
+            _fSmall.DrawText(DisplayText("Click a key to rebind  ·  Restart HUD to apply"), r.Left + 160f, y + 10f);
 
             var expandBtn = new RectangleF(r.Right - 34f, y + 4f, 24f, btnH);
             DrawGlossButton(expandBtn, _hotkeysExpanded ? "-" : "+", _hotkeysExpanded, false, true);
@@ -13617,7 +13894,11 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     DrawGlossButton(keyBtn, keyDisplay, capturing, false, true);
                     RegisterMainHit("hotkeys:key:" + cellIndex.ToString(CultureInfo.InvariantCulture), keyBtn);
 
-                    _fSmall.DrawText(Trim(HotkeyLabels[cellIndex], ApproxCharsForWidth(cell.Width - 8f, 5.0f)), cell.Left + 4f, cell.Top + labelYOff);
+                    DrawLeftFittedText(
+                        _fSmall,
+                        _fButtonTiny,
+                        DisplayText(HotkeyLabels[cellIndex]),
+                        new RectangleF(cell.Left + 4f, cell.Top + labelYOff - 2f, Math.Max(20f, cell.Width - 8f), 18f));
                 }
                 else
                 {
@@ -13625,7 +13906,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     DrawGlossButton(keyBtn, resetting ? "DONE" : "RESET", resetting, !resetting, false);
                     RegisterMainHit("hotkeys:reset", keyBtn);
 
-                    _fSmall.DrawText("Reset Defaults", cell.Left + 4f, cell.Top + labelYOff);
+                    _fSmall.DrawText(DisplayText("Reset Defaults"), cell.Left + 4f, cell.Top + labelYOff);
                 }
             }
         }
@@ -13780,18 +14061,195 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 _bBtnEdge.DrawRectangle(r.Left + 1f, r.Top + 1f, Math.Max(1f, r.Width - 2f), Math.Max(1f, r.Height - 2f));
             }
 
-            IFont shadow = compact ? _fButtonShadow : _fButtonLargeShadow;
-            bool yellowText = active || forceYellowText;
-            IFont normal = compact
-                ? (yellowText ? _fButtonActive : _fButton)
-                : (yellowText ? _fButtonLargeActive : _fButtonLarge);
+            bool invariantSymbol = IsInvariantButtonSymbol(text);
+            if (!invariantSymbol)
+                text = s7o_Localization.DisplayButton(text);
 
-            DrawCenteredOutlinedText(normal, shadow, text, r);
+            if (string.IsNullOrWhiteSpace(text))
+                return;
+
+            bool yellowText = active || forceYellowText;
+            IFont normal = invariantSymbol
+                ? (yellowText ? _fButtonActive : _fButton)
+                : compact
+                    ? (yellowText ? _fButtonActive : _fButton)
+                    : (yellowText ? _fButtonLargeActive : _fButtonLarge);
+            IFont shadow = invariantSymbol
+                ? _fButtonShadow
+                : compact ? _fButtonShadow : _fButtonLargeShadow;
+
+            float maxTextWidth = Math.Max(1f, r.Width - (invariantSymbol ? 4f : 14f));
+            if (!TextFitsWidth(normal, text, maxTextWidth))
+            {
+                normal = yellowText ? _fButtonActive : _fButton;
+                shadow = _fButtonShadow;
+            }
+
+            if (!TextFitsWidth(normal, text, maxTextWidth))
+            {
+                normal = yellowText ? _fButtonTinyActive : _fButtonTiny;
+                shadow = _fButtonTinyShadow;
+            }
+
+            if (!invariantSymbol)
+                text = FitTextToWidth(normal, text, maxTextWidth);
+
+            DrawCenteredOutlinedTextRaw(normal, shadow, text, r);
+        }
+
+        private static bool IsInvariantButtonSymbol(string text)
+        {
+            return string.Equals(text, "+", StringComparison.Ordinal) ||
+                   string.Equals(text, "-", StringComparison.Ordinal) ||
+                   string.Equals(text, "X", StringComparison.Ordinal) ||
+                   string.Equals(text, "×", StringComparison.Ordinal);
+        }
+
+        private static bool TextFitsWidth(IFont font, string text, float maxWidth)
+        {
+            if (font == null || string.IsNullOrEmpty(text))
+                return true;
+
+            try { return font.GetTextLayout(text).Metrics.Width <= maxWidth; }
+            catch { return true; }
+        }
+
+        private static string FitTextToWidth(IFont font, string text, float maxWidth)
+        {
+            if (font == null || string.IsNullOrEmpty(text) || TextFitsWidth(font, text, maxWidth))
+                return text;
+
+            const string ellipsis = "...";
+            int low = 0;
+            int high = text.Length;
+            while (low < high)
+            {
+                int mid = (low + high + 1) / 2;
+                string candidate = text.Substring(0, mid).TrimEnd() + ellipsis;
+                if (TextFitsWidth(font, candidate, maxWidth)) low = mid;
+                else high = mid - 1;
+            }
+
+            return low <= 0 ? ellipsis : text.Substring(0, low).TrimEnd() + ellipsis;
+        }
+
+        private static void DrawCenteredTextRaw(IFont font, string text, RectangleF r)
+        {
+            if (font == null || string.IsNullOrEmpty(text))
+                return;
+
+            try
+            {
+                var layout = font.GetTextLayout(text);
+                font.DrawText(layout,
+                    r.Left + (r.Width - layout.Metrics.Width) * 0.5f,
+                    r.Top + (r.Height - layout.Metrics.Height) * 0.5f);
+            }
+            catch { }
+        }
+
+        private static void DrawCenteredOutlinedTextRaw(IFont mainFont, IFont outlineFont, string text, RectangleF r)
+        {
+            if (string.IsNullOrEmpty(text))
+                return;
+
+            IFont outline = outlineFont ?? mainFont;
+            IFont main = mainFont ?? outline;
+            if (outline != null)
+            {
+                DrawCenteredTextRaw(outline, text, new RectangleF(r.Left - 2f, r.Top, r.Width, r.Height));
+                DrawCenteredTextRaw(outline, text, new RectangleF(r.Left + 2f, r.Top, r.Width, r.Height));
+                DrawCenteredTextRaw(outline, text, new RectangleF(r.Left, r.Top - 2f, r.Width, r.Height));
+                DrawCenteredTextRaw(outline, text, new RectangleF(r.Left, r.Top + 2f, r.Width, r.Height));
+                DrawCenteredTextRaw(outline, text, new RectangleF(r.Left - 1f, r.Top - 1f, r.Width, r.Height));
+                DrawCenteredTextRaw(outline, text, new RectangleF(r.Left + 1f, r.Top - 1f, r.Width, r.Height));
+                DrawCenteredTextRaw(outline, text, new RectangleF(r.Left - 1f, r.Top + 1f, r.Width, r.Height));
+                DrawCenteredTextRaw(outline, text, new RectangleF(r.Left + 1f, r.Top + 1f, r.Width, r.Height));
+            }
+
+            if (main != null)
+                DrawCenteredTextRaw(main, text, r);
         }
 
 
+        private void DrawOutlinedFittedText(
+            IFont primaryFont,
+            IFont primaryOutline,
+            IFont fallbackFont,
+            IFont fallbackOutline,
+            string text,
+            float x,
+            float y,
+            float maxWidth)
+        {
+            text = DisplayText(text);
+            if (string.IsNullOrEmpty(text) || maxWidth <= 1f)
+                return;
+
+            IFont font = primaryFont ?? fallbackFont;
+            IFont outline = primaryOutline ?? fallbackOutline ?? font;
+
+            if (!TextFitsWidth(font, text, maxWidth))
+            {
+                font = fallbackFont ?? font;
+                outline = fallbackOutline ?? outline ?? font;
+            }
+
+            if (!TextFitsWidth(font, text, maxWidth))
+            {
+                font = _fButtonTiny ?? font;
+                outline = _fButtonTinyShadow ?? outline ?? font;
+            }
+
+            string fitted = FitTextToWidth(font, text, maxWidth);
+            DrawOutlinedTextAtRaw(font, outline, fitted, x, y);
+        }
+
+        private void DrawLeftFittedText(IFont primaryFont, IFont fallbackFont, string text, RectangleF bounds)
+        {
+            text = DisplayText(text);
+            if (string.IsNullOrWhiteSpace(text) || bounds.Width <= 1f || bounds.Height <= 1f)
+                return;
+
+            IFont font = primaryFont ?? fallbackFont;
+            if (!TextFitsWidth(font, text, bounds.Width))
+                font = fallbackFont ?? font;
+            if (!TextFitsWidth(font, text, bounds.Width))
+                font = _fButtonTiny ?? font;
+
+            string fitted = FitTextToWidth(font, text, bounds.Width);
+            if (font == null || string.IsNullOrEmpty(fitted))
+                return;
+
+            try
+            {
+                var layout = font.GetTextLayout(fitted);
+                font.DrawText(layout, bounds.Left, bounds.Top + Math.Max(0f, (bounds.Height - layout.Metrics.Height) * 0.5f));
+            }
+            catch { }
+        }
+
+        private void DrawOutlinedTextAtRaw(IFont mainFont, IFont outlineFont, string text, float x, float y)
+        {
+            if (string.IsNullOrEmpty(text))
+                return;
+
+            IFont outline = outlineFont ?? mainFont;
+            IFont main = mainFont ?? outline;
+            if (outline != null)
+            {
+                outline.DrawText(text, x - 2f, y); outline.DrawText(text, x + 2f, y);
+                outline.DrawText(text, x, y - 2f); outline.DrawText(text, x, y + 2f);
+                outline.DrawText(text, x - 1f, y - 1f); outline.DrawText(text, x + 1f, y - 1f);
+                outline.DrawText(text, x - 1f, y + 1f); outline.DrawText(text, x + 1f, y + 1f);
+            }
+            if (main != null)
+                main.DrawText(text, x, y);
+        }
+
         private void DrawOutlinedTextAt(IFont mainFont, IFont outlineFont, string text, float x, float y)
         {
+            text = DisplayText(text);
             if (string.IsNullOrEmpty(text)) return;
             IFont outline = outlineFont ?? mainFont;
             IFont main    = mainFont    ?? outline;
@@ -13807,6 +14265,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
         private void DrawCenteredTextExact(IFont font, string text, RectangleF r)
         {
+            text = DisplayText(text);
             if (font == null || string.IsNullOrEmpty(text)) return;
             try
             {
@@ -13862,6 +14321,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
         private void DrawCenteredText(IFont font, string text, RectangleF r)
         {
+            text = DisplayText(text);
             if (font == null || string.IsNullOrEmpty(text)) return;
             try
             {
@@ -13875,10 +14335,10 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
         {
             switch (page)
             {
-                case MenuPageTab.Main: return "MAIN";
-                case MenuPageTab.Toggles: return "TOGGLES";
-                case MenuPageTab.Plugins: return "PLUGINS";
-                default: return "MAIN";
+                case MenuPageTab.Main:    return T("menu.page.main", "MAIN");
+                case MenuPageTab.Toggles: return T("menu.page.toggles", "TOGGLES");
+                case MenuPageTab.Plugins: return T("menu.page.plugins", "PLUGINS");
+                default:                  return T("menu.page.main", "MAIN");
             }
         }
 
@@ -13886,10 +14346,10 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
         {
             switch (cat)
             {
-                case ToggleCategory.Visual:    return "VISUAL";
-                case ToggleCategory.Macros:    return "MACROS";
-                case ToggleCategory.TtsAlerts: return "TTS ALERTS";
-                default: return cat.ToString().ToUpperInvariant();
+                case ToggleCategory.Visual:    return T("menu.category.visual", "VISUAL");
+                case ToggleCategory.Macros:    return T("menu.category.macros", "MACROS");
+                case ToggleCategory.TtsAlerts: return T("menu.category.tts_alerts", "TTS ALERTS");
+                default:                       return cat.ToString().ToUpperInvariant();
             }
         }
 
@@ -13986,13 +14446,13 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
         {
             switch (tab)
             {
-                case ManagerTab.Favorites: return "Favorites";
-                case ManagerTab.Combat: return "Combat";
-                case ManagerTab.Rift: return "Rift";
-                case ManagerTab.Items: return "Items";
-                case ManagerTab.Other: return "Other";
-                case ManagerTab.All: return "All";
-                default: return tab.ToString();
+                case ManagerTab.Favorites: return T("menu.tab.favorites", "Favorites");
+                case ManagerTab.Combat:    return T("menu.tab.combat", "Combat");
+                case ManagerTab.Rift:      return T("menu.tab.rift", "Rift");
+                case ManagerTab.Items:     return T("menu.tab.items", "Items");
+                case ManagerTab.Other:     return T("menu.tab.other", "Other");
+                case ManagerTab.All:       return T("menu.tab.all", "All");
+                default:                   return tab.ToString();
             }
         }
 
@@ -15134,6 +15594,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
         private static string[] WrapToggleDescription(string text, int maxCharsPerLine, int maxLines)
         {
+            text = DisplayText(text);
             if (string.IsNullOrWhiteSpace(text) || maxLines <= 0)
                 return new string[0];
 
@@ -15157,68 +15618,94 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             return result.ToArray();
         }
 
-                private static string[] WrapTextApprox(string text, int maxCharsPerLine, int maxLines)
+        private static string[] WrapTextApprox(string text, int maxCharsPerLine, int maxLines)
         {
             if (string.IsNullOrWhiteSpace(text) || maxLines <= 0)
                 return new string[0];
 
-            if (maxCharsPerLine < 8)
-                maxCharsPerLine = 8;
-
+            int maxUnits = Math.Max(8, maxCharsPerLine);
             var lines = new List<string>();
+            var current = new StringBuilder();
             string[] words = text.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            int wordIndex = 0;
 
-            var sb = new StringBuilder();
-
-            for (int i = 0; i < words.Length; i++)
+            while (wordIndex < words.Length && lines.Count < maxLines)
             {
-                string word = words[i];
+                string word = words[wordIndex] ?? string.Empty;
+                string candidate = current.Length == 0 ? word : current.ToString() + " " + word;
 
-                if (sb.Length == 0)
+                if (VisualTextUnits(candidate) <= maxUnits)
                 {
-                    sb.Append(word);
+                    current.Length = 0;
+                    current.Append(candidate);
+                    wordIndex++;
                     continue;
                 }
 
-                if (sb.Length + 1 + word.Length <= maxCharsPerLine)
+                if (current.Length > 0)
                 {
-                    sb.Append(' ');
-                    sb.Append(word);
+                    lines.Add(current.ToString());
+                    current.Length = 0;
                     continue;
                 }
 
-                lines.Add(sb.ToString());
-                sb.Length = 0;
-                sb.Append(word);
-
-                if (lines.Count >= maxLines)
-                    break;
+                int take = VisualPrefixLength(word, maxUnits);
+                if (take <= 0) take = 1;
+                lines.Add(word.Substring(0, take));
+                words[wordIndex] = word.Substring(take);
+                if (words[wordIndex].Length == 0)
+                    wordIndex++;
             }
 
-            if (lines.Count < maxLines && sb.Length > 0)
-                lines.Add(sb.ToString());
-
-            if (lines.Count > maxLines)
-                lines.RemoveRange(maxLines, lines.Count - maxLines);
-
-            if (lines.Count == maxLines)
+            if (lines.Count < maxLines && current.Length > 0)
             {
-                int consumedWords = 0;
-                for (int li = 0; li < lines.Count; li++)
-                    consumedWords += lines[li].Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries).Length;
+                lines.Add(current.ToString());
+                current.Length = 0;
+            }
 
-                if (consumedWords < words.Length)
-                {
-                    string last = lines[lines.Count - 1];
-
-                    if (last.Length > Math.Max(4, maxCharsPerLine - 3))
-                        last = last.Substring(0, Math.Max(1, maxCharsPerLine - 3)).TrimEnd();
-
-                    lines[lines.Count - 1] = last + "...";
-                }
+            bool remaining = wordIndex < words.Length;
+            if (remaining && lines.Count > 0)
+            {
+                string last = lines[lines.Count - 1].TrimEnd();
+                while (last.Length > 0 && VisualTextUnits(last + "...") > maxUnits)
+                    last = last.Substring(0, last.Length - 1).TrimEnd();
+                lines[lines.Count - 1] = last + "...";
             }
 
             return lines.ToArray();
+        }
+
+        private static int VisualPrefixLength(string text, int maxUnits)
+        {
+            int units = 0;
+            int i = 0;
+            for (; i < text.Length; i++)
+            {
+                int next = units + VisualCharacterUnits(text[i]);
+                if (next > maxUnits)
+                    break;
+                units = next;
+            }
+            return i;
+        }
+
+        private static int VisualTextUnits(string text)
+        {
+            int units = 0;
+            if (string.IsNullOrEmpty(text))
+                return units;
+
+            for (int i = 0; i < text.Length; i++)
+                units += VisualCharacterUnits(text[i]);
+            return units;
+        }
+
+        private static int VisualCharacterUnits(char c)
+        {
+            // CJK, Hangul, full-width forms, and broad uppercase glyphs need more room.
+            if (c >= 0x2E80 || c == 'W' || c == 'M')
+                return 2;
+            return 1;
         }
 
         private const float ToggleDescriptionSafetyGap = 150f;
@@ -15239,16 +15726,9 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             return Math.Max(8, (int)Math.Floor(width / avgCharWidth));
         }
 
-        private string FitButtonLabel(string text, float buttonWidth)
-        {
-            if (string.IsNullOrWhiteSpace(text)) return string.Empty;
-            int maxChars = ApproxCharsForWidth(buttonWidth - 10f, 6.2f);
-            if (maxChars < 4) maxChars = 4;
-            return Trim(text, maxChars);
-        }
-
         private static string Trim(string s, int max)
         {
+            s = DisplayText(s);
             if (string.IsNullOrEmpty(s)) return string.Empty;
             if (max <= 3 || s.Length <= max) return s;
             return s.Substring(0, max - 3) + "...";
@@ -15368,6 +15848,9 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             _fSmallShadow  = Hud.Render.CreateFont("tahoma",  7.2f, 245, 0, 0, 0, false, false, 0, 0, 0, 0, false);
             _fButtonShadow = Hud.Render.CreateFont("tahoma",  7.8f, 245, 0, 0, 0, false, false, 0, 0, 0, 0, false);
             _fButtonLargeShadow = Hud.Render.CreateFont("tahoma", 10.0f, 245, 0, 0, 0, true, false, 0, 0, 0, 0, false);
+            _fButtonTiny = Hud.Render.CreateFont("tahoma", 6.8f, 255, 245, 248, 250, false, false, 118, 0, 0, 0, true);
+            _fButtonTinyActive = Hud.Render.CreateFont("tahoma", 6.8f, 255, 255, 225, 70, false, false, 118, 0, 0, 0, true);
+            _fButtonTinyShadow = Hud.Render.CreateFont("tahoma", 6.8f, 245, 0, 0, 0, false, false, 0, 0, 0, 0, false);
 
             _fAutoLootToastGreenFade = CreateAutoLootToastFadeFonts(88, 230, 84, 11.2f);
             _fAutoLootToastRedFade = CreateAutoLootToastFadeFonts(235, 72, 72, 11.2f);
