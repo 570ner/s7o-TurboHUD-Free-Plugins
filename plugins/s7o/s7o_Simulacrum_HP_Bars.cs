@@ -1,19 +1,15 @@
 using System;
 using System.Collections.Generic;
+using SharpDX.DirectInput;
 using Turbo.Plugins.Default;
 
 namespace Turbo.Plugins.s7o
 {
-    // Lightweight standalone Simulacrum HP bars for TurboHUD Free / FreeHUD and LightningMOD.
-    // Install as: plugins/s7o/s7o_Simulacrum_HP_Bars.cs
-    //
-    // Quick customization notes:
-    // - ShowOwnSimulacrums / ShowOtherSimulacrums: set false to hide your Sims or party Sims.
-    // - WidthScale / HeightScale: 1.0 = default bar size. Example: 0.8 = smaller width, 1.5 = taller bar.
-    // - OwnTone / OtherTone: 0 is darker, 5 is normal, 10 is brighter. Defaults make your Sims brighter than others.
-    // - Alpha: 255 is solid, lower values are more transparent. Example: 180 is softer.
-    // - The HP color automatically ramps green -> yellow -> red as health drops.
-    public class s7o_Simulacrum_HP_Bars : BasePlugin, IInGameTopPainter
+    // Lightweight Simulacrum health bars and movable party list for FreeHUD and LightningMOD.
+    // Simulacrum alert/list concept credited to RNN's SimulacrumsAlertIcon community plugin.
+    // Actor-following bars use every live on-screen Sim exposed natively. The fixed list can
+    // apply a separate range/completeness gate so it never reports a partial two-Sim set as complete.
+    public class s7o_Simulacrum_HP_Bars : BasePlugin, IInGameTopPainter, IKeyEventHandler
     {
         public bool ShowOwnSimulacrums { get; set; } = true;
         public bool ShowOtherSimulacrums { get; set; } = true;
@@ -34,7 +30,45 @@ namespace Turbo.Plugins.s7o
         public float OutlineSize { get; set; } = 2.0f;
         public bool UseTwoToneLighting { get; set; } = true;
 
+        public bool ShowScreenList { get; set; } = true;
+        public float ScreenListWidth { get; set; } = 130.0f;
+        public float ScreenListBarHeight { get; set; } = 14.0f;
+        public Key ScreenListDragHotkey { get; set; } = Key.F2;
+        public Key ScreenListToggleHotkey { get; set; } = Key.F3;
+        // Starts beside the default s7o Elite HP list at 1920x1080.
+        public float ScreenListXFraction { get; set; } = 0.22f;
+        public float ScreenListYFraction { get; set; } = 0.018f;
+        public float ScreenListLabelGap { get; set; } = 3.0f;
+        public float ScreenListInnerBarGap { get; set; } = 2.0f;
+        public float ScreenListGroupGap { get; set; } = 5.0f;
+        public int ScreenListMaxRows { get; set; } = 8;
+        public bool ShowScreenListEntityCount { get; set; } = true;
+        // Fixed list only. Actor-following bars remain unrestricted by distance.
+        public bool LimitOtherScreenListByRange { get; set; } = true;
+        public float OtherScreenListRange { get; set; } = 70.0f;
+        public bool HideIncompleteOtherScreenListGroups { get; set; } = true;
+        public bool ShowSurvivorAfterConfirmedDeath { get; set; } = true;
+
         private const uint AnyAttributeModifier = 0xFFFFFu;
+
+        private sealed class ScreenListEntry
+        {
+            public IActor Actor;
+            public uint ActorId;
+            public uint OwnerId;
+            public string OwnerName;
+            public float HealthRatio;
+            public double Distance;
+            public bool Mine;
+        }
+
+        private sealed class ScreenListGroup
+        {
+            public uint OwnerId;
+            public string OwnerName;
+            public bool Mine;
+            public readonly List<ScreenListEntry> Entries = new List<ScreenListEntry>();
+        }
 
         private readonly HashSet<ActorSnoEnum> _simulacrumSnos = new HashSet<ActorSnoEnum>
         {
@@ -48,12 +82,23 @@ namespace Turbo.Plugins.s7o
         private readonly Dictionary<uint, float> _maxHitpointsByActor = new Dictionary<uint, float>();
         private readonly Dictionary<uint, int> _lastSeenTickByActor = new Dictionary<uint, int>();
         private readonly Dictionary<int, IBrush> _brushCache = new Dictionary<int, IBrush>();
+        private readonly HashSet<uint> _ownersWithConfirmedSimDeath = new HashSet<uint>();
 
         private IBrush _ownOutlineBrush;
         private IBrush _ownBackgroundBrush;
         private IBrush _otherOutlineBrush;
         private IBrush _otherBackgroundBrush;
+        private IFont _screenListTextFont;
+        private bool _screenListDragging;
+        private bool _screenListBoundsValid;
+        private float _screenListDragOffsetX;
+        private float _screenListDragOffsetY;
+        private float _screenListBoundsX;
+        private float _screenListBoundsY;
+        private float _screenListBoundsWidth;
+        private float _screenListBoundsHeight;
         private int _lastPruneTick;
+        private int _lastGameTick = -1;
 
         public s7o_Simulacrum_HP_Bars()
         {
@@ -69,6 +114,29 @@ namespace Turbo.Plugins.s7o
             _ownBackgroundBrush = Hud.Render.CreateBrush(ClampAlpha((int)(OwnAlpha * 0.72f)), 0, 0, 0, 0);
             _otherOutlineBrush = Hud.Render.CreateBrush(ClampAlpha(OtherAlpha), 0, 0, 0, 0);
             _otherBackgroundBrush = Hud.Render.CreateBrush(ClampAlpha((int)(OtherAlpha * 0.72f)), 0, 0, 0, 0);
+            _screenListTextFont = Hud.Render.CreateFont("tahoma", 8.0f, 245, 255, 255, 255, true, false, 220, 0, 0, 0, true);
+        }
+
+        public void OnKeyEvent(IKeyEvent keyEvent)
+        {
+            if (keyEvent == null)
+                return;
+
+            if (keyEvent.Key == ScreenListDragHotkey)
+            {
+                if (keyEvent.IsPressed)
+                    BeginScreenListDrag();
+                else
+                    _screenListDragging = false;
+                return;
+            }
+
+            if (keyEvent.Key == ScreenListToggleHotkey &&
+                keyEvent.IsPressed &&
+                (IsCursorOverOwnPortrait() || IsCursorOverScreenList()))
+            {
+                ToggleScreenList();
+            }
         }
 
         public void PaintTopInGame(ClipState clipState)
@@ -77,51 +145,255 @@ namespace Turbo.Plugins.s7o
                 return;
 
             int tick = Hud.Game.CurrentGameTick;
+            if (_lastGameTick >= 0 && tick < _lastGameTick)
+                ResetRuntimeState(tick);
+            _lastGameTick = tick;
+
             if (tick - _lastPruneTick > 600)
                 PruneStaleActors(tick);
 
+            var liveEntries = new List<ScreenListEntry>();
             foreach (var actor in Hud.Game.Actors)
             {
-                if (!IsValidSimulacrum(actor))
+                if (!IsSimulacrumSno(actor))
+                    continue;
+
+                ObserveConfirmedSimulacrumDeath(actor);
+                if (!IsSimulacrumActor(actor))
                     continue;
 
                 bool mine = actor.SummonerAcdDynamicId == Hud.Game.Me.SummonerId;
-                if (mine)
-                {
-                    if (!ShowOwnSimulacrums) continue;
-                }
-                else
-                {
-                    if (!ShowOtherSimulacrums) continue;
-                }
-
-                float hpRatio;
-                if (!TryGetHealthRatio(actor, tick, out hpRatio))
+                if ((mine && !ShowOwnSimulacrums) || (!mine && !ShowOtherSimulacrums))
                     continue;
 
-                DrawSimulacrumBar(actor, hpRatio, mine);
+                float hpRatio;
+                if (!TryGetHealthRatio(actor, tick, out hpRatio) || hpRatio <= 0.0f)
+                    continue;
+
+                liveEntries.Add(new ScreenListEntry
+                {
+                    Actor = actor,
+                    ActorId = GetActorKey(actor),
+                    OwnerId = actor.SummonerAcdDynamicId,
+                    OwnerName = GetSimulacrumOwnerName(actor),
+                    HealthRatio = hpRatio,
+                    Distance = actor.NormalizedXyDistanceToMe,
+                    Mine = mine,
+                });
+            }
+
+            RefreshConfirmedDeathOwners(liveEntries);
+
+            // Actor-following bars reflect every currently collected live Sim.
+            // Screen-list completeness/range rules must never suppress a visible actor bar.
+            foreach (ScreenListEntry entry in liveEntries)
+            {
+                if (entry.Actor != null && entry.Actor.IsOnScreen)
+                    DrawSimulacrumBar(entry.Actor, entry.HealthRatio, entry.Mine);
+            }
+
+            if (ShowScreenList)
+                DrawScreenList(FilterIncompleteOtherScreenListGroups(liveEntries));
+            else
+            {
+                _screenListDragging = false;
+                _screenListBoundsValid = false;
             }
         }
 
-        private bool IsValidSimulacrum(IActor actor)
+        private bool IsSimulacrumSno(IActor actor)
         {
-            if (actor == null || actor.SnoActor == null)
+            return actor != null && actor.SnoActor != null && _simulacrumSnos.Contains(actor.SnoActor.Sno);
+        }
+
+        private bool IsSimulacrumActor(IActor actor)
+        {
+            return IsSimulacrumSno(actor) && !actor.IsDisabled;
+        }
+
+        private void ObserveConfirmedSimulacrumDeath(IActor actor)
+        {
+            if (actor == null || actor.SummonerAcdDynamicId == 0 ||
+                actor.SummonerAcdDynamicId == Hud.Game.Me.SummonerId)
+            {
+                return;
+            }
+
+            float ratio;
+            if (TryGetNativeHealthRatio(actor, out ratio) && ratio <= 0.0f)
+                _ownersWithConfirmedSimDeath.Add(actor.SummonerAcdDynamicId);
+        }
+
+        private void RefreshConfirmedDeathOwners(List<ScreenListEntry> entries)
+        {
+            if (_ownersWithConfirmedSimDeath.Count == 0)
+                return;
+
+            var remove = new List<uint>();
+            foreach (uint ownerId in _ownersWithConfirmedSimDeath)
+            {
+                int liveCount = 0;
+                foreach (ScreenListEntry entry in entries)
+                {
+                    if (!entry.Mine && entry.OwnerId == ownerId)
+                        liveCount++;
+                }
+
+                // No live Sim means the old cast ended. Two live Sims means the set is complete again.
+                if (liveCount == 0 || liveCount >= 2)
+                    remove.Add(ownerId);
+            }
+
+            foreach (uint ownerId in remove)
+                _ownersWithConfirmedSimDeath.Remove(ownerId);
+        }
+
+        private List<ScreenListEntry> FilterIncompleteOtherScreenListGroups(List<ScreenListEntry> entries)
+        {
+            var result = new List<ScreenListEntry>(entries.Count);
+            var handledOwners = new List<ScreenListEntry>();
+
+            foreach (ScreenListEntry entry in entries)
+            {
+                if (entry.Mine)
+                {
+                    result.Add(entry);
+                    continue;
+                }
+
+                bool handled = false;
+                foreach (ScreenListEntry owner in handledOwners)
+                {
+                    if (IsSameScreenListOwner(owner, entry))
+                    {
+                        handled = true;
+                        break;
+                    }
+                }
+                if (handled)
+                    continue;
+
+                handledOwners.Add(entry);
+                int count = 0;
+                bool inRange = true;
+                foreach (ScreenListEntry candidate in entries)
+                {
+                    if (!IsSameScreenListOwner(entry, candidate))
+                        continue;
+
+                    count++;
+                    if (LimitOtherScreenListByRange && !IsValidOtherScreenListDistance(candidate.Distance))
+                        inRange = false;
+                }
+
+                int expectedCount = GetExpectedOtherSimulacrumCount(entry);
+                bool confirmedSurvivor = ShowSurvivorAfterConfirmedDeath &&
+                    expectedCount == 2 &&
+                    count == 1 &&
+                    entry.OwnerId != 0 &&
+                    _ownersWithConfirmedSimDeath.Contains(entry.OwnerId);
+
+                if (!inRange || (HideIncompleteOtherScreenListGroups && count < expectedCount && !confirmedSurvivor))
+                    continue;
+
+                foreach (ScreenListEntry candidate in entries)
+                {
+                    if (IsSameScreenListOwner(entry, candidate))
+                        result.Add(candidate);
+                }
+            }
+
+            return result;
+        }
+
+        private bool IsValidOtherScreenListDistance(double distance)
+        {
+            return !double.IsNaN(distance) &&
+                !double.IsInfinity(distance) &&
+                distance <= Math.Max(0.0f, OtherScreenListRange);
+        }
+
+        private int GetExpectedOtherSimulacrumCount(ScreenListEntry entry)
+        {
+            if (entry.Actor != null && entry.Actor.SnoActor != null)
+            {
+                ActorSnoEnum sno = entry.Actor.SnoActor.Sno;
+                if (sno == ActorSnoEnum._p6_necro_simulacrum_a ||
+                    sno == ActorSnoEnum._p6_necro_simulacrum_a_set)
+                {
+                    return 2;
+                }
+            }
+
+            IPlayer owner = GetPlayerBySummonerId(entry.OwnerId);
+            if (owner == null || owner.Powers == null)
+                return 1;
+
+            try
+            {
+                IPlayerSkill skill = GetSimulacrumSkill(owner);
+                bool bloodAndBone = skill != null &&
+                    (string.Equals(skill.RuneNameEnglish, "Blood and Bone", StringComparison.OrdinalIgnoreCase) ||
+                    (string.IsNullOrWhiteSpace(skill.RuneNameEnglish) && skill.Rune == 3));
+                return bloodAndBone || owner.Powers.BuffIsActive(484301) ? 2 : 1;
+            }
+            catch
+            {
+                return 1;
+            }
+        }
+
+        private IPlayerSkill GetSimulacrumSkill(IPlayer player)
+        {
+            if (player == null || player.Powers == null)
+                return null;
+
+            try
+            {
+                if (player.Powers.UsedNecromancerPowers != null &&
+                    player.Powers.UsedNecromancerPowers.Simulacrum != null)
+                {
+                    return player.Powers.UsedNecromancerPowers.Simulacrum;
+                }
+
+                return player.Powers.GetUsedSkill(Hud.Sno.SnoPowers.Necromancer_Simulacrum);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private IPlayer GetPlayerBySummonerId(uint summonerId)
+        {
+            if (summonerId == 0 || Hud.Game.Players == null)
+                return null;
+
+            foreach (IPlayer player in Hud.Game.Players)
+            {
+                if (player != null && player.SummonerId == summonerId)
+                    return player;
+            }
+
+            return null;
+        }
+
+        private bool IsSameScreenListOwner(ScreenListEntry a, ScreenListEntry b)
+        {
+            if (a == null || b == null || a.Mine != b.Mine)
                 return false;
 
-            if (!_simulacrumSnos.Contains(actor.SnoActor.Sno))
-                return false;
+            if (a.OwnerId != 0 || b.OwnerId != 0)
+                return a.OwnerId == b.OwnerId;
 
-            if (!actor.IsOnScreen || actor.IsDisabled)
-                return false;
-
-            return true;
+            return string.Equals(a.OwnerName, b.OwnerName, StringComparison.OrdinalIgnoreCase);
         }
 
         private bool TryGetHealthRatio(IActor actor, int tick, out float ratio)
         {
             ratio = 1.0f;
 
-            uint key = actor.AcdId != 0 ? actor.AcdId : actor.AnnId;
+            uint key = GetActorKey(actor);
             if (key == 0)
                 return false;
 
@@ -149,6 +421,14 @@ namespace Turbo.Plugins.s7o
 
             ratio = ClampRatio(current / max);
             return true;
+        }
+
+        private uint GetActorKey(IActor actor)
+        {
+            if (actor == null)
+                return 0;
+
+            return actor.AcdId != 0 ? actor.AcdId : actor.AnnId;
         }
 
         private bool TryGetNativeHealthRatio(IActor actor, out float ratio)
@@ -219,12 +499,17 @@ namespace Turbo.Plugins.s7o
 
             float w = BaseWidth * ClampScale(mine ? OwnWidthScale : OtherWidthScale, 0.25f, 3.0f);
             float h = BaseHeight * ClampScale(mine ? OwnHeightScale : OtherHeightScale, 0.25f, 3.0f);
+            float x = sc.X - w * 0.5f;
+            float y = sc.Y + BarYOffset;
+            DrawHealthBar(x, y, w, h, hpRatio, mine);
+        }
+
+        private void DrawHealthBar(float x, float y, float w, float h, float hpRatio, bool mine)
+        {
             float outline = OutlineSize < 0.0f ? 0.0f : OutlineSize;
             if (outline * 2.0f >= w || outline * 2.0f >= h)
                 outline = 1.0f;
 
-            float x = sc.X - w * 0.5f;
-            float y = sc.Y + BarYOffset;
             float fillX = x + outline;
             float fillY = y + outline;
             float fillW = w - outline * 2.0f;
@@ -261,6 +546,299 @@ namespace Turbo.Plugins.s7o
             int sr = r, sg = g, sb = b;
             Darken(ref sr, ref sg, ref sb, 0.35f);
             GetFillBrush(alpha, sr, sg, sb).DrawRectangleGridFit(fillX, fillY + fillH * 0.72f, hpW, fillH * 0.28f);
+        }
+
+        private void DrawScreenList(List<ScreenListEntry> entries)
+        {
+            if (entries == null || entries.Count == 0 || Hud.Window == null)
+            {
+                _screenListDragging = false;
+                _screenListBoundsValid = false;
+                return;
+            }
+
+            entries.Sort(delegate(ScreenListEntry a, ScreenListEntry b)
+            {
+                int mine = b.Mine.CompareTo(a.Mine);
+                if (mine != 0) return mine;
+
+                int owner = string.Compare(a.OwnerName, b.OwnerName, StringComparison.OrdinalIgnoreCase);
+                if (owner != 0) return owner;
+
+                int ownerId = a.OwnerId.CompareTo(b.OwnerId);
+                if (ownerId != 0) return ownerId;
+
+                return a.ActorId.CompareTo(b.ActorId);
+            });
+
+            UpdateScreenListDrag();
+
+            float windowW = Hud.Window.Size.Width;
+            float windowH = Hud.Window.Size.Height;
+            float w = ClampScale(ScreenListWidth, 60.0f, Math.Max(60.0f, windowW));
+            float barH = ClampScale(ScreenListBarHeight, 5.0f, 60.0f);
+            float x = ClampRatio(ScreenListXFraction) * windowW;
+            float y = ClampRatio(ScreenListYFraction) * windowH;
+            float labelGap = Math.Max(0.0f, ScreenListLabelGap);
+            float innerBarGap = Math.Max(0.0f, ScreenListInnerBarGap);
+            float groupGap = Math.Max(0.0f, ScreenListGroupGap);
+            int maxRows = Math.Max(1, Math.Min(16, ScreenListMaxRows));
+            List<ScreenListGroup> groups = BuildScreenListGroups(entries, maxRows);
+            if (groups.Count == 0)
+            {
+                _screenListDragging = false;
+                _screenListBoundsValid = false;
+                return;
+            }
+
+            if (x + w > windowW)
+                x = Math.Max(0.0f, windowW - w);
+
+            float labelHeight = 0.0f;
+            if (_screenListTextFont != null)
+                labelHeight = _screenListTextFont.GetTextLayout("SIM").Metrics.Height + labelGap;
+
+            int barCount = 0;
+            int innerGapCount = 0;
+            foreach (ScreenListGroup group in groups)
+            {
+                barCount += group.Entries.Count;
+                innerGapCount += Math.Max(0, group.Entries.Count - 1);
+            }
+
+            float estimatedHeight =
+                groups.Count * labelHeight +
+                barCount * barH +
+                innerGapCount * innerBarGap +
+                Math.Max(0, groups.Count - 1) * groupGap;
+            if (y + estimatedHeight > windowH)
+                y = Math.Max(0.0f, windowH - estimatedHeight);
+
+            float startY = y;
+            for (int groupIndex = 0; groupIndex < groups.Count; groupIndex++)
+            {
+                ScreenListGroup group = groups[groupIndex];
+                string label = TruncateLabel(group.OwnerName, 20);
+
+                if (ShowScreenListEntityCount)
+                {
+                    string suffix = " (" + group.Entries.Count + ")";
+                    label = TruncateLabel(group.OwnerName, Math.Max(1, 20 - suffix.Length)) + suffix;
+                }
+
+                if (_screenListTextFont != null && !string.IsNullOrEmpty(label))
+                {
+                    var layout = _screenListTextFont.GetTextLayout(label);
+                    _screenListTextFont.DrawText(layout, x, y);
+                    y += layout.Metrics.Height + labelGap;
+                }
+
+                for (int entryIndex = 0; entryIndex < group.Entries.Count; entryIndex++)
+                {
+                    ScreenListEntry entry = group.Entries[entryIndex];
+                    DrawHealthBar(x, y, w, barH, entry.HealthRatio, entry.Mine);
+                    y += barH;
+                    if (entryIndex + 1 < group.Entries.Count)
+                        y += innerBarGap;
+                }
+
+                if (groupIndex + 1 < groups.Count)
+                    y += groupGap;
+            }
+
+            _screenListBoundsX = x;
+            _screenListBoundsY = startY;
+            _screenListBoundsWidth = w;
+            _screenListBoundsHeight = Math.Max(barH, y - startY);
+            _screenListBoundsValid = true;
+
+            ScreenListXFraction = windowW > 0.0f ? x / windowW : ScreenListXFraction;
+            ScreenListYFraction = windowH > 0.0f ? startY / windowH : ScreenListYFraction;
+        }
+
+        private List<ScreenListGroup> BuildScreenListGroups(List<ScreenListEntry> entries, int maxRows)
+        {
+            var groups = new List<ScreenListGroup>();
+            int rows = 0;
+
+            foreach (ScreenListEntry entry in entries)
+            {
+                if (rows >= maxRows)
+                    break;
+
+                ScreenListGroup group =
+                    groups.Count > 0 && IsSameScreenListOwner(groups[groups.Count - 1], entry)
+                        ? groups[groups.Count - 1]
+                        : null;
+
+                if (group == null)
+                {
+                    group = new ScreenListGroup
+                    {
+                        OwnerId = entry.OwnerId,
+                        OwnerName = entry.OwnerName,
+                        Mine = entry.Mine,
+                    };
+                    groups.Add(group);
+                }
+
+                group.Entries.Add(entry);
+                rows++;
+            }
+
+            return groups;
+        }
+
+        private bool IsSameScreenListOwner(ScreenListGroup group, ScreenListEntry entry)
+        {
+            if (group == null || entry == null || group.Mine != entry.Mine)
+                return false;
+
+            if (group.OwnerId != 0 || entry.OwnerId != 0)
+                return group.OwnerId == entry.OwnerId;
+
+            return string.Equals(group.OwnerName, entry.OwnerName, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private string GetSimulacrumOwnerName(IActor actor)
+        {
+            if (actor == null || Hud.Game == null)
+                return "SIM";
+
+            uint ownerId = actor.SummonerAcdDynamicId;
+            var players = Hud.Game.Players;
+            if (players == null)
+                return "SIM";
+
+            foreach (IPlayer player in players)
+            {
+                if (player == null || player.SummonerId != ownerId)
+                    continue;
+
+                string name = player.IsMe ? Hud.MyBattleTag : player.BattleTagAbovePortrait;
+                if (string.IsNullOrWhiteSpace(name))
+                    name = player.BattleTagAbovePortrait;
+
+                name = ExtractAccountName(name);
+
+                if (!string.IsNullOrWhiteSpace(name))
+                    return name.Trim();
+
+                if (!string.IsNullOrWhiteSpace(player.HeroName))
+                    return player.HeroName.Trim();
+            }
+
+            return "SIM";
+        }
+
+        private string ExtractAccountName(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name))
+                return string.Empty;
+
+            string result = name.Trim();
+
+            int clanEnd = result.LastIndexOf('>');
+            if (clanEnd >= 0 && clanEnd + 1 < result.Length)
+                result = result.Substring(clanEnd + 1).Trim();
+
+            int hashIndex = result.IndexOf('#');
+            if (hashIndex > 0)
+                result = result.Substring(0, hashIndex).Trim();
+
+            return result;
+        }
+
+        private string TruncateLabel(string text, int maxLength)
+        {
+            if (string.IsNullOrEmpty(text))
+                return "SIM";
+
+            if (text.Length <= maxLength)
+                return text;
+
+            return text.Substring(0, Math.Max(1, maxLength - 1)) + "…";
+        }
+
+        private void BeginScreenListDrag()
+        {
+            if (!ShowScreenList || !_screenListBoundsValid || Hud == null || Hud.Window == null)
+                return;
+
+            if (!Hud.Window.CursorInsideRect(
+                _screenListBoundsX,
+                _screenListBoundsY,
+                _screenListBoundsWidth,
+                _screenListBoundsHeight))
+            {
+                return;
+            }
+
+            _screenListDragging = true;
+            _screenListDragOffsetX = Hud.Window.CursorX - _screenListBoundsX;
+            _screenListDragOffsetY = Hud.Window.CursorY - _screenListBoundsY;
+        }
+
+        private void UpdateScreenListDrag()
+        {
+            if (!_screenListDragging || Hud == null || Hud.Window == null)
+                return;
+
+            float windowW = Hud.Window.Size.Width;
+            float windowH = Hud.Window.Size.Height;
+            float w = ClampScale(ScreenListWidth, 60.0f, Math.Max(60.0f, windowW));
+            float h = Math.Max(ScreenListBarHeight, _screenListBoundsHeight);
+            float x = Hud.Window.CursorX - _screenListDragOffsetX;
+            float y = Hud.Window.CursorY - _screenListDragOffsetY;
+
+            x = Math.Max(0.0f, Math.Min(Math.Max(0.0f, windowW - w), x));
+            y = Math.Max(0.0f, Math.Min(Math.Max(0.0f, windowH - h), y));
+
+            if (windowW > 0.0f)
+                ScreenListXFraction = x / windowW;
+            if (windowH > 0.0f)
+                ScreenListYFraction = y / windowH;
+        }
+
+        private bool IsCursorOverOwnPortrait()
+        {
+            if (Hud == null || Hud.Window == null || Hud.Game == null || Hud.Game.Me == null)
+                return false;
+
+            IUiElement portrait = Hud.Game.Me.PortraitUiElement;
+            if (portrait == null)
+                return false;
+
+            if (!portrait.Visible && portrait.ReplacementWhenNotVisible != null)
+                portrait = portrait.ReplacementWhenNotVisible;
+
+            var rect = portrait.Rectangle;
+            return rect.Width > 0.0f &&
+                rect.Height > 0.0f &&
+                Hud.Window.CursorInsideRect(rect.X, rect.Y, rect.Width, rect.Height);
+        }
+
+        private bool IsCursorOverScreenList()
+        {
+            return ShowScreenList &&
+                _screenListBoundsValid &&
+                Hud != null &&
+                Hud.Window != null &&
+                Hud.Window.CursorInsideRect(
+                    _screenListBoundsX,
+                    _screenListBoundsY,
+                    _screenListBoundsWidth,
+                    _screenListBoundsHeight);
+        }
+
+        private void ToggleScreenList()
+        {
+            ShowScreenList = !ShowScreenList;
+            if (!ShowScreenList)
+            {
+                _screenListDragging = false;
+                _screenListBoundsValid = false;
+            }
         }
 
         private void GetHealthRampColor(float hp, out int r, out int g, out int b)
@@ -343,6 +921,16 @@ namespace Turbo.Plugins.s7o
                 _brushCache[key] = brush;
             }
             return brush;
+        }
+
+        private void ResetRuntimeState(int tick)
+        {
+            _maxHitpointsByActor.Clear();
+            _lastSeenTickByActor.Clear();
+            _ownersWithConfirmedSimDeath.Clear();
+            _screenListDragging = false;
+            _screenListBoundsValid = false;
+            _lastPruneTick = tick;
         }
 
         private void PruneStaleActors(int tick)
