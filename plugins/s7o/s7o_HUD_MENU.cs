@@ -587,7 +587,7 @@ namespace Turbo.Plugins.s7o
         private bool _pestilenceRgkCursorRestore = true;
         private int _pestilenceRgkTargetRange = 70;
         private bool _pestilenceRgkJuggerHotkeyEnabled = true;
-        private ushort _pestilenceRgkJuggerHotkeyVk = 0x20;
+        private ushort _pestilenceRgkJuggerHotkeyVk = 0x11;
         private bool _pestilenceRgkJuggerHotkeyCapture = false;
         private bool _pestilenceRgkRgAssist = false;
         private bool _pestilenceRgkShowTargetLineReticle = true;
@@ -1559,6 +1559,9 @@ namespace Turbo.Plugins.s7o
                     _status = "UNSUPPORTED PESTILENCE JUGGER HOTKEY";
                     return;
                 }
+
+                if (vk == 0x20)
+                    vk = 0x11;
 
                 _pestilenceRgkJuggerHotkeyVk = vk;
                 _pestilenceRgkJuggerHotkeyCapture = false;
@@ -18881,7 +18884,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     {
                         int tmp;
                         if (int.TryParse(val, NumberStyles.Integer, CultureInfo.InvariantCulture, out tmp) && tmp > 0 && tmp <= ushort.MaxValue)
-                            _pestilenceRgkJuggerHotkeyVk = (ushort)tmp;
+                            _pestilenceRgkJuggerHotkeyVk = (ushort)(tmp == 0x20 ? 0x11 : tmp);
                     }
                     else if (string.Equals(key, "PESTILENCE_RGK_RG_ASSIST", StringComparison.OrdinalIgnoreCase))
                     {
