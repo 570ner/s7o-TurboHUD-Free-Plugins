@@ -4,9 +4,11 @@ using Turbo.Plugins.Default;
 
 namespace Turbo.Plugins.s7o
 {
-    // REV05 keeps the independent features and uses client coordinates for all HUD rendering.
+    // REV06 preserves REV05 and keeps low-health Morlu recovery states targetable and normally colored.
     public class s7o_EliteHealthBars : BasePlugin, IInGameWorldPainter, IInGameTopPainter
     {
+        private const double MorluRecoveryHealthThreshold = 0.12d;
+
         private bool _defaultEliteMinimapCirclesAdjusted;
         private int _defaultEliteMinimapCircleAdjustAttempts;
         private IBrush _eliteMinimapCircleOutlineBrush;
@@ -820,11 +822,36 @@ namespace Turbo.Plugins.s7o
                 || IsBossLikeMonster(monster);
         }
 
+        private bool IsMorluRecoveryState(IMonster monster)
+        {
+            if (monster == null)
+                return false;
+
+            try
+            {
+                string name = monster.SnoMonster != null ? monster.SnoMonster.NameEnglish : null;
+                if (string.IsNullOrEmpty(name) || name.IndexOf("Morlu", StringComparison.OrdinalIgnoreCase) < 0)
+                    return false;
+
+                if (!monster.IsAlive || !monster.IsOnScreen || monster.MaxHealth <= 0
+                    || monster.Invulnerable || monster.Untargetable || monster.Hidden || monster.Stealthed)
+                {
+                    return false;
+                }
+
+                double hp = monster.CurHealth / monster.MaxHealth;
+                return hp > 0.0d && hp <= MorluRecoveryHealthThreshold
+                    && (monster.Invisible || !monster.Attackable);
+            }
+            catch { return false; }
+        }
+
         private bool IsEliteTemporarilyUnavailable(IMonster monster)
         {
             if (!GreyOutUnavailableElites) return false;
             if (monster == null) return false;
             if (!IsEliteLikeForVisibility(monster)) return false;
+            if (IsMorluRecoveryState(monster)) return false;
 
             if (GreyOutBurrowedElites && monster.Burrowed)
                 return true;
