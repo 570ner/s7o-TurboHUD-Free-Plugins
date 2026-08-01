@@ -82,8 +82,14 @@ public static class s7o_AutoGemUpgradeState
 
         public static string AutoGemDebugAction = string.Empty;
         public static string AutoGemDebugDetail = string.Empty;
+        public static int AutoGemDebugActionSequence = 0;
         public static int AutoGemDebugTargetAbs = -1;
         public static int AutoGemDebugTargetRow = -1;
+        public static string AutoGemDebugStage = "Idle";
+        public static string AutoGemDebugTargetName = string.Empty;
+        public static int AutoGemDebugTargetRank = -1;
+        public static int AutoGemDebugUpgradeAttempts = -1;
+        public static uint AutoGemDebugSelectedAcd = 0;
 
         // === Debug Logging Configuration ===
         // Debugging is off by default. When enabled via the overlay menu, logs are written
@@ -108,6 +114,28 @@ public static class s7o_AutoGemUpgradeState
         public static int MaxBufferedLines = 64;
         // Maximum log file size in megabytes. If exceeded the log will be truncated.
         public static int MaxFileSizeMb = 4;
+
+        // Read-only lifecycle diagnostics consumed by the standalone debugger.
+        public static string AutoGemTownRewardState = "Idle";
+        public static string AutoGemTownRewardReason = "load";
+        public static int AutoGemTownRewardSession = 0;
+        public static int AutoGemTownRewardSpaceCount = 0;
+
+        public static string ResolveDebugLogPath()
+        {
+            try
+            {
+                return Path.Combine(
+                    AppDomain.CurrentDomain.BaseDirectory,
+                    "plugins",
+                    "s7o",
+                    DebugLogFileName);
+            }
+            catch
+            {
+                return DebugLogFileName;
+            }
+        }
 
         public static int ClampTPDelayMs(int ms)
         {
@@ -937,8 +965,7 @@ public static class s7o_AutoGemUpgradeState
 
         private static string FreeHudDebugPath()
         {
-            try { return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "plugins", "s7o", s7o_AutoGemUpgradeState.DebugLogFileName); }
-            catch { return s7o_AutoGemUpgradeState.DebugLogFileName; }
+            return s7o_AutoGemUpgradeState.ResolveDebugLogPath();
         }
 
         private void LogMenuEvent(string message)
@@ -1687,18 +1714,7 @@ public static class s7o_AutoGemUpgradeState
                 return;
             }
 
-            try
-            {
-                s7o_AutoGemUpgradeState.DebugLogPath = Path.Combine(
-                    AppDomain.CurrentDomain.BaseDirectory,
-                    "plugins",
-                    "s7o",
-                    s7o_AutoGemUpgradeState.DebugLogFileName);
-            }
-            catch
-            {
-                s7o_AutoGemUpgradeState.DebugLogPath = s7o_AutoGemUpgradeState.DebugLogFileName;
-            }
+            s7o_AutoGemUpgradeState.DebugLogPath = s7o_AutoGemUpgradeState.ResolveDebugLogPath();
         }
     }
 
@@ -2125,7 +2141,6 @@ public static class s7o_AutoGemUpgradeState
     internal static class FreeHudInput
     {
         public const ushort VirtualKeyForTownPortal = 0x54; // T: FreeHUD uses direct virtual-key input for Town Portal.
-        public const ushort VirtualKeyForInteract = 0x00;
         public const ushort VK_SHIFT = 0x10;
         public const ushort VK_J = 0x4A;
         public const ushort VK_ESCAPE = 0x1B;
@@ -2133,7 +2148,6 @@ public static class s7o_AutoGemUpgradeState
         private const uint INPUT_MOUSE = 0;
         private const uint INPUT_KEYBOARD = 1;
         private const uint KEYEVENTF_KEYUP = 0x0002;
-        private const uint MOUSEEVENTF_MOVE = 0x0001;
         private const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
         private const uint MOUSEEVENTF_LEFTUP = 0x0004;
         private const uint MOUSEEVENTF_WHEEL = 0x0800;
@@ -2146,58 +2160,166 @@ public static class s7o_AutoGemUpgradeState
         [DllImport("user32.dll")] private static extern bool SetCursorPos(int X, int Y);
         [DllImport("user32.dll", SetLastError = true)] private static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
 
-        public static void MouseMove(int x, int y) { SetCursorPos(x, y); }
-        public static void MouseDown(MouseButtons button) { if (button == MouseButtons.Left) SendMouse(MOUSEEVENTF_LEFTDOWN, 0); }
-        public static void MouseUp(MouseButtons button) { if (button == MouseButtons.Left) SendMouse(MOUSEEVENTF_LEFTUP, 0); }
-        public static void ScrollDown(int clicks) { SendMouse(MOUSEEVENTF_WHEEL, unchecked((uint)(-WHEEL_DELTA * Math.Max(1, clicks)))); }
-        public static void ScrollUp(int clicks) { SendMouse(MOUSEEVENTF_WHEEL, (uint)(WHEEL_DELTA * Math.Max(1, clicks))); }
-        public static void ClickUiElement(MouseButtons button, IUiElement element)
+        public static bool MouseMoveClient(IController hud, int x, int y)
         {
-            if (element == null) return;
-            var r = element.Rectangle;
-            MouseMove((int)Math.Round(r.Left + r.Width * 0.5f), (int)Math.Round(r.Top + r.Height * 0.5f));
-            MouseDown(button); Thread.Sleep(10); MouseUp(button);
+            try
+            {
+                if (hud == null || hud.Window == null || !hud.Window.IsForeground)
+                    return false;
+
+                Size size = hud.Window.Size;
+                if (x < 0 || y < 0 || x >= size.Width || y >= size.Height)
+                    return false;
+
+                Point offset = hud.Window.Offset;
+                long screenX = (long)offset.X + x;
+                long screenY = (long)offset.Y + y;
+                if (screenX < int.MinValue || screenX > int.MaxValue ||
+                    screenY < int.MinValue || screenY > int.MaxValue)
+                    return false;
+
+                return SetCursorPos((int)screenX, (int)screenY) && hud.Window.IsForeground;
+            }
+            catch
+            {
+                return false;
+            }
         }
-        public static void SendVirtualKey(ushort vk)
+
+        public static bool MouseDown(MouseButtons button)
         {
-            if (vk == 0) return;
-            SendKeyboard(vk, false); Thread.Sleep(10); SendKeyboard(vk, true);
+            return button == MouseButtons.Left && SendMouse(MOUSEEVENTF_LEFTDOWN, 0);
         }
-        public static void SendKeyDown(ushort vk)
+
+        public static bool MouseUp(MouseButtons button)
         {
-            if (vk == 0) return;
-            SendKeyboard(vk, false);
+            return button == MouseButtons.Left && SendMouse(MOUSEEVENTF_LEFTUP, 0);
         }
-        public static void SendKeyUp(ushort vk)
+
+        public static bool ScrollDown(int clicks)
         {
-            if (vk == 0) return;
-            SendKeyboard(vk, true);
+            return SendMouse(MOUSEEVENTF_WHEEL, unchecked((uint)(-WHEEL_DELTA * Math.Max(1, clicks))));
         }
-        public static void SendKeyCombo(ushort modifierVk, ushort keyVk)
+
+        public static bool ScrollUp(int clicks)
         {
-            if (modifierVk == 0 || keyVk == 0) return;
-            SendKeyDown(modifierVk);
+            return SendMouse(MOUSEEVENTF_WHEEL, (uint)(WHEEL_DELTA * Math.Max(1, clicks)));
+        }
+
+        public static bool ClickUiElement(IController hud, MouseButtons button, IUiElement element)
+        {
+            if (element == null)
+                return false;
+
+            try
+            {
+                RectangleF r = element.Rectangle;
+                int x = (int)Math.Round(r.Left + r.Width * 0.5f);
+                int y = (int)Math.Round(r.Top + r.Height * 0.5f);
+                if (!MouseMoveClient(hud, x, y) || !MouseDown(button))
+                    return false;
+
+                Thread.Sleep(10);
+                return MouseUp(button);
+            }
+            catch
+            {
+                MouseUp(button);
+                return false;
+            }
+        }
+
+        public static bool SendVirtualKey(ushort vk)
+        {
+            if (vk == 0 || !SendKeyboard(vk, false))
+                return false;
+
             Thread.Sleep(10);
-            SendVirtualKey(keyVk);
-            Thread.Sleep(10);
-            SendKeyUp(modifierVk);
+            return SendKeyboard(vk, true);
         }
-        public static void SendEscape() { SendVirtualKey(VK_ESCAPE); }
-        public static void SendSpace() { SendVirtualKey(VK_SPACE); }
-        public static void SendShiftJ() { SendKeyCombo(VK_SHIFT, VK_J); }
-        private static void SendMouse(uint flags, uint mouseData)
+
+        public static bool SendKeyDown(ushort vk)
         {
-            var input = new[] { new INPUT { type = INPUT_MOUSE, U = new InputUnion { mi = new MOUSEINPUT { dx = 0, dy = 0, mouseData = mouseData, dwFlags = flags, time = 0, dwExtraInfo = IntPtr.Zero } } } };
-            SendInput(1, input, Marshal.SizeOf(typeof(INPUT)));
+            return vk != 0 && SendKeyboard(vk, false);
         }
-        private static void SendKeyboard(ushort vk, bool up)
+
+        public static bool SendKeyUp(ushort vk)
         {
-            var input = new[] { new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = vk, wScan = 0, dwFlags = up ? KEYEVENTF_KEYUP : 0, time = 0, dwExtraInfo = IntPtr.Zero } } } };
-            SendInput(1, input, Marshal.SizeOf(typeof(INPUT)));
+            return vk != 0 && SendKeyboard(vk, true);
+        }
+
+        public static bool SendKeyCombo(ushort modifierVk, ushort keyVk)
+        {
+            if (modifierVk == 0 || keyVk == 0 || !SendKeyDown(modifierVk))
+                return false;
+
+            try
+            {
+                Thread.Sleep(10);
+                if (!SendVirtualKey(keyVk))
+                    return false;
+                Thread.Sleep(10);
+                return true;
+            }
+            finally
+            {
+                SendKeyUp(modifierVk);
+            }
+        }
+
+        public static bool SendEscape() { return SendVirtualKey(VK_ESCAPE); }
+        public static bool SendSpace() { return SendVirtualKey(VK_SPACE); }
+        public static bool SendShiftJ() { return SendKeyCombo(VK_SHIFT, VK_J); }
+
+        private static bool SendMouse(uint flags, uint mouseData)
+        {
+            var input = new[]
+            {
+                new INPUT
+                {
+                    type = INPUT_MOUSE,
+                    U = new InputUnion
+                    {
+                        mi = new MOUSEINPUT
+                        {
+                            dx = 0,
+                            dy = 0,
+                            mouseData = mouseData,
+                            dwFlags = flags,
+                            time = 0,
+                            dwExtraInfo = IntPtr.Zero,
+                        }
+                    }
+                }
+            };
+            return SendInput(1, input, Marshal.SizeOf(typeof(INPUT))) == 1;
+        }
+
+        private static bool SendKeyboard(ushort vk, bool up)
+        {
+            var input = new[]
+            {
+                new INPUT
+                {
+                    type = INPUT_KEYBOARD,
+                    U = new InputUnion
+                    {
+                        ki = new KEYBDINPUT
+                        {
+                            wVk = vk,
+                            wScan = 0,
+                            dwFlags = up ? KEYEVENTF_KEYUP : 0,
+                            time = 0,
+                            dwExtraInfo = IntPtr.Zero,
+                        }
+                    }
+                }
+            };
+            return SendInput(1, input, Marshal.SizeOf(typeof(INPUT))) == 1;
         }
     }
 
-public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IInGameTopPainter
+public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IInGameTopPainter, INewAreaHandler
     {
         public bool AutoStartEnabled { get; set; } = true;
 
@@ -2248,8 +2370,6 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
         public int MaxProbeNoIdentityRetries { get; set; } = 0;
 
         public int ScrollHoldMs { get; set; } = 0;
-
-        public int MaxScrollHoldMsPerRow { get; set; } = 700;
 
         private const int UrshiCols = 5;
         public int ScanRowsPerViewport { get; set; } = 3;
@@ -2335,12 +2455,15 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
         private IUiElement _chatEditLine;
         private int _lastConversationCloseTick = int.MinValue;
         private int _lastGemPaneChatCloseTick = int.MinValue;
-        private bool _townRewardDialogSpaceSent;
-        private bool _townRewardDialogArmed;
+        private TownRewardSpaceState _townRewardSpaceState = TownRewardSpaceState.Idle;
+        private int _townRewardSessionId;
+        private int _townRewardSessionStartTick = int.MinValue;
+        private int _townRewardSpaceCount;
         private int _chatCloseFadeWaitUntilTick = int.MinValue;
         private bool _chatCloseFadePendingDialogSpace;
         private int _chatCloseFadePendingAttempts = int.MinValue;
         private const int ConversationCloseThrottleMs = 150;
+        private const int TownRewardSessionTimeoutMs = 30 * 60 * 1000;
         private readonly List<CellRef> _candidateCells = new List<CellRef>();
 
         private IFont _warningFont;
@@ -2526,6 +2649,14 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
         private VisibleCell _probePendingCell;
         private int _probeActionTick = int.MinValue;
         private int _probeNoIdentityRetryCount;
+
+        private enum TownRewardSpaceState
+        {
+            Idle,
+            AwaitingTown,
+            AwaitingRiftClose,
+            RewardSpaceSent,
+        }
 
         private enum AutomationStage
         {
@@ -2751,7 +2882,17 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
             RegisterStrideCandidatePaths();
 
             _warningFont = Hud.Render.CreateFont("tahoma", 8, 255, 255, 70, 70, true, false, 220, 0, 0, 0, true);
+            PublishTownRewardLifecycle("load");
+        }
 
+        public void OnNewArea(bool newGame, ISnoArea area)
+        {
+            if (!newGame)
+                return;
+
+            _lastConversationCloseTick = int.MinValue;
+            ClearChatCloseFadeWait();
+            ResetTownRewardLifecycle("new-game");
         }
 
         private void RegisterCandidatePath(string family, string path, int major, int minor)
@@ -2848,32 +2989,36 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
             // invoke debug instrumentation before normal logic so run metrics can observe pane hide and resets
             try { InstrumentationHook(); } catch { }
             SyncMenuState();
+            PublishAutomationDebugSnapshot();
 
             if (!AutoStartEnabled)
             {
-                _townRewardDialogSpaceSent = false;
-                _townRewardDialogArmed = false;
+                ResetTownRewardLifecycle("disabled");
                 ResetState();
                 ClearSoftRestartWait(true);
                 return;
             }
 
-            if (!Hud.Game.IsInGame || !Hud.Window.IsForeground)
+            if (!Hud.Game.IsInGame)
             {
                 _lastConversationCloseTick = int.MinValue;
-                _townRewardDialogSpaceSent = false;
-                if (!Hud.Game.IsInGame)
-                    _townRewardDialogArmed = false;
+                // Preserve a pending Urshi reward session across transient loading frames.
+                // OnNewArea(newGame) remains the authoritative reset for a real game change.
                 ResetState();
                 ClearSoftRestartWait(true);
                 return;
             }
 
-            if (_gemUpgradePane?.Visible == true)
+            if (!Hud.Window.IsForeground || Hud.Game.IsLoading || Hud.Game.IsPaused)
             {
-                _townRewardDialogArmed = true;
-                _townRewardDialogSpaceSent = false;
+                _lastConversationCloseTick = int.MinValue;
+                ResetState();
+                ClearSoftRestartWait(true);
+                return;
             }
+
+            bool gemPaneVisible = SafeUiVisible(_gemUpgradePane);
+            UpdateTownRewardLifecycle(gemPaneVisible);
 
             if (Hud.Game.IsInTown)
             {
@@ -4975,10 +5120,12 @@ private void FocusSelectedGemAfterTeleportCancel()
             RectangleF r = _itemButton.Rectangle;
             int x = (int)Math.Round(r.Left + (r.Width * 0.5f));
             int y = (int)Math.Round(r.Top + (r.Height * 0.5f));
-            FreeHudInput.MouseMove(x, y);
-            Log(() => "urshi-cancel: focused-selected-gem x=" + x.ToString(CultureInfo.InvariantCulture)
-                + " y=" + y.ToString(CultureInfo.InvariantCulture));
-            return;
+            if (FreeHudInput.MouseMoveClient(Hud, x, y))
+            {
+                Log(() => "urshi-cancel: focused-selected-gem x=" + x.ToString(CultureInfo.InvariantCulture)
+                    + " y=" + y.ToString(CultureInfo.InvariantCulture));
+                return;
+            }
         }
 
         if (_gemStatusText != null && _gemStatusText.Visible)
@@ -4986,9 +5133,11 @@ private void FocusSelectedGemAfterTeleportCancel()
             RectangleF s = _gemStatusText.Rectangle;
             int x = (int)Math.Round(s.Left + 24f);
             int y = (int)Math.Round(s.Bottom + 18f);
-            FreeHudInput.MouseMove(x, y);
-            Log(() => "urshi-cancel: focused-status-fallback x=" + x.ToString(CultureInfo.InvariantCulture)
-                + " y=" + y.ToString(CultureInfo.InvariantCulture));
+            if (FreeHudInput.MouseMoveClient(Hud, x, y))
+            {
+                Log(() => "urshi-cancel: focused-status-fallback x=" + x.ToString(CultureInfo.InvariantCulture)
+                    + " y=" + y.ToString(CultureInfo.InvariantCulture));
+            }
         }
     }
     catch { }
@@ -5041,17 +5190,24 @@ private bool TryCancelTeleportByTalkingToUrshi(string reason)
                 return false;
             }
 
+            if (!FreeHudInput.MouseMoveClient(Hud, ux, uy))
+            {
+                Log(() => "urshi-cancel: client-to-screen move failed attempt=" + attempt.ToString(CultureInfo.InvariantCulture));
+                return false;
+            }
+
             MarkAutomationInputAction();
-            FreeHudInput.MouseMove(ux, uy);
             try { Thread.Sleep(20); } catch { }
-            FreeHudInput.MouseDown(MouseButtons.Left);
+            if (!FreeHudInput.MouseDown(MouseButtons.Left))
+                return false;
             try { Thread.Sleep(30); } catch { }
-            FreeHudInput.MouseUp(MouseButtons.Left);
+            bool released = FreeHudInput.MouseUp(MouseButtons.Left);
 
             Log(() => "urshi-cancel: click attempt=" + attempt.ToString(CultureInfo.InvariantCulture)
                 + " x=" + ux.ToString(CultureInfo.InvariantCulture)
-                + " y=" + uy.ToString(CultureInfo.InvariantCulture));
-            return true;
+                + " y=" + uy.ToString(CultureInfo.InvariantCulture)
+                + " released=" + (released ? "1" : "0"));
+            return released;
         }
         catch
         {
@@ -7791,9 +7947,16 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
 
             _savedCursorX = Hud.Window.CursorX;
             _savedCursorY = Hud.Window.CursorY;
-            FreeHudInput.ClickUiElement(MouseButtons.Left, element);
+            bool clicked = FreeHudInput.ClickUiElement(Hud, MouseButtons.Left, element);
             if (!ShouldKeepCursorAtAutomationActionPoint())
-                FreeHudInput.MouseMove(_savedCursorX, _savedCursorY);
+                FreeHudInput.MouseMoveClient(Hud, _savedCursorX, _savedCursorY);
+
+            if (!clicked)
+            {
+                UpdateSharedDebugState("click-ui-failed", element.Path, _target != null ? _target.AbsoluteIndex : int.MinValue);
+                return;
+            }
+
             MarkAutomationInputAction();
             UpdateSharedDebugState("click-ui", element.Path, _target != null ? _target.AbsoluteIndex : int.MinValue);
         }
@@ -7806,8 +7969,11 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             int y = (int)Math.Round(point.Y);
             if (!string.IsNullOrWhiteSpace(reason))
                 Log(() => "click " + reason + " @(" + x + "," + y + ") hold=" + holdMs);
-            FreeHudInput.MouseMove(x, y);
-            FreeHudInput.MouseDown(MouseButtons.Left);
+            if (!FreeHudInput.MouseMoveClient(Hud, x, y) || !FreeHudInput.MouseDown(MouseButtons.Left))
+            {
+                UpdateSharedDebugState("click-point-failed", reason ?? string.Empty, _target != null ? _target.AbsoluteIndex : int.MinValue);
+                return;
+            }
             // All scroll callers now use WheelScrollTick (holdMs=0). The only remaining
             // callers that pass holdMs>0 are the urshi-cancel path (intentional) and
             // reset-scroll-up (ScrollHoldMs=0). Cap to 12ms as a hard safety ceiling
@@ -7817,9 +7983,11 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             {
                 try { Thread.Sleep(clampedHold); } catch { }
             }
-            FreeHudInput.MouseUp(MouseButtons.Left);
+            bool released = FreeHudInput.MouseUp(MouseButtons.Left);
             if (!ShouldKeepCursorAtAutomationActionPoint())
-                FreeHudInput.MouseMove(_savedCursorX, _savedCursorY);
+                FreeHudInput.MouseMoveClient(Hud, _savedCursorX, _savedCursorY);
+            if (!released)
+                UpdateSharedDebugState("click-point-release-failed", reason ?? string.Empty, _target != null ? _target.AbsoluteIndex : int.MinValue);
             MarkAutomationInputAction(clampedHold > 0 ? UserInterferenceIgnoreAfterPluginInputMs + clampedHold : -1);
             UpdateSharedDebugState("click-point", (reason ?? string.Empty) + "|hold=" + holdMs.ToString(CultureInfo.InvariantCulture), _target != null ? _target.AbsoluteIndex : int.MinValue);
         }
@@ -7881,45 +8049,182 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
 
         private bool CanSendConversationDialogSpace()
         {
-            // Keep the existing dialog-skip behavior, but never synthesize Space
-            // while a text/storage context can own that key.  The stash guard
-            // fixes the storage-search leak when a rift-close dialog is stale
-            // or no longer accepts Space.
+            // Repeated inside-rift dialog advancement must never type into chat or
+            // leak into storage. The separate town reward one-shot intentionally
+            // ignores vendor/storage panels because it can fire only once per session.
             if (IsChatEntryOpen()) return false;
             if (IsStashUiOpen()) return false;
             return true;
         }
 
-        private bool TryCloseTownRewardDialogOnce()
+        private void UpdateTownRewardLifecycle(bool gemPaneVisible)
+        {
+            int now = NowTick();
+
+            if ((_townRewardSpaceState == TownRewardSpaceState.AwaitingTown ||
+                 _townRewardSpaceState == TownRewardSpaceState.AwaitingRiftClose) &&
+                _townRewardSessionStartTick != int.MinValue &&
+                unchecked(now - _townRewardSessionStartTick) > TownRewardSessionTimeoutMs)
+            {
+                ResetTownRewardLifecycle("session-timeout");
+            }
+
+            if (!Hud.Game.IsInTown && !gemPaneVisible && IsNewGreaterRiftInProgress())
+            {
+                if (_townRewardSpaceState != TownRewardSpaceState.Idle)
+                    ResetTownRewardLifecycle("new-greater-rift");
+                return;
+            }
+
+            // A real non-town Urshi gem-pane session is the only event that arms
+            // the later town one-shot. Quest/attribute signals can linger and must not
+            // arm a stale town Space against an unrelated conversation.
+            if (!Hud.Game.IsInTown && gemPaneVisible)
+                ArmTownRewardLifecycle("urshi-gem-pane-seen");
+
+            if (Hud.Game.IsInTown && _townRewardSpaceState == TownRewardSpaceState.AwaitingTown)
+                SetTownRewardState(TownRewardSpaceState.AwaitingRiftClose, "entered-town");
+        }
+
+        private void ArmTownRewardLifecycle(string reason)
+        {
+            if (_townRewardSpaceState == TownRewardSpaceState.AwaitingTown ||
+                _townRewardSpaceState == TownRewardSpaceState.AwaitingRiftClose)
+            {
+                return;
+            }
+
+            _townRewardSessionId++;
+            _townRewardSessionStartTick = NowTick();
+            _townRewardSpaceCount = 0;
+            SetTownRewardState(TownRewardSpaceState.AwaitingTown, reason);
+        }
+
+        private void ResetTownRewardLifecycle(string reason)
+        {
+            _townRewardSessionStartTick = int.MinValue;
+            _townRewardSpaceCount = 0;
+            SetTownRewardState(TownRewardSpaceState.Idle, reason);
+        }
+
+        private void SetTownRewardState(TownRewardSpaceState state, string reason)
+        {
+            bool changed = _townRewardSpaceState != state;
+            _townRewardSpaceState = state;
+            PublishTownRewardLifecycle(reason);
+
+            if (!changed)
+                return;
+
+            string detail = state.ToString()
+                + "|reason=" + (reason ?? string.Empty)
+                + "|session=" + _townRewardSessionId.ToString(CultureInfo.InvariantCulture)
+                + "|spaces=" + _townRewardSpaceCount.ToString(CultureInfo.InvariantCulture);
+            Log(() => "town reward state: " + detail);
+            UpdateSharedDebugState("town-reward-state", detail, _townRewardSessionId);
+        }
+
+        private void PublishTownRewardLifecycle(string reason)
+        {
+            s7o_AutoGemUpgradeState.AutoGemTownRewardState = _townRewardSpaceState.ToString();
+            s7o_AutoGemUpgradeState.AutoGemTownRewardReason = reason ?? string.Empty;
+            s7o_AutoGemUpgradeState.AutoGemTownRewardSession = _townRewardSessionId;
+            s7o_AutoGemUpgradeState.AutoGemTownRewardSpaceCount = _townRewardSpaceCount;
+        }
+
+        private bool IsNewGreaterRiftInProgress()
         {
             try
             {
-                if (_conversationDialogMain == null || !_conversationDialogMain.Visible)
-                {
-                    _townRewardDialogSpaceSent = false;
+                bool inGreaterRift = Hud.Game.Me != null &&
+                    (Hud.Game.Me.InGreaterRift || Hud.Game.SpecialArea == SpecialArea.GreaterRift);
+                if (!inGreaterRift || IsGreaterRiftRewardQuestStep())
                     return false;
-                }
 
-                if (!_townRewardDialogArmed || _townRewardDialogSpaceSent)
-                    return true;
+                return Hud.Game.RiftPercentage >= 0.0d && Hud.Game.RiftPercentage < 100.0d;
+            }
+            catch
+            {
+                return false;
+            }
+        }
 
+        private bool IsGreaterRiftRewardQuestStep()
+        {
+            uint step = GetGreaterRiftQuestStepId(382695);
+            if (step == 5 || step == 10 || step == 34 || step == 46)
+                return true;
+
+            step = GetGreaterRiftQuestStepId(337492);
+            return step == 5 || step == 10 || step == 34 || step == 46;
+        }
+
+        private uint GetGreaterRiftQuestStepId(uint questSno)
+        {
+            try
+            {
+                if (Hud.Game.Quests == null)
+                    return 0;
+
+                IQuest quest = Hud.Game.Quests.FirstOrDefault(q =>
+                    q != null && q.SnoQuest != null && q.SnoQuest.Sno == questSno);
+                return quest != null ? quest.QuestStepId : 0;
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        private bool TryCloseTownRewardDialogOnce()
+        {
+            if (_townRewardSpaceState != TownRewardSpaceState.AwaitingRiftClose || !Hud.Game.IsInTown)
+                return false;
+
+            try
+            {
+                if (_conversationDialogMain == null || !_conversationDialogMain.Visible)
+                    return false;
+
+                // Chat owns Space. Defer without consuming the one-shot; the next town
+                // tick after chat closes can still dismiss the same reward dialog.
                 if (IsChatEntryOpen())
                 {
-                    UpdateSharedDebugState("skip-town-reward-space-chat-open", "conversation_dialog_main", -1);
+                    UpdateSharedDebugState(
+                        "skip-town-reward-space-chat-open",
+                        BuildTownRewardSignalDetail(),
+                        _townRewardSessionId);
                     return true;
                 }
 
-                _townRewardDialogSpaceSent = true;
-                _townRewardDialogArmed = false;
-                FreeHudInput.SendSpace();
+                // Consume the one allowed town Space before input. This guarantees that
+                // a forge, merchant, salvage, stash, or other panel can never receive a
+                // second Space from this reward session, even if SendInput is ambiguous.
+                _townRewardSpaceCount = 1;
+                SetTownRewardState(TownRewardSpaceState.RewardSpaceSent, "town-rift-close-dialog");
+                bool sent = FreeHudInput.SendSpace();
                 MarkAutomationInputAction(ConversationCloseThrottleMs + 30);
-                UpdateSharedDebugState("space-town-reward-dialog-once", "conversation_dialog_main", -1);
+                UpdateSharedDebugState(
+                    "space-town-reward-dialog-once",
+                    BuildTownRewardSignalDetail() + "|sent=" + (sent ? "1" : "0"),
+                    _townRewardSessionId);
                 return true;
             }
             catch
             {
                 return false;
             }
+        }
+
+        private string BuildTownRewardSignalDetail()
+        {
+            return "conversation_dialog_main"
+                + "|town=" + (Hud.Game.IsInTown ? "1" : "0")
+                + "|dialog=" + (SafeUiVisible(_conversationDialogMain) ? "1" : "0")
+                + "|chat=" + (IsChatEntryOpen() ? "1" : "0")
+                + "|stash=" + (IsStashUiOpen() ? "1" : "0")
+                + "|gemPane=" + (SafeUiVisible(_gemUpgradePane) ? "1" : "0")
+                + "|state=" + _townRewardSpaceState.ToString();
         }
 
         private bool TryCloseChatBeforeGemPaneAutomation(int remainingAttempts)
@@ -8002,9 +8307,11 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
 
                     if (ux > 0 && uy > 0 && ux < Hud.Window.Size.Width && uy < Hud.Window.Size.Height)
                     {
-                        FreeHudInput.MouseMove(ux, uy);
-                        UpdateSharedDebugState("hover-urshi-after-chat-close", reason ?? string.Empty, _target != null ? _target.AbsoluteIndex : int.MinValue);
-                        return true;
+                        if (FreeHudInput.MouseMoveClient(Hud, ux, uy))
+                        {
+                            UpdateSharedDebugState("hover-urshi-after-chat-close", reason ?? string.Empty, _target != null ? _target.AbsoluteIndex : int.MinValue);
+                            return true;
+                        }
                     }
                 }
             }
@@ -8024,9 +8331,11 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
 
                 if (x > 0 && y > 0 && x < Hud.Window.Size.Width && y < Hud.Window.Size.Height)
                 {
-                    FreeHudInput.MouseMove(x, y);
-                    UpdateSharedDebugState("hover-safe-after-chat-close", reason ?? string.Empty, _target != null ? _target.AbsoluteIndex : int.MinValue);
-                    return true;
+                    if (FreeHudInput.MouseMoveClient(Hud, x, y))
+                    {
+                        UpdateSharedDebugState("hover-safe-after-chat-close", reason ?? string.Empty, _target != null ? _target.AbsoluteIndex : int.MinValue);
+                        return true;
+                    }
                 }
             }
             catch { }
@@ -8262,12 +8571,28 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             ResetCursorWatchToCurrent(Math.Max(0, delay));
         }
 
+        private void PublishAutomationDebugSnapshot()
+        {
+            try
+            {
+                s7o_AutoGemUpgradeState.AutoGemDebugStage = _stage.ToString();
+                s7o_AutoGemUpgradeState.AutoGemDebugTargetName = _target != null ? (_target.Name ?? string.Empty) : string.Empty;
+                s7o_AutoGemUpgradeState.AutoGemDebugTargetRank = _target != null ? _target.Rank : -1;
+                s7o_AutoGemUpgradeState.AutoGemDebugTargetAbs = _target != null ? _target.AbsoluteIndex : -1;
+                s7o_AutoGemUpgradeState.AutoGemDebugUpgradeAttempts = Hud.Game.Me != null ? GetUpgradeAttempts() : -1;
+                s7o_AutoGemUpgradeState.AutoGemDebugSelectedAcd = SafeItemButtonAcd();
+            }
+            catch { }
+        }
+
         private void UpdateSharedDebugState(string action, string detail = null, int targetAbs = int.MinValue, int targetRow = int.MinValue)
         {
             try
             {
+                PublishAutomationDebugSnapshot();
                 s7o_AutoGemUpgradeState.AutoGemDebugAction = action ?? string.Empty;
                 s7o_AutoGemUpgradeState.AutoGemDebugDetail = detail ?? string.Empty;
+                unchecked { s7o_AutoGemUpgradeState.AutoGemDebugActionSequence++; }
                 if (targetAbs != int.MinValue) s7o_AutoGemUpgradeState.AutoGemDebugTargetAbs = targetAbs;
                 if (targetRow != int.MinValue) s7o_AutoGemUpgradeState.AutoGemDebugTargetRow = targetRow;
             }
@@ -8346,7 +8671,12 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
 
             int x = (int)Math.Round(point.X);
             int y = (int)Math.Round(point.Y);
-            FreeHudInput.MouseMove(x, y);
+            if (!FreeHudInput.MouseMoveClient(Hud, x, y))
+            {
+                UpdateSharedDebugState("hover-client-to-screen-failed", reason ?? string.Empty, _target != null ? _target.AbsoluteIndex : int.MinValue);
+                return;
+            }
+
             MarkAutomationInputAction();
             if (!string.IsNullOrWhiteSpace(reason))
                 Log(() => "hover " + reason + " @(" + x.ToString(CultureInfo.InvariantCulture) + "," + y.ToString(CultureInfo.InvariantCulture) + ")");
@@ -9564,22 +9894,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
                 return;
             }
             if (string.IsNullOrWhiteSpace(s7o_AutoGemUpgradeState.DebugLogPath))
-            {
-                // path is unresolved; attempt to resolve lazily
-                try
-                {
-                    var asm = System.Reflection.Assembly.GetExecutingAssembly().Location;
-                    var dir = Path.GetDirectoryName(asm);
-                    var logsDir = Path.Combine(dir ?? string.Empty, "logs");
-                    if (!Directory.Exists(logsDir))
-                        Directory.CreateDirectory(logsDir);
-                    s7o_AutoGemUpgradeState.DebugLogPath = Path.Combine(logsDir, s7o_AutoGemUpgradeState.DebugLogFileName);
-                }
-                catch
-                {
-                    s7o_AutoGemUpgradeState.DebugLogPath = s7o_AutoGemUpgradeState.DebugLogFileName;
-                }
-            }
+                s7o_AutoGemUpgradeState.DebugLogPath = s7o_AutoGemUpgradeState.ResolveDebugLogPath();
             try
             {
                 string dirName = Path.GetDirectoryName(s7o_AutoGemUpgradeState.DebugLogPath);
@@ -9603,23 +9918,8 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
         // Start a new debug session by resolving the log path and emitting a session header.
         private void StartDebugSession()
         {
-            // ensure log path resolved
             if (string.IsNullOrWhiteSpace(s7o_AutoGemUpgradeState.DebugLogPath))
-            {
-                try
-                {
-                    var asm = System.Reflection.Assembly.GetExecutingAssembly().Location;
-                    var dir = Path.GetDirectoryName(asm);
-                    var logsDir = Path.Combine(dir ?? string.Empty, "logs");
-                    if (!Directory.Exists(logsDir))
-                        Directory.CreateDirectory(logsDir);
-                    s7o_AutoGemUpgradeState.DebugLogPath = Path.Combine(logsDir, s7o_AutoGemUpgradeState.DebugLogFileName);
-                }
-                catch
-                {
-                    s7o_AutoGemUpgradeState.DebugLogPath = s7o_AutoGemUpgradeState.DebugLogFileName;
-                }
-            }
+                s7o_AutoGemUpgradeState.DebugLogPath = s7o_AutoGemUpgradeState.ResolveDebugLogPath();
             Log(() =>
             {
                 return "=== session start | plugin=" + s7o_AutoGemUpgradeState.DebugPluginName
@@ -9669,10 +9969,11 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
                 return;
             }
 
-            float warningLeft = 60f;
-            float warningRight = 470f;
-            float warningTop = 200f;
-            float warningBottom = 470f;
+            float horizontalMargin = Math.Max(12f, paneRect.Width * 0.06f);
+            float warningLeft = paneRect.Left + horizontalMargin;
+            float warningRight = paneRect.Right - horizontalMargin;
+            float warningTop = paneRect.Top + Math.Max(70f, paneRect.Height * 0.24f);
+            float warningBottom = paneRect.Bottom - Math.Max(16f, paneRect.Height * 0.08f);
             float maxWidth = Math.Max(110f, warningRight - warningLeft);
 
             var wrappedLines = WrapPaneWarningLines(LocalizeMultilineDisplayText(_paneWarningMessage), maxWidth);
