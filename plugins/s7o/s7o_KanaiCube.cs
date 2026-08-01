@@ -144,7 +144,7 @@ namespace Turbo.Plugins.s7o
         {
             get
             {
-                return "REV11-POST-FILL-READY-FAST-REPAIR-MULTI-MONITOR";
+                return "REV12-DETERMINISTIC-QUEUE-IDENTITY";
             }
         }
 
@@ -290,7 +290,7 @@ namespace Turbo.Plugins.s7o
                 + P3FillToTransmute + "/" + P3TransmuteToRepair + "}";
         }
 
-        private class Slot { public RectangleF Rect; public int X, Y; public ItemQuality Quality; public string Uid; }
+        private class Slot { public RectangleF Rect; public int X, Y, Seed; public uint AcdId, Sno; public ItemQuality Quality; public string Uid; }
 
         private TimingProfile _p;
         private int  _runId, _cycleId;
@@ -1500,19 +1500,43 @@ namespace Turbo.Plugins.s7o
                 while (_snapshotIndex < _snapshotLimit)
                 {
                     Slot slot = _snapshotQueue[_snapshotIndex++];
-                    string key = StableItemKey(slot.Uid);
+                    string queuedKey = StableItemKey(slot.Uid);
 
                     if (_skippedThisRun != null &&
-                        _skippedThisRun.Contains(key))
+                        _skippedThisRun.Contains(queuedKey))
                     {
                         continue;
                     }
 
+                    string resolvePath = "stable";
                     IItem liveItem =
-                        FindInventoryItemByStableKey(key);
+                        _runPage >= 7 && _runPage <= 9
+                            ? FindSnapshotItem(slot, out resolvePath)
+                            : FindInventoryItemByStableKey(queuedKey);
 
                     if (liveItem == null)
+                    {
+                        LogV(
+                            "QUEUE resolve miss index=" +
+                            (_snapshotIndex - 1) +
+                            " slot=" + slot.X + "," + slot.Y +
+                            " acd=" + slot.AcdId);
                         continue;
+                    }
+
+                    string key =
+                        StableItemKey(liveItem.ItemUniqueId);
+
+                    if (_runPage >= 7 && _runPage <= 9)
+                    {
+                        LogV(
+                            "QUEUE resolve index=" +
+                            (_snapshotIndex - 1) +
+                            " path=" + resolvePath +
+                            " expected=" + slot.X + "," + slot.Y +
+                            " actual=" + liveItem.InventoryX + "," + liveItem.InventoryY +
+                            " acd=" + liveItem.AcdId);
+                    }
 
                     if (_runPage == 3 &&
                         !IsUpgradeRareEligible(liveItem))
@@ -2408,6 +2432,94 @@ namespace Turbo.Plugins.s7o
             return null;
         }
 
+        private IItem FindSnapshotItem(
+            Slot slot,
+            out string resolvePath)
+        {
+            resolvePath = "none";
+
+            if (slot == null)
+                return null;
+
+            IItem slotMatch = null;
+            IItem uidMatch = null;
+            IItem stableMatch = null;
+            string stableKey = StableItemKey(slot.Uid);
+
+            foreach (var item in Hud.Inventory.ItemsInInventory)
+            {
+                if (!IsLiveInventoryItem(item))
+                    continue;
+
+                if (slot.AcdId != 0 &&
+                    item.AcdId == slot.AcdId)
+                {
+                    resolvePath = "acd";
+                    return item;
+                }
+
+                bool sameSignature =
+                    item.SnoItem.Sno == slot.Sno &&
+                    item.Quality == slot.Quality &&
+                    item.Seed == slot.Seed;
+
+                if (slotMatch == null &&
+                    sameSignature &&
+                    item.InventoryX == slot.X &&
+                    item.InventoryY == slot.Y)
+                {
+                    slotMatch = item;
+                }
+
+                if (uidMatch == null &&
+                    !string.IsNullOrEmpty(slot.Uid) &&
+                    string.Equals(
+                        item.ItemUniqueId,
+                        slot.Uid,
+                        StringComparison.Ordinal))
+                {
+                    uidMatch = item;
+                }
+
+                if (stableMatch == null &&
+                    sameSignature &&
+                    !string.IsNullOrEmpty(stableKey) &&
+                    StableItemKey(item.ItemUniqueId) == stableKey)
+                {
+                    stableMatch = item;
+                }
+            }
+
+            if (slotMatch != null)
+            {
+                resolvePath = "slot";
+                return slotMatch;
+            }
+
+            if (uidMatch != null)
+            {
+                resolvePath = "uid";
+                return uidMatch;
+            }
+
+            if (stableMatch != null)
+            {
+                resolvePath = "stable";
+                return stableMatch;
+            }
+
+            return null;
+        }
+
+        private static bool IsLiveInventoryItem(IItem item)
+        {
+            return item != null &&
+                item.SnoItem != null &&
+                item.Location == ItemLocation.Inventory &&
+                item.InventoryX >= 0 &&
+                item.InventoryY >= 0;
+        }
+
         private bool RefreshUpgradeTarget(
             string key)
         {
@@ -3006,14 +3118,34 @@ namespace Turbo.Plugins.s7o
 
         private List<Slot> BuildQueue(int page)
         {
-            var items = Candidates(page); SortItems(page, items);
-            var q = new List<Slot>();
+            var items = Candidates(page);
+            SortItems(page, items);
+
+            var queue = new List<Slot>();
+
             foreach (var item in items)
             {
-                var r = Hud.Inventory.GetItemRect(item);
-                if (r.Width > 0) q.Add(new Slot { Rect = r, X = item.InventoryX, Y = item.InventoryY, Quality = item.Quality, Uid = item.ItemUniqueId });
+                if (!IsLiveInventoryItem(item))
+                    continue;
+
+                RectangleF rect = Hud.Inventory.GetItemRect(item);
+                if (rect.Width <= 0 || rect.Height <= 0)
+                    continue;
+
+                queue.Add(new Slot
+                {
+                    Rect = rect,
+                    X = item.InventoryX,
+                    Y = item.InventoryY,
+                    Seed = item.Seed,
+                    AcdId = item.AcdId,
+                    Sno = item.SnoItem.Sno,
+                    Quality = item.Quality,
+                    Uid = item.ItemUniqueId
+                });
             }
-            return q;
+
+            return queue;
         }
 
         private List<IItem> Candidates(int page)
@@ -3391,7 +3523,23 @@ namespace Turbo.Plugins.s7o
         private static int InvRowMajor(IItem a, IItem b)
         {
             int y = a.InventoryY.CompareTo(b.InventoryY);
-            return y != 0 ? y : a.InventoryX.CompareTo(b.InventoryX);
+            if (y != 0) return y;
+
+            int x = a.InventoryX.CompareTo(b.InventoryX);
+            return x != 0 ? x : CompareInventoryIdentity(a, b);
+        }
+
+        private static int CompareInventoryIdentity(IItem a, IItem b)
+        {
+            if (ReferenceEquals(a, b)) return 0;
+
+            int result = a.AcdId.CompareTo(b.AcdId);
+            if (result != 0) return result;
+
+            return string.Compare(
+                a.ItemUniqueId,
+                b.ItemUniqueId,
+                StringComparison.Ordinal);
         }
 
         private void SnapshotAncients()
