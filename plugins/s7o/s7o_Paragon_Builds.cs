@@ -230,6 +230,7 @@ namespace Turbo.Plugins.s7o
             _currentBuildDisplayLabel = "current build";
             _activeArmoryIndex = -1;
             _activeArmoryName = string.Empty;
+            _activeArmoryBaseKey = string.Empty;
             _nextBuildMetadataRefreshTick = NoTick;
         }
 
@@ -292,6 +293,7 @@ namespace Turbo.Plugins.s7o
         private string _currentBuildDisplayLabel = "current build";
         private int _activeArmoryIndex = -1;
         private string _activeArmoryName = string.Empty;
+        private string _activeArmoryBaseKey = string.Empty;
 
         private int _nextBuildMetadataRefreshTick = NoTick;
         private System.Drawing.RectangleF _profileSaveButtonRect;
@@ -858,9 +860,9 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
-            if (_activeArmoryIndex < 0 ||
-                !CurrentBuildMatchesArmoryIndex(
-                    _activeArmoryIndex, baseKey))
+            if (!TryResolveArmorySlotForSave(
+                    baseKey,
+                    stableKey))
             {
                 ShowStatus("Equip the Armory build once before saving.");
                 return;
@@ -949,7 +951,8 @@ namespace Turbo.Plugins.s7o
                     StringComparison.Ordinal) ||
                 !string.Equals(stableKey, _profileSaveStableKey,
                     StringComparison.Ordinal) ||
-                !CurrentBuildMatchesArmoryIndex(
+                _activeArmoryIndex != _profileSaveArmoryIndex ||
+                !ArmorySlotMatchesLiveBuild(
                     _profileSaveArmoryIndex, baseKey))
             {
                 ClearProfileSaveRequest();
@@ -1348,6 +1351,7 @@ namespace Turbo.Plugins.s7o
             SetActiveArmoryBuild(
                 armoryIndex,
                 buildLabel,
+                baseKey,
                 stableKey);
 
             if (profile == null)
@@ -2990,6 +2994,7 @@ namespace Turbo.Plugins.s7o
             SetActiveArmoryBuild(
                 uniqueIndex,
                 set != null ? set.Name : profile.Label,
+                GetLiveArmoryKey(),
                 _currentStableBuildKey);
         }
 
@@ -5478,14 +5483,84 @@ namespace Turbo.Plugins.s7o
                     StringComparison.Ordinal);
         }
 
+        private bool ArmorySlotMatchesLiveBuild(
+            int armoryIndex,
+            string baseKey)
+        {
+            if (armoryIndex < 0 ||
+                string.IsNullOrEmpty(baseKey))
+                return false;
+
+            if (armoryIndex == _activeArmoryIndex &&
+                string.Equals(
+                    _activeArmoryBaseKey,
+                    baseKey,
+                    StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            return CurrentBuildMatchesArmoryIndex(
+                armoryIndex,
+                baseKey);
+        }
+
+        private bool TryResolveArmorySlotForSave(
+            string baseKey,
+            string stableKey)
+        {
+            if (string.IsNullOrEmpty(baseKey) ||
+                string.IsNullOrEmpty(stableKey))
+                return false;
+
+            if (_activeArmoryIndex >= 0 &&
+                ArmorySlotMatchesLiveBuild(
+                    _activeArmoryIndex,
+                    baseKey))
+            {
+                _activeArmoryBaseKey = baseKey;
+                _currentStableBuildKey = stableKey;
+                return true;
+            }
+
+            HashSet<int> matches =
+                FindNativeArmoryMatches(baseKey);
+
+            if (matches.Count != 1)
+                return false;
+
+            int armoryIndex = -1;
+            foreach (int match in matches)
+            {
+                armoryIndex = match;
+                break;
+            }
+
+            IPlayerArmorySet set =
+                GetArmorySetByIndex(armoryIndex);
+
+            if (set == null)
+                return false;
+
+            SetActiveArmoryBuild(
+                armoryIndex,
+                set.Name,
+                baseKey,
+                stableKey);
+            return true;
+        }
+
         private void SetActiveArmoryBuild(
             int armoryIndex,
             string armoryName,
+            string baseKey,
             string stableKey)
         {
             _activeArmoryIndex = armoryIndex;
             _activeArmoryName =
                 armoryName ?? string.Empty;
+            _activeArmoryBaseKey =
+                baseKey ?? string.Empty;
             _currentStableBuildKey =
                 stableKey ?? string.Empty;
             RefreshCurrentBuildDisplay();
@@ -5681,7 +5756,7 @@ namespace Turbo.Plugins.s7o
             string baseKey =
                 GetLiveArmoryKey();
 
-            if (!CurrentBuildMatchesArmoryIndex(
+            if (!ArmorySlotMatchesLiveBuild(
                     _activeArmoryIndex,
                     baseKey))
                 return;
@@ -7137,6 +7212,7 @@ namespace Turbo.Plugins.s7o
 
             _activeArmoryIndex = -1;
             _activeArmoryName = string.Empty;
+            _activeArmoryBaseKey = string.Empty;
             _currentStableBuildKey =
                 string.Empty;
             _currentBuildDisplayLabel =
