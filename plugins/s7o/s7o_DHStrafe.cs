@@ -108,6 +108,8 @@ namespace Turbo.Plugins.s7o
         public bool StopOnInventoryOpen = true;
         public bool StopOnBlockingUi = true;
         public bool BlockPrimaryOnClickableActor = true;
+        public bool PauseForAutoLootPickups = true;
+        public int AutoLootPauseMs = 300;
         // Original Lightning used 5 yards for the main Strafe pause and 10 yards
         // for primary-fire suppression. 8 yards is a practical FREEHUD default
         // for comfortably interacting with pylons, shrines, chests, doors, portals, etc.
@@ -168,6 +170,7 @@ namespace Turbo.Plugins.s7o
         private bool _running;
         private bool _highFrequencyMode;
         private bool _temporarilyPaused;
+        private int _autoLootPauseUntilTick;
         private int _pendingStartUntilTick;
         private string _lastStartBlockedReason = string.Empty;
 
@@ -253,6 +256,7 @@ namespace Turbo.Plugins.s7o
             _actMapRecentlyVisibleUntilTick = 0;
             _worldMapRecentlyVisibleUntilTick = 0;
             _nextBuildRefreshTick = 0;
+            _autoLootPauseUntilTick = 0;
 
             if (newGame)
             {
@@ -283,6 +287,12 @@ namespace Turbo.Plugins.s7o
         public void ForceStopForDisable()
         {
             try { StopMacro("disabled"); }
+            catch { }
+        }
+
+        public void StopForAutoLootUrshiHandoff()
+        {
+            try { StopMacro("Urshi"); }
             catch { }
         }
 
@@ -369,6 +379,18 @@ namespace Turbo.Plugins.s7o
             if (!_running)
                 return;
 
+            if (_autoLootPauseUntilTick != 0 && TickReached(now, _autoLootPauseUntilTick))
+                _autoLootPauseUntilTick = 0;
+
+            if (TickNotExpired(now, _autoLootPauseUntilTick))
+            {
+                FinishPendingPrimaryPress(now, true);
+                StopStrafeHold();
+                _temporarilyPaused = true;
+                _lastStatus = "paused";
+                return;
+            }
+
             string reason;
             if (!IsValidRuntimeContext(out reason))
             {
@@ -435,6 +457,19 @@ namespace Turbo.Plugins.s7o
 
             MaintainStrafe(now);
             MaybeFirePrimary(now);
+        }
+
+        public void PauseForAutoLootPickup()
+        {
+            if (!Enabled || !_running || !PauseForAutoLootPickups)
+                return;
+
+            int now = Environment.TickCount;
+            _autoLootPauseUntilTick = unchecked(now + Math.Max(50, Math.Min(1000, AutoLootPauseMs)));
+            FinishPendingPrimaryPress(now, true);
+            StopStrafeHold();
+            _temporarilyPaused = true;
+            _lastStatus = "paused";
         }
 
         public void PaintTopInGame(ClipState clipState)
@@ -565,6 +600,7 @@ namespace Turbo.Plugins.s7o
 
             _running = true;
             _temporarilyPaused = false;
+            _autoLootPauseUntilTick = 0;
             _nextStrafeCheckTick = 0;
             _nextPrimaryFireTick = 0;
             _lastPrimaryFireTick = 0;
@@ -669,6 +705,7 @@ namespace Turbo.Plugins.s7o
 
             _running = false;
             _temporarilyPaused = false;
+            _autoLootPauseUntilTick = 0;
             _pendingStartUntilTick = 0;
             _lastStartBlockedReason = string.Empty;
             _nextStrafeCheckTick = 0;
@@ -2137,6 +2174,8 @@ namespace Turbo.Plugins.s7o
 
             p.StrafeClickableActorBlockDistance = 8.0f;
             p.PrimaryClickableActorBlockDistance = 10.0f;
+            p.PauseForAutoLootPickups = true;
+            p.AutoLootPauseMs = 300;
 
             p.StatusTextCenterXFrac = 0.50f;
             p.StatusTextYFrac = 0.58f;
