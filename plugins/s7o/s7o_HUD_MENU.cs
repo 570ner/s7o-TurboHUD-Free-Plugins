@@ -568,6 +568,8 @@ namespace Turbo.Plugins.s7o
         private bool _autoLootMaterials = true;
         private bool _autoLootDeathsBreath = false;
         private bool _autoLootTalkToUrshi = false;
+        private int _autoLootNormalRangeYards = s7o_AutoLoot.DefaultNormalPickupRangeYards;
+        private int _autoLootEventRangeYards = s7o_AutoLoot.DefaultEventPickupRangeYards;
         private bool _inventoryDropExpanded = false;
         private bool _inventoryDropEnabled = true;
         private bool _inventoryDropNonAccountLegendaries = false;
@@ -3192,7 +3194,8 @@ namespace Turbo.Plugins.s7o
             if (action.Equals("autoloot:expand", StringComparison.OrdinalIgnoreCase)
                 || action.Equals("autoloot:toggle", StringComparison.OrdinalIgnoreCase)
                 || action.Equals("autoloot:hotkey", StringComparison.OrdinalIgnoreCase)
-                || action.StartsWith("autoloot:option:", StringComparison.OrdinalIgnoreCase))
+                || action.StartsWith("autoloot:option:", StringComparison.OrdinalIgnoreCase)
+                || action.StartsWith("autoloot:range:", StringComparison.OrdinalIgnoreCase))
             {
                 HandleAutoLootOptionAction(action);
                 return;
@@ -6718,7 +6721,9 @@ namespace Turbo.Plugins.s7o
                     _autoLootTrash,
                     _autoLootMaterials,
                     _autoLootDeathsBreath,
-                    _autoLootTalkToUrshi);
+                    _autoLootTalkToUrshi,
+                    _autoLootNormalRangeYards,
+                    _autoLootEventRangeYards);
                 plugin.SetPaused(_autoLootEnabled && _autoLootPaused);
             }
             catch { }
@@ -6807,6 +6812,38 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
+            const string rangePrefix = "autoloot:range:";
+            if (action.StartsWith(rangePrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                string[] parts = action.Substring(rangePrefix.Length).Split(':');
+                int direction;
+                if (parts.Length != 2
+                    || !int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out direction)
+                    || direction == 0)
+                    return;
+
+                if (string.Equals(parts[0], "normal", StringComparison.OrdinalIgnoreCase))
+                {
+                    _autoLootNormalRangeYards = ClampAutoLootNormalRange(_autoLootNormalRangeYards + (direction < 0 ? -1 : 1));
+                    _status = "AUTO LOOT NORMAL RADIUS: " + _autoLootNormalRangeYards.ToString(CultureInfo.InvariantCulture) + "y";
+                }
+                else if (string.Equals(parts[0], "event", StringComparison.OrdinalIgnoreCase))
+                {
+                    _autoLootEventRangeYards = ClampAutoLootEventRange(_autoLootEventRangeYards + (direction < 0 ? -5 : 5));
+                    _status = "AUTO LOOT EVENT/BOSS RADIUS: " + _autoLootEventRangeYards.ToString(CultureInfo.InvariantCulture) + "y";
+                }
+                else
+                {
+                    return;
+                }
+
+                _visualButtonFlashTicks[action] = Environment.TickCount;
+                _macroToggleFlashTicks["auto_loot_pickup"] = Environment.TickCount;
+                ApplyAutoLootSettingsToPlugin();
+                SaveSettings();
+                return;
+            }
+
             const string prefix = "autoloot:option:";
             if (!action.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
                 return;
@@ -6839,6 +6876,18 @@ namespace Turbo.Plugins.s7o
             _macroToggleFlashTicks["auto_loot_pickup"] = Environment.TickCount;
             ApplyAutoLootSettingsToPlugin();
             SaveSettings();
+        }
+
+        private static int ClampAutoLootNormalRange(int value)
+        {
+            return Math.Max(s7o_AutoLoot.MinNormalPickupRangeYards,
+                Math.Min(s7o_AutoLoot.MaxNormalPickupRangeYards, value));
+        }
+
+        private static int ClampAutoLootEventRange(int value)
+        {
+            return Math.Max(s7o_AutoLoot.MinEventPickupRangeYards,
+                Math.Min(s7o_AutoLoot.MaxEventPickupRangeYards, value));
         }
 
         private string GetAutoLootOptionLabel(int kind, bool installed)
@@ -12376,6 +12425,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
         private void AddAutoLootChildEntries(List<MacroEntry> entries)
         {
             AddAutoLootChildEntry(entries, "Pause Hotkey", "Click the key button to change the temporary Auto Loot pause/resume hotkey. Click the status dot or press the hotkey to pause/resume.", "auto_loot_pause", 0);
+            AddAutoLootChildEntry(entries, "Normal Radius", "Idle pickup radius. Movement remains capped at 5 yards.", "auto_loot_normal_radius", 11);
+            AddAutoLootChildEntry(entries, "Event Chests & Boss Radius", "Pickup radius after Rift Guardians and special event chests.", "auto_loot_event_radius", 12);
             AddAutoLootChildEntry(entries, "Talk to Urshi", "After post-rift loot cleanup, talk to Urshi so Auto Gem Upgrade can start.", "auto_loot_urshi", 10);
             AddAutoLootChildEntry(entries, "Primals", "Pick up primal ancient legendary/set items.", "auto_loot_primals", 1);
             AddAutoLootChildEntry(entries, "Ancients", "Pick up ancient legendary/set items.", "auto_loot_ancients", 2);
@@ -12403,6 +12454,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
         private void AddAutoLootChildItems(List<MacroListItem> items, bool favoriteDisplay)
         {
             AddAutoLootChildItem(items, favoriteDisplay, "Pause Hotkey", "Click the key button to change the temporary Auto Loot pause/resume hotkey. Click the status dot or press the hotkey to pause/resume.", "auto_loot_pause", 0);
+            AddAutoLootChildItem(items, favoriteDisplay, "Normal Radius", "Idle pickup radius. Movement remains capped at 5 yards.", "auto_loot_normal_radius", 11);
+            AddAutoLootChildItem(items, favoriteDisplay, "Event Chests & Boss Radius", "Pickup radius after Rift Guardians and special event chests.", "auto_loot_event_radius", 12);
             AddAutoLootChildItem(items, favoriteDisplay, "Talk to Urshi", "After post-rift loot cleanup, talk to Urshi so Auto Gem Upgrade can start.", "auto_loot_urshi", 10);
             AddAutoLootChildItem(items, favoriteDisplay, "Primals", "Pick up primal ancient legendary/set items.", "auto_loot_primals", 1);
             AddAutoLootChildItem(items, favoriteDisplay, "Ancients", "Pick up ancient legendary/set items.", "auto_loot_ancients", 2);
@@ -12699,26 +12752,64 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
 
             bool installed = GetAutoLootPlugin() != null;
-            string label = GetAutoLootOptionLabel(entry.AutoLootOptionKind, installed);
-            bool on = GetAutoLootOptionEnabled(entry.AutoLootOptionKind);
-
+            int kind = entry.AutoLootOptionKind;
             float pad = 44f;
+            float textX = r.Left + pad;
+
+            if (kind == 11 || kind == 12)
+            {
+                float stepW = 120f;
+                RectangleF stepR = new RectangleF(r.Right - stepW - 8f, r.Top + 4f, stepW, r.Height - 8f);
+                float rangeTextW = Math.Max(40f, stepR.Left - textX - 10f);
+
+                DrawOutlinedFittedText(_fRowText, _fRowTextShadow, _fSmall, _fSmallShadow,
+                    "• " + entry.Title, textX, r.Top + 10f, rangeTextW);
+
+                string value = (kind == 11 ? _autoLootNormalRangeYards : _autoLootEventRangeYards)
+                    .ToString(CultureInfo.InvariantCulture) + "y";
+                string key = kind == 11 ? "normal" : "event";
+                DrawAutoLootRangeStepper(stepR, value,
+                    "autoloot:range:" + key + ":-1",
+                    "autoloot:range:" + key + ":+1",
+                    installed);
+                return;
+            }
+
+            string label = GetAutoLootOptionLabel(kind, installed);
+            bool on = GetAutoLootOptionEnabled(kind);
             float stateW = 120f;
             RectangleF stateR = new RectangleF(r.Right - stateW - 8f, r.Top + 5f, stateW, r.Height - 10f);
-            float textX = r.Left + pad;
             float textW = Math.Max(40f, stateR.Left - textX - 10f);
 
             DrawOutlinedFittedText(_fRowText, _fRowTextShadow, _fSmall, _fSmallShadow,
                 "• " + entry.Title, textX, r.Top + 10f, textW);
-            DrawGlossButton(stateR, label, on, false, entry.AutoLootOptionKind == 0);
+            DrawGlossButton(stateR, label, on, false, kind == 0);
 
             if (installed)
             {
-                if (entry.AutoLootOptionKind == 0)
+                if (kind == 0)
                     RegisterToggleHit("autoloot:hotkey", stateR);
                 else
-                    RegisterToggleHit("autoloot:option:" + entry.AutoLootOptionKind.ToString(CultureInfo.InvariantCulture), stateR);
+                    RegisterToggleHit("autoloot:option:" + kind.ToString(CultureInfo.InvariantCulture), stateR);
             }
+        }
+
+        private void DrawAutoLootRangeStepper(RectangleF r, string valueText, string minusAction, string plusAction, bool installed)
+        {
+            const float buttonWidth = 26f;
+            RectangleF minus = new RectangleF(r.Left, r.Top, buttonWidth, r.Height);
+            RectangleF plus = new RectangleF(r.Right - buttonWidth, r.Top, buttonWidth, r.Height);
+            RectangleF value = new RectangleF(minus.Right + 5f, r.Top, Math.Max(40f, r.Width - buttonWidth * 2f - 10f), r.Height);
+
+            DrawGlossButton(minus, "-", installed && IsVisualButtonFlashActive(minusAction), false, installed);
+            DrawGlossButton(value, installed ? valueText : "NOT INSTALLED", false, false, installed);
+            DrawGlossButton(plus, "+", installed && IsVisualButtonFlashActive(plusAction), false, installed);
+
+            if (!installed)
+                return;
+
+            RegisterToggleHit(minusAction, minus);
+            RegisterToggleHit(plusAction, plus);
         }
 
         private void DrawInventoryDropChildRow(RectangleF r, MacroEntry entry, int rowIdx)
@@ -18017,6 +18108,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 lines.Add("AUTO_LOOT_MATERIALS=" + _autoLootMaterials.ToString(CultureInfo.InvariantCulture));
                 lines.Add("AUTO_LOOT_DEATHS_BREATH=" + _autoLootDeathsBreath.ToString(CultureInfo.InvariantCulture));
                 lines.Add("AUTO_LOOT_TALK_TO_URSHI=" + _autoLootTalkToUrshi.ToString(CultureInfo.InvariantCulture));
+                lines.Add("AUTO_LOOT_NORMAL_RANGE=" + _autoLootNormalRangeYards.ToString(CultureInfo.InvariantCulture));
+                lines.Add("AUTO_LOOT_EVENT_RANGE=" + _autoLootEventRangeYards.ToString(CultureInfo.InvariantCulture));
 
 
                 lines.Add("TOGGLE_CATEGORY=" + _activeToggleCategory);
@@ -18706,6 +18799,18 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     else if (string.Equals(key, "AUTO_LOOT_TALK_TO_URSHI", StringComparison.OrdinalIgnoreCase))
                     {
                         _autoLootTalkToUrshi = ParseBool(val, _autoLootTalkToUrshi);
+                    }
+                    else if (string.Equals(key, "AUTO_LOOT_NORMAL_RANGE", StringComparison.OrdinalIgnoreCase))
+                    {
+                        int iv;
+                        if (int.TryParse(val, NumberStyles.Integer, CultureInfo.InvariantCulture, out iv))
+                            _autoLootNormalRangeYards = ClampAutoLootNormalRange(iv);
+                    }
+                    else if (string.Equals(key, "AUTO_LOOT_EVENT_RANGE", StringComparison.OrdinalIgnoreCase))
+                    {
+                        int iv;
+                        if (int.TryParse(val, NumberStyles.Integer, CultureInfo.InvariantCulture, out iv))
+                            _autoLootEventRangeYards = ClampAutoLootEventRange(iv);
                     }
                     else if (key == "TOGGLE_CATEGORY")
                     {
