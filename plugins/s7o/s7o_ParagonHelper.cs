@@ -65,6 +65,8 @@ namespace Turbo.Plugins.s7o
         private IUiElement _pointSelect;
         private IUiElement _coreTab;
         private IUiElement _coreAvailable;
+        private readonly IUiElement[] _categoryTabs = new IUiElement[4];
+        private readonly IUiElement[] _categoryAvailable = new IUiElement[4];
         private readonly IUiElement[] _rows = new IUiElement[4];
         private readonly IUiElement[] _pointsSpent = new IUiElement[4];
         private readonly IUiElement[] _plusButtons = new IUiElement[4];
@@ -105,6 +107,9 @@ namespace Turbo.Plugins.s7o
         private int _nextTick;
         private int _clicks;
         private bool _changed;
+        private bool _under800Spend;
+        private int _under800Category;
+        private int _under800Row;
         private bool _restoreCursorCaptured;
         private int _restoreCursorX;
         private int _restoreCursorY;
@@ -145,11 +150,11 @@ namespace Turbo.Plugins.s7o
             {
                 if (_state != SpendState.Idle)
                 {
-                    Stop("Core spend cancelled");
+                    Stop(_under800Spend ? "cancelled" : "Core spend cancelled");
                     return;
                 }
 
-                StartCoreSpend();
+                StartSpend();
             }
         }
 
@@ -168,7 +173,7 @@ namespace Turbo.Plugins.s7o
             }
 
             if (_state != SpendState.Idle)
-                ProcessCoreSpend();
+                ProcessSpend();
         }
 
         public void PaintTopInGame(ClipState clipState)
@@ -256,22 +261,212 @@ namespace Turbo.Plugins.s7o
             SaveSettings();
         }
 
-        private void StartCoreSpend()
+        private void StartSpend()
         {
             if (!IsParagonOpen())
                 return;
 
             EnsureActiveProfile();
             CaptureCursorForRestore();
-            _state = IsCoreTabActive() ? SpendState.WaitRows : SpendState.OpenCoreTab;
             _nextTick = Environment.TickCount;
             _clicks = 0;
             _changed = false;
+            _under800Spend = IsUnderParagon800();
+
+            if (_under800Spend)
+            {
+                _under800Category = CoreCategory;
+                _under800Row = 0;
+                _state = IsCategoryTabActive(_under800Category)
+                    ? SpendState.WaitCategoryRows
+                    : SpendState.OpenCategoryTab;
+                ShowStatus("running", StatusHoldMs);
+                return;
+            }
+
+            _state = IsCoreTabActive() ? SpendState.WaitRows : SpendState.OpenCoreTab;
 
             if (_selectedCoreRow == PrimaryStatRow || _selectedCoreRow == VitalityRow)
                 ShowStatus("checking Core / " + CoreRowNames[_selectedCoreRow] + "...", StatusHoldMs);
             else
                 ShowStatus("checking Core points...", StatusHoldMs);
+        }
+
+        private void ProcessSpend()
+        {
+            if (_under800Spend)
+                ProcessUnder800Spend();
+            else
+                ProcessCoreSpend();
+        }
+
+        private void ProcessUnder800Spend()
+        {
+            if (!IsParagonOpen())
+            {
+                Stop("Paragon menu closed");
+                return;
+            }
+
+            int now = Environment.TickCount;
+            if (!TickReachedOrUnset(now, _nextTick))
+                return;
+
+            if (_clicks >= SpendClickLimit)
+            {
+                Stop("click failed");
+                return;
+            }
+
+            if (_state == SpendState.OpenCategoryTab)
+            {
+                if (_under800Category >= _categoryTabs.Length)
+                {
+                    FinishUnder800Spend(now);
+                    return;
+                }
+
+                if (IsCategoryTabActive(_under800Category))
+                {
+                    _state = SpendState.WaitCategoryRows;
+                    _nextTick = now + RowSettleMs;
+                    return;
+                }
+
+                if (ClickUi(_categoryTabs[_under800Category], false))
+                {
+                    _clicks++;
+                    _state = SpendState.WaitCategoryRows;
+                    _nextTick = now + TabSettleMs;
+                }
+                else
+                {
+                    Stop("click failed");
+                }
+                return;
+            }
+
+            if (_state == SpendState.WaitCategoryRows)
+            {
+                if (!IsCategoryTabActive(_under800Category))
+                {
+                    _state = SpendState.OpenCategoryTab;
+                    _nextTick = now;
+                    return;
+                }
+
+                if (!RowsReadable())
+                {
+                    _nextTick = now + RowSettleMs;
+                    return;
+                }
+
+                _under800Row = 0;
+                _state = SpendState.SpendCategory;
+                _nextTick = now;
+                return;
+            }
+
+            if (_state == SpendState.SpendCategory)
+            {
+                int available = ParseCategoryAvailable(_under800Category);
+                if (available < 0)
+                {
+                    _nextTick = now + RowSettleMs;
+                    return;
+                }
+
+                if (available == 0)
+                {
+                    AdvanceUnder800Category(now);
+                    return;
+                }
+
+                while (_under800Row < _plusButtons.Length)
+                {
+                    RowState row = GetRowState(_under800Row);
+                    if (!row.Valid)
+                    {
+                        _nextTick = now + RowSettleMs;
+                        return;
+                    }
+
+                    bool uncappedCoreRow = _under800Category == CoreCategory
+                        && (_under800Row == PrimaryStatRow || _under800Row == VitalityRow);
+                    if (row.Assigned <= 0 || (!uncappedCoreRow && (row.Assigned >= 50 || row.IsCapped)))
+                    {
+                        _under800Row++;
+                        continue;
+                    }
+
+                    if (!IsVisible(_plusButtons[_under800Row]))
+                    {
+                        _under800Row++;
+                        continue;
+                    }
+
+                    if (ClickUi(_plusButtons[_under800Row], true))
+                    {
+                        _clicks++;
+                        _changed = true;
+                        _nextTick = now + SpendDelayMs;
+                        ShowStatus("running", StatusHoldMs);
+                    }
+                    else
+                    {
+                        Stop("click failed");
+                    }
+                    return;
+                }
+
+                AdvanceUnder800Category(now);
+                return;
+            }
+
+            if (_state == SpendState.CloseNoSpend)
+            {
+                ClickClose();
+                Stop("finished");
+                return;
+            }
+
+            if (_state == SpendState.Accept)
+            {
+                if (!_changed || !AutoAcceptAfterSpending)
+                {
+                    Stop("finished");
+                    return;
+                }
+
+                if (ClickUi(_acceptButton, false))
+                {
+                    _clicks++;
+                    Stop("finished");
+                    return;
+                }
+
+                Stop("click failed");
+            }
+        }
+
+        private void AdvanceUnder800Category(int now)
+        {
+            _under800Category++;
+            _under800Row = 0;
+            if (_under800Category >= _categoryTabs.Length)
+            {
+                FinishUnder800Spend(now);
+                return;
+            }
+
+            _state = SpendState.OpenCategoryTab;
+            _nextTick = now;
+        }
+
+        private void FinishUnder800Spend(int now)
+        {
+            _state = _changed ? SpendState.Accept : SpendState.CloseNoSpend;
+            _nextTick = now + (_changed ? AcceptDelayMs : CloseDelayMs);
         }
 
         private void ProcessCoreSpend()
@@ -424,6 +619,9 @@ namespace Turbo.Plugins.s7o
         {
             _state = SpendState.Idle;
             _changed = false;
+            _under800Spend = false;
+            _under800Category = 0;
+            _under800Row = 0;
             _captureMarkHotkey = false;
             _captureSpendHotkey = false;
             ReleaseCtrl();
@@ -486,6 +684,23 @@ namespace Turbo.Plugins.s7o
             return IsVisible(_coreTab) && SafeAnim(_coreTab) == ActiveTabAnim;
         }
 
+        private bool IsCategoryTabActive(int category)
+        {
+            return category >= 0 && category < _categoryTabs.Length
+                && IsVisible(_categoryTabs[category])
+                && SafeAnim(_categoryTabs[category]) == ActiveTabAnim;
+        }
+
+        private bool IsUnderParagon800()
+        {
+            try
+            {
+                return Hud != null && Hud.Game != null && Hud.Game.Me != null
+                    && Hud.Game.Me.CurrentLevelParagon < 800;
+            }
+            catch { return false; }
+        }
+
         private int GetHoveredRow()
         {
             try
@@ -535,6 +750,14 @@ namespace Turbo.Plugins.s7o
             return !string.IsNullOrEmpty(PointsSpentText(PrimaryStatRow)) || !string.IsNullOrEmpty(PointsSpentText(VitalityRow));
         }
 
+        private bool RowsReadable()
+        {
+            for (int row = 0; row < _pointsSpent.Length; row++)
+                if (!GetRowState(row).Valid)
+                    return false;
+            return true;
+        }
+
         private int ParseCoreAvailable()
         {
             try
@@ -545,6 +768,30 @@ namespace Turbo.Plugins.s7o
                 return TryParseFirstInt(Clean(_coreAvailable.ReadText(Encoding.UTF8, true)), out value) ? value : 0;
             }
             catch { return 0; }
+        }
+
+        private int ParseCategoryAvailable(int category)
+        {
+            try
+            {
+                int[] available = Hud.Game.Me.ParagonPointsAvailable;
+                if (available != null && category >= 0 && category < available.Length)
+                    return available[category];
+            }
+            catch { }
+
+            try
+            {
+                if (category >= 0 && category < _categoryAvailable.Length && IsVisible(_categoryAvailable[category]))
+                {
+                    int value;
+                    if (TryParseFirstInt(Clean(_categoryAvailable[category].ReadText(Encoding.UTF8, true)), out value))
+                        return value;
+                }
+            }
+            catch { }
+
+            return -1;
         }
 
         private RowState GetRowState(int row)
@@ -1077,8 +1324,15 @@ namespace Turbo.Plugins.s7o
         private void RegisterUiElements()
         {
             _pointSelect = Hud.Render.RegisterUiElement(BasePath, null, null);
-            _coreTab = Hud.Render.RegisterUiElement(BasePath + ".tab_1", _pointSelect, null);
-            _coreAvailable = Hud.Render.RegisterUiElement(BasePath + ".Points_Available_1", _pointSelect, null);
+            for (int category = 0; category < _categoryTabs.Length; category++)
+            {
+                string suffix = (category + 1).ToString(CultureInfo.InvariantCulture);
+                _categoryTabs[category] = Hud.Render.RegisterUiElement(BasePath + ".tab_" + suffix, _pointSelect, null);
+                _categoryAvailable[category] = Hud.Render.RegisterUiElement(BasePath + ".Points_Available_" + suffix, _pointSelect, null);
+            }
+
+            _coreTab = _categoryTabs[CoreCategory];
+            _coreAvailable = _categoryAvailable[CoreCategory];
             _acceptButton = Hud.Render.RegisterUiElement(BasePath + ".AcceptParagonPointsButton", _pointSelect, null);
             _closeButton = Hud.Render.RegisterUiElement(BasePath + ".CloseButton", _pointSelect, null);
 
@@ -1442,6 +1696,9 @@ namespace Turbo.Plugins.s7o
             OpenCoreTab,
             WaitRows,
             SpendCore,
+            OpenCategoryTab,
+            WaitCategoryRows,
+            SpendCategory,
             CloseNoSpend,
             Accept
         }
