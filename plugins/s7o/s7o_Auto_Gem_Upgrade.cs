@@ -5,22 +5,18 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
-using System.Threading;
 using System.Text.RegularExpressions;
 using System.Windows.Forms;
 using System.Runtime.InteropServices;
-using SharpDX.DirectInput;
 using Turbo.Plugins.Default;
 
 namespace Turbo.Plugins.s7o
 {
-public static class s7o_AutoGemUpgradeState
+    public static class s7o_AutoGemUpgradeState
     {
-        // Town portal timing is anchored to a specific upgrade phase and then
-        // delayed by a literal number of milliseconds. Users choose whether the
-        // timer starts after the 3-remaining or 4-remaining upgrade begins, and
-        // then tune a real millisecond delay from that anchor. This keeps the
-        // control linear and avoids hidden profile switches.
+        private const string SettingsFileName = "s7o_AutoGemUpgrade.ini";
+        private const string LegacySettingsFileName = "s7o_AutoGemUpgrade.settings.txt";
+
         public const int AutoGemTPDelayMin = 0;
         public const int AutoGemTPDelayMax = 1500;
         public const int AutoGemTPDelayStep = 100;
@@ -31,22 +27,13 @@ public static class s7o_AutoGemUpgradeState
         public static bool AutoGemUpgradeEnabled = true;
         public static int AutoGemMode = 0;
         public static string AutoGemSpecificName = "Bane of the Trapped";
-        // SPECIFIC sub-mode: 0=AUTO (chance-tier logic scoped to gem name), 1=HIGHEST (highest eligible rank first)
         public static int AutoGemSpecificSubMode = 0;
-        // Literal delay after the configured anchor upgrade begins.
         public static int AutoGemTPDelayMs = 1000;
-        // Which upgrade-remaining phase starts the TP timer: 3 or 4.
         public static int AutoGemTPAnchorRemaining = 3;
         public static bool AutoGemTPLagBoost = false;
 
-        // HUD Menu ownership bridge.
-        // When true, the standalone Auto Gem overlay/menu button/hotkey suppresses itself,
-        // but the navigator/automation continues to use this same shared state.
         public static bool HudMenuOwnsUi = false;
         public static string HudMenuUiOwner = string.Empty;
-
-        // Optional persistence bridge. The standalone menu owns the Auto Gem settings file,
-        // so HUD Menu can request a save after changing shared Auto Gem state.
         public static Action SaveSettingsRequested;
 
         public static bool IsUiOwnedByHudMenu()
@@ -72,69 +59,118 @@ public static class s7o_AutoGemUpgradeState
 
         public static void RequestSettingsSave()
         {
+            try { SaveSettingsRequested?.Invoke(); } catch { }
+        }
+
+        public static void LoadSettings()
+        {
+            SaveSettingsRequested = SaveSettings;
+
             try
             {
-                Action cb = SaveSettingsRequested;
-                if (cb != null) cb();
+                string path = ResolveSettingsLoadPath();
+                if (!File.Exists(path))
+                    return;
+
+                foreach (string raw in File.ReadAllLines(path))
+                {
+                    if (string.IsNullOrWhiteSpace(raw) || raw.TrimStart().StartsWith("#", StringComparison.Ordinal))
+                        continue;
+
+                    int separator = raw.IndexOf('=');
+                    if (separator <= 0)
+                        continue;
+
+                    string key = raw.Substring(0, separator).Trim();
+                    string value = raw.Substring(separator + 1).Trim();
+                    int intValue;
+                    bool boolValue;
+
+                    if ((key == "AUTOGEM_ENABLED" || key == "AUTOGEM_ON") && bool.TryParse(value, out boolValue))
+                        AutoGemUpgradeEnabled = boolValue;
+                    else if (key == "AUTOGEM_MODE" && int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out intValue))
+                        AutoGemMode = intValue;
+                    else if (key == "AUTOGEM_NAME")
+                        AutoGemSpecificName = value;
+                    else if (key == "AUTOGEM_SPEC_SUBMODE" && int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out intValue))
+                        AutoGemSpecificSubMode = intValue;
+                    else if (key == "AUTOGEM_TP_DELAY_MS" && int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out intValue))
+                        AutoGemTPDelayMs = intValue;
+                    else if (key == "AUTOGEM_TP_ANCHOR" && int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out intValue))
+                        AutoGemTPAnchorRemaining = intValue;
+                    else if (key == "AUTOGEM_TP_LAG" && bool.TryParse(value, out boolValue))
+                        AutoGemTPLagBoost = boolValue;
+                }
+            }
+            catch { }
+
+            NormalizeSettings();
+        }
+
+        public static void SaveSettings()
+        {
+            try
+            {
+                NormalizeSettings();
+                string directory = SettingsDirectory();
+                if (!Directory.Exists(directory))
+                    Directory.CreateDirectory(directory);
+
+                File.WriteAllLines(SettingsPath(), new[]
+                {
+                    "# s7o Auto Gem Upgrade FreeHUD settings",
+                    "AUTOGEM_ENABLED=" + AutoGemUpgradeEnabled,
+                    "AUTOGEM_ON=" + AutoGemUpgradeEnabled,
+                    "AUTOGEM_MODE=" + AutoGemMode.ToString(CultureInfo.InvariantCulture),
+                    "AUTOGEM_NAME=" + AutoGemSpecificName,
+                    "AUTOGEM_SPEC_SUBMODE=" + AutoGemSpecificSubMode.ToString(CultureInfo.InvariantCulture),
+                    "AUTOGEM_TP_DELAY_MODE=ANCHOR_DELAY",
+                    "AUTOGEM_TP_DELAY_MS=" + AutoGemTPDelayMs.ToString(CultureInfo.InvariantCulture),
+                    "AUTOGEM_TP_ANCHOR=" + AutoGemTPAnchorRemaining.ToString(CultureInfo.InvariantCulture),
+                    "AUTOGEM_TP_LAG=" + AutoGemTPLagBoost,
+                });
             }
             catch { }
         }
 
-        public static string AutoGemDebugAction = string.Empty;
-        public static string AutoGemDebugDetail = string.Empty;
-        public static int AutoGemDebugActionSequence = 0;
-        public static int AutoGemDebugTargetAbs = -1;
-        public static int AutoGemDebugTargetRow = -1;
-        public static string AutoGemDebugStage = "Idle";
-        public static string AutoGemDebugTargetName = string.Empty;
-        public static int AutoGemDebugTargetRank = -1;
-        public static int AutoGemDebugUpgradeAttempts = -1;
-        public static uint AutoGemDebugSelectedAcd = 0;
-
-        // === Debug Logging Configuration ===
-        // Debugging is off by default. When enabled via the overlay menu, logs are written
-        // to the TurboHUD logs folder. The debug level controls which messages are emitted:
-        // 0 = off, 1 = state changes, 2 = verbose.
-        // Do not change these defaults unless adding new debug controls.
-        public const int DebugLevelOff = 0;
-        public const int DebugLevelState = 1;
-        public const int DebugLevelVerbose = 2;
-        public const string DebugPluginName = "s7o_AutoGem_FREEHUD";
-        public const string DebugLogFileName = "s7o_AutoGem_FREEHUD_debug.log";
-
-        // Whether debugging is enabled at all. Controlled by the menu toggle.
-        public static bool DebugEnabled = false;
-        // Whether file logging is active. This is set internally when debug is enabled.
-        public static bool DebugFileEnabled = false;
-        // Current debug level. When DebugEnabled is true this is set to DebugLevelState.
-        public static int DebugLevel = DebugLevelOff;
-        // Resolved log file path. If empty it will be resolved lazily on the first log flush.
-        public static string DebugLogPath = string.Empty;
-        // Maximum number of log lines to buffer before flushing to disk.
-        public static int MaxBufferedLines = 64;
-        // Maximum log file size in megabytes. If exceeded the log will be truncated.
-        public static int MaxFileSizeMb = 4;
-
-        // Read-only lifecycle diagnostics consumed by the standalone debugger.
-        public static string AutoGemTownRewardState = "Idle";
-        public static string AutoGemTownRewardReason = "load";
-        public static int AutoGemTownRewardSession = 0;
-        public static int AutoGemTownRewardSpaceCount = 0;
-
-        public static string ResolveDebugLogPath()
+        private static void NormalizeSettings()
         {
+            AutoGemMode = Math.Max(0, Math.Min(4, AutoGemMode));
+            AutoGemSpecificSubMode = Math.Max(0, Math.Min(1, AutoGemSpecificSubMode));
+            AutoGemTPDelayMs = ClampTPDelayMs(AutoGemTPDelayMs);
+            AutoGemTPAnchorRemaining = ClampTPAnchorRemaining(AutoGemTPAnchorRemaining);
+            if (string.IsNullOrWhiteSpace(AutoGemSpecificName))
+                AutoGemSpecificName = "Bane of the Trapped";
+        }
+
+        private static string SettingsDirectory()
+        {
+            try { return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Plugins", "s7o", "settings"); }
+            catch { return "settings"; }
+        }
+
+        private static string SettingsPath()
+        {
+            try { return Path.Combine(SettingsDirectory(), SettingsFileName); }
+            catch { return SettingsFileName; }
+        }
+
+        private static string LegacySettingsPath()
+        {
+            try { return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Plugins", "s7o", LegacySettingsFileName); }
+            catch { return LegacySettingsFileName; }
+        }
+
+        private static string ResolveSettingsLoadPath()
+        {
+            string current = SettingsPath();
             try
             {
-                return Path.Combine(
-                    AppDomain.CurrentDomain.BaseDirectory,
-                    "plugins",
-                    "s7o",
-                    DebugLogFileName);
+                if (File.Exists(current)) return current;
+                string legacy = LegacySettingsPath();
+                return File.Exists(legacy) ? legacy : current;
             }
-            catch
-            {
-                return DebugLogFileName;
-            }
+            catch { return current; }
         }
 
         public static int ClampTPDelayMs(int ms)
@@ -181,1968 +217,9 @@ public static class s7o_AutoGemUpgradeState
         }
     }
 
-
-
-    internal enum AutoGemOverlayCommand
-    {
-        None,
-        ToggleMenu,
-        HideMenu,
-        ToggleMove,
-        ToggleMenuButtonVisible,
-        ToggleNoClickBg,
-        ToggleEnabled,
-        ToggleSection,
-        SetModeAuto,
-        SetModeFast150,
-        SetModeHighest,
-        SetModeLowest,
-        SetModeSpecific,
-        SetAnchor3,
-        SetAnchor4,
-        DelayMinus,
-        DelayPlus,
-        ToggleLag,
-        ToggleSpecificSubMode,
-        ToggleSpecificDropdown,
-        ToggleDebug,
-        SelectSpecificGem,
-        BeginHotkeyCapture,
-        BeginPanelDrag,
-        BeginDotDrag,
-        BeginSpecificScrollDrag,
-        ScrollSpecificUp,
-        ScrollSpecificDown,
-        ToggleInfoPopup,
-        CloseInfoPopup,
-        JourneyCloseMask
-    }
-
-    // FREE TurboHUD self-contained menu: replaces LightningMod/Razor Movable overlay.
-    // REV13 keeps the REV10 visible Journey X-mask, forces the overlay closed
-    // on plugin load, and closes a bound Journey background with unconditional
-    // Shift+J while delaying overlay/mask teardown until the close toggle is issued.
-    public class s7o_AutoGemUpgradeMenu : BasePlugin, IKeyEventHandler, IAfterCollectHandler, IInGameTopPainter, IMouseClickHandler
-    {
-        private const string SettingsFileName = "s7o_AutoGemUpgrade.ini";
-        private const string LegacySettingsFileName = "s7o_AutoGemUpgrade.settings.txt";
-        private const int JourneyOpenGraceMs = 500;
-        private const int ChatCloseBeforeJourneyCloseMs = 75;
-        private const int JourneyCloseOverlayHideDelayMs = 140;
-
-        private readonly AutoGemOverlayModel _model = new AutoGemOverlayModel();
-        private readonly AutoGemOverlayRenderer _renderer = new AutoGemOverlayRenderer();
-        private readonly AutoGemOverlayController _controller = new AutoGemOverlayController();
-
-        private bool _overlayLeftDownBlocked;
-        private bool _overlayMouseCapture;
-        private bool _capturingMenuHotkey;
-        private Key _menuHotkeyKey = Key.F7;
-        private string _menuHotkeyLabel = "F7";
-
-        private bool _journeyOpenedByAutoGemMenu;
-        private bool _journeyWasVisibleBeforeMenu;
-        private bool _journeyBackgroundActiveForMenu;
-        private bool _journeyOpenRequested;
-        private int _journeyOpenRequestTick = int.MinValue;
-        private bool _journeyConfirmedVisibleForMenu;
-        private bool _pendingJourneyCloseAfterChat;
-        private int _pendingJourneyCloseAt = int.MinValue;
-        private bool _pendingJourneyCloseHideMenu = true;
-        private bool _pendingOverlayHideAfterJourneyClose;
-        private bool _pendingOverlayHideShouldHideMenu = true;
-        private int _pendingOverlayHideAt = int.MinValue;
-        private int _lastChatEscapeTick = int.MinValue;
-        private bool _initialJourneySyncDone;
-        private bool _infoPopupVisible;
-        private IUiElement _chatEditLine;
-        private IUiElement _journeyUiElement;
-
-        private AutoGemOverlayCommand _pendingCommand = AutoGemOverlayCommand.None;
-        private int _pendingGemIndex = -1;
-        private float _pendingMouseX;
-        private float _pendingMouseY;
-
-        private struct OverlayHitResult
-        {
-            public bool ShouldBlock;
-            public AutoGemOverlayCommand Command;
-            public int GemIndex;
-
-            public OverlayHitResult(bool shouldBlock, AutoGemOverlayCommand command, int gemIndex)
-            {
-                ShouldBlock = shouldBlock;
-                Command = command;
-                GemIndex = gemIndex;
-            }
-        }
-
-        public s7o_AutoGemUpgradeMenu() { Enabled = true; }
-
-        public override void Load(IController hud)
-        {
-            base.Load(hud);
-            LoadSettings();
-            SetDebug(false);
-
-            // Allow HUD Menu to persist Auto Gem state changes through the existing
-            // standalone settings writer without duplicating settings-file logic.
-            s7o_AutoGemUpgradeState.SaveSettingsRequested = SaveSettings;
-
-            NormalizeLoadedState();
-            // Public-test safety: never restore an open overlay/Journey session on HUD reload.
-            _model.Visible = false;
-            _model.SpecificExpanded = false;
-            _infoPopupVisible = false;
-            _capturingMenuHotkey = false;
-            ClearJourneyBackgroundState();
-            try { _chatEditLine = Hud.Render.RegisterUiElement("Root.NormalLayer.chatentry_dialog_backgroundScreen.chatentry_content.chat_editline", null, null); } catch { _chatEditLine = null; }
-            try { _journeyUiElement = Hud.Render.RegisterUiElement("Root.NormalLayer.seasonal_check_dialog", null, null); } catch { _journeyUiElement = null; }
-            _controller.ResetSnapshot(_model);
-
-            if (StandaloneUiSuppressedByHudMenu())
-                SuppressStandaloneUiForHudMenu();
-        }
-
-        public void AfterCollect()
-        {
-            if (StandaloneUiSuppressedByHudMenu())
-            {
-                SuppressStandaloneUiForHudMenu();
-                return;
-            }
-
-            if (!_initialJourneySyncDone)
-            {
-                _initialJourneySyncDone = true;
-                if (_model.Visible && _model.NoClickBackground) RequestJourneyBackgroundOpen();
-            }
-            ProcessPendingJourneyClose();
-            ProcessPendingOverlayHideAfterJourneyClose();
-            if (!_pendingJourneyCloseAfterChat && !_pendingOverlayHideAfterJourneyClose) SyncExternalJourneyClosure();
-            ExecutePendingOverlayCommand();
-            bool physicalLeftDown = false;
-            try { physicalLeftDown = Hud.Input.IsKeyDown(Keys.LButton); } catch { }
-            bool leftDown = physicalLeftDown || _overlayLeftDownBlocked;
-
-            AutoGemOverlayLayout layout = AutoGemOverlayLayout.Build(Hud, _model);
-            _controller.UpdateContinuous(Hud, _model, layout, leftDown);
-            if (_controller.ConsumeDirty()) SaveSettings();
-        }
-
-        public void OnKeyEvent(IKeyEvent keyEvent)
-        {
-            if (keyEvent == null || !keyEvent.IsPressed) return;
-
-            if (StandaloneUiSuppressedByHudMenu())
-            {
-                SuppressStandaloneUiForHudMenu();
-                return;
-            }
-
-            if (_capturingMenuHotkey)
-            {
-                if (keyEvent.Key == Key.Escape)
-                {
-                    _capturingMenuHotkey = false;
-                    return;
-                }
-
-                _menuHotkeyKey = keyEvent.Key;
-                _menuHotkeyLabel = KeyLabel(_menuHotkeyKey);
-                _capturingMenuHotkey = false;
-                _controller.MarkDirty();
-                SaveSettings();
-                return;
-            }
-
-            if (keyEvent.Key == _menuHotkeyKey)
-            {
-                if (_model.Visible) CloseMenu(true);
-                else OpenMenu();
-                SaveSettings();
-                return;
-            }
-
-            if (_model.Visible && (keyEvent.Key == Key.Escape || keyEvent.Key == Key.Space))
-            {
-                // Physical Escape/Space is allowed to close Journey directly.
-                // Hide our overlay immediately and clear only our binding state; do not
-                // synthesize a separate Journey close here.
-                CloseMenu(false);
-                ClearJourneyBackgroundState();
-                SaveSettings();
-                return;
-            }
-        }
-
-        public bool MouseDown(MouseButtons button)
-        {
-            if (button != MouseButtons.Left) return false;
-
-            if (StandaloneUiSuppressedByHudMenu())
-            {
-                SuppressStandaloneUiForHudMenu();
-                return false;
-            }
-
-            AutoGemOverlayLayout layout;
-            float x, y;
-            try
-            {
-                layout = AutoGemOverlayLayout.Build(Hud, _model);
-                x = Hud.Window.CursorX;
-                y = Hud.Window.CursorY;
-            }
-            catch { return false; }
-
-            OverlayHitResult hit = HitTestOverlay(layout, x, y);
-            if (!hit.ShouldBlock && hit.Command == AutoGemOverlayCommand.None) return false;
-
-            if (hit.Command == AutoGemOverlayCommand.JourneyCloseMask)
-            {
-                // This is a bound close zone over Diablo's Journey X. Hide our overlay
-                // immediately, then return false so the same physical click still reaches
-                // Diablo and closes Journey.
-                LogMenuEvent("Journey X-mask clicked; closing overlay and passing click through");
-                CloseMenu(false);
-                ClearJourneyBackgroundState();
-                SaveSettings();
-                return false;
-            }
-
-            _pendingCommand = hit.Command;
-            _pendingGemIndex = hit.GemIndex;
-            _pendingMouseX = x;
-            _pendingMouseY = y;
-            _overlayMouseCapture = hit.ShouldBlock;
-            _overlayLeftDownBlocked = hit.ShouldBlock;
-            return hit.ShouldBlock;
-        }
-
-        public bool MouseUp(MouseButtons button)
-        {
-            if (button != MouseButtons.Left) return false;
-
-            if (StandaloneUiSuppressedByHudMenu())
-            {
-                SuppressStandaloneUiForHudMenu();
-                return false;
-            }
-            if (!_overlayMouseCapture && !IsOverlayClickTarget()) return false;
-
-            _overlayMouseCapture = false;
-            _overlayLeftDownBlocked = false;
-            return true;
-        }
-
-        public void PaintTopInGame(ClipState clipState)
-        {
-            if (clipState != ClipState.AfterClip) return;
-
-            if (StandaloneUiSuppressedByHudMenu())
-            {
-                SuppressStandaloneUiForHudMenu();
-                return;
-            }
-
-            _renderer.EnsureResources(Hud);
-
-            ExecutePendingOverlayCommand();
-
-            bool physicalLeftDown = false;
-            try { physicalLeftDown = Hud.Input.IsKeyDown(Keys.LButton); } catch { }
-            bool leftDown = physicalLeftDown || _overlayLeftDownBlocked;
-
-            AutoGemOverlayLayout layout = AutoGemOverlayLayout.Build(Hud, _model);
-            _controller.UpdateContinuous(Hud, _model, layout, leftDown);
-            if (_controller.ConsumeDirty()) SaveSettings();
-
-            layout = AutoGemOverlayLayout.Build(Hud, _model);
-            _renderer.Draw(Hud, _model, layout, _capturingMenuHotkey ? "press key..." : _menuHotkeyLabel, _infoPopupVisible, ShouldShowJourneyCloseMask());
-        }
-
-        private bool StandaloneUiSuppressedByHudMenu()
-        {
-            return s7o_AutoGemUpgradeState.IsUiOwnedByHudMenu();
-        }
-
-        private void SuppressStandaloneUiForHudMenu()
-        {
-            if (!_model.Visible &&
-                !_infoPopupVisible &&
-                !_capturingMenuHotkey &&
-                !_overlayMouseCapture &&
-                !_overlayLeftDownBlocked &&
-                _pendingCommand == AutoGemOverlayCommand.None &&
-                !_journeyBackgroundActiveForMenu &&
-                !_journeyOpenedByAutoGemMenu &&
-                !_pendingJourneyCloseAfterChat &&
-                !_pendingOverlayHideAfterJourneyClose)
-            {
-                return;
-            }
-
-            _model.Visible = false;
-            _model.SpecificExpanded = false;
-            _infoPopupVisible = false;
-            _capturingMenuHotkey = false;
-            _overlayMouseCapture = false;
-            _overlayLeftDownBlocked = false;
-            _pendingCommand = AutoGemOverlayCommand.None;
-            _pendingGemIndex = -1;
-            ClearJourneyBackgroundState();
-            _controller.ResetSnapshot(_model);
-        }
-
-        private void ExecutePendingOverlayCommand()
-        {
-            if (_pendingCommand == AutoGemOverlayCommand.None) return;
-
-            AutoGemOverlayCommand command = _pendingCommand;
-            int gemIndex = _pendingGemIndex;
-            float x = _pendingMouseX;
-            float y = _pendingMouseY;
-            _pendingCommand = AutoGemOverlayCommand.None;
-            _pendingGemIndex = -1;
-
-            if (command == AutoGemOverlayCommand.ToggleMenu)
-            {
-                if (_model.Visible) CloseMenu(true);
-                else OpenMenu();
-                return;
-            }
-            if (command == AutoGemOverlayCommand.HideMenu)
-            {
-                CloseMenu(true);
-                return;
-            }
-            if (command == AutoGemOverlayCommand.JourneyCloseMask)
-            {
-                CloseMenu(false);
-                ClearJourneyBackgroundState();
-                SaveSettings();
-                return;
-            }
-            if (command == AutoGemOverlayCommand.ToggleNoClickBg)
-            {
-                _model.NoClickBackground = !_model.NoClickBackground;
-                if (_model.Visible)
-                {
-                    if (_model.NoClickBackground) RequestJourneyBackgroundOpen();
-                    else RequestJourneyBackgroundClose(false);
-                }
-                _controller.MarkDirty();
-                SaveSettings();
-                return;
-            }
-            if (command == AutoGemOverlayCommand.ToggleInfoPopup)
-            {
-                _infoPopupVisible = !_infoPopupVisible;
-                return;
-            }
-            if (command == AutoGemOverlayCommand.CloseInfoPopup)
-            {
-                _infoPopupVisible = false;
-                return;
-            }
-
-            AutoGemOverlayLayout layout = AutoGemOverlayLayout.Build(Hud, _model);
-            _controller.ExecuteCommand(Hud, _model, layout, command, gemIndex, x, y);
-            if (command == AutoGemOverlayCommand.BeginHotkeyCapture)
-            {
-                _capturingMenuHotkey = true;
-            }
-        }
-
-        private void OpenMenu()
-        {
-            if (_model.Visible) return;
-            _model.Visible = true;
-            LogMenuEvent("menu open");
-            if (_model.NoClickBackground) RequestJourneyBackgroundOpen();
-            else ClearJourneyBackgroundState();
-            _controller.MarkDirty();
-        }
-
-        private void CloseMenu(bool closeJourney)
-        {
-            if (!_model.Visible && !_infoPopupVisible && !_capturingMenuHotkey)
-            {
-                if (closeJourney) RequestJourneyBackgroundClose(true);
-                return;
-            }
-
-            if (closeJourney && IsJourneyBoundForMenu())
-            {
-                LogMenuEvent("menu close requested; Journey bound, delaying overlay hide until Shift+J close is issued");
-                _model.SpecificExpanded = false;
-                _infoPopupVisible = false;
-                _capturingMenuHotkey = false;
-                RequestJourneyBackgroundClose(true);
-                _controller.MarkDirty();
-                return;
-            }
-
-            HideOverlayStateOnly();
-            LogMenuEvent("menu close; closeJourney=" + closeJourney.ToString());
-            if (closeJourney) ClearJourneyBackgroundState();
-            _controller.MarkDirty();
-        }
-
-        private void HideOverlayStateOnly()
-        {
-            _model.Visible = false;
-            _model.SpecificExpanded = false;
-            _infoPopupVisible = false;
-            _capturingMenuHotkey = false;
-        }
-
-        private bool IsChatEntryOpen()
-        {
-            try { return _chatEditLine != null && _chatEditLine.Visible; }
-            catch { return false; }
-        }
-
-        private bool IsJourneyWindowVisible()
-        {
-            try { return _journeyUiElement != null && _journeyUiElement.Visible; }
-            catch { return false; }
-        }
-
-        private bool IsJourneyBoundForMenu()
-        {
-            return _journeyBackgroundActiveForMenu || _journeyOpenedByAutoGemMenu || _journeyConfirmedVisibleForMenu;
-        }
-
-        private void CloseChatIfNeeded()
-        {
-            if (!IsChatEntryOpen()) return;
-            try
-            {
-                FreeHudInput.SendEscape();
-                _lastChatEscapeTick = Environment.TickCount;
-                Thread.Sleep(35);
-            }
-            catch { }
-        }
-
-        private void RequestJourneyBackgroundOpen()
-        {
-            if (!_model.Visible || !_model.NoClickBackground) return;
-            try { if (Hud.Window == null || !Hud.Window.IsForeground || Hud.Game == null || !Hud.Game.IsInGame) return; } catch { return; }
-
-            bool visibleNow = IsJourneyWindowVisible();
-            if (_journeyBackgroundActiveForMenu)
-            {
-                _journeyOpenRequested = true;
-                if (_journeyOpenRequestTick == int.MinValue) _journeyOpenRequestTick = Environment.TickCount;
-                if (visibleNow) _journeyConfirmedVisibleForMenu = true;
-                return;
-            }
-
-            _journeyWasVisibleBeforeMenu = visibleNow;
-            _journeyBackgroundActiveForMenu = true;
-            _journeyOpenRequested = true;
-            _journeyOpenRequestTick = Environment.TickCount;
-            _journeyConfirmedVisibleForMenu = visibleNow;
-
-            if (visibleNow)
-            {
-                _journeyOpenedByAutoGemMenu = false;
-                return;
-            }
-
-            try
-            {
-                CloseChatIfNeeded();
-                LogMenuEvent("Journey open request: Shift+J sent");
-                FreeHudInput.SendShiftJ();
-                _journeyOpenRequestTick = Environment.TickCount;
-                _journeyOpenedByAutoGemMenu = true;
-                _journeyConfirmedVisibleForMenu = false;
-            }
-            catch { }
-        }
-
-        private void RequestJourneyBackgroundClose(bool hideMenuAfterClose)
-        {
-            // Close a Journey background because this overlay believes it is bound,
-            // not because the instantaneous UI visibility probe happens to be true.
-            bool bound = IsJourneyBoundForMenu();
-            if (!bound)
-            {
-                if (hideMenuAfterClose)
-                {
-                    HideOverlayStateOnly();
-                    _controller.MarkDirty();
-                }
-                return;
-            }
-
-            LogMenuEvent("Journey close requested; bound=true; hideMenuAfterClose=" + hideMenuAfterClose.ToString());
-
-            try
-            {
-                if (Hud.Window == null || !Hud.Window.IsForeground || Hud.Game == null || !Hud.Game.IsInGame)
-                {
-                    if (hideMenuAfterClose) HideOverlayStateOnly();
-                    ClearJourneyBackgroundState();
-                    _controller.MarkDirty();
-                    return;
-                }
-            }
-            catch
-            {
-                if (hideMenuAfterClose) HideOverlayStateOnly();
-                ClearJourneyBackgroundState();
-                _controller.MarkDirty();
-                return;
-            }
-
-            try
-            {
-                if (IsChatEntryOpen())
-                {
-                    LogMenuEvent("chat detected before Journey close; Escape sent and Shift+J deferred");
-                    FreeHudInput.SendEscape();
-                    _lastChatEscapeTick = Environment.TickCount;
-                    _pendingJourneyCloseAfterChat = true;
-                    _pendingJourneyCloseHideMenu = hideMenuAfterClose;
-                    _pendingJourneyCloseAt = unchecked(Environment.TickCount + ChatCloseBeforeJourneyCloseMs);
-                    return;
-                }
-
-                LogMenuEvent("Journey close request: unconditional Shift+J sent");
-                FreeHudInput.SendShiftJ();
-                QueueOverlayHideAfterJourneyClose(hideMenuAfterClose);
-            }
-            catch
-            {
-                if (hideMenuAfterClose) HideOverlayStateOnly();
-                ClearJourneyBackgroundState();
-                _controller.MarkDirty();
-            }
-        }
-
-        private void QueueOverlayHideAfterJourneyClose(bool hideMenuAfterClose)
-        {
-            _pendingOverlayHideAfterJourneyClose = true;
-            _pendingOverlayHideShouldHideMenu = hideMenuAfterClose;
-            _pendingOverlayHideAt = unchecked(Environment.TickCount + JourneyCloseOverlayHideDelayMs);
-            LogMenuEvent("overlay/mask teardown queued after Journey Shift+J; hideMenu=" + hideMenuAfterClose.ToString());
-        }
-
-        private void ProcessPendingJourneyClose()
-        {
-            if (!_pendingJourneyCloseAfterChat) return;
-            int now = Environment.TickCount;
-            if (unchecked(now - _pendingJourneyCloseAt) < 0) return;
-
-            bool hideMenuAfterClose = _pendingJourneyCloseHideMenu;
-            _pendingJourneyCloseAfterChat = false;
-            _pendingJourneyCloseAt = int.MinValue;
-            _pendingJourneyCloseHideMenu = true;
-
-            try
-            {
-                LogMenuEvent("pending Journey close after chat: unconditional Shift+J sent");
-                FreeHudInput.SendShiftJ();
-                QueueOverlayHideAfterJourneyClose(hideMenuAfterClose);
-            }
-            catch
-            {
-                if (hideMenuAfterClose) HideOverlayStateOnly();
-                ClearJourneyBackgroundState();
-                _controller.MarkDirty();
-            }
-        }
-
-        private void ProcessPendingOverlayHideAfterJourneyClose()
-        {
-            if (!_pendingOverlayHideAfterJourneyClose) return;
-            int now = Environment.TickCount;
-            if (unchecked(now - _pendingOverlayHideAt) < 0) return;
-
-            bool hideMenu = _pendingOverlayHideShouldHideMenu;
-            _pendingOverlayHideAfterJourneyClose = false;
-            _pendingOverlayHideAt = int.MinValue;
-            _pendingOverlayHideShouldHideMenu = true;
-
-            if (hideMenu)
-            {
-                HideOverlayStateOnly();
-                LogMenuEvent("overlay hidden after Journey Shift+J close delay");
-            }
-            else
-            {
-                LogMenuEvent("Journey mask/binding cleared after Shift+J close delay");
-            }
-
-            ClearJourneyBackgroundState();
-            _controller.MarkDirty();
-            SaveSettings();
-        }
-
-        private void ClearJourneyBackgroundState()
-        {
-            _journeyOpenedByAutoGemMenu = false;
-            _journeyWasVisibleBeforeMenu = false;
-            _journeyBackgroundActiveForMenu = false;
-            _journeyOpenRequested = false;
-            _journeyOpenRequestTick = int.MinValue;
-            _journeyConfirmedVisibleForMenu = false;
-            _pendingJourneyCloseAfterChat = false;
-            _pendingJourneyCloseAt = int.MinValue;
-            _pendingJourneyCloseHideMenu = true;
-            _pendingOverlayHideAfterJourneyClose = false;
-            _pendingOverlayHideShouldHideMenu = true;
-            _pendingOverlayHideAt = int.MinValue;
-        }
-
-        private void SyncExternalJourneyClosure()
-        {
-            if (!_model.Visible || !_journeyBackgroundActiveForMenu || !_journeyOpenRequested || _journeyUiElement == null) return;
-
-            bool visibleNow = IsJourneyWindowVisible();
-            if (visibleNow)
-            {
-                _journeyConfirmedVisibleForMenu = true;
-                return;
-            }
-
-            int elapsed = unchecked(Environment.TickCount - _journeyOpenRequestTick);
-            if (elapsed < JourneyOpenGraceMs) return;
-
-            // Do not hide the overlay during Journey's open latency. Only treat a missing
-            // Journey window as an external close after it was confirmed visible at least once.
-            if (!_journeyConfirmedVisibleForMenu) return;
-
-            ClearJourneyBackgroundState();
-            CloseMenu(false);
-            SaveSettings();
-        }
-
-        private bool ShouldShowJourneyCloseMask()
-        {
-            // Keep the visible close-zone highlight present for the entire bound menu
-            // session and during the brief close delay after Shift+J is issued.
-            return _model.Visible && (_journeyBackgroundActiveForMenu || _pendingOverlayHideAfterJourneyClose || _pendingJourneyCloseAfterChat);
-        }
-
-        private bool IsOverlayClickTarget()
-        {
-            try
-            {
-                AutoGemOverlayLayout layout = AutoGemOverlayLayout.Build(Hud, _model);
-                float x = Hud.Window.CursorX;
-                float y = Hud.Window.CursorY;
-                return HitTestOverlay(layout, x, y).ShouldBlock;
-            }
-            catch { }
-            return false;
-        }
-
-        private OverlayHitResult HitTestOverlay(AutoGemOverlayLayout layout, float x, float y)
-        {
-            if (_model.Visible && ShouldShowJourneyCloseMask() && Contains(layout.JourneyCloseMask, x, y, 4f))
-                return new OverlayHitResult(false, AutoGemOverlayCommand.JourneyCloseMask, -1);
-
-            // The bottom-right dot is always independent of the panel. In MOVE mode it drags;
-            // otherwise it toggles the main panel.
-            if (_model.ShowMenuDot && Contains(layout.DotHitRect, x, y, 8f))
-                return new OverlayHitResult(true, _model.EditMode ? AutoGemOverlayCommand.BeginDotDrag : AutoGemOverlayCommand.ToggleMenu, -1);
-
-            if (!_model.Visible) return new OverlayHitResult(false, AutoGemOverlayCommand.None, -1);
-
-            if (Contains(layout.InfoButton, x, y, 7f)) return new OverlayHitResult(true, AutoGemOverlayCommand.ToggleInfoPopup, -1);
-            if (_infoPopupVisible)
-            {
-                if (Contains(layout.InfoPopup, x, y, 2f)) return new OverlayHitResult(true, AutoGemOverlayCommand.None, -1);
-                return new OverlayHitResult(true, AutoGemOverlayCommand.CloseInfoPopup, -1);
-            }
-
-            if (Contains(layout.HotkeyButton, x, y, 5f)) return new OverlayHitResult(true, AutoGemOverlayCommand.BeginHotkeyCapture, -1);
-            if (Contains(layout.MenuDotButton, x, y, 5f)) return new OverlayHitResult(true, AutoGemOverlayCommand.ToggleMenuButtonVisible, -1);
-            if (Contains(layout.EditButton, x, y, 5f)) return new OverlayHitResult(true, AutoGemOverlayCommand.ToggleMove, -1);
-            if (Contains(layout.HideButton, x, y, 5f)) return new OverlayHitResult(true, AutoGemOverlayCommand.HideMenu, -1);
-
-            if (_model.EditMode && Contains(layout.HeaderDragArea, x, y, 4f)) return new OverlayHitResult(true, AutoGemOverlayCommand.BeginPanelDrag, -1);
-
-            if (Contains(layout.NoClickCheck, x, y, 7f) || Contains(layout.NoClickLabel, x, y, 4f)) return new OverlayHitResult(true, AutoGemOverlayCommand.ToggleNoClickBg, -1);
-            if (Contains(layout.EnabledCheck, x, y, 7f) || Contains(layout.EnabledLabel, x, y, 4f)) return new OverlayHitResult(true, AutoGemOverlayCommand.ToggleEnabled, -1);
-            if (Contains(layout.SectionToggle, x, y, 6f)) return new OverlayHitResult(true, AutoGemOverlayCommand.ToggleSection, -1);
-
-            if (_model.AutoGemExpanded)
-            {
-                if (Contains(layout.ModeAuto, x, y, 5f)) return new OverlayHitResult(true, AutoGemOverlayCommand.SetModeAuto, -1);
-                if (Contains(layout.ModeFast150, x, y, 5f)) return new OverlayHitResult(true, AutoGemOverlayCommand.SetModeFast150, -1);
-                if (Contains(layout.ModeHighest, x, y, 5f)) return new OverlayHitResult(true, AutoGemOverlayCommand.SetModeHighest, -1);
-                if (Contains(layout.ModeLowest, x, y, 5f)) return new OverlayHitResult(true, AutoGemOverlayCommand.SetModeLowest, -1);
-                if (Contains(layout.ModeSpecific, x, y, 5f)) return new OverlayHitResult(true, AutoGemOverlayCommand.SetModeSpecific, -1);
-                if (Contains(layout.Anchor3, x, y, 5f)) return new OverlayHitResult(true, AutoGemOverlayCommand.SetAnchor3, -1);
-                if (Contains(layout.Anchor4, x, y, 5f)) return new OverlayHitResult(true, AutoGemOverlayCommand.SetAnchor4, -1);
-                if (Contains(layout.DelayMinus, x, y, 7f)) return new OverlayHitResult(true, AutoGemOverlayCommand.DelayMinus, -1);
-                if (Contains(layout.DelayPlus, x, y, 7f)) return new OverlayHitResult(true, AutoGemOverlayCommand.DelayPlus, -1);
-                if (Contains(layout.DelayValue, x, y, 3f)) return new OverlayHitResult(true, AutoGemOverlayCommand.None, -1);
-                if (Contains(layout.LagBoost, x, y, 5f)) return new OverlayHitResult(true, AutoGemOverlayCommand.ToggleLag, -1);
-                if (Contains(layout.SpecificSubMode, x, y, 5f)) return new OverlayHitResult(true, AutoGemOverlayCommand.ToggleSpecificSubMode, -1);
-                if (Contains(layout.SpecificValue, x, y, 4f) || Contains(layout.SpecificToggle, x, y, 7f)) return new OverlayHitResult(true, AutoGemOverlayCommand.ToggleSpecificDropdown, -1);
-
-                if (_model.SpecificExpanded)
-                {
-                    if (Contains(layout.ScrollUp, x, y, 8f)) return new OverlayHitResult(true, AutoGemOverlayCommand.ScrollSpecificUp, -1);
-                    if (Contains(layout.ScrollDown, x, y, 8f)) return new OverlayHitResult(true, AutoGemOverlayCommand.ScrollSpecificDown, -1);
-                    if (Contains(layout.ScrollThumb, x, y, 8f) || Contains(layout.ScrollTrack, x, y, 5f)) return new OverlayHitResult(true, AutoGemOverlayCommand.BeginSpecificScrollDrag, -1);
-                    for (int i = 0; i < layout.GemOptions.Count; i++)
-                    {
-                        GemOptionLayout opt = layout.GemOptions[i];
-                        if (Contains(opt.Rect, x, y, 4f)) return new OverlayHitResult(true, AutoGemOverlayCommand.SelectSpecificGem, opt.Index);
-                    }
-                    if (Contains(layout.SpecificList, x, y, 2f)) return new OverlayHitResult(true, AutoGemOverlayCommand.None, -1);
-                }
-            }
-
-            if (Contains(layout.DebugCheck, x, y, 7f) || Contains(layout.DebugLabel, x, y, 4f)) return new OverlayHitResult(true, AutoGemOverlayCommand.ToggleDebug, -1);
-
-            if (_model.NoClickBackground && Contains(layout.Panel, x, y, 0f)) return new OverlayHitResult(true, AutoGemOverlayCommand.None, -1);
-            return new OverlayHitResult(false, AutoGemOverlayCommand.None, -1);
-        }
-
-        private static bool Contains(RectangleF rect, float x, float y, float inflate)
-        {
-            if (rect.Width <= 0f || rect.Height <= 0f) return false;
-            return x >= rect.Left - inflate && x <= rect.Right + inflate && y >= rect.Top - inflate && y <= rect.Bottom + inflate;
-        }
-
-        private void NormalizeLoadedState()
-        {
-            s7o_AutoGemUpgradeState.AutoGemMode = ClampInt(s7o_AutoGemUpgradeState.AutoGemMode, 0, 4);
-            s7o_AutoGemUpgradeState.AutoGemSpecificSubMode = ClampInt(s7o_AutoGemUpgradeState.AutoGemSpecificSubMode, 0, 1);
-            s7o_AutoGemUpgradeState.AutoGemTPDelayMs = s7o_AutoGemUpgradeState.ClampTPDelayMs(s7o_AutoGemUpgradeState.AutoGemTPDelayMs);
-            s7o_AutoGemUpgradeState.AutoGemTPAnchorRemaining = s7o_AutoGemUpgradeState.ClampTPAnchorRemaining(s7o_AutoGemUpgradeState.AutoGemTPAnchorRemaining);
-            if (string.IsNullOrWhiteSpace(s7o_AutoGemUpgradeState.AutoGemSpecificName))
-                s7o_AutoGemUpgradeState.AutoGemSpecificName = AutoGemOverlayModel.DefaultSpecificGemName;
-            _model.SpecificScroll = ClampInt(_model.SpecificScroll, 0, Math.Max(0, AutoGemOverlayModel.AutoGemNames.Length - 1));
-            _model.NormalizeRects(Hud);
-            _model.Visible = false;
-            if (string.IsNullOrWhiteSpace(_menuHotkeyLabel)) _menuHotkeyLabel = KeyLabel(_menuHotkeyKey);
-            SetDebug(false);
-        }
-
-        private static int ClampInt(int value, int min, int max)
-        {
-            if (value < min) return min;
-            if (value > max) return max;
-            return value;
-        }
-
-        private static string KeyLabel(Key key)
-        {
-            string raw = key.ToString();
-            if (string.IsNullOrEmpty(raw)) return "?";
-            if (raw.StartsWith("D", StringComparison.Ordinal) && raw.Length == 2 && char.IsDigit(raw[1])) return raw.Substring(1);
-            if (raw.StartsWith("NumberPad", StringComparison.Ordinal)) return "NUM" + raw.Substring("NumberPad".Length);
-            return raw.ToUpperInvariant();
-        }
-
-        private static void SetDebug(bool enabled)
-        {
-            s7o_AutoGemUpgradeState.DebugEnabled = enabled;
-            s7o_AutoGemUpgradeState.DebugFileEnabled = enabled;
-            s7o_AutoGemUpgradeState.DebugLevel = enabled
-                ? s7o_AutoGemUpgradeState.DebugLevelState
-                : s7o_AutoGemUpgradeState.DebugLevelOff;
-
-            if (!enabled)
-            {
-                s7o_AutoGemUpgradeState.DebugLogPath = string.Empty;
-                return;
-            }
-
-            s7o_AutoGemUpgradeState.DebugLogPath = FreeHudDebugPath();
-        }
-
-        private static string FreeHudDebugPath()
-        {
-            return s7o_AutoGemUpgradeState.ResolveDebugLogPath();
-        }
-
-        private void LogMenuEvent(string message)
-        {
-            if (!s7o_AutoGemUpgradeState.DebugEnabled || !s7o_AutoGemUpgradeState.DebugFileEnabled) return;
-            try
-            {
-                if (string.IsNullOrWhiteSpace(s7o_AutoGemUpgradeState.DebugLogPath))
-                    s7o_AutoGemUpgradeState.DebugLogPath = FreeHudDebugPath();
-                string dirName = Path.GetDirectoryName(s7o_AutoGemUpgradeState.DebugLogPath);
-                if (!string.IsNullOrEmpty(dirName) && !Directory.Exists(dirName)) Directory.CreateDirectory(dirName);
-                string line = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture) + " menu: " + (message ?? string.Empty);
-                File.AppendAllText(s7o_AutoGemUpgradeState.DebugLogPath, line + Environment.NewLine);
-            }
-            catch { }
-        }
-
-        private string SettingsDirectory()
-        {
-            try
-            {
-                return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Plugins", "s7o", "settings");
-            }
-            catch
-            {
-                return "settings";
-            }
-        }
-
-        private string SettingsPath()
-        {
-            try
-            {
-                return Path.Combine(SettingsDirectory(), SettingsFileName);
-            }
-            catch
-            {
-                return SettingsFileName;
-            }
-        }
-
-        private string LegacySettingsPath()
-        {
-            try
-            {
-                return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Plugins", "s7o", LegacySettingsFileName);
-            }
-            catch
-            {
-                return LegacySettingsFileName;
-            }
-        }
-
-        private string ResolveSettingsLoadPath()
-        {
-            try
-            {
-                string current = SettingsPath();
-                if (File.Exists(current))
-                    return current;
-
-                string legacy = LegacySettingsPath();
-                if (File.Exists(legacy))
-                    return legacy;
-
-                return current;
-            }
-            catch
-            {
-                return SettingsPath();
-            }
-        }
-
-        private void SaveSettings()
-        {
-            try
-            {
-                _model.NormalizeRects(Hud);
-                var lines = new List<string>();
-                lines.Add("# s7o Auto Gem Upgrade FreeHUD settings");
-                // Do not persist open-state for public testing; overlay must start closed after HUD reload.
-                lines.Add("MENU_VISIBLE=False");
-                lines.Add("VISIBLE=False");
-                lines.Add("EDITMODE=" + _model.EditMode);
-                lines.Add("SHOWMENUDOT=" + _model.ShowMenuDot);
-                lines.Add("AUTOGEM_MENU_X=" + _model.PanelRect.X.ToString(CultureInfo.InvariantCulture));
-                lines.Add("AUTOGEM_MENU_Y=" + _model.PanelRect.Y.ToString(CultureInfo.InvariantCulture));
-                lines.Add("AUTOGEM_MENU_VISIBLE=False");
-                lines.Add("AUTOGEM_MENU_BUTTON_VISIBLE=" + _model.ShowMenuDot);
-                lines.Add("AUTOGEM_MOVE_MODE=" + _model.EditMode);
-                lines.Add("AUTOGEM_NOCLICK_BACKGROUND=" + _model.NoClickBackground);
-                lines.Add("AUTOGEM_BUTTON_X=" + _model.DotRect.X.ToString(CultureInfo.InvariantCulture));
-                lines.Add("AUTOGEM_BUTTON_Y=" + _model.DotRect.Y.ToString(CultureInfo.InvariantCulture));
-                lines.Add("WINX=" + _model.PanelRect.X.ToString(CultureInfo.InvariantCulture));
-                lines.Add("WINY=" + _model.PanelRect.Y.ToString(CultureInfo.InvariantCulture));
-                lines.Add("WINW=" + _model.PanelRect.Width.ToString(CultureInfo.InvariantCulture));
-                lines.Add("WINH=" + _model.PanelRect.Height.ToString(CultureInfo.InvariantCulture));
-                lines.Add("DOTX=" + _model.DotRect.X.ToString(CultureInfo.InvariantCulture));
-                lines.Add("DOTY=" + _model.DotRect.Y.ToString(CultureInfo.InvariantCulture));
-                lines.Add("MENU_HOTKEY=" + _menuHotkeyKey);
-                lines.Add("MENU_HOTKEY_LABEL=" + _menuHotkeyLabel);
-                lines.Add("AUTOGEM_ENABLED=" + s7o_AutoGemUpgradeState.AutoGemUpgradeEnabled);
-                lines.Add("AUTOGEM_ON=" + s7o_AutoGemUpgradeState.AutoGemUpgradeEnabled);
-                lines.Add("AUTOGEM_MODE=" + s7o_AutoGemUpgradeState.AutoGemMode.ToString(CultureInfo.InvariantCulture));
-                lines.Add("AUTOGEM_NAME=" + (s7o_AutoGemUpgradeState.AutoGemSpecificName ?? string.Empty));
-                lines.Add("AUTOGEM_SPEC_SUBMODE=" + s7o_AutoGemUpgradeState.AutoGemSpecificSubMode.ToString(CultureInfo.InvariantCulture));
-                lines.Add("AUTOGEM_TP_DELAY_MODE=ANCHOR_DELAY");
-                lines.Add("AUTOGEM_TP_DELAY_MS=" + s7o_AutoGemUpgradeState.ClampTPDelayMs(s7o_AutoGemUpgradeState.AutoGemTPDelayMs).ToString(CultureInfo.InvariantCulture));
-                lines.Add("AUTOGEM_TP_ANCHOR=" + s7o_AutoGemUpgradeState.GetConfiguredPortalAnchorRemaining().ToString(CultureInfo.InvariantCulture));
-                lines.Add("AUTOGEM_TP_LAG=" + s7o_AutoGemUpgradeState.AutoGemTPLagBoost);
-                lines.Add("AUTOGEM_EXPANDED=" + _model.AutoGemExpanded);
-                lines.Add("AUTOGEM_SPEC_EXPANDED=" + _model.SpecificExpanded);
-                lines.Add("AUTOGEM_SPEC_SCROLL=" + _model.SpecificScroll.ToString(CultureInfo.InvariantCulture));
-                // Debug logging is intentionally not persisted ON in public releases.
-                // It should always start disabled unless manually enabled for the current session.
-                lines.Add("DEBUG_ENABLED=false");
-                lines.Add("DEBUG_ON=false");
-
-                string dir = SettingsDirectory();
-                if (!Directory.Exists(dir))
-                    Directory.CreateDirectory(dir);
-
-                File.WriteAllLines(SettingsPath(), lines.ToArray());
-            }
-            catch { }
-        }
-
-        private void LoadSettings()
-        {
-            try
-            {
-                string path = ResolveSettingsLoadPath();
-                if (!File.Exists(path)) return;
-                foreach (var raw in File.ReadAllLines(path))
-                {
-                    if (string.IsNullOrWhiteSpace(raw) || raw.TrimStart().StartsWith("#")) continue;
-                    int eq = raw.IndexOf('=');
-                    if (eq <= 0) continue;
-                    string key = raw.Substring(0, eq).Trim();
-                    string val = raw.Substring(eq + 1).Trim();
-                    float fv; int iv; bool bv; Key k;
-                    if (key == "MENU_VISIBLE" || key == "VISIBLE") { /* ignored: public-test builds always start closed */ }
-                    else if (key == "EDITMODE" && bool.TryParse(val, out bv)) _model.EditMode = bv;
-                    else if ((key == "SHOWMENUDOT" || key == "AUTOGEM_MENU_BUTTON_VISIBLE") && bool.TryParse(val, out bv)) _model.ShowMenuDot = bv;
-                    else if (key == "AUTOGEM_MENU_VISIBLE") { /* ignored: public-test builds always start closed */ }
-                    else if (key == "AUTOGEM_MOVE_MODE" && bool.TryParse(val, out bv)) _model.EditMode = bv;
-                    else if (key == "AUTOGEM_NOCLICK_BACKGROUND" && bool.TryParse(val, out bv)) _model.NoClickBackground = bv;
-                    else if (key == "AUTOGEM_MENU_X" && float.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out fv)) _model.PanelRect.X = fv;
-                    else if (key == "AUTOGEM_MENU_Y" && float.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out fv)) _model.PanelRect.Y = fv;
-                    else if (key == "AUTOGEM_BUTTON_X" && float.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out fv)) _model.DotRect.X = fv;
-                    else if (key == "AUTOGEM_BUTTON_Y" && float.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out fv)) _model.DotRect.Y = fv;
-                    else if (key == "WINX" && float.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out fv)) _model.PanelRect.X = fv;
-                    else if (key == "WINY" && float.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out fv)) _model.PanelRect.Y = fv;
-                    else if (key == "WINW" && float.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out fv)) _model.PanelRect.Width = fv;
-                    else if (key == "WINH" && float.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out fv)) _model.PanelRect.Height = fv;
-                    else if (key == "DOTX" && float.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out fv)) _model.DotRect.X = fv;
-                    else if (key == "DOTY" && float.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out fv)) _model.DotRect.Y = fv;
-                    else if (key == "MENU_HOTKEY" && Enum.TryParse<Key>(val, out k)) { _menuHotkeyKey = k; _menuHotkeyLabel = KeyLabel(k); }
-                    else if (key == "MENU_HOTKEY_LABEL") _menuHotkeyLabel = val;
-                    else if ((key == "AUTOGEM_ENABLED" || key == "AUTOGEM_ON") && bool.TryParse(val, out bv)) s7o_AutoGemUpgradeState.AutoGemUpgradeEnabled = bv;
-                    else if (key == "AUTOGEM_MODE" && int.TryParse(val, NumberStyles.Integer, CultureInfo.InvariantCulture, out iv)) s7o_AutoGemUpgradeState.AutoGemMode = iv;
-                    else if (key == "AUTOGEM_NAME") s7o_AutoGemUpgradeState.AutoGemSpecificName = string.IsNullOrWhiteSpace(val) ? AutoGemOverlayModel.DefaultSpecificGemName : val;
-                    else if (key == "AUTOGEM_SPEC_SUBMODE" && int.TryParse(val, NumberStyles.Integer, CultureInfo.InvariantCulture, out iv)) s7o_AutoGemUpgradeState.AutoGemSpecificSubMode = iv;
-                    else if (key == "AUTOGEM_TP_DELAY_MS" && int.TryParse(val, NumberStyles.Integer, CultureInfo.InvariantCulture, out iv)) s7o_AutoGemUpgradeState.AutoGemTPDelayMs = s7o_AutoGemUpgradeState.ClampTPDelayMs(iv);
-                    else if (key == "AUTOGEM_TP_ANCHOR" && int.TryParse(val, NumberStyles.Integer, CultureInfo.InvariantCulture, out iv)) s7o_AutoGemUpgradeState.AutoGemTPAnchorRemaining = s7o_AutoGemUpgradeState.ClampTPAnchorRemaining(iv);
-                    else if (key == "AUTOGEM_TP_LAG" && bool.TryParse(val, out bv)) s7o_AutoGemUpgradeState.AutoGemTPLagBoost = bv;
-                    else if (key == "AUTOGEM_EXPANDED" && bool.TryParse(val, out bv)) _model.AutoGemExpanded = bv;
-                    else if (key == "AUTOGEM_SPEC_EXPANDED" && bool.TryParse(val, out bv)) _model.SpecificExpanded = bv;
-                    else if (key == "AUTOGEM_SPEC_SCROLL" && int.TryParse(val, NumberStyles.Integer, CultureInfo.InvariantCulture, out iv)) _model.SpecificScroll = Math.Max(0, iv);
-                    else if (key == "DEBUG_ENABLED" || key == "DEBUG_ON")
-                    {
-                        // Ignore persisted debug flags in release builds.
-                        // Debug should not auto-enable from saved settings.
-                        SetDebug(false);
-                    }
-                }
-            }
-            catch { }
-        }
-    }
-
-    internal sealed class AutoGemOverlayModel
-    {
-        public const string DefaultSpecificGemName = "Bane of the Trapped";
-        public bool Visible;
-        public bool AutoGemExpanded = true;
-        public bool _autoGemSpecificExpanded;
-        public int _autoGemSpecificScroll;
-        public bool DraggingSpecificScroll;
-
-        public RectangleF PanelRect = new RectangleF(8f, 6f, 690f, 490f);
-        public RectangleF DotRect = new RectangleF(-1f, -1f, 18f, 18f);
-        public bool EditMode;
-        public bool ShowMenuDot = true;
-        public bool NoClickBackground = true;
-        public int DotColorIdx = 0;
-        public int DotOpenColorIdx = 3;
-        public int DotSize = 5;
-        public int DotOpenSize = 7;
-        public bool DraggingPanel;
-        public bool DraggingDot;
-        public float DragOffsetX;
-        public float DragOffsetY;
-
-        public bool SpecificExpanded { get { return _autoGemSpecificExpanded; } set { _autoGemSpecificExpanded = value; } }
-        public int SpecificScroll { get { return _autoGemSpecificScroll; } set { _autoGemSpecificScroll = value; } }
-
-        public static readonly string[] _autoGemNames =
-        {
-            "Bane of the Powerful",
-            "Bane of the Stricken",
-            "Bane of the Trapped",
-            "Boon of the Hoarder",
-            "Boyarsky's Chip",
-            "Enforcer",
-            "Esoteric Alteration",
-            "Gem of Ease",
-            "Gem of Efficacious Toxin",
-            "Gogok of Swiftness",
-            "Iceblink",
-            "Invigorating Gemstone",
-            "Legacy of Dreams",
-            "Mirinae, Teardrop of the Starweaver",
-            "Molten Wildebeest's Gizzard",
-            "Moratorium",
-            "Mutilation Guard",
-            "Pain Enhancer",
-            "Simplicity's Strength",
-            "Taeguk",
-            "Wreath of Lightning",
-            "Whisper of Atonement",
-            "Zei's Stone of Vengeance",
-        };
-
-        public static string[] AutoGemNames { get { return _autoGemNames; } }
-
-        public void NormalizeRects(IController hud)
-        {
-            if (PanelRect.Width < 690f) PanelRect.Width = 690f;
-            if (PanelRect.Height < 490f) PanelRect.Height = 490f;
-            if (DotRect.Width <= 0f) DotRect.Width = 18f;
-            if (DotRect.Height <= 0f) DotRect.Height = 18f;
-            try
-            {
-                float sw = hud.Window.Size.Width;
-                float sh = hud.Window.Size.Height;
-                if (DotRect.X < 0f && sw > 100f) DotRect.X = Math.Max(0f, sw - 34f);
-                if (DotRect.Y < 0f && sh > 100f) DotRect.Y = Math.Max(0f, sh - 34f);
-                if (sw > 100f)
-                {
-                    if (PanelRect.Width > sw) PanelRect.Width = sw;
-                    if (PanelRect.Left < 0f) PanelRect.X = 0f;
-                    if (PanelRect.Right > sw) PanelRect.X = Math.Max(0f, sw - PanelRect.Width);
-                    if (DotRect.Left < 0f) DotRect.X = 0f;
-                    if (DotRect.Right > sw) DotRect.X = Math.Max(0f, sw - DotRect.Width);
-                }
-                if (sh > 100f)
-                {
-                    if (PanelRect.Height > sh) PanelRect.Height = sh;
-                    if (PanelRect.Top < 0f) PanelRect.Y = 0f;
-                    if (PanelRect.Bottom > sh) PanelRect.Y = Math.Max(0f, sh - PanelRect.Height);
-                    if (DotRect.Top < 0f) DotRect.Y = 0f;
-                    if (DotRect.Bottom > sh) DotRect.Y = Math.Max(0f, sh - DotRect.Height);
-                }
-            }
-            catch { }
-        }
-    }
-
-    internal sealed class AutoGemOverlayLayout
-    {
-        public RectangleF Indicator;
-        public RectangleF DotHitRect;
-        public RectangleF DotDragFrame;
-        public RectangleF Panel;
-        public RectangleF TitleBar;
-        public RectangleF HeaderDragArea;
-        public RectangleF HotkeyButton;
-        public RectangleF MenuDotButton;
-        public RectangleF EditButton;
-        public RectangleF HideButton;
-        public RectangleF MainPane;
-        public RectangleF InfoButton;
-        public RectangleF InfoPopup;
-        public RectangleF JourneyCloseMask;
-        public RectangleF StatusRow;
-        public RectangleF NoClickCheck;
-        public RectangleF NoClickLabel;
-        public RectangleF EnabledCheck;
-        public RectangleF EnabledLabel;
-        public RectangleF SectionToggle;
-        public RectangleF ModeAuto;
-        public RectangleF ModeFast150;
-        public RectangleF ModeHighest;
-        public RectangleF ModeLowest;
-        public RectangleF ModeSpecific;
-        public RectangleF Anchor3;
-        public RectangleF Anchor4;
-        public RectangleF DelayMinus;
-        public RectangleF DelayValue;
-        public RectangleF DelayPlus;
-        public RectangleF LagBoost;
-        public RectangleF SpecificValue;
-        public RectangleF SpecificSubMode;
-        public RectangleF SpecificToggle;
-        public RectangleF SpecificList;
-        public RectangleF ScrollUp;
-        public RectangleF ScrollDown;
-        public RectangleF ScrollTrack;
-        public RectangleF ScrollThumb;
-        public RectangleF DebugCheck;
-        public RectangleF DebugLabel;
-        public int VisibleGemRows;
-        public int MaxGemScroll;
-        public readonly List<GemOptionLayout> GemOptions = new List<GemOptionLayout>();
-
-        public static AutoGemOverlayLayout Build(IController hud, AutoGemOverlayModel model)
-        {
-            model.NormalizeRects(hud);
-            var l = new AutoGemOverlayLayout();
-            RectangleF panel = model.PanelRect;
-            float requiredHeight = 490f + (model.SpecificExpanded ? 40f : 0f);
-            if (panel.Height < requiredHeight) panel.Height = requiredHeight;
-            try
-            {
-                float sh = hud.Window.Size.Height;
-                if (sh > 100f && panel.Bottom > sh) panel.Y = Math.Max(0f, sh - panel.Height);
-            }
-            catch { }
-            l.Panel = panel;
-            l.Indicator = model.DotRect;
-            l.DotHitRect = new RectangleF(model.DotRect.Left - 12f, model.DotRect.Top - 12f, model.DotRect.Width + 24f, model.DotRect.Height + 24f);
-            l.DotDragFrame = new RectangleF(model.DotRect.Left - 6f, model.DotRect.Top - 6f, model.DotRect.Width + 12f, model.DotRect.Height + 12f);
-
-            l.TitleBar = new RectangleF(panel.Left + 6f, panel.Top + 6f, panel.Width - 12f, 34f);
-            l.HideButton = new RectangleF(panel.Right - 68f, panel.Top + 12f, 54f, 20f);
-            l.EditButton = new RectangleF(l.HideButton.Left - 4f - 82f, panel.Top + 12f, 82f, 20f);
-            l.MenuDotButton = new RectangleF(l.EditButton.Left - 8f - 128f, panel.Top + 12f, 128f, 20f);
-            l.HotkeyButton = new RectangleF(l.MenuDotButton.Left - 96f, panel.Top + 13f, 78f, 18f);
-            l.HeaderDragArea = new RectangleF(panel.Left + 6f, panel.Top + 6f, Math.Max(1f, l.HotkeyButton.Left - panel.Left - 12f), 34f);
-
-            float margin = 16f;
-            float topY = panel.Top + 52f;
-            float paneH = panel.Height - 68f;
-            l.MainPane = new RectangleF(panel.Left + margin, topY, panel.Width - margin * 2f, paneH);
-            l.InfoButton = new RectangleF(l.MainPane.Left + 170.5f, l.MainPane.Top + 6.5f, 15f, 15f);
-            l.InfoPopup = new RectangleF(l.MainPane.Left + 12f, l.MainPane.Top + 31f, 430f, 118f);
-            try
-            {
-                float sw = hud.Window.Size.Width;
-                float sh = hud.Window.Size.Height;
-                if (sw > 100f && sh > 100f)
-                    l.JourneyCloseMask = new RectangleF(sw * (1567f / 1920f), sh * (100f / 1080f), sw * (23f / 1920f), sh * (23f / 1080f));
-                else
-                    l.JourneyCloseMask = new RectangleF(1567f, 100f, 23f, 23f);
-            }
-            catch { l.JourneyCloseMask = new RectangleF(1567f, 100f, 23f, 23f); }
-
-            float contentX = l.MainPane.Left + 12f;
-            float contentW = l.MainPane.Width - 24f;
-            float y = l.MainPane.Top + 34f;
-            l.StatusRow = new RectangleF(contentX, y, contentW, 18f);
-            l.NoClickCheck = new RectangleF(l.StatusRow.Right - 138f, l.StatusRow.Top + 3f, 12f, 12f);
-            l.NoClickLabel = new RectangleF(l.NoClickCheck.Right + 6f, l.StatusRow.Top + 1f, 120f, 16f);
-            y += 24f;
-
-            RectangleF gemTitleRow = new RectangleF(contentX, y, contentW, 20f);
-            l.EnabledCheck = new RectangleF(gemTitleRow.Left + 6f, gemTitleRow.Top + 4f, 12f, 12f);
-            l.EnabledLabel = new RectangleF(gemTitleRow.Left + 24f, gemTitleRow.Top + 2f, 155f, 16f);
-            l.SectionToggle = new RectangleF(gemTitleRow.Right - 20f, gemTitleRow.Top + 4f, 14f, 12f);
-            y += 24f;
-
-            if (model.AutoGemExpanded)
-            {
-                RectangleF gemModeRow = new RectangleF(contentX, y, contentW, 22f);
-                float btnY = gemModeRow.Top + 3f;
-                float modeGap = 4f;
-                float modeInnerLeft = gemModeRow.Left + 6f;
-                float modeBtnW = (gemModeRow.Width - 12f - modeGap * 4f) / 5f;
-                l.ModeAuto = new RectangleF(modeInnerLeft, btnY, modeBtnW, 16f);
-                l.ModeFast150 = new RectangleF(l.ModeAuto.Right + modeGap, btnY, modeBtnW, 16f);
-                l.ModeHighest = new RectangleF(l.ModeFast150.Right + modeGap, btnY, modeBtnW, 16f);
-                l.ModeLowest = new RectangleF(l.ModeHighest.Right + modeGap, btnY, modeBtnW, 16f);
-                l.ModeSpecific = new RectangleF(l.ModeLowest.Right + modeGap, btnY, modeBtnW, 16f);
-                y += 26f;
-
-                RectangleF gemAnchorRow = new RectangleF(contentX, y, contentW, 22f);
-                l.Anchor3 = new RectangleF(gemAnchorRow.Left + 86f, gemAnchorRow.Top + 3f, 58f, 16f);
-                l.Anchor4 = new RectangleF(l.Anchor3.Right + 4f, gemAnchorRow.Top + 3f, 58f, 16f);
-                y += 26f;
-
-                RectangleF gemDelayRow = new RectangleF(contentX, y, contentW, 22f);
-                l.DelayMinus = new RectangleF(gemDelayRow.Left + 86f, gemDelayRow.Top + 3f, 18f, 16f);
-                l.DelayValue = new RectangleF(l.DelayMinus.Right + 4f, gemDelayRow.Top + 3f, 56f, 16f);
-                l.DelayPlus = new RectangleF(l.DelayValue.Right + 4f, gemDelayRow.Top + 3f, 18f, 16f);
-                l.LagBoost = new RectangleF(l.DelayPlus.Right + 4f, gemDelayRow.Top + 3f, 36f, 16f);
-                y += 26f;
-
-                RectangleF gemSpecificRow = new RectangleF(contentX, y, contentW, 22f);
-                l.SpecificToggle = new RectangleF(gemSpecificRow.Right - 26f, gemSpecificRow.Top + 3f, 18f, 16f);
-                l.SpecificSubMode = new RectangleF(l.SpecificToggle.Left - 46f, gemSpecificRow.Top + 3f, 40f, 16f);
-                l.SpecificValue = new RectangleF(gemSpecificRow.Left + 86f, gemSpecificRow.Top + 3f, Math.Max(68f, l.SpecificSubMode.Left - (gemSpecificRow.Left + 86f) - 4f), 16f);
-                y += 26f;
-
-                if (model.SpecificExpanded)
-                {
-                    l.SpecificList = new RectangleF(contentX, y, contentW, 148f);
-                    l.VisibleGemRows = Math.Max(1, (int)((l.SpecificList.Height - 8f) / 18f));
-                    l.MaxGemScroll = Math.Max(0, AutoGemOverlayModel.AutoGemNames.Length - l.VisibleGemRows);
-                    if (model.SpecificScroll > l.MaxGemScroll) model.SpecificScroll = l.MaxGemScroll;
-                    if (model.SpecificScroll < 0) model.SpecificScroll = 0;
-                    l.ScrollUp = new RectangleF(l.SpecificList.Right - 12f, l.SpecificList.Top + 2f, 10f, 14f);
-                    l.ScrollDown = new RectangleF(l.SpecificList.Right - 12f, l.SpecificList.Bottom - 16f, 10f, 14f);
-                    l.ScrollTrack = new RectangleF(l.SpecificList.Right - 12f, l.ScrollUp.Bottom + 2f, 10f, l.ScrollDown.Top - l.ScrollUp.Bottom - 4f);
-                    float knobH = Math.Max(18f, l.ScrollTrack.Height * Math.Min(1f, l.VisibleGemRows / (float)Math.Max(1, AutoGemOverlayModel.AutoGemNames.Length)));
-                    float knobTravel = Math.Max(1f, l.ScrollTrack.Height - knobH);
-                    float knobY = l.ScrollTrack.Top + ((l.MaxGemScroll <= 0) ? 0f : (model.SpecificScroll / (float)l.MaxGemScroll) * knobTravel);
-                    l.ScrollThumb = new RectangleF(l.ScrollTrack.Left + 1f, knobY, l.ScrollTrack.Width - 2f, knobH);
-                    float gy = l.SpecificList.Top + 4f;
-                    for (int gi = model.SpecificScroll; gi < AutoGemOverlayModel.AutoGemNames.Length && gy + 16f <= l.SpecificList.Bottom - 4f; gi++)
-                    {
-                        l.GemOptions.Add(new GemOptionLayout(gi, new RectangleF(l.SpecificList.Left + 4f, gy, l.SpecificList.Width - 20f, 16f)));
-                        gy += 18f;
-                    }
-                    y += 156f;
-                }
-            }
-
-            l.DebugCheck = new RectangleF(contentX + 6f, y + 4f, 12f, 12f);
-            l.DebugLabel = new RectangleF(contentX + 24f, y + 2f, 145f, 16f);
-            y += 24f;
-
-            return l;
-        }
-    }
-
-    internal sealed class GemOptionLayout
-    {
-        public readonly int Index;
-        public readonly RectangleF Rect;
-        public GemOptionLayout(int index, RectangleF rect) { Index = index; Rect = rect; }
-    }
-
-    internal sealed class AutoGemOverlayController
-    {
-        private bool _dirty;
-        private string _lastSpecificName = string.Empty;
-        private int _lastSpecificScroll;
-
-        public void ResetSnapshot(AutoGemOverlayModel model)
-        {
-            _lastSpecificName = s7o_AutoGemUpgradeState.AutoGemSpecificName ?? string.Empty;
-            _lastSpecificScroll = model.SpecificScroll;
-            _dirty = false;
-        }
-
-        public void MarkDirty() { _dirty = true; }
-        public bool ConsumeDirty() { bool value = _dirty; _dirty = false; return value; }
-
-        public bool ExecuteCommand(IController hud, AutoGemOverlayModel model, AutoGemOverlayLayout layout, AutoGemOverlayCommand command, int gemIndex, float mouseX, float mouseY)
-        {
-            bool changed = false;
-            switch (command)
-            {
-                case AutoGemOverlayCommand.ToggleMenu:
-                    model.Visible = !model.Visible;
-                    changed = true;
-                    break;
-
-                case AutoGemOverlayCommand.HideMenu:
-                    model.Visible = false;
-                    model.SpecificExpanded = false;
-                    changed = true;
-                    break;
-
-                case AutoGemOverlayCommand.ToggleMove:
-                    model.EditMode = !model.EditMode;
-                    if (!model.EditMode)
-                    {
-                        model.DraggingPanel = false;
-                        model.DraggingDot = false;
-                    }
-                    changed = true;
-                    break;
-
-                case AutoGemOverlayCommand.ToggleMenuButtonVisible:
-                    model.ShowMenuDot = !model.ShowMenuDot;
-                    changed = true;
-                    break;
-
-                case AutoGemOverlayCommand.ToggleNoClickBg:
-                    model.NoClickBackground = !model.NoClickBackground;
-                    changed = true;
-                    break;
-
-                case AutoGemOverlayCommand.ToggleEnabled:
-                    s7o_AutoGemUpgradeState.AutoGemUpgradeEnabled = !s7o_AutoGemUpgradeState.AutoGemUpgradeEnabled;
-                    changed = true;
-                    break;
-
-                case AutoGemOverlayCommand.ToggleSection:
-                    model.AutoGemExpanded = !model.AutoGemExpanded;
-                    if (!model.AutoGemExpanded) model.SpecificExpanded = false;
-                    changed = true;
-                    break;
-
-                case AutoGemOverlayCommand.SetModeAuto:
-                    changed = SetMode(model, 0);
-                    break;
-
-                case AutoGemOverlayCommand.SetModeFast150:
-                    changed = SetMode(model, 3);
-                    break;
-
-                case AutoGemOverlayCommand.SetModeHighest:
-                    changed = SetMode(model, 2);
-                    break;
-
-                case AutoGemOverlayCommand.SetModeLowest:
-                    changed = SetMode(model, 1);
-                    break;
-
-                case AutoGemOverlayCommand.SetModeSpecific:
-                    changed = SetMode(model, 4);
-                    break;
-
-                case AutoGemOverlayCommand.SetAnchor3:
-                    if (s7o_AutoGemUpgradeState.AutoGemTPAnchorRemaining != 3) changed = true;
-                    s7o_AutoGemUpgradeState.AutoGemTPAnchorRemaining = 3;
-                    break;
-
-                case AutoGemOverlayCommand.SetAnchor4:
-                    if (s7o_AutoGemUpgradeState.AutoGemTPAnchorRemaining != 4) changed = true;
-                    s7o_AutoGemUpgradeState.AutoGemTPAnchorRemaining = 4;
-                    break;
-
-                case AutoGemOverlayCommand.DelayMinus:
-                    {
-                        int next = s7o_AutoGemUpgradeState.ClampTPDelayMs(s7o_AutoGemUpgradeState.AutoGemTPDelayMs - s7o_AutoGemUpgradeState.AutoGemTPDelayStep);
-                        if (next != s7o_AutoGemUpgradeState.AutoGemTPDelayMs)
-                        {
-                            s7o_AutoGemUpgradeState.AutoGemTPDelayMs = next;
-                            changed = true;
-                        }
-                        break;
-                    }
-
-                case AutoGemOverlayCommand.DelayPlus:
-                    {
-                        int next = s7o_AutoGemUpgradeState.ClampTPDelayMs(s7o_AutoGemUpgradeState.AutoGemTPDelayMs + s7o_AutoGemUpgradeState.AutoGemTPDelayStep);
-                        if (next != s7o_AutoGemUpgradeState.AutoGemTPDelayMs)
-                        {
-                            s7o_AutoGemUpgradeState.AutoGemTPDelayMs = next;
-                            changed = true;
-                        }
-                        break;
-                    }
-
-                case AutoGemOverlayCommand.ToggleLag:
-                    s7o_AutoGemUpgradeState.AutoGemTPLagBoost = !s7o_AutoGemUpgradeState.AutoGemTPLagBoost;
-                    changed = true;
-                    break;
-
-                case AutoGemOverlayCommand.ToggleSpecificSubMode:
-                    s7o_AutoGemUpgradeState.AutoGemSpecificSubMode = s7o_AutoGemUpgradeState.AutoGemSpecificSubMode == 1 ? 0 : 1;
-                    changed = true;
-                    break;
-
-                case AutoGemOverlayCommand.ToggleSpecificDropdown:
-                    model.SpecificExpanded = !model.SpecificExpanded;
-                    changed = true;
-                    break;
-
-                case AutoGemOverlayCommand.ToggleDebug:
-                    SetDebug(!s7o_AutoGemUpgradeState.DebugEnabled);
-                    changed = true;
-                    break;
-
-                case AutoGemOverlayCommand.SelectSpecificGem:
-                    if (gemIndex >= 0 && gemIndex < AutoGemOverlayModel.AutoGemNames.Length)
-                    {
-                        s7o_AutoGemUpgradeState.AutoGemSpecificName = AutoGemOverlayModel.AutoGemNames[gemIndex];
-                        s7o_AutoGemUpgradeState.AutoGemMode = 4;
-                        model.SpecificExpanded = false;
-                        changed = true;
-                    }
-                    break;
-
-                case AutoGemOverlayCommand.ScrollSpecificUp:
-                    {
-                        int next = Math.Max(0, model.SpecificScroll - 3);
-                        if (next != model.SpecificScroll)
-                        {
-                            model.SpecificScroll = next;
-                            changed = true;
-                        }
-                        break;
-                    }
-
-                case AutoGemOverlayCommand.ScrollSpecificDown:
-                    {
-                        int maxScroll = Math.Max(0, layout.MaxGemScroll);
-                        int next = Math.Min(maxScroll, model.SpecificScroll + 3);
-                        if (next != model.SpecificScroll)
-                        {
-                            model.SpecificScroll = next;
-                            changed = true;
-                        }
-                        break;
-                    }
-
-                case AutoGemOverlayCommand.BeginSpecificScrollDrag:
-                    model.DraggingSpecificScroll = true;
-                    if (UpdateSpecificScrollFromCursor(hud, model, layout)) changed = true;
-                    break;
-
-                case AutoGemOverlayCommand.BeginDotDrag:
-                    if (model.EditMode && model.ShowMenuDot)
-                    {
-                        model.DraggingDot = true;
-                        model.DraggingPanel = false;
-                        model.DragOffsetX = mouseX - model.DotRect.Left;
-                        model.DragOffsetY = mouseY - model.DotRect.Top;
-                    }
-                    break;
-
-                case AutoGemOverlayCommand.BeginPanelDrag:
-                    if (model.EditMode)
-                    {
-                        model.DraggingPanel = true;
-                        model.DraggingDot = false;
-                        model.DragOffsetX = mouseX - model.PanelRect.Left;
-                        model.DragOffsetY = mouseY - model.PanelRect.Top;
-                    }
-                    break;
-            }
-
-            string curName = s7o_AutoGemUpgradeState.AutoGemSpecificName ?? string.Empty;
-            if (!string.Equals(curName, _lastSpecificName, StringComparison.Ordinal) || model.SpecificScroll != _lastSpecificScroll)
-            {
-                _lastSpecificName = curName;
-                _lastSpecificScroll = model.SpecificScroll;
-                changed = true;
-            }
-
-            if (changed) _dirty = true;
-            return changed;
-        }
-
-        public void UpdateContinuous(IController hud, AutoGemOverlayModel model, AutoGemOverlayLayout layout, bool leftDown)
-        {
-            if (HandleDragging(hud, model, layout, leftDown)) _dirty = true;
-
-            if (!leftDown)
-            {
-                if (model.DraggingSpecificScroll)
-                {
-                    model.DraggingSpecificScroll = false;
-                    _dirty = true;
-                }
-                return;
-            }
-
-            if (model.DraggingSpecificScroll && UpdateSpecificScrollFromCursor(hud, model, layout)) _dirty = true;
-        }
-
-        private bool HandleDragging(IController hud, AutoGemOverlayModel model, AutoGemOverlayLayout layout, bool leftDown)
-        {
-            bool changed = false;
-            if (!leftDown)
-            {
-                if (model.DraggingPanel || model.DraggingDot) changed = true;
-                model.DraggingPanel = false;
-                model.DraggingDot = false;
-                return changed;
-            }
-
-            if (!model.EditMode) return false;
-
-            float cx = 0f, cy = 0f;
-            try { cx = hud.Window.CursorX; cy = hud.Window.CursorY; } catch { return false; }
-
-            if (model.DraggingDot)
-            {
-                float nx = cx - model.DragOffsetX;
-                float ny = cy - model.DragOffsetY;
-                if (Math.Abs(nx - model.DotRect.X) > 0.1f || Math.Abs(ny - model.DotRect.Y) > 0.1f)
-                {
-                    model.DotRect.X = nx;
-                    model.DotRect.Y = ny;
-                    model.NormalizeRects(hud);
-                }
-            }
-            if (model.DraggingPanel)
-            {
-                float nx = cx - model.DragOffsetX;
-                float ny = cy - model.DragOffsetY;
-                if (Math.Abs(nx - model.PanelRect.X) > 0.1f || Math.Abs(ny - model.PanelRect.Y) > 0.1f)
-                {
-                    model.PanelRect.X = nx;
-                    model.PanelRect.Y = ny;
-                    model.NormalizeRects(hud);
-                }
-            }
-            return changed;
-        }
-
-        private bool UpdateSpecificScrollFromCursor(IController hud, AutoGemOverlayModel model, AutoGemOverlayLayout layout)
-        {
-            int maxScroll = Math.Max(0, layout.MaxGemScroll);
-            if (maxScroll <= 0) return false;
-            float cy;
-            try { cy = hud.Window.CursorY; } catch { return false; }
-            float pct = (cy - layout.ScrollTrack.Top) / Math.Max(1f, layout.ScrollTrack.Height);
-            if (pct < 0f) pct = 0f;
-            if (pct > 1f) pct = 1f;
-            int next = (int)Math.Round(maxScroll * pct);
-            if (next == model.SpecificScroll) return false;
-            model.SpecificScroll = next;
-            return true;
-        }
-
-        private static bool SetMode(AutoGemOverlayModel model, int mode)
-        {
-            bool changed = s7o_AutoGemUpgradeState.AutoGemMode != mode;
-            s7o_AutoGemUpgradeState.AutoGemMode = mode;
-            if (mode != 4 && model.SpecificExpanded)
-            {
-                model.SpecificExpanded = false;
-                changed = true;
-            }
-            return changed;
-        }
-
-        private static void SetDebug(bool enabled)
-        {
-            s7o_AutoGemUpgradeState.DebugEnabled = enabled;
-            s7o_AutoGemUpgradeState.DebugFileEnabled = enabled;
-            s7o_AutoGemUpgradeState.DebugLevel = enabled
-                ? s7o_AutoGemUpgradeState.DebugLevelState
-                : s7o_AutoGemUpgradeState.DebugLevelOff;
-
-            if (!enabled)
-            {
-                s7o_AutoGemUpgradeState.DebugLogPath = string.Empty;
-                return;
-            }
-
-            s7o_AutoGemUpgradeState.DebugLogPath = s7o_AutoGemUpgradeState.ResolveDebugLogPath();
-        }
-    }
-
-    internal sealed class AutoGemOverlayRenderer
-    {
-        private bool _ready;
-        private IController _hud;
-        private IBrush _bShadow, _bFrame, _bFrameBorder, _bInner, _bTitle, _bPane, _bPaneBorder;
-        private IBrush _bStatus, _bRow, _bRowAlt, _bGemListBg, _bGemListBorder;
-        private IBrush _bBtnNormal, _bBtnActive, _bBtnDanger, _bBtnGloss, _bBtnEdge;
-        private IBrush _bChkBg, _bChkEdge, _bChkFill, _bChkShadow, _bChkGloss;
-        private IBrush _bScrollTrack, _bScrollThumb, _bScrollButton;
-        private IBrush _bInfoFill, _bInfoBorder, _bInfoPanelBg, _bInfoPanelEdge, _bJourneyMaskFill, _bJourneyMaskEdge, _bEditDash, _bDotRim, _bDotSpec, _bDotHot;
-        private readonly IBrush[] _dotFill = new IBrush[8];
-        private readonly IBrush[] _dotShadow = new IBrush[8];
-        private IFont _fTitle, _fLabel, _fSection, _fText, _fBtnCompact, _fBtnNormal, _fLogoSilver, _fLogoGreen, _fInfoSub;
-
-        private static readonly Color[] _picker8 = new Color[]
-        {
-            Color.FromArgb(210, 40, 40),
-            Color.FromArgb(220, 130, 30),
-            Color.FromArgb(220, 200, 40),
-            Color.FromArgb(70, 200, 70),
-            Color.FromArgb(50, 110, 225),
-            Color.FromArgb(140, 70, 215),
-            Color.FromArgb(225, 225, 225),
-            Color.FromArgb(18, 18, 18),
-        };
-
-        public void EnsureResources(IController hud)
-        {
-            if (_ready) return;
-            _ready = true;
-            _bShadow      = hud.Render.CreateBrush(165, 0, 0, 0, 0);
-            _bFrame       = hud.Render.CreateBrush(230, 36, 42, 46, 0);
-            _bFrameBorder = hud.Render.CreateBrush(255, 48, 180, 60, 1.4f);
-            _bInner       = hud.Render.CreateBrush(215, 42, 48, 54, 0);
-            _bTitle       = hud.Render.CreateBrush(235, 18, 58, 20, 0);
-            _bPane        = hud.Render.CreateBrush(170, 35, 41, 46, 0);
-            _bPaneBorder  = hud.Render.CreateBrush(140, 120, 126, 132, 1.0f);
-            _bStatus = hud.Render.CreateBrush(215, 54, 61, 68, 0);
-            _bRow    = hud.Render.CreateBrush(205, 47, 54, 61, 0);
-            _bRowAlt = hud.Render.CreateBrush(225, 39, 46, 53, 0);
-            _bGemListBg     = hud.Render.CreateBrush(90, 20, 26, 30, 0);
-            _bGemListBorder = hud.Render.CreateBrush(140, 120, 126, 132, 1.0f);
-            _bScrollTrack = hud.Render.CreateBrush(100, 30, 38, 44, 0);
-            _bScrollThumb = hud.Render.CreateBrush(210, 70, 195, 85, 0);
-            _bScrollButton = hud.Render.CreateBrush(235, 60, 66, 72, 0);
-            _bChkBg     = hud.Render.CreateBrush(235, 58, 64, 70, 0);
-            _bChkEdge   = hud.Render.CreateBrush(220, 28, 32, 36, 1f);
-            _bChkFill   = hud.Render.CreateBrush(245, 62, 185, 52, 0);
-            _bChkShadow = hud.Render.CreateBrush(130, 22, 88, 18, 0);
-            _bChkGloss  = hud.Render.CreateBrush(140, 170, 255, 150, 0);
-            _bBtnNormal = hud.Render.CreateBrush(235, 60, 66, 72, 0);
-            _bBtnActive = hud.Render.CreateBrush(235, 78, 195, 72, 0);
-            _bBtnDanger = hud.Render.CreateBrush(235, 145, 58, 58, 0);
-            _bBtnGloss  = hud.Render.CreateBrush(32, 235, 245, 245, 0);
-            _bBtnEdge   = hud.Render.CreateBrush(230, 18, 22, 24, 1f);
-            _bInfoFill   = hud.Render.CreateBrush(70, 35, 155, 45, 0);
-            _bInfoBorder = hud.Render.CreateBrush(230, 50, 200, 60, 1.5f);
-            _bInfoPanelBg = hud.Render.CreateBrush(238, 24, 30, 35, 0);
-            _bInfoPanelEdge = hud.Render.CreateBrush(235, 58, 200, 72, 1.3f);
-            _bJourneyMaskFill = hud.Render.CreateBrush(70, 255, 90, 70, 0);
-            _bJourneyMaskEdge = hud.Render.CreateBrush(255, 255, 90, 70, 2.4f);
-            _bEditDash   = hud.Render.CreateBrush(220, 140, 220, 120, 1f);
-            _bDotRim     = hud.Render.CreateBrush(210, 8, 10, 12, 1.7f);
-            _bDotSpec    = hud.Render.CreateBrush(130, 255, 255, 255, 0);
-            _bDotHot     = hud.Render.CreateBrush(210, 255, 255, 255, 0);
-            for (int i = 0; i < 8; i++)
-            {
-                Color c = _picker8[i];
-                Color d = Darken(c, 0.45f);
-                _dotFill[i] = hud.Render.CreateBrush(245, c.R, c.G, c.B, 0);
-                _dotShadow[i] = hud.Render.CreateBrush(170, d.R, d.G, d.B, 0);
-            }
-            _fTitle   = hud.Render.CreateFont("tahoma", 9.2f, 255, 255, 255, 255, true, false, 130, 0, 0, 0, true);
-            _fLabel   = hud.Render.CreateFont("tahoma", 7.2f, 255, 255, 255, 255, false, false, 95, 0, 0, 0, true);
-            _fSection = hud.Render.CreateFont("tahoma", 8.0f, 255, 255, 255, 255, true, false, 110, 0, 0, 0, true);
-            _fText    = hud.Render.CreateFont("tahoma", 6.9f, 255, 220, 225, 228, false, false, 90, 0, 0, 0, true);
-            _fBtnCompact = hud.Render.CreateFont("tahoma", 6.0f, 255, 255, 255, 255, false, false, 100, 0, 0, 0, true);
-            _fBtnNormal  = hud.Render.CreateFont("tahoma", 6.6f, 255, 255, 255, 255, false, false, 100, 0, 0, 0, true);
-            _fLogoSilver = hud.Render.CreateFont("tahoma", 8.0f, 255, 190, 195, 208, true, false, 110, 0, 0, 0, true);
-            _fLogoGreen  = hud.Render.CreateFont("tahoma", 10.5f, 255, 50, 230, 80, true, false, 150, 0, 0, 0, true);
-            _fInfoSub    = hud.Render.CreateFont("tahoma", 6.5f, 200, 140, 220, 120, false, false, 90, 0, 0, 0, true);
-        }
-
-        public void Draw(IController hud, AutoGemOverlayModel model, AutoGemOverlayLayout layout, string hotkeyLabel, bool infoPopupVisible, bool journeyMaskVisible)
-        {
-            _hud = hud;
-            if (model.ShowMenuDot) DrawOpenDot(layout.Indicator, model);
-            if (!model.Visible) return;
-
-            // The Journey X mask belongs to the Journey background layer, so draw it
-            // before the AutoGem panel and info popup. The panel still wins visually
-            // if the user moves it over the mask.
-            if (journeyMaskVisible) DrawJourneyCloseMask(layout.JourneyCloseMask);
-            DrawPanel(model, layout, hotkeyLabel);
-            if (infoPopupVisible) DrawInfoPopup(layout, hotkeyLabel);
-        }
-
-        private void DrawPanel(AutoGemOverlayModel model, AutoGemOverlayLayout layout, string hotkeyLabel)
-        {
-            RectangleF rect = layout.Panel;
-            _bShadow.DrawRectangle(rect.Left + 5f, rect.Top + 5f, rect.Width, rect.Height);
-            _bFrame.DrawRectangle(rect.Left, rect.Top, rect.Width, rect.Height);
-            _bFrameBorder.DrawRectangle(rect.Left, rect.Top, rect.Width, rect.Height);
-            _bInner.DrawRectangle(rect.Left + 6f, rect.Top + 6f, rect.Width - 12f, rect.Height - 12f);
-            _bTitle.DrawRectangle(layout.TitleBar.Left, layout.TitleBar.Top, layout.TitleBar.Width, layout.TitleBar.Height);
-            _bFrameBorder.DrawRectangle(layout.TitleBar.Left, layout.TitleBar.Top, layout.TitleBar.Width, layout.TitleBar.Height);
-
-            _fTitle.DrawText(s7o_Localization.Get("overlay.autogem.title", "Auto Gem Upgrade"), rect.Left + 14f, rect.Top + 14f);
-            _fLabel.DrawText(s7o_Localization.Get("overlay.autogem.menu_hotkey", "Menu Hotkey ="), Math.Max(rect.Left + 188f, layout.HotkeyButton.Left - 92f), rect.Top + 15f);
-            DrawGlossButton(layout.HotkeyButton, hotkeyLabel, false, false, true);
-            DrawGlossButton(layout.MenuDotButton, "MENU BUTTON", model.ShowMenuDot, false, false);
-            DrawGlossButton(layout.EditButton, "MOVE", model.EditMode, false, true);
-            DrawGlossButton(layout.HideButton, "HIDE", false, false, true);
-
-            RectangleF mainRect = layout.MainPane;
-            _bPane.DrawRectangle(mainRect.Left, mainRect.Top, mainRect.Width, mainRect.Height);
-            _bPaneBorder.DrawRectangle(mainRect.Left, mainRect.Top, mainRect.Width, mainRect.Height);
-            _fSection.DrawText(s7o_Localization.Get("overlay.autogem.controls", "Auto Gem Controls"), mainRect.Left + 12f, mainRect.Top + 10f);
-            DrawInfoCircle(layout.InfoButton);
-            DrawStaticLogo(mainRect.Right - 36f, mainRect.Top + 10f);
-            if (model.EditMode)
-            {
-                DrawRect(layout.Panel.Left + 2f, layout.Panel.Top + 2f, layout.Panel.Width - 4f, layout.Panel.Height - 4f, _bEditDash);
-                _fInfoSub.DrawText(s7o_Localization.Get("overlay.autogem.drag_hint", "DRAG TITLE OR MENU BUTTON TO MOVE"), rect.Left + 10f, rect.Bottom - 16f);
-            }
-
-            float contentX = mainRect.Left + 12f;
-            float contentW = mainRect.Width - 24f;
-            float y = mainRect.Top + 34f;
-
-            _bStatus.DrawRectangle(layout.StatusRow.Left, layout.StatusRow.Top, layout.StatusRow.Width, layout.StatusRow.Height);
-            string modeText = ModeName(s7o_AutoGemUpgradeState.AutoGemMode);
-            string tpTimingLabel = AutoGemAnchorText(s7o_AutoGemUpgradeState.GetConfiguredPortalAnchorRemaining()) + "+" + s7o_AutoGemUpgradeState.AutoGemTPDelayMs.ToString(CultureInfo.InvariantCulture) + "ms";
-            string stateText = s7o_Localization.Display(s7o_AutoGemUpgradeState.AutoGemUpgradeEnabled ? "Enabled" : "Disabled");
-            string modeDisplay = s7o_Localization.DisplayButton(modeText);
-            string statusText = s7o_AutoGemUpgradeState.AutoGemTPLagBoost
-                ? s7o_Localization.Format("overlay.autogem.status_lag", "Status: {0}   Mode: {1}   TP: {2}   LAG", stateText, modeDisplay, tpTimingLabel)
-                : s7o_Localization.Format("overlay.autogem.status", "Status: {0}   Mode: {1}   TP: {2}", stateText, modeDisplay, tpTimingLabel);
-            _fText.DrawText(TrimToWidth(statusText, 70), contentX + 6f, y + 3f);
-            DrawSquareCheckPassive(layout.NoClickCheck, model.NoClickBackground);
-            _fText.DrawText(s7o_Localization.Get("overlay.autogem.no_click", "No-Click Background"), layout.NoClickLabel.Left, layout.NoClickLabel.Top + 2f);
-            y += 24f;
-
-            RectangleF gemTitleRow = new RectangleF(contentX, y, contentW, 20f);
-            _bRowAlt.DrawRectangle(gemTitleRow.Left, gemTitleRow.Top, gemTitleRow.Width, gemTitleRow.Height);
-            DrawSquareCheckPassive(layout.EnabledCheck, s7o_AutoGemUpgradeState.AutoGemUpgradeEnabled);
-            _fSection.DrawText(s7o_Localization.Get("overlay.autogem.title", "Auto Gem Upgrade"), gemTitleRow.Left + 24f, gemTitleRow.Top + 2f);
-            DrawGlossButton(layout.SectionToggle, model.AutoGemExpanded ? "-" : "+", s7o_AutoGemUpgradeState.AutoGemUpgradeEnabled && model.AutoGemExpanded, false, true);
-            y += 24f;
-
-            if (model.AutoGemExpanded)
-            {
-                RectangleF modeRow = new RectangleF(contentX, y, contentW, 22f);
-                _bRow.DrawRectangle(modeRow.Left, modeRow.Top, modeRow.Width, modeRow.Height);
-                DrawGlossButton(layout.ModeAuto, "AUTO", s7o_AutoGemUpgradeState.AutoGemMode == 0, false, true);
-                DrawGlossButton(layout.ModeFast150, "FAST 150", s7o_AutoGemUpgradeState.AutoGemMode == 3, false, true);
-                DrawGlossButton(layout.ModeHighest, "HIGHEST", s7o_AutoGemUpgradeState.AutoGemMode == 2, false, true);
-                DrawGlossButton(layout.ModeLowest, "LOWEST", s7o_AutoGemUpgradeState.AutoGemMode == 1, false, true);
-                DrawGlossButton(layout.ModeSpecific, "SPECIFIC", s7o_AutoGemUpgradeState.AutoGemMode == 4, false, true);
-                y += 26f;
-
-                RectangleF anchorRow = new RectangleF(contentX, y, contentW, 22f);
-                _bRowAlt.DrawRectangle(anchorRow.Left, anchorRow.Top, anchorRow.Width, anchorRow.Height);
-                _fText.DrawText(s7o_Localization.Get("overlay.autogem.tp_anchor", "TP Anchor"), anchorRow.Left + 8f, anchorRow.Top + 4f);
-                int tpAnchor = s7o_AutoGemUpgradeState.GetConfiguredPortalAnchorRemaining();
-                DrawGlossButton(layout.Anchor3, "3RD GEM", tpAnchor == 3, false, true);
-                DrawGlossButton(layout.Anchor4, "4TH GEM", tpAnchor == 4, false, true);
-                _fText.DrawText(s7o_Localization.Get("overlay.autogem.anchor_timer", "Timer starts when that upgrade begins"), layout.Anchor4.Right + 10f, anchorRow.Top + 4f);
-                y += 26f;
-
-                RectangleF delayRow = new RectangleF(contentX, y, contentW, 22f);
-                _bRow.DrawRectangle(delayRow.Left, delayRow.Top, delayRow.Width, delayRow.Height);
-                _fText.DrawText(s7o_Localization.Get("overlay.autogem.tp_delay", "TP Delay"), delayRow.Left + 8f, delayRow.Top + 4f);
-                int tpDelay = s7o_AutoGemUpgradeState.AutoGemTPDelayMs;
-                DrawGlossButton(layout.DelayMinus, "-", false, false, true);
-                DrawGlossButton(layout.DelayValue, tpDelay.ToString(CultureInfo.InvariantCulture) + "ms", false, false, true);
-                DrawGlossButton(layout.DelayPlus, "+", false, false, true);
-                DrawGlossButton(layout.LagBoost, "LAG", s7o_AutoGemUpgradeState.AutoGemTPLagBoost, false, true);
-                _fText.DrawText(s7o_Localization.Get("overlay.autogem.delay_hint", "0-1500ms after anchor; default = 3RD + 1000ms"), layout.LagBoost.Right + 10f, delayRow.Top + 4f);
-                y += 26f;
-
-                RectangleF specificRow = new RectangleF(contentX, y, contentW, 22f);
-                _bRow.DrawRectangle(specificRow.Left, specificRow.Top, specificRow.Width, specificRow.Height);
-                _fText.DrawText(s7o_Localization.Get("overlay.autogem.specific_gem", "Specific Gem"), specificRow.Left + 8f, specificRow.Top + 4f);
-                DrawGlossButton(layout.SpecificValue, TrimToWidth(GetAutoGemDisplayName(s7o_AutoGemUpgradeState.AutoGemSpecificName), 28), false, false, true);
-                DrawGlossButton(layout.SpecificSubMode, s7o_AutoGemUpgradeState.AutoGemSpecificSubMode == 1 ? "HIGH" : "AUTO", true, false, true);
-                DrawGlossButton(layout.SpecificToggle, model.SpecificExpanded ? "-" : "+", model.SpecificExpanded, false, true);
-                y += 26f;
-
-                if (model.SpecificExpanded)
-                {
-                    _bGemListBg.DrawRectangle(layout.SpecificList.Left, layout.SpecificList.Top, layout.SpecificList.Width, layout.SpecificList.Height);
-                    _bGemListBorder.DrawRectangle(layout.SpecificList.Left, layout.SpecificList.Top, layout.SpecificList.Width, layout.SpecificList.Height);
-                    for (int i = 0; i < layout.GemOptions.Count; i++)
-                    {
-                        GemOptionLayout opt = layout.GemOptions[i];
-                        string name = AutoGemOverlayModel.AutoGemNames[opt.Index];
-                        bool selected = string.Equals(name, s7o_AutoGemUpgradeState.AutoGemSpecificName, StringComparison.OrdinalIgnoreCase);
-                        DrawGlossButton(opt.Rect, TrimToWidth(GetAutoGemDisplayName(opt.Index), 40), selected, false, true);
-                    }
-                    DrawScrollBar(layout);
-                    y = layout.SpecificList.Bottom + 8f;
-                }
-            }
-
-            RectangleF debugRow = new RectangleF(contentX, y, contentW, 22f);
-            _bRow.DrawRectangle(debugRow.Left, debugRow.Top, debugRow.Width, debugRow.Height);
-            DrawSquareCheckPassive(layout.DebugCheck, s7o_AutoGemUpgradeState.DebugEnabled);
-            _fText.DrawText(s7o_Localization.Get("overlay.autogem.debug", "Debug Logging"), layout.DebugLabel.Left, layout.DebugLabel.Top + 2f);
-            y += 24f;
-
-
-        }
-
-        private void DrawInfoPopup(AutoGemOverlayLayout layout, string hotkeyLabel)
-        {
-            RectangleF r = layout.InfoPopup;
-            _bShadow.DrawRectangle(r.Left + 4f, r.Top + 4f, r.Width, r.Height);
-            _bInfoPanelBg.DrawRectangle(r.Left, r.Top, r.Width, r.Height);
-            _bInfoPanelEdge.DrawRectangle(r.Left, r.Top, r.Width, r.Height);
-            _fSection.DrawText(s7o_Localization.Get("overlay.autogem.info_title", "Auto Gem Upgrade Info"), r.Left + 10f, r.Top + 8f);
-            float y = r.Top + 30f;
-            _fText.DrawText(s7o_Localization.Format("overlay.autogem.info_hotkey", "Menu hotkey [{0}] opens or closes this menu.", hotkeyLabel), r.Left + 12f, y); y += 18f;
-            _fText.DrawText(s7o_Localization.Get("overlay.autogem.info_no_click", "No-Click Background opens Journey behind this overlay to absorb game clicks."), r.Left + 12f, y); y += 18f;
-            _fText.DrawText(s7o_Localization.Get("overlay.autogem.info_move", "MOVE lets you drag the title bar or the small menu button."), r.Left + 12f, y); y += 18f;
-            _fText.DrawText(s7o_Localization.Get("overlay.autogem.info_urshi", "Urshi upgrade behavior is controlled by the Auto Gem Upgrade section."), r.Left + 12f, y); y += 18f;
-            _fInfoSub.DrawText(s7o_Localization.Get("overlay.autogem.info_close", "Click the green info icon again, Escape, or outside this popup to close it."), r.Left + 12f, y + 3f);
-        }
-
-        private void DrawJourneyCloseMask(RectangleF r)
-        {
-            if (r.Width <= 1f || r.Height <= 1f) return;
-
-            // Draw a visible square bound-close zone over the Journey X button.
-            // This is intentionally obvious: it confirms where the overlay is
-            // watching for the user's Journey close click.
-            _bJourneyMaskFill.DrawRectangle(r.Left, r.Top, r.Width, r.Height);
-            _bJourneyMaskEdge.DrawRectangle(r.Left, r.Top, r.Width, r.Height);
-
-            float pad = Math.Max(2f, Math.Min(r.Width, r.Height) * 0.18f);
-            _bJourneyMaskEdge.DrawRectangle(r.Left + pad, r.Top + pad, Math.Max(1f, r.Width - pad * 2f), Math.Max(1f, r.Height - pad * 2f));
-        }
-
-        private void DrawInfoCircle(RectangleF r)
-        {
-            float cx = r.Left + r.Width * 0.5f;
-            float cy = r.Top + r.Height * 0.5f;
-            float rad = Math.Min(r.Width, r.Height) * 0.5f;
-            _bInfoFill.DrawEllipse(cx, cy, rad, rad);
-            _bInfoBorder.DrawEllipse(cx, cy, rad, rad);
-            _fSection.DrawText("i", cx - 1.8f, cy - rad + 0.5f);
-        }
-
-        private void DrawStaticLogo(float x, float y)
-        {
-            _fLogoSilver.DrawText("s", x, y);
-            _fLogoGreen.DrawText("7", x + 7f, y - 3f);
-            _fLogoSilver.DrawText("o", x + 14f, y);
-        }
-
-        private void DrawOpenDot(RectangleF rect, AutoGemOverlayModel model)
-        {
-            int activeSize = model.Visible ? model.DotOpenSize : model.DotSize;
-            int activeIdx = model.Visible ? model.DotOpenColorIdx : model.DotColorIdx;
-            if (activeIdx < 0) activeIdx = 0;
-            if (activeIdx > 7) activeIdx = 7;
-            float sz = rect.Width * (activeSize / 5.0f);
-            float cx = rect.Left + rect.Width * 0.5f;
-            float cy = rect.Top + rect.Height * 0.5f;
-            float rx = sz * 0.5f;
-            float ry = rx * 0.90f;
-            _bDotRim.DrawEllipse(cx, cy, rx, ry);
-            _dotFill[activeIdx].DrawEllipse(cx, cy, rx * 0.91f, ry * 0.91f);
-            _dotShadow[activeIdx].DrawEllipse(cx, cy + ry * 0.28f, rx * 0.72f, ry * 0.52f);
-            _bDotSpec.DrawEllipse(cx - rx * 0.24f, cy - ry * 0.24f, rx * 0.54f, ry * 0.37f);
-            _bDotHot.DrawEllipse(cx - rx * 0.30f, cy - ry * 0.30f, rx * 0.19f, ry * 0.13f);
-            if (model.EditMode) DrawRect(rect.Left - 6f, rect.Top - 6f, rect.Width + 12f, rect.Height + 12f, _bEditDash);
-        }
-
-        private void DrawSquareCheckPassive(RectangleF rect, bool value)
-        {
-            _bChkBg.DrawRectangle(rect.Left, rect.Top, rect.Width, rect.Height);
-            _bChkEdge.DrawRectangle(rect.Left, rect.Top, rect.Width, rect.Height);
-            if (!value) return;
-            float ix = rect.Left + 2f, iy = rect.Top + 2f, iw = rect.Width - 4f, ih = rect.Height - 4f;
-            _bChkFill.DrawRectangle(ix, iy, iw, ih);
-            _bChkShadow.DrawRectangle(ix, iy + ih * 0.52f, iw, ih * 0.48f);
-            _bChkGloss.DrawRectangle(ix, iy, iw, ih * 0.44f);
-        }
-
-        private void DrawGlossButton(RectangleF rect, string text, bool active, bool danger, bool compact)
-        {
-            text = s7o_Localization.DisplayButton(text);
-            IBrush body = active ? _bBtnActive : danger ? _bBtnDanger : _bBtnNormal;
-            IFont font = compact ? _fBtnCompact : _fBtnNormal;
-            body.DrawRectangle(rect.Left, rect.Top, rect.Width, rect.Height);
-            _bBtnGloss.DrawRectangle(rect.Left + 1f, rect.Top + 1f, Math.Max(1f, rect.Width - 2f), rect.Height * 0.45f);
-            _bBtnEdge.DrawRectangle(rect.Left, rect.Top, rect.Width, rect.Height);
-            if (string.IsNullOrEmpty(text)) return;
-            DrawCenteredText(font, text, rect);
-        }
-
-        private void DrawCenteredText(IFont font, string text, RectangleF rect)
-        {
-            try
-            {
-                var tl = font.GetTextLayout(text);
-                font.DrawText(tl, rect.Left + (rect.Width - tl.Metrics.Width) / 2f, rect.Top + (rect.Height - tl.Metrics.Height) / 2f - 1f);
-            }
-            catch
-            {
-                float tx = rect.Left + Math.Max(4f, (rect.Width * 0.5f) - (text.Length * 2.4f));
-                font.DrawText(text, tx, rect.Top + 1f);
-            }
-        }
-
-        private void DrawScrollBar(AutoGemOverlayLayout layout)
-        {
-            if (layout.SpecificList.Width <= 0f) return;
-            _bScrollTrack.DrawRectangle(layout.ScrollTrack.Left, layout.ScrollTrack.Top, layout.ScrollTrack.Width, layout.ScrollTrack.Height);
-            _bScrollButton.DrawRectangle(layout.ScrollUp.Left, layout.ScrollUp.Top, layout.ScrollUp.Width, layout.ScrollUp.Height);
-            _bScrollButton.DrawRectangle(layout.ScrollDown.Left, layout.ScrollDown.Top, layout.ScrollDown.Width, layout.ScrollDown.Height);
-            _bBtnEdge.DrawRectangle(layout.ScrollUp.Left, layout.ScrollUp.Top, layout.ScrollUp.Width, layout.ScrollUp.Height);
-            _bBtnEdge.DrawRectangle(layout.ScrollDown.Left, layout.ScrollDown.Top, layout.ScrollDown.Width, layout.ScrollDown.Height);
-            _fBtnCompact.DrawText("^", layout.ScrollUp.Left + 2f, layout.ScrollUp.Top - 1f);
-            _fBtnCompact.DrawText("v", layout.ScrollDown.Left + 2f, layout.ScrollDown.Top - 1f);
-            _bScrollThumb.DrawRectangle(layout.ScrollThumb.Left, layout.ScrollThumb.Top, layout.ScrollThumb.Width, layout.ScrollThumb.Height);
-            _bBtnEdge.DrawRectangle(layout.ScrollThumb.Left, layout.ScrollThumb.Top, layout.ScrollThumb.Width, layout.ScrollThumb.Height);
-        }
-
-        private void DrawRect(float x, float y, float w, float h, IBrush b)
-        {
-            b.DrawRectangle(x, y, w, 1f); b.DrawRectangle(x, y + h - 1f, w, 1f); b.DrawRectangle(x, y, 1f, h); b.DrawRectangle(x + w - 1f, y, 1f, h);
-        }
-
-        private string GetAutoGemDisplayName(int index)
-        {
-            if (index < 0 || index >= AutoGemOverlayModel.AutoGemNames.Length)
-                return string.Empty;
-
-            if (string.Equals(s7o_Localization.LanguageCode, "enUS", StringComparison.OrdinalIgnoreCase))
-                return AutoGemOverlayModel.AutoGemNames[index];
-
-            try
-            {
-                ISnoItem snoItem = null;
-                switch (index)
-                {
-                    case 0:  snoItem = _hud.Sno.SnoItems.Unique_Gem_001_x1; break;
-                    case 1:  snoItem = _hud.Sno.SnoItems.Unique_Gem_018_x1; break;
-                    case 2:  snoItem = _hud.Sno.SnoItems.Unique_Gem_002_x1; break;
-                    case 3:  snoItem = _hud.Sno.SnoItems.Unique_Gem_014_x1; break;
-                    case 4:  snoItem = _hud.Sno.SnoItems.Unique_Gem_020_x1; break;
-                    case 5:  snoItem = _hud.Sno.SnoItems.Unique_Gem_010_x1; break;
-                    case 6:  snoItem = _hud.Sno.SnoItems.Unique_Gem_016_x1; break;
-                    case 7:  snoItem = _hud.Sno.SnoItems.Unique_Gem_003_x1; break;
-                    case 8:  snoItem = _hud.Sno.SnoItems.Unique_Gem_005_x1; break;
-                    case 9:  snoItem = _hud.Sno.SnoItems.Unique_Gem_008_x1; break;
-                    case 10: snoItem = _hud.Sno.SnoItems.Unique_Gem_021_x1; break;
-                    case 11: snoItem = _hud.Sno.SnoItems.Unique_Gem_009_x1; break;
-                    case 12: snoItem = _hud.Sno.SnoItems.Unique_Gem_023_x1; break;
-                    case 13: snoItem = _hud.Sno.SnoItems.Unique_Gem_007_x1; break;
-                    case 14: snoItem = _hud.Sno.SnoItems.Unique_Gem_017_x1; break;
-                    case 15: snoItem = _hud.Sno.SnoItems.Unique_Gem_011_x1; break;
-                    case 16: snoItem = _hud.Sno.SnoItems.Unique_Gem_019_x1; break;
-                    case 17: snoItem = _hud.Sno.SnoItems.Unique_Gem_006_x1; break;
-                    case 18: snoItem = _hud.Sno.SnoItems.Unique_Gem_013_x1; break;
-                    case 19: snoItem = _hud.Sno.SnoItems.Unique_Gem_015_x1; break;
-                    case 20: snoItem = _hud.Sno.SnoItems.Unique_Gem_004_x1; break;
-                    case 21: snoItem = _hud.Sno.SnoItems.P73_Unique_Gem_150; break;
-                    case 22: snoItem = _hud.Sno.SnoItems.Unique_Gem_012_x1; break;
-                }
-
-                if (snoItem != null && !string.IsNullOrWhiteSpace(snoItem.NameLocalized))
-                    return snoItem.NameLocalized;
-            }
-            catch { }
-
-            return s7o_Localization.Display(AutoGemOverlayModel.AutoGemNames[index]);
-        }
-
-        private string GetAutoGemDisplayName(string englishName)
-        {
-            for (int i = 0; i < AutoGemOverlayModel.AutoGemNames.Length; i++)
-                if (string.Equals(AutoGemOverlayModel.AutoGemNames[i], englishName, StringComparison.OrdinalIgnoreCase))
-                    return GetAutoGemDisplayName(i);
-
-            return s7o_Localization.Display(englishName ?? string.Empty);
-        }
-
-        private static string ModeName(int mode)
-        {
-            if (mode == 0) return "AUTO";
-            if (mode == 3) return "FAST 150";
-            if (mode == 2) return "HIGHEST";
-            if (mode == 4) return "SPECIFIC";
-            return "LOWEST";
-        }
-
-        private static string AutoGemAnchorText(int remaining)
-        {
-            return remaining == 4 ? "4TH" : "3RD";
-        }
-
-        private static string TrimToWidth(string text, int maxChars)
-        {
-            if (string.IsNullOrEmpty(text)) return string.Empty;
-            if (text.Length <= maxChars) return text;
-            if (maxChars <= 3) return text.Substring(0, Math.Max(0, maxChars));
-            return text.Substring(0, maxChars - 3) + "...";
-        }
-
-        private static Color Darken(Color c, float factor)
-        {
-            if (factor < 0f) factor = 0f;
-            if (factor > 1f) factor = 1f;
-            return Color.FromArgb((int)(c.R * factor), (int)(c.G * factor), (int)(c.B * factor));
-        }
-    }
-
     internal static class FreeHudInput
     {
         public const ushort VirtualKeyForTownPortal = 0x54; // T: FreeHUD uses direct virtual-key input for Town Portal.
-        public const ushort VK_SHIFT = 0x10;
-        public const ushort VK_J = 0x4A;
         public const ushort VK_ESCAPE = 0x1B;
         public const ushort VK_SPACE = 0x20;
         private const uint INPUT_MOUSE = 0;
@@ -2206,70 +283,8 @@ public static class s7o_AutoGemUpgradeState
             return SendMouse(MOUSEEVENTF_WHEEL, (uint)(WHEEL_DELTA * Math.Max(1, clicks)));
         }
 
-        public static bool ClickUiElement(IController hud, MouseButtons button, IUiElement element)
-        {
-            if (element == null)
-                return false;
-
-            try
-            {
-                RectangleF r = element.Rectangle;
-                int x = (int)Math.Round(r.Left + r.Width * 0.5f);
-                int y = (int)Math.Round(r.Top + r.Height * 0.5f);
-                if (!MouseMoveClient(hud, x, y) || !MouseDown(button))
-                    return false;
-
-                Thread.Sleep(10);
-                return MouseUp(button);
-            }
-            catch
-            {
-                MouseUp(button);
-                return false;
-            }
-        }
-
-        public static bool SendVirtualKey(ushort vk)
-        {
-            if (vk == 0 || !SendKeyboard(vk, false))
-                return false;
-
-            Thread.Sleep(10);
-            return SendKeyboard(vk, true);
-        }
-
-        public static bool SendKeyDown(ushort vk)
-        {
-            return vk != 0 && SendKeyboard(vk, false);
-        }
-
-        public static bool SendKeyUp(ushort vk)
-        {
-            return vk != 0 && SendKeyboard(vk, true);
-        }
-
-        public static bool SendKeyCombo(ushort modifierVk, ushort keyVk)
-        {
-            if (modifierVk == 0 || keyVk == 0 || !SendKeyDown(modifierVk))
-                return false;
-
-            try
-            {
-                Thread.Sleep(10);
-                if (!SendVirtualKey(keyVk))
-                    return false;
-                Thread.Sleep(10);
-                return true;
-            }
-            finally
-            {
-                SendKeyUp(modifierVk);
-            }
-        }
-
-        public static bool SendEscape() { return SendVirtualKey(VK_ESCAPE); }
-        public static bool SendSpace() { return SendVirtualKey(VK_SPACE); }
-        public static bool SendShiftJ() { return SendKeyCombo(VK_SHIFT, VK_J); }
+        public static bool KeyDown(ushort vk) { return vk != 0 && SendKeyboard(vk, false); }
+        public static bool KeyUp(ushort vk) { return vk != 0 && SendKeyboard(vk, true); }
 
         private static bool SendMouse(uint flags, uint mouseData)
         {
@@ -2387,8 +402,6 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
         public bool AutoUpgradeAfterFullListVerification { get; set; } = false;
         public bool RequireIdentifiedCellsForNavigation { get; set; } = false;
         public bool ResetToTopBeforeFullScan { get; set; } = false;
-        public bool LogSelectionEvidence { get; set; } = false;
-
         public int CandidateRowCount { get; set; } = 16;
         public int CandidateColumnCount { get; set; } = 5;
         public int FlatCandidateItemCount { get; set; } = 24;
@@ -2464,6 +477,13 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
         private int _chatCloseFadePendingAttempts = int.MinValue;
         private const int ConversationCloseThrottleMs = 150;
         private const int TownRewardSessionTimeoutMs = 30 * 60 * 1000;
+        private const int InputPulseMs = 10;
+        private const int UrshiMoveDelayMs = 20;
+        private const int UrshiMouseHoldMs = 30;
+        private const int UrshiPortalPollMs = 25;
+        private const int UrshiFirstPortalPollCount = 4;
+        private const int UrshiSecondPortalPollCount = 8;
+        private const int UrshiExtraWaitMs = 100;
         private readonly List<CellRef> _candidateCells = new List<CellRef>();
 
         private IFont _warningFont;
@@ -2487,8 +507,17 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
         private bool _hasSentInitialUpgradeClick;
         private bool _portalRequestedThisRun;
         private bool _upgradeProgressObservedThisRun;
-        private int _savedCursorX;
-        private int _savedCursorY;
+        private bool _tailWaitAfterFinalAttempt;
+        private PendingInputKind _pendingInputKind;
+        private ushort _pendingKey;
+        private int _pendingInputReleaseTick = int.MinValue;
+        private bool _pendingRestoreCursor;
+        private int _pendingRestoreCursorX;
+        private int _pendingRestoreCursorY;
+        private bool _pendingInputReleaseSucceeded = true;
+        private UrshiCancelStage _urshiCancelStage;
+        private int _urshiCancelDueTick = int.MinValue;
+        private int _urshiCancelChecksRemaining;
         private bool _autoRunning;
         private int _targetValidationStartTick = int.MinValue;
         private int _targetValidationAttempts;
@@ -2508,7 +537,6 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
         private ObservedPageSnapshot _currentSnapshot;
         private readonly HashSet<string> _seenPageSignatures = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private uint _targetAcd;          // AcdId of target gem — for ACD-based post-click validation
-        private bool _navTargetLogged;    // Suppresses repeated row/col log lines within one nav run
 
         private readonly List<AutoPlanStep> _autoPlan = new List<AutoPlanStep>();
         private string _autoPlanSummary = string.Empty;
@@ -2556,7 +584,6 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
         private bool _lastCaptureHadUsableLiveAcds;
         private VirtualGridModel _virtualGrid;
         private AbsoluteGridModel _absoluteGrid;
-        private int _estimatedTopVisibleRow = -1;
         private float _viewportOriginRowFloat = -1f;
         private int _viewportOriginRowInt = -1;
         private int _viewportEpoch;
@@ -2656,6 +683,25 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
             AwaitingTown,
             AwaitingRiftClose,
             RewardSpaceSent,
+        }
+
+        private enum PendingInputKind
+        {
+            None,
+            Mouse,
+            Key,
+        }
+
+        private enum UrshiCancelStage
+        {
+            Idle,
+            FirstMoveDelay,
+            FirstMouseHold,
+            FirstPortalCheck,
+            FirstExtraWait,
+            SecondMoveDelay,
+            SecondMouseHold,
+            SecondPortalCheck,
         }
 
         private enum AutomationStage
@@ -2849,6 +895,7 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
         {
             base.Load(hud);
             Enabled = true;
+            s7o_AutoGemUpgradeState.LoadSettings();
 
             const string root = "Root.NormalLayer.vendor_dialog_mainPage.riftReward_dialog.LayoutRoot.gemUpgradePane";
             _gemUpgradePane = Hud.Render.RegisterUiElement(root, null, null);
@@ -2882,7 +929,7 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
             RegisterStrideCandidatePaths();
 
             _warningFont = Hud.Render.CreateFont("tahoma", 8, 255, 255, 70, 70, true, false, 220, 0, 0, 0, true);
-            PublishTownRewardLifecycle("load");
+
         }
 
         public void OnNewArea(bool newGame, ISnoArea area)
@@ -2890,6 +937,8 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
             if (!newGame)
                 return;
 
+            CancelPendingInput();
+            CancelUrshiCancel();
             _lastConversationCloseTick = int.MinValue;
             ClearChatCloseFadeWait();
             ResetTownRewardLifecycle("new-game");
@@ -2968,14 +1017,13 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
             FastFallbackMode = (mode == 3);
             ForcedGemNameExact = (mode == 4) ? specificName : string.Empty;
             // Keep the legacy property synchronized with the literal anchor delay
-            // so any existing UI or debug paths that inspect it still see the
-            // current effective delay value.
+            // so existing UI consumers still see the current effective value.
             PortalAtFourDelayMs = s7o_AutoGemUpgradeState.GetFullPortalDelayMs();
 
             if (changed)
             {
                 ResetState();
-                Log(() => "menu sync: enabled=" + (enabled ? "1" : "0") + ", mode=" + mode.ToString(CultureInfo.InvariantCulture) + ", specific='" + specificName + "'");
+
             }
 
             _menuStateApplied = true;
@@ -2986,10 +1034,13 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
 
         public void AfterCollect()
         {
-            // invoke debug instrumentation before normal logic so run metrics can observe pane hide and resets
-            try { InstrumentationHook(); } catch { }
+            if (AdvancePendingInput())
+                return;
+
+            if (AdvanceUrshiCancel())
+                return;
+
             SyncMenuState();
-            PublishAutomationDebugSnapshot();
 
             if (!AutoStartEnabled)
             {
@@ -3092,8 +1143,6 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
             switch (_stage)
             {
                 case AutomationStage.Idle:
-                    Log(() => "Target acquired: " + _target.Name + " r" + _target.Rank + " a" + _target.AbsoluteIndex + " (" + _target.Reason + ")" + (_targetAcd != 0 ? " acd=" + _targetAcd : string.Empty));
-                    _navTargetLogged = false;
             _autoPlan.Clear();
             _autoPlanSummary = string.Empty;
                     _scannedAbsoluteIndices.Clear();
@@ -3136,7 +1185,7 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
                     if (_resetScrollClicks >= requiredResetClicks)
                     {
                         SetViewportOriginExact(0, "top-reset");
-                        Log(() => "top reset complete after " + _resetScrollClicks + " scroll-up clicks");
+
                         _lastActionTick = NowTick();
                         _stage = AutomationStage.WaitAfterScrollUp;
                         return;
@@ -3222,7 +1271,7 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
                     int maxTopScanRow = GetMaxTopScanRow();
                     if (GetAuthoritativeViewportTopRow() >= maxTopScanRow)
                     {
-                        Log(() => "bottom of scan range reached");
+
                         if (FullListVerificationMode && !AutoUpgradeAfterFullListVerification)
                         {
                             _autoRunning = false;
@@ -3295,7 +1344,7 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
                         _postScrollRealignAttempts++;
                         _lastActionTick = NowTick();
                         _afterScrollWait = PostScrollWaitMs;
-                        Log(() => "post-scroll realign retry #" + _postScrollRealignAttempts);
+
                         _stage = AutomationStage.DirectCaptureCurrentPage;
                         return;
                     }
@@ -3305,7 +1354,7 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
                         _postScrollSettlePasses++;
                         _lastActionTick = NowTick();
                         _afterScrollWait = PostScrollWaitMs;
-                        Log(() => "post-scroll settle retry #" + _postScrollSettlePasses + " alignErr=" + GetCurrentAlignmentErrorPx().ToString("0.0", CultureInfo.InvariantCulture));
+
                         _stage = AutomationStage.DirectCaptureCurrentPage;
                         return;
                     }
@@ -3355,11 +1404,7 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
                             _currentProbeAbsoluteIndex = _target.AbsoluteIndex;
                             _arrowScrollAttempts = 0;
                             _noProgressSeekCount = 0;
-                            Log(() => "ACD-direct: target a" + _target.AbsoluteIndex
-                                + " '" + _target.Name + "#" + _target.Rank
-                                + "' visible at viewport row=" + acdDirectCell.RowIndex
-                                + " col=" + acdDirectCell.ColumnIndex
-                                + " rect=(" + (int)acdDirectCell.Rect.Left + "," + (int)acdDirectCell.Rect.Top + ")");
+
                             _lastActionTick = NowTick();
                             _stage = AutomationStage.SelectObservedTarget;
                             return;
@@ -3393,21 +1438,6 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
                     if (GetAuthoritativeViewportTopRow() != topRowBeforeCapture)
                         _arrowScrollAttempts = 0;
 
-                    if (_virtualGrid != null && _virtualGrid.ColumnCount > 0
-                        && !_navTargetLogged)
-                    {
-                        _navTargetLogged = true;
-                        int cols = _virtualGrid.ColumnCount;
-                        int tRows = _virtualGrid.TotalRowCount;
-                        int tRow1 = _target.AbsoluteIndex / cols + 1;
-                        int tCol1 = _target.AbsoluteIndex % cols + 1;
-                        Log(() => "nav target: gem " + (_target.AbsoluteIndex + 1) + "/" + _orderedGems.Count + " '"
-                            + _target.Name + "#" + _target.Rank
-                            + "' → row " + tRow1 + "/" + tRows
-                            + ", col " + tCol1 + "/" + cols
-                            + " (" + cols + "-per-row grid)");
-                    }
-
                     if (_viewportOriginRowInt < 0)
                         SetViewportOriginExact(0, "direct-init");
 
@@ -3417,15 +1447,11 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
                         ? Math.Max(0, _target.AbsoluteIndex / Math.Max(1, _virtualGrid.ColumnCount))
                         : currentTopRow;
 
-                    Log(() => "direct target viewport: rows=" + currentTopRow + "-" + currentBottomRow + ", targetRow=" + targetRow + ", targetAbs=" + _target.AbsoluteIndex + "; attempting direct slot resolution");
+
                     string trustReason;
                     if (!IsPageTrustworthyForResolve(out trustReason))
                     {
-                        Log(() => "resolve-block: " + trustReason
-                            + " topRow=" + _viewportOriginRowInt
-                            + " liveRows=" + GetLiveVisibleRowCount()
-                            + " trackedRows=" + GetTrackedProjectedRowCount()
-                            + " authRows=" + GetAuthoritativeViewportVisibleRowCount());
+
                         _lastActionTick = NowTick();
                         _afterScrollWait = PageTrustSettleWaitMs;
                         _stage = AutomationStage.DirectCaptureCurrentPage;
@@ -3455,7 +1481,7 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
                             return;
                         }
 
-                        Log(() => "direct target not visible on current viewport — scrolling " + (targetBelowViewport ? "down" : "up"));
+
                         _stage = AutomationStage.DirectScrollToTargetViewport;
                         return;
                     }
@@ -3531,7 +1557,7 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
                     }
                     if (IsSelectedTargetReady(_target))
                     {
-                        Log(() => "select short-circuit: target already selected and upgrade-ready");
+
                         StartRunningFromConfirmedTarget();
                         return;
                     }
@@ -3590,12 +1616,9 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
                     // Sentinel consumed — first click is about to fire.
                     _capRetargetFirstClickPending = false;
 
-                    bool requiresStrictValidation = _currentSnapshot != null && _currentSnapshot.TargetCell != null && !_currentSnapshot.TargetCell.MatchTarget;
-                    if (requiresStrictValidation)
-                        Log(() => "soft target assignment requires post-click validation before upgrade");
                     _preClickItemButtonAnim = SafeAnimState(_itemButton);
                     int totalGemSlots = Math.Max(_orderedGems != null ? _orderedGems.Count : 0, _target.AbsoluteIndex + 1);
-                    Log(() => "gem click: slot " + (_target.AbsoluteIndex + 1) + "/" + totalGemSlots + " a" + _target.AbsoluteIndex + " (" + _target.Name + "#" + _target.Rank + "), preClickAnim=" + _preClickItemButtonAnim);
+
                     ClickVisibleCell(_currentSnapshot.TargetCell.VisibleCell);
                     _targetValidationStartTick = NowTick();
                     _targetValidationAttempts = 0;
@@ -3622,9 +1645,6 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
                         if (string.IsNullOrWhiteSpace(observedName) && _target != null) observedName = _target.Name;
                         if (observedRank < 0 && _target != null) observedRank = _target.Rank;
                     }
-                    if (LogSelectionEvidence && (_targetValidationAttempts <= 3 || isMatch))
-                        Log(() => "validate attempt " + _targetValidationAttempts + ": observed=" + (observedName ?? "<null>") + "#" + observedRank + ", loaded=" + (SafeAnimState(_itemButton) != -1 ? "1" : "0") + ", itemAnim=" + SafeAnimState(_itemButton) + " (was " + _preClickItemButtonAnim + "), evidence='" + ShortEvidence(sourceText) + "'", s7o_AutoGemUpgradeState.DebugLevelState);
-
                     bool selectionUiLoaded = SafeAnimState(_itemButton) != -1;
                     bool validationSettleElapsed = ElapsedMs(_targetValidationStartTick) >= TargetValidationReclickSettleMs;
                     // Rev 5.6.13: for cap-retarget, extend reclicks at every 4th validation
@@ -3654,7 +1674,7 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
                         TryCorrectCursorAfterWheelNudge(_currentSnapshot.TargetCell.VisibleCell, "validate-retry");
                         _preClickItemButtonAnim = SafeAnimState(_itemButton);
                         int retryTotalSlots = Math.Max(_orderedGems != null ? _orderedGems.Count : 0, _target.AbsoluteIndex + 1);
-                        Log(() => "validate retry #" + _targetValidationAttempts + ": reclicking slot " + (_target.AbsoluteIndex + 1) + "/" + retryTotalSlots + " a" + _target.AbsoluteIndex + ", preClickAnim=" + _preClickItemButtonAnim);
+
                         ClickVisibleCell(_currentSnapshot.TargetCell.VisibleCell);
                         _lastActionTick = NowTick();
                         return;
@@ -3692,12 +1712,13 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
             }
         }
 
-        private void TryRequestTimedPortalDuringRun(int upgrades, int now)
+        private bool TryRequestTimedPortalDuringRun(int upgrades, int now)
         {
-            if (_portalRequestedThisRun) return;
-            if (Hud.Game?.Me == null) return;
-            if (Hud.Game.Me.AnimationState == AcdAnimationState.CastingPortal) return;
-            if (_portalRequestedTick != int.MinValue && ElapsedMs(_portalRequestedTick) < 1500) return;
+            if (_portalRequestedThisRun) return false;
+            if (_pendingInputKind != PendingInputKind.None) return false;
+            if (Hud.Game?.Me == null) return false;
+            if (Hud.Game.Me.AnimationState == AcdAnimationState.CastingPortal) return false;
+            if (_portalRequestedTick != int.MinValue && ElapsedMs(_portalRequestedTick) < 1500) return false;
 
             int configuredAnchorRemaining = s7o_AutoGemUpgradeState.GetConfiguredPortalAnchorRemaining();
             int effectiveAnchorRemaining = s7o_AutoGemUpgradeState.GetEffectivePortalAnchorRemaining(_initialUpgradeAttemptsThisRun);
@@ -3711,40 +1732,29 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
             {
                 // Rev 5.6.3 polish: sleepAfter=0 overrides the default 10ms post-key wait.
                 // The key has already been sent; the capture thread should not idle after the call.
-                FreeHudInput.SendVirtualKey(FreeHudInput.VirtualKeyForTownPortal);
+                BeginKeyPulse(FreeHudInput.VirtualKeyForTownPortal);
                 _lastPortalActionTick = now;
                 _portalRequestedTick = now;
                 _portalRequestedThisRun = true;
-                UpdateSharedDebugState("tp-request-below-threshold", "upgrades=" + upgrades.ToString(CultureInfo.InvariantCulture), int.MinValue, int.MinValue);
-                Log(() => "town portal requested: below-threshold immediate, upgrades=" + upgrades
-                    + ", configuredAnchor=" + configuredAnchorRemaining.ToString(CultureInfo.InvariantCulture)
-                    + ", initialAttempts=" + _initialUpgradeAttemptsThisRun.ToString(CultureInfo.InvariantCulture)
-                    + ", effectiveAnchor=" + effectiveAnchorRemaining.ToString(CultureInfo.InvariantCulture)
-                    + ", tpDelayMs=0");
-                return;
+
+
+                return true;
             }
 
             if (_portalAnchorClickTick == int.MinValue)
-                return;
+                return false;
 
             if (ElapsedMs(_portalAnchorClickTick) < effectiveDelayMs)
-                return;
+                return false;
 
             // Rev 5.6.3 polish: sleepAfter=0 overrides the default 10ms post-key wait.
             // Saves ~10ms against the tight final-upgrade TP margin.
-            FreeHudInput.SendVirtualKey(FreeHudInput.VirtualKeyForTownPortal);
+            BeginKeyPulse(FreeHudInput.VirtualKeyForTownPortal);
             _lastPortalActionTick = now;
             _portalRequestedTick = now;
             _portalRequestedThisRun = true;
-            UpdateSharedDebugState("tp-request", "upgrades=" + upgrades.ToString(CultureInfo.InvariantCulture) + " delay=" + effectiveDelayMs.ToString(CultureInfo.InvariantCulture), int.MinValue, int.MinValue);
-            Log(() => "town portal requested: upgrades=" + upgrades
-                + ", configuredAnchor=" + configuredAnchorRemaining.ToString(CultureInfo.InvariantCulture)
-                + ", effectiveAnchor=" + effectiveAnchorRemaining.ToString(CultureInfo.InvariantCulture)
-                + ", anchorClickAgeMs=" + (_portalAnchorClickTick == int.MinValue ? -1 : ElapsedMs(_portalAnchorClickTick))
-                + ", progressObserved=" + (_upgradeProgressObservedThisRun ? "1" : "0")
-                + ", tpDelayMs=" + effectiveDelayMs.ToString(CultureInfo.InvariantCulture)
-                + ", userTpDelayMs=" + s7o_AutoGemUpgradeState.AutoGemTPDelayMs.ToString(CultureInfo.InvariantCulture)
-                + ", lagBoost=" + (s7o_AutoGemUpgradeState.AutoGemTPLagBoost ? "1" : "0"));
+
+            return true;
         }
 
         private void HandleRunningState(int upgrades)
@@ -3766,7 +1776,7 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
             }
             else if (upgrades != _lastObservedUpgradeAttempts)
             {
-                Log(() => "upgrade progress: " + _lastObservedUpgradeAttempts + " -> " + upgrades + ", buttonAnim=" + buttonAnim + ", loaded=" + (loaded ? "1" : "0"), s7o_AutoGemUpgradeState.DebugLevelState);
+
                 if (_initialUpgradeAttemptsThisRun != int.MinValue && upgrades < _initialUpgradeAttemptsThisRun)
                     _upgradeProgressObservedThisRun = true;
                 _lastObservedUpgradeAttempts = upgrades;
@@ -3775,7 +1785,8 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
                 _noProgressAbortTick = int.MinValue;
             }
 
-            TryRequestTimedPortalDuringRun(upgrades, now);
+            if (TryRequestTimedPortalDuringRun(upgrades, now))
+                return;
 
             if (AutoPercentMode && upgrades > 0)
             {
@@ -3803,11 +1814,7 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
                         _autoAttemptResolvedTick = now;
                         _autoRetargetEarliestTick = now + 10;
                         TryPrepositionForPlannedTarget(upgrades, "auto");
-                        Log(() => "auto resolve: "
-                            + _autoUpgradeClickStartUpgrades.ToString(CultureInfo.InvariantCulture)
-                            + " -> " + upgrades.ToString(CultureInfo.InvariantCulture)
-                            + ", buttonAnim=" + buttonAnim
-                            + ", loaded=" + (loaded ? "1" : "0"));
+
 
                         // Rev 5.6.9: cap-retarget fires immediately on attempt-consumed, before
                         // any button-state gate.  A capped gem's upgrade button gets stuck at 27
@@ -3858,9 +1865,7 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
                     GemTarget plannedTarget;
                     bool havePlannedTarget = TryGetPlannedAutoTarget(upgrades, out plannedTarget, succeeded) && plannedTarget != null;
                     bool sameAsCurrent = havePlannedTarget && _target != null && plannedTarget.AbsoluteIndex == _target.AbsoluteIndex;
-                    Log(() => "auto validation: success=" + (succeeded ? "1" : "0")
-                        + ", same=" + (sameAsCurrent ? "1" : "0")
-                        + ", plan='" + _autoPlanSummary + "'");
+
 
                     _autoAwaitingResolution = false;
                     _autoUpgradeClickStartUpgrades = int.MinValue;
@@ -3870,7 +1875,7 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
 
                     if (havePlannedTarget && !sameAsCurrent)
                     {
-                        Log(() => "auto retarget planned: " + (_target != null ? _target.Name : "<none>") + " -> " + plannedTarget.Name + ", upgrades=" + upgrades.ToString(CultureInfo.InvariantCulture) + ", plan='" + _autoPlanSummary + "'");
+
                         BeginPlannedRetarget(plannedTarget);
                         return;
                     }
@@ -3904,11 +1909,7 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
                         _lowestAttemptResolvedTick = now;
                         _lowestRetargetEarliestTick = now + 10;
                         TryPrepositionForPlannedTarget(upgrades, "lowest");
-                        Log(() => "lowest resolve: "
-                            + _lowestUpgradeClickStartUpgrades.ToString(CultureInfo.InvariantCulture)
-                            + " -> " + upgrades.ToString(CultureInfo.InvariantCulture)
-                            + ", buttonAnim=" + buttonAnim
-                            + ", loaded=" + (loaded ? "1" : "0"));
+
 
                         // Rev 5.6.9: see AUTO
                         if (TryHandleLowestSuccessNoReadyCapStop(upgrades))
@@ -3925,11 +1926,7 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
                     if (succeeded)
                         _lowestPlanPointer++;
 
-                    Log(() => "lowest validation: acd=" + _lowestValidationAcd.ToString(CultureInfo.InvariantCulture)
-                        + ", rank=" + _lowestValidationPreRank.ToString(CultureInfo.InvariantCulture)
-                        + ", success=" + (succeeded ? "1" : "0")
-                        + ", ptr=" + _lowestPlanPointer.ToString(CultureInfo.InvariantCulture) + "/" + _lowestPlanSequence.Count.ToString(CultureInfo.InvariantCulture)
-                        + ", plan='" + _lowestPlanSummary + "'");
+
 
                     _lowestAwaitingResolution = false;
                     _lowestUpgradeClickStartUpgrades = int.MinValue;
@@ -3944,11 +1941,7 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
                         bool sameAsCurrent = _target != null && plannedTarget.AbsoluteIndex == _target.AbsoluteIndex;
                         if (!sameAsCurrent)
                         {
-                            Log(() => "lowest retarget: " + (_target != null ? (_target.Name + "#" + _target.Rank + " a" + _target.AbsoluteIndex) : "<none>")
-                                + " -> " + plannedTarget.Name + "#" + plannedTarget.Rank + " a" + plannedTarget.AbsoluteIndex
-                                + ", upgrades=" + upgrades.ToString(CultureInfo.InvariantCulture)
-                                + ", ptr=" + _lowestPlanPointer.ToString(CultureInfo.InvariantCulture) + "/" + _lowestPlanSequence.Count.ToString(CultureInfo.InvariantCulture)
-                                + ", plan='" + _lowestPlanSummary + "'");
+
                             BeginPlannedRetarget(plannedTarget);
                             return;
                         }
@@ -3981,11 +1974,7 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
                     {
                         _persistentAttemptResolvedTick = now;
                         _persistentRetargetEarliestTick = now + 10;
-                        Log(() => "persistent resolve: "
-                            + _persistentUpgradeClickStartUpgrades.ToString(CultureInfo.InvariantCulture)
-                            + " -> " + upgrades.ToString(CultureInfo.InvariantCulture)
-                            + ", buttonAnim=" + buttonAnim
-                            + ", loaded=" + (loaded ? "1" : "0"));
+
 
                         // Rev 5.6.9: see AUTO
                         if (TryHandlePersistentSuccessNoReadyCapStop(upgrades))
@@ -4016,7 +2005,7 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
                     bool sameAsCurrent = _target != null && desiredTarget.AbsoluteIndex == _target.AbsoluteIndex;
                     if (!sameAsCurrent)
                     {
-                        Log(() => "persistent retarget planned: " + (_target != null ? _target.Name : "<none>") + " -> " + desiredTarget.Name + ", upgrades=" + upgrades.ToString(CultureInfo.InvariantCulture));
+
                         BeginPlannedRetarget(desiredTarget);
                         return;
                     }
@@ -4070,12 +2059,8 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
                 if (_portalAnchorClickTick == int.MinValue && upgrades == runAnchorRemaining)
                 {
                     _portalAnchorClickTick = now;
-                    UpdateSharedDebugState("tp-anchor-start", "upgrades=" + upgrades.ToString(CultureInfo.InvariantCulture) + " delay=" + s7o_AutoGemUpgradeState.GetFullPortalDelayMs().ToString(CultureInfo.InvariantCulture), _target != null ? _target.AbsoluteIndex : int.MinValue, int.MinValue);
-                    Log(() => "portal anchor started: upgrades=" + upgrades
-                        + ", anchorRemaining=" + runAnchorRemaining.ToString(CultureInfo.InvariantCulture)
-                        + ", delayMs=" + s7o_AutoGemUpgradeState.GetFullPortalDelayMs().ToString(CultureInfo.InvariantCulture)
-                        + ", userDelayMs=" + s7o_AutoGemUpgradeState.AutoGemTPDelayMs.ToString(CultureInfo.InvariantCulture)
-                        + ", lag=" + (s7o_AutoGemUpgradeState.AutoGemTPLagBoost ? "1" : "0"));
+
+
                 }
                 if (IsLowestBalanceMode())
                 {
@@ -4101,11 +2086,14 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
                     _persistentAttemptResolvedTick = int.MinValue;
                     _persistentRetargetEarliestTick = int.MinValue;
                 }
-                Log(() => "click upgrade_button: upgrades=" + upgrades + ", anim=" + buttonAnim + ", recovery=" + (recoveryReady ? "1" : "0") + ", initial=" + (firstClickPending ? "1" : "0") + ", autoPending=" + (AutoPercentMode ? "1" : "0") + ", lowestPending=" + (IsLowestBalanceMode() ? "1" : "0") + ", persistentPending=" + ((!AutoPercentMode && !IsLowestBalanceMode()) ? "1" : "0"));
+
             }
             bool initialClickSent = _hasSentInitialUpgradeClick && _firstUpgradeClickTick != int.MinValue;
             if (initialClickSent)
-                TryRequestTimedPortalDuringRun(upgrades, now);
+            {
+                if (TryRequestTimedPortalDuringRun(upgrades, now))
+                    return;
+            }
 
             if (initialClickSent && !_upgradeProgressObservedThisRun && _noProgressAbortTick != int.MinValue && ElapsedMs(_noProgressAbortTick) >= 1600)
             {
@@ -4379,7 +2367,7 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
             string trustReason2;
             if (!IsPageTrustworthyForResolve(out trustReason2))
             {
-                Log(() => "upgrade-block: " + trustReason2);
+
                 SoftAbortAndRestart("refusing upgrade because page truth is not trustworthy");
                 return;
             }
@@ -4419,7 +2407,7 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
                 _hasSentInitialUpgradeClick = false;
                 _noProgressAbortTick = int.MinValue;
                 _lastRecoveryUpgradeAttempts = int.MinValue;
-                Log(() => "Target re-confirmed. Resuming upgrade loop.");
+
                 return;
             }
 
@@ -4439,7 +2427,7 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
             _portalRequestedThisRun = preservePortalRequest;
             _upgradeProgressObservedThisRun = false;
             _noProgressAbortTick = int.MinValue;
-            Log(() => "Target confirmed. Starting upgrade loop.");
+
         }
 
         private static int GetUpgradeChanceTier(int greaterRiftLevel, int gemRank)
@@ -4733,7 +2721,6 @@ private GemOrderEntry ChooseSpecificSubModeTarget(List<GemOrderEntry> forcedMatc
             _lastArrowScrollDirection = 0;
             _virtualGrid = null;
             _absoluteGrid = null;
-            _estimatedTopVisibleRow = -1;
             _viewportOriginRowFloat = -1f;
             _viewportOriginRowInt = -1;
             _viewportEpoch = 0;
@@ -5122,8 +3109,7 @@ private void FocusSelectedGemAfterTeleportCancel()
             int y = (int)Math.Round(r.Top + (r.Height * 0.5f));
             if (FreeHudInput.MouseMoveClient(Hud, x, y))
             {
-                Log(() => "urshi-cancel: focused-selected-gem x=" + x.ToString(CultureInfo.InvariantCulture)
-                    + " y=" + y.ToString(CultureInfo.InvariantCulture));
+
                 return;
             }
         }
@@ -5133,126 +3119,186 @@ private void FocusSelectedGemAfterTeleportCancel()
             RectangleF s = _gemStatusText.Rectangle;
             int x = (int)Math.Round(s.Left + 24f);
             int y = (int)Math.Round(s.Bottom + 18f);
-            if (FreeHudInput.MouseMoveClient(Hud, x, y))
-            {
-                Log(() => "urshi-cancel: focused-status-fallback x=" + x.ToString(CultureInfo.InvariantCulture)
-                    + " y=" + y.ToString(CultureInfo.InvariantCulture));
-            }
+            FreeHudInput.MouseMoveClient(Hud, x, y);
         }
     }
     catch { }
 }
 
 
-private bool TryCancelTeleportByTalkingToUrshi(string reason)
+private bool TryMoveCursorToUrshi()
 {
-    if (!IsPortalActiveOrRequested())
-        return false;
-
-    Log(() => "urshi-cancel: " + (reason ?? "no eligible target"));
-
-    Func<int, bool> tryClickUrshi = attempt =>
+    try
     {
-        try
-        {
-            var urshi = Hud.Game != null && Hud.Game.Actors != null
-                ? Hud.Game.Actors
-                    .Where(x =>
-                        x != null &&
-                        x.SnoActor != null &&
-                        x.SnoActor.Sno == ActorSnoEnum._p1_lr_tieredrift_nephalem &&
-                        x.IsOnScreen)
-                    .OrderBy(x =>
+        var urshi = Hud.Game != null && Hud.Game.Actors != null
+            ? Hud.Game.Actors
+                .Where(x =>
+                    x != null &&
+                    x.SnoActor != null &&
+                    x.SnoActor.Sno == ActorSnoEnum._p1_lr_tieredrift_nephalem &&
+                    x.IsOnScreen)
+                .OrderBy(x =>
+                {
+                    try
                     {
-                        try
-                        {
-                            float dx = x.ScreenCoordinate.X - (Hud.Window.Size.Width * 0.5f);
-                            float dy = x.ScreenCoordinate.Y - (Hud.Window.Size.Height * 0.5f);
-                            return (dx * dx) + (dy * dy);
-                        }
-                        catch { return float.MaxValue; }
-                    })
-                    .FirstOrDefault()
-                : null;
+                        float dx = x.ScreenCoordinate.X - (Hud.Window.Size.Width * 0.5f);
+                        float dy = x.ScreenCoordinate.Y - (Hud.Window.Size.Height * 0.5f);
+                        return (dx * dx) + (dy * dy);
+                    }
+                    catch { return float.MaxValue; }
+                })
+                .FirstOrDefault()
+            : null;
 
-            if (urshi == null)
-            {
-                Log(() => "urshi-cancel: urshi not found/on-screen attempt=" + attempt.ToString(CultureInfo.InvariantCulture));
-                return false;
-            }
-
-            int ux = (int)Math.Round(urshi.ScreenCoordinate.X);
-            int uy = (int)Math.Round(urshi.ScreenCoordinate.Y);
-
-            if (ux <= 0 || uy <= 0 || ux >= Hud.Window.Size.Width || uy >= Hud.Window.Size.Height)
-            {
-                Log(() => "urshi-cancel: invalid screen point attempt=" + attempt.ToString(CultureInfo.InvariantCulture));
-                return false;
-            }
-
-            if (!FreeHudInput.MouseMoveClient(Hud, ux, uy))
-            {
-                Log(() => "urshi-cancel: client-to-screen move failed attempt=" + attempt.ToString(CultureInfo.InvariantCulture));
-                return false;
-            }
-
-            MarkAutomationInputAction();
-            try { Thread.Sleep(20); } catch { }
-            if (!FreeHudInput.MouseDown(MouseButtons.Left))
-                return false;
-            try { Thread.Sleep(30); } catch { }
-            bool released = FreeHudInput.MouseUp(MouseButtons.Left);
-
-            Log(() => "urshi-cancel: click attempt=" + attempt.ToString(CultureInfo.InvariantCulture)
-                + " x=" + ux.ToString(CultureInfo.InvariantCulture)
-                + " y=" + uy.ToString(CultureInfo.InvariantCulture)
-                + " released=" + (released ? "1" : "0"));
-            return released;
-        }
-        catch
-        {
-            Log(() => "urshi-cancel: click exception attempt=" + attempt.ToString(CultureInfo.InvariantCulture));
+        if (urshi == null)
             return false;
-        }
-    };
 
-    if (!tryClickUrshi(1))
-        return false;
+        int ux = (int)Math.Round(urshi.ScreenCoordinate.X);
+        int uy = (int)Math.Round(urshi.ScreenCoordinate.Y);
+        if (ux <= 0 || uy <= 0 || ux >= Hud.Window.Size.Width || uy >= Hud.Window.Size.Height)
+            return false;
 
-    for (int wait = 0; wait < 4; wait++)
+        return FreeHudInput.MouseMoveClient(Hud, ux, uy);
+    }
+    catch
     {
-        try { Thread.Sleep(25); } catch { }
-        if (!IsPortalActiveOrRequested())
-        {
-            FocusSelectedGemAfterTeleportCancel();
-            return true;
-        }
+        return false;
+    }
+}
+
+private bool TryStartTeleportCancelByTalkingToUrshi()
+{
+    if (_urshiCancelStage != UrshiCancelStage.Idle ||
+        _pendingInputKind != PendingInputKind.None ||
+        !IsPortalActiveOrRequested() ||
+        !TryMoveCursorToUrshi())
+    {
+        return false;
     }
 
-    try { Thread.Sleep(100); } catch { }
+    MarkAutomationInputAction();
+    _urshiCancelStage = UrshiCancelStage.FirstMoveDelay;
+    _urshiCancelDueTick = NowTick() + UrshiMoveDelayMs;
+    _urshiCancelChecksRemaining = 0;
+    return true;
+}
 
-    if (!IsPortalActiveOrRequested())
+private void CancelUrshiCancel()
+{
+    _urshiCancelStage = UrshiCancelStage.Idle;
+    _urshiCancelDueTick = int.MinValue;
+    _urshiCancelChecksRemaining = 0;
+}
+
+private bool CompleteUrshiCancel()
+{
+    FocusSelectedGemAfterTeleportCancel();
+    CancelUrshiCancel();
+    return true;
+}
+
+private bool AdvanceUrshiCancel()
+{
+    if (_urshiCancelStage == UrshiCancelStage.Idle)
+        return false;
+
+    if (!Hud.Game.IsInGame || !Hud.Window.IsForeground || Hud.Game.IsLoading || Hud.Game.IsPaused)
     {
-        FocusSelectedGemAfterTeleportCancel();
+        CancelUrshiCancel();
+        return false;
+    }
+
+    if (_pendingInputKind != PendingInputKind.None)
         return true;
-    }
 
-    Log(() => "urshi-cancel: first click did not cancel teleport, trying once more");
-    if (!tryClickUrshi(2))
-        return false;
+    int now = NowTick();
+    if (unchecked(_urshiCancelDueTick - now) > 0)
+        return true;
 
-    for (int wait = 0; wait < 8; wait++)
+    switch (_urshiCancelStage)
     {
-        try { Thread.Sleep(25); } catch { }
-        if (!IsPortalActiveOrRequested())
-        {
-            FocusSelectedGemAfterTeleportCancel();
+        case UrshiCancelStage.FirstMoveDelay:
+            if (!BeginMousePulseAtCurrentCursor(UrshiMouseHoldMs))
+            {
+                CancelUrshiCancel();
+                return false;
+            }
+            _urshiCancelStage = UrshiCancelStage.FirstMouseHold;
             return true;
-        }
-    }
 
-    Log(() => "urshi-cancel: teleport did not cancel after two clicks");
-    return false;
+        case UrshiCancelStage.FirstMouseHold:
+            if (!_pendingInputReleaseSucceeded)
+            {
+                CancelUrshiCancel();
+                return false;
+            }
+            _urshiCancelChecksRemaining = UrshiFirstPortalPollCount;
+            _urshiCancelStage = UrshiCancelStage.FirstPortalCheck;
+            _urshiCancelDueTick = now + UrshiPortalPollMs;
+            return true;
+
+        case UrshiCancelStage.FirstPortalCheck:
+            if (!IsPortalActiveOrRequested())
+                return CompleteUrshiCancel();
+            _urshiCancelChecksRemaining--;
+            if (_urshiCancelChecksRemaining > 0)
+            {
+                _urshiCancelDueTick = now + UrshiPortalPollMs;
+                return true;
+            }
+            _urshiCancelStage = UrshiCancelStage.FirstExtraWait;
+            _urshiCancelDueTick = now + UrshiExtraWaitMs;
+            return true;
+
+        case UrshiCancelStage.FirstExtraWait:
+            if (!IsPortalActiveOrRequested())
+                return CompleteUrshiCancel();
+            if (!TryMoveCursorToUrshi())
+            {
+                CancelUrshiCancel();
+                return false;
+            }
+            MarkAutomationInputAction();
+            _urshiCancelStage = UrshiCancelStage.SecondMoveDelay;
+            _urshiCancelDueTick = now + UrshiMoveDelayMs;
+            return true;
+
+        case UrshiCancelStage.SecondMoveDelay:
+            if (!BeginMousePulseAtCurrentCursor(UrshiMouseHoldMs))
+            {
+                CancelUrshiCancel();
+                return false;
+            }
+            _urshiCancelStage = UrshiCancelStage.SecondMouseHold;
+            return true;
+
+        case UrshiCancelStage.SecondMouseHold:
+            if (!_pendingInputReleaseSucceeded)
+            {
+                CancelUrshiCancel();
+                return false;
+            }
+            _urshiCancelChecksRemaining = UrshiSecondPortalPollCount;
+            _urshiCancelStage = UrshiCancelStage.SecondPortalCheck;
+            _urshiCancelDueTick = now + UrshiPortalPollMs;
+            return true;
+
+        case UrshiCancelStage.SecondPortalCheck:
+            if (!IsPortalActiveOrRequested())
+                return CompleteUrshiCancel();
+            _urshiCancelChecksRemaining--;
+            if (_urshiCancelChecksRemaining > 0)
+            {
+                _urshiCancelDueTick = now + UrshiPortalPollMs;
+                return true;
+            }
+            CancelUrshiCancel();
+            return true;
+
+        default:
+            CancelUrshiCancel();
+            return false;
+    }
 }
 
 private void HandleNoEligibleTargetStop(string warningText, string failureReason)
@@ -5264,12 +3310,10 @@ private void HandleNoEligibleTargetStop(string warningText, string failureReason
         ? "no eligible target gem under current rules"
         : failureReason;
 
-    bool portalWasActive = IsPortalActiveOrRequested();
-    bool canceled = false;
-    if (portalWasActive)
-        canceled = TryCancelTeleportByTalkingToUrshi(finalReason);
+    if (IsPortalActiveOrRequested())
+        TryStartTeleportCancelByTalkingToUrshi();
 
-    Log(() => "no-eligible-stop: portalActive=" + (portalWasActive ? "1" : "0") + ", canceled=" + (canceled ? "1" : "0") + ", reason=" + finalReason);
+
     Fail(finalReason);
 }
 
@@ -5313,7 +3357,7 @@ private bool TryHandlePersistentSuccessNoReadyCapStop(int upgrades)
     bool sameAsCurrent = _target != null && desiredTarget.AbsoluteIndex == _target.AbsoluteIndex;
     if (!sameAsCurrent)
     {
-        Log(() => "persistent no-ready cap retarget: " + (_target != null ? _target.Name : "<none>") + " -> " + desiredTarget.Name + ", upgrades=" + upgrades.ToString(CultureInfo.InvariantCulture));
+
         _capRetargetInProgress = true;
         _capRetargetFirstClickPending = true;
         _capRetargetResolvedTick = capResolvedTick;
@@ -5364,7 +3408,7 @@ private bool TryHandleAutoSuccessNoReadyCapStop(int upgrades)
         bool sameAsCurrent = _target != null && plannedTarget.AbsoluteIndex == _target.AbsoluteIndex;
         if (!sameAsCurrent)
         {
-            Log(() => "auto no-ready cap retarget: " + (_target != null ? _target.Name : "<none>") + " -> " + plannedTarget.Name + ", upgrades=" + upgrades.ToString(CultureInfo.InvariantCulture) + ", plan='" + _autoPlanSummary + "'");
+
             _capRetargetInProgress = true;
             _capRetargetFirstClickPending = true;
             _capRetargetResolvedTick = capResolvedTick;
@@ -5403,10 +3447,7 @@ private bool TryHandleAutoSuccessNoReadyCapStop(int upgrades)
                 Reason        = "auto fallback after cap",
                 Source        = fallbackEntry,
             };
-            Log(() => "auto no-ready cap fallback retarget: "
-                + (_target != null ? _target.Name : "<none>") + " -> " + fallbackTarget.Name
-                + ", upgrades=" + upgrades.ToString(CultureInfo.InvariantCulture)
-                + ", chance=" + autoChosenChance.ToString(CultureInfo.InvariantCulture) + "%");
+
             _capRetargetInProgress = true;
             _capRetargetFirstClickPending = true;
             _capRetargetResolvedTick = capResolvedTick;
@@ -5454,7 +3495,7 @@ private bool TryHandleLowestSuccessNoReadyCapStop(int upgrades)
         bool sameAsCurrent = _target != null && plannedTarget.AbsoluteIndex == _target.AbsoluteIndex;
         if (!sameAsCurrent)
         {
-            Log(() => "lowest no-ready cap retarget: " + (_target != null ? _target.Name : "<none>") + " -> " + plannedTarget.Name + ", upgrades=" + upgrades.ToString(CultureInfo.InvariantCulture) + ", ptr=" + _lowestPlanPointer.ToString(CultureInfo.InvariantCulture) + "/" + _lowestPlanSequence.Count.ToString(CultureInfo.InvariantCulture));
+
             _capRetargetInProgress = true;
             _capRetargetFirstClickPending = true;
             _capRetargetResolvedTick = capResolvedTick;
@@ -5648,7 +3689,7 @@ private bool QueueViewportRecovery(string reason, int delayMs)
     _viewportRecoveryAttempts++;
     _lastActionTick = NowTick();
     _afterScrollWait = Math.Max(0, delayMs);
-    Log(() => "viewport recovery " + _viewportRecoveryAttempts + "/" + maxViewportRecoveryAttempts + ": " + reason);
+
     _stage = AutomationStage.DirectCaptureCurrentPage;
     return true;
 }
@@ -5666,7 +3707,7 @@ private void BeginCurrentTargetRecoveryFromRunning(string reason)
     _lastRecoveryUpgradeAttempts = int.MinValue;
     _lastActionTick = NowTick();
     _afterScrollWait = 0;
-    Log(() => "running recovery: " + reason);
+
     _stage = AutomationStage.DirectCaptureCurrentPage;
 }
 
@@ -5841,19 +3882,6 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
                 });
             }
 
-            if (ShouldLog(s7o_AutoGemUpgradeState.DebugLevelState))
-            {
-                string signature = string.Join(", ", result.Select(g => "a" + g.AbsoluteIndex + "=" + GetGemName(g.Item) + "#" + g.Item.JewelRank));
-                if (!string.Equals(_lastGemOrderLogSignature, signature, StringComparison.Ordinal))
-                {
-                    _lastGemOrderLogSignature = signature;
-                    // Compact summary always; full list only at verbose level
-                    AppendDebugLine("gem order: count=" + result.Count
-                        + " eligible=" + result.Count(g => IsStrictUpgradeEligible(g) || (FastFallbackMode && IsBurnEligible(g))));
-                    if (ShouldLog(s7o_AutoGemUpgradeState.DebugLevelVerbose))
-                        AppendDebugLine("gem order (" + result.Count + "): " + signature);
-                }
-            }
             return result;
         }
 
@@ -5918,7 +3946,6 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
                     assignedIndices.Add(c.AbsoluteIndex);
             }
 
-            int enriched = 0;
             foreach (var cell in cells)
             {
                 if (cell == null || cell.AbsoluteIndex >= 0) continue;
@@ -5940,25 +3967,9 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
                             string acdName = GetGemName(acdMatch.Item);
                             int acdRank = acdMatch.Item.JewelRank;
                             if (!_confirmedSlotMap.ContainsKey(acdMatch.AbsoluteIndex))
-                            {
                                 _confirmedSlotMap[acdMatch.AbsoluteIndex] = Tuple.Create(acdName, acdRank);
-                                Log(() => "confirmed slot a" + acdMatch.AbsoluteIndex + " = " + acdName + "#" + acdRank + " (cell-acd=" + cellAcd + ", row=" + cell.RowIndex + " col=" + cell.ColumnIndex + ")", s7o_AutoGemUpgradeState.DebugLevelVerbose);
-                            }
-                            else
-                            {
-                                Log(() => "cell-acd=" + cellAcd + " -> a" + acdMatch.AbsoluteIndex + " = " + acdName + "#" + acdRank + " (row=" + cell.RowIndex + " col=" + cell.ColumnIndex + ", slot already confirmed)", s7o_AutoGemUpgradeState.DebugLevelVerbose);
-                            }
-                            enriched++;
                             continue;
                         }
-                        else
-                        {
-                            Log(() => "cell-acd=" + cellAcd + " matched a" + acdMatch.AbsoluteIndex + " but index already assigned — fallback to text parse (row=" + cell.RowIndex + " col=" + cell.ColumnIndex + ")", s7o_AutoGemUpgradeState.DebugLevelVerbose);
-                        }
-                    }
-                    else
-                    {
-                        Log(() => "cell-acd=" + cellAcd + " not in acdToEntry (orderedGems=" + _orderedGems.Count + ", acdMap=" + acdToEntry.Count + ") — fallback to text parse (row=" + cell.RowIndex + " col=" + cell.ColumnIndex + ")", s7o_AutoGemUpgradeState.DebugLevelVerbose);
                     }
                 }
 
@@ -5976,11 +3987,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
                         cell.AbsoluteIndex = match.AbsoluteIndex;
                         assignedIndices.Add(match.AbsoluteIndex);
                         if (!_confirmedSlotMap.ContainsKey(match.AbsoluteIndex))
-                        {
                             _confirmedSlotMap[match.AbsoluteIndex] = Tuple.Create(identity.Item1, identity.Item2);
-                            Log(() => "confirmed slot a" + match.AbsoluteIndex + " = " + identity.Item1 + "#" + identity.Item2 + " (directtext-name, row=" + cell.RowIndex + " col=" + cell.ColumnIndex + ")", s7o_AutoGemUpgradeState.DebugLevelVerbose);
-                        }
-                        enriched++;
                         continue;
                     }
                 }
@@ -5997,7 +4004,6 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
                         {
                             cell.AbsoluteIndex = estimatedAbs;
                             assignedIndices.Add(estimatedAbs);
-                            enriched++;
                             continue;
                         }
                     }
@@ -6037,11 +4043,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
 
                 cell.AbsoluteIndex = chosen.AbsoluteIndex;
                 assignedIndices.Add(chosen.AbsoluteIndex);
-                enriched++;
             }
-
-            if (enriched > 0)
-                Log(() => "direct-text enrichment: resolved " + enriched + " slot(s) (confirmedMap=" + _confirmedSlotMap.Count + ", acdMap=" + acdToEntry.Count + ")", s7o_AutoGemUpgradeState.DebugLevelVerbose);
         }
 
         private void StartPageProbe(ProbeReason reason)
@@ -6073,18 +4075,10 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             if (reason == ProbeReason.Search && _target != null)
             {
                 TryEnrichCellsFromDirectText(visibleCells);
-                VisibleCell targetVC = visibleCells.FirstOrDefault(
-                    c => c != null && !c.IsProjected && c.Ref != null && c.AbsoluteIndex == _target.AbsoluteIndex);
-                if (targetVC == null && _target.Source?.Item != null)
-                {
-                    uint tAcd = (uint)_target.Source.Item.AcdId;
-                    if (tAcd != 0 && tAcd != 0xFFFFFFFF)
-                        targetVC = visibleCells.FirstOrDefault(
-                            c => c != null && !c.IsProjected && c.Ref != null && c.Ref.CachedLegendaryGemAcdId == tAcd);
-                }
+                VisibleCell targetVC = FindLiveTargetCell(visibleCells);
                 if (targetVC != null)
                 {
-                    Log(() => "probe shortcut: target " + _target.Name + "#" + _target.Rank + " visible at a" + targetVC.AbsoluteIndex + ", skipping probe");
+
                     RefreshSnapshotFromViewportCapture(new ViewportCapture
                     {
                         HasPane = true,
@@ -6134,9 +4128,9 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             _probeNoIdentityRetryCount = 0;
             _probeActive = true;
 
-            Log(() => "start probe " + reason.ToString().ToLowerInvariant() + ": visibleCells=" + visibleCells.Count + ", topRow=" + GetAuthoritativeViewportTopRow() + ", paneRect=" + ((int)paneRect.Left) + "," + ((int)paneRect.Top) + "," + ((int)paneRect.Width) + "x" + ((int)paneRect.Height) + ", listBounds=" + ((int)listBounds.Left) + "," + ((int)listBounds.Top) + "," + ((int)listBounds.Width) + "x" + ((int)listBounds.Height) + (_virtualGrid != null ? (", rowPitch=" + ((int)Math.Round(_virtualGrid.RowPitch)) + ", visRows=" + _virtualGrid.VisibleRowCount) : string.Empty));
-            LogViewportMetrics("probe-start");
-            LogScrollLane("probe-start", paneRect, listBounds);
+
+
+
 
             if (reason == ProbeReason.Reset)
                 _stage = AutomationStage.ResetProbeCurrentPage;
@@ -6413,7 +4407,6 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
         {
             int nowLive = _currentSnapshot != null && _currentSnapshot.LiveVisibleCells != null ? _currentSnapshot.LiveVisibleCells.Count : 0;
             bool overshot = (_lastLiveCellCountBeforeScroll >= 15 && nowLive == 0) || (_lastLiveCellCountBeforeScroll >= 20 && nowLive <= 5);
-            if (overshot) Log(() => "overshoot-detected: liveCells " + _lastLiveCellCountBeforeScroll + " -> " + nowLive + ", top=" + _viewportOriginRowFloat.ToString("0.00", CultureInfo.InvariantCulture));
             return overshot;
         }
 
@@ -6517,7 +4510,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             }
 
             int strongestRows = Math.Max(liveRows, Math.Max(trackedRows, nativeRows));
-            if (authRows > strongestRows && liveRows < 3)
+            if (authRows > strongestRows && liveRows < 3 && !IsCompleteOwnedGemListVisible())
             {
                 reason = "authRows>rows";
                 return false;
@@ -6531,18 +4524,6 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             }
 
             return true;
-        }
-
-        private void LogTargetRejectReason(string reason)
-
-        {
-            Log(() => "target-reject: " + reason
-                + " targetAbs=" + (_target != null ? _target.AbsoluteIndex : -1)
-                + " topRow=" + _viewportOriginRowInt
-                + " liveRows=" + GetLiveVisibleRowCount()
-                + " trackedRows=" + GetTrackedProjectedRowCount()
-                + " authRows=" + GetAuthoritativeViewportVisibleRowCount()
-                + " epoch=" + _viewportEpoch);
         }
 
         private bool ApplyLiveAlignmentCorrection(RectangleF listBounds, List<VisibleCell> liveCells, string reason)
@@ -6585,7 +4566,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
                 RectangleF ix = RectangleF.Intersect(slot.PredictedRect, listBounds);
                 slot.IntersectsViewport = ix.Width > 0f && ix.Height > 0f;
             }
-            Log(() => "live-align " + reason + ": matched=" + matched + ", dx=" + dx.ToString("0.0", CultureInfo.InvariantCulture) + ", dy=" + dy.ToString("0.0", CultureInfo.InvariantCulture) + ", top=" + _viewportOriginRowFloat.ToString("0.00", CultureInfo.InvariantCulture));
+
             return true;
         }
 
@@ -6680,7 +4661,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
                 _probeActionTick = NowTick();
                 int retryAbs;
                 string retryAbsText = TryGetPredictedAbsoluteIndex(_probePendingCell, out retryAbs) ? (" a" + retryAbs) : string.Empty;
-                Log(() => "probe retry " + _probeNoIdentityRetryCount + retryAbsText + " on " + GetShortPath(_probePendingCell.Ref.Path));
+
                 return;
             }
 
@@ -6708,22 +4689,15 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             var selection = ReadCurrentSelectionEvidence(out sourceText);
             int absIndex;
             int probeAbs = TryGetPredictedAbsoluteIndex(cell, out absIndex) ? absIndex : -1;
-            if (LogSelectionEvidence)
-            {
-                Log(() => "observe" + (probeAbs >= 0 ? (" a" + probeAbs) : string.Empty)
-                    + " => name=" + (selection.Item1 ?? "<null>")
-                    + ", rank=" + selection.Item2
-                    + ", loaded=" + (SafeAnimState(_itemButton) != -1 ? "1" : "0")
-                    + ", text='" + ShortEvidence(sourceText) + "'");
-            }
-
             return new ObservedCell
             {
                 VisibleCell = cell,
                 SelectedGemName = selection.Item1,
                 SelectedGemRank = selection.Item2,
                 SourceText = sourceText,
-                MatchTarget = selection.Item1 != null && _target != null && IsTargetMatch(selection.Item1, selection.Item2, _target),
+                MatchTarget = HasKnownTargetAcd()
+                    ? IsLiveTargetIdentityCell(cell)
+                    : selection.Item1 != null && _target != null && IsTargetMatch(selection.Item1, selection.Item2, _target),
                 ItemButtonLoaded = SafeAnimState(_itemButton) != -1,
                 UpgradeButtonAnimState = SafeAnimState(_upgradeButton),
             ViewportEpoch = _viewportEpoch,
@@ -6736,13 +4710,13 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             _currentSnapshot = _probeSnapshot;
             _probeActive = false;
 
-            Log(() => "probe " + _probeReason.ToString().ToLowerInvariant() + ": cells=" + _currentSnapshot.VisibleCells.Count + ", identified=" + _currentSnapshot.IdentifiedCellCount + ", sig=" + ShortSignature(_currentSnapshot.Signature));
-            Log(() => "probe families: " + string.Join(", ", _currentSnapshot.VisibleCells.Take(8).Select(c => c.FamilyTag)));
+
+
 
             if (_currentSnapshot.IdentifiedCellCount < MinIdentifiedCellsForNavigation)
             {
                 string warn = "probe identified only " + _currentSnapshot.IdentifiedCellCount + " visible gems";
-                Log(warn);
+
                 if (RequireIdentifiedCellsForNavigation && !FullListVerificationMode)
                 {
                     Fail("probe could not identify enough visible gems for navigation");
@@ -6767,7 +4741,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
         private void HandleCompletedResetProbe()
         {
             _seenPageSignatures.Clear();
-            Log(() => "reset probe complete; beginning bounded top reset burst");
+
             _stage = AutomationStage.ResetScrollUp;
         }
 
@@ -6796,7 +4770,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             if (_currentSnapshot == null)
                 return false;
 
-            // REWRITTEN: was ClickPoint(hold=420ms) + Thread.Sleep(150ms) = 570ms blocking.
+            // The old 570 ms blocking drag path was replaced with staged wheel input.
             // Now uses a wheel tick — zero blocking, async verify on next capture.
             RectangleF listBounds = _currentSnapshot.ListBounds;
             if (listBounds == RectangleF.Empty || listBounds.Width <= 1f || listBounds.Height <= 1f)
@@ -6818,22 +4792,14 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             _lastActionTick = NowTick();
             _afterScrollWait = 0;
 
-            Log(() => "final bottom nudge: wheel tick sent (no-sleep), async verify on next capture");
+
 
             ViewportCapture cap;
             if (TryCaptureViewport(out cap))
             {
                 bool hasLiveCells = RefreshSnapshotFromViewportCapture(cap);
                 if (hasLiveCells)
-                {
-                    Log(() => "final bottom nudge complete: visibleCells=" + cap.LiveCells.Count + ", topRow=" + GetAuthoritativeViewportTopRow());
                     return true;
-                }
-                Log(() => "final bottom nudge geometry refreshed but there are no live Urshi cells on the page");
-            }
-            else
-            {
-                Log(() => "final bottom nudge failed to refresh visible geometry");
             }
             return false;
         }
@@ -6842,32 +4808,24 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
         {
             int authoritativeTopRow = GetAuthoritativeViewportTopRow();
             int authoritativeVisibleRows = GetAuthoritativeViewportVisibleRowCount();
-            Log(() => "search probe complete: topRow=" + authoritativeTopRow + ", visibleRows=" + authoritativeVisibleRows + ", targetAbs=" + (_target != null ? _target.AbsoluteIndex : -1) + ", probeAbs=" + _currentProbeAbsoluteIndex);
+
             bool targetRowVisible = IsTargetRowReliablyVisible(_target);
 
             if (!FullListVerificationMode)
             {
                 if (_currentSnapshot.TargetCell != null)
                 {
-                    Log(() => "target found on current observed page via guarded viewport probe");
+
                     _stage = AutomationStage.SelectObservedTarget;
                     return;
                 }
 
                 if (_target != null && _currentSnapshot?.VisibleCells != null)
                 {
-                    VisibleCell acdTargetCell = _currentSnapshot.VisibleCells.FirstOrDefault(
-                        c => c != null && !c.IsProjected && c.Ref != null && c.AbsoluteIndex == _target.AbsoluteIndex);
-                    if (acdTargetCell == null && _target.Source?.Item != null)
-                    {
-                        uint tAcd = (uint)_target.Source.Item.AcdId;
-                        if (tAcd != 0 && tAcd != 0xFFFFFFFF)
-                            acdTargetCell = _currentSnapshot.VisibleCells.FirstOrDefault(
-                                c => c != null && !c.IsProjected && c.Ref != null && c.Ref.CachedLegendaryGemAcdId == tAcd);
-                    }
+                    VisibleCell acdTargetCell = FindLiveTargetCell(_currentSnapshot.VisibleCells);
                     if (acdTargetCell != null)
                     {
-                        Log(() => "probe acd-recovery: target visible via ACD at a" + acdTargetCell.AbsoluteIndex);
+
                         _currentSnapshot.TargetCell = new ObservedCell
                         {
                             VisibleCell = acdTargetCell,
@@ -6909,9 +4867,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
                             return;
                         }
 
-                        Log(() => "verification-mode seek desiredTopRow=" + desiredTopRow
-                            + " from topRow=" + currentTopRow
-                            + " (deltaRows=" + deltaRows + ")");
+
                         _stage = AutomationStage.SearchScrollDown;
                         return;
                     }
@@ -6929,7 +4885,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             if (FullListVerificationMode && NeedsBottomNudgeForProjectedFinalRow())
             {
                 _bottomNudgeAttempted = true;
-                Log(() => "bottom-aligned projected row detected; performing one final bottom nudge before completion");
+
                 if (TryBottomNudgeScroll())
                 {
                     StartPageProbe(ProbeReason.Search);
@@ -6939,9 +4895,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
 
             if (FullListVerificationMode && _orderedGems != null && _orderedGems.Count > 0 && _scannedAbsoluteIndices.Count >= _orderedGems.Count)
             {
-                Log(() => "full Urshi list verification completed by scanned-slot count=" + _scannedAbsoluteIndices.Count
-                    + "/" + _orderedGems.Count
-                    + (targetRowVisible ? "; target row is in current viewport" : string.Empty));
+
 
                 if (!AutoUpgradeAfterFullListVerification)
                 {
@@ -6993,11 +4947,6 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
         {
             return _viewportOriginRowInt;
         }
-        private void UpdateDebugTopRowMirror()
-        {
-            _estimatedTopVisibleRow = _viewportOriginRowInt;
-        }
-
         private int CalculateVisibleRowGeometryCap(RectangleF listBounds, float rowPitch, float cellHeight)
         {
             if (listBounds.Height <= 1f)
@@ -7047,45 +4996,6 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             return Math.Max(1, Math.Min(4, Math.Min(cap, fallbackRows)));
         }
 
-        private void LogViewportMetrics(string reason)
-        {
-            try
-            {
-                RectangleF lb = _currentSnapshot != null ? _currentSnapshot.ListBounds : RectangleF.Empty;
-                float rowPitch = (_virtualGrid != null && _virtualGrid.RowPitch > 1f) ? _virtualGrid.RowPitch : _lastMeasuredRowPitch;
-                float cellHeight = (_virtualGrid != null && _virtualGrid.CellHeight > 1f) ? _virtualGrid.CellHeight : rowPitch;
-                int liveRows = GetLiveVisibleRowCount();
-                int cap = CalculateVisibleRowGeometryCap(lb, rowPitch, cellHeight);
-                int authRows = GetAuthoritativeViewportVisibleRowCount();
-
-                Log(() => "viewport-metrics " + reason
-                    + ": topRow=" + _viewportOriginRowInt
-                    + ", liveRows=" + liveRows
-                    + ", authRows=" + authRows
-                    + ", cap=" + cap
-                    + ", rowPitch=" + rowPitch.ToString("F1", CultureInfo.InvariantCulture)
-                    + ", cellH=" + cellHeight.ToString("F1", CultureInfo.InvariantCulture)
-                    + ", listH=" + lb.Height.ToString("F1", CultureInfo.InvariantCulture)
-                    + ", epoch=" + _viewportEpoch, s7o_AutoGemUpgradeState.DebugLevelVerbose);
-            }
-            catch { }
-        }
-
-        private void LogViewportGridMismatch(ObservedPageSnapshot snap)
-        {
-            if (snap == null) return;
-
-            int liveRows = GetLiveVisibleRowCount();
-            int authRows = GetAuthoritativeViewportVisibleRowCount();
-            if (liveRows > 0 && authRows > liveRows)
-            {
-                Log(() => "grid-mismatch: authRows=" + authRows
-                    + " exceeds liveRows=" + liveRows
-                    + " at epoch=" + _viewportEpoch
-                    + " topRow=" + _viewportOriginRowInt);
-            }
-        }
-
         private RectangleF GetAuthoritativeScrollLane(RectangleF paneRect, RectangleF listBounds)
         {
             try
@@ -7102,25 +5012,6 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             float fallbackLeft = listBounds.Right;
             float fallbackWidth = Math.Max(18f, paneRect.Right - listBounds.Right);
             return new RectangleF(fallbackLeft, listBounds.Top, fallbackWidth, listBounds.Height);
-        }
-
-        private void LogScrollLane(string reason, RectangleF paneRect, RectangleF listBounds)
-        {
-            try
-            {
-                RectangleF lane = GetAuthoritativeScrollLane(paneRect, listBounds);
-                var pts = GetScrollPoints(paneRect, listBounds, _currentSnapshot != null ? _currentSnapshot.LiveVisibleCells : new List<VisibleCell>());
-                PointF fastUp = GetFastScrollPoint(paneRect, listBounds, false);
-                PointF fastDown = GetFastScrollPoint(paneRect, listBounds, true);
-
-                Log(() => "scroll-lane " + reason
-                    + ": lane=(" + (int)lane.Left + "," + (int)lane.Top + "," + (int)lane.Width + "x" + (int)lane.Height + ")"
-                    + ", up=(" + (int)pts.Item1.X + "," + (int)pts.Item1.Y + ")"
-                    + ", down=(" + (int)pts.Item2.X + "," + (int)pts.Item2.Y + ")"
-                    + ", fastUp=(" + (int)fastUp.X + "," + (int)fastUp.Y + ")"
-                    + ", fastDown=(" + (int)fastDown.X + "," + (int)fastDown.Y + ")", s7o_AutoGemUpgradeState.DebugLevelVerbose);
-            }
-            catch { }
         }
 
         private bool CanSeekTargetViewport(out int desiredTopRow, out int currentTopRow, out int deltaRows)
@@ -7165,12 +5056,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
         {
             if (_target != null && IsTargetViewportTrulyLocked(_target))
             {
-                Log(() => "invariant violation: attempted " + nextStage
-                    + " while target viewport is already truly locked"
-                    + " (topRow=" + GetAuthoritativeViewportTopRow()
-                    + ", authRows=" + GetAuthoritativeViewportVisibleRowCount()
-                    + ", liveRows=" + GetLiveVisibleRowCount()
-                    + ", epoch=" + _viewportEpoch + ")");
+
                 return false;
             }
 
@@ -7187,6 +5073,15 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             return _currentSnapshot != null
                 && _currentSnapshot.LiveVisibleCells != null
                 && _currentSnapshot.LiveVisibleCells.Count > 0;
+        }
+
+        private bool IsCompleteOwnedGemListVisible()
+        {
+            return _orderedGems != null
+                && _orderedGems.Count > 0
+                && GetAuthoritativeViewportTopRow() == 0
+                && HasLiveViewportTruth()
+                && _currentSnapshot.LiveVisibleCells.Count(c => c != null && !c.IsProjected) >= _orderedGems.Count;
         }
 
         private bool IsCurrentEpochLiveSlot(VisibleCell cell)
@@ -7226,10 +5121,9 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
                 return false;
 
             int liveRows = GetLiveVisibleRowCount();
-            if (liveRows < MinLiveScanRowsForNavigation)
+            if (liveRows < MinLiveScanRowsForNavigation && !IsCompleteOwnedGemListVisible())
             {
-                Log(() => "target row band reached, but liveRows=" + liveRows
-                    + " is below MinLiveScanRowsForNavigation=" + MinLiveScanRowsForNavigation);
+
                 return false;
             }
 
@@ -7241,31 +5135,36 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
         {
             if (candidate == null)
             {
-                Log(() => "commit-block " + reason + ": candidate=null");
+
                 return false;
             }
 
             if (candidate.IsProjected)
             {
-                Log(() => "commit-block " + reason + ": candidate is projected");
+
                 return false;
             }
 
             if (!HasLiveViewportTruth())
             {
-                Log(() => "commit-block " + reason + ": no live viewport truth");
+
                 return false;
             }
 
             if (!IsCurrentEpochLiveSlot(candidate))
             {
-                Log(() => "commit-block " + reason + ": candidate is not a current-epoch live slot");
+
                 return false;
             }
 
             if (_target == null || !IsTargetRowReliablyVisible(_target))
             {
-                Log(() => "commit-block " + reason + ": target row not in current viewport");
+
+                return false;
+            }
+
+            if (HasKnownTargetAcd() && !IsLiveTargetIdentityCell(candidate))
+            {
                 return false;
             }
 
@@ -7300,10 +5199,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             if (changed)
             {
                 _viewportEpoch++;
-                if (!string.IsNullOrWhiteSpace(reason))
-                    Log(() => "viewport-origin " + reason + ": topRow=" + _viewportOriginRowInt + ", epoch=" + _viewportEpoch);
             }
-            UpdateDebugTopRowMirror();
             SyncVirtualGridViewport();
         }
 
@@ -7320,10 +5216,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             if (changed)
             {
                 _viewportEpoch++;
-                if (!string.IsNullOrWhiteSpace(reason))
-                    Log(() => "viewport-origin " + reason + ": topRow≈" + _viewportOriginRowFloat.ToString("0.00", CultureInfo.InvariantCulture) + " (" + _viewportOriginRowInt + "), epoch=" + _viewportEpoch);
             }
-            UpdateDebugTopRowMirror();
             SyncVirtualGridViewport();
         }
 
@@ -7417,10 +5310,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             }
 
             _noProgressSeekCount++;
-            Log(() => "seek stall #" + _noProgressSeekCount
-                + ": topBefore=" + topRowBefore
-                + ", topAfter=" + topRowAfter
-                + ", stackTop=" + (float.IsNaN(stackTop) ? "nan" : stackTop.ToString("0.0", CultureInfo.InvariantCulture)), s7o_AutoGemUpgradeState.DebugLevelState);
+
 
             return false;
         }
@@ -7463,7 +5353,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             if (!hasLiveCells)
             {
                 _scrollCaptureFailed = true;
-                Log(() => "capture: geometry refreshed but there are no live Urshi cells on the page", s7o_AutoGemUpgradeState.DebugLevelState);
+
                 return false;
             }
 
@@ -7538,8 +5428,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
                 if (_lastCaptureHadUsableLiveAcds && !hasUsableLiveAcds)
                 {
                     _lostLiveIdentityAfterScroll = true;
-                    Log(() => "identity loss: live cell ACDs disappeared after scroll at topRow=" + GetAuthoritativeViewportTopRow()
-                        + " — measured transport fallback engaged; permissive ACD-dead confirmation disabled");
+
                 }
                 else if (hasUsableLiveAcds)
                 {
@@ -7551,15 +5440,8 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
 
             if (bestTop >= 0)
             {
-                Log(() => "ACD calibration: topRow " + GetAuthoritativeViewportTopRow() + "→" + bestTop
-                    + " (votes=" + bestVotes + "/" + visibleCells.Count(c => !c.IsProjected && c.Ref?.CachedLegendaryGemAcdId != 0 && c.Ref?.CachedLegendaryGemAcdId != 0xFFFFFFFF) + ")");
                 SetViewportOriginExact(bestTop, "acd");
                 _lostLiveIdentityAfterScroll = false;
-            }
-            else // bestTop < 0 — no usable ACDs
-            {
-                if (!_lostLiveIdentityAfterScroll)
-                    Log(() => "ACD calibration: no usable cell ACDs (LegendaryGemAcdId not live on this client — using position math)");
             }
         }
 
@@ -7585,17 +5467,18 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
 
             _currentSnapshot.TargetCell = null;
 
-            // 1) direct ACD
-            if (_targetAcd != 0 && _currentSnapshot.LiveVisibleCells != null)
+            // Native ACD identity is authoritative whenever it is available.
+            if (HasKnownTargetAcd())
             {
-                var liveAcd = _currentSnapshot.LiveVisibleCells
-                    .FirstOrDefault(c => c != null && c.Ref != null && c.Ref.CachedLegendaryGemAcdId == _targetAcd);
+                VisibleCell liveAcd = FindLiveTargetCell(_currentSnapshot.LiveVisibleCells);
 
                 if (liveAcd != null)
                     return AssignObservedTarget(liveAcd, "acd-direct", true);
+
+                return false;
             }
 
-            // 2) exact absolute slot -> live slot
+            // Legacy fallback for the unlikely case where the target has no usable ACD.
             if (_target.AbsoluteIndex >= 0 && _target.AbsoluteIndex < _absoluteGrid.Slots.Count)
             {
                 var slot = _absoluteGrid.Slots[_target.AbsoluteIndex];
@@ -7655,8 +5538,35 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
                 }
             }
 
-            LogTargetRejectReason("no-live-slot");
+
             return false;
+        }
+
+        private bool HasKnownTargetAcd()
+        {
+            return _targetAcd != 0 && _targetAcd != 0xFFFFFFFF;
+        }
+
+        private bool IsLiveTargetIdentityCell(VisibleCell cell)
+        {
+            return cell != null
+                && !cell.IsProjected
+                && cell.Ref != null
+                && cell.Ref.CachedLegendaryGemAcdId == _targetAcd;
+        }
+
+        private VisibleCell FindLiveTargetCell(IEnumerable<VisibleCell> cells)
+        {
+            if (_target == null || cells == null)
+                return null;
+
+            if (HasKnownTargetAcd())
+                return cells.FirstOrDefault(IsLiveTargetIdentityCell);
+
+            return cells.FirstOrDefault(c => c != null
+                && !c.IsProjected
+                && c.Ref != null
+                && c.AbsoluteIndex == _target.AbsoluteIndex);
         }
 
         private bool AssignObservedTarget(VisibleCell cell, string source, bool hardMatch)
@@ -7792,7 +5702,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
 
         private bool TryViewportGuidedArrowScroll(bool goDown, int rowsHint, string reason)
         {
-            // REWRITTEN: was synchronous click-hold + Thread.Sleep verification loop (up to ~1180ms blocking).
+            // The old synchronous click-hold verification loop was replaced with staged polling.
             // Now uses WheelScrollTick — zero blocking, completes in microseconds, lets the stage machine
             // re-capture and verify on the very next AfterCollect tick.
             if (_currentSnapshot == null)
@@ -7836,11 +5746,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             rowsHint = Math.Max(1, rowsHint);
             int ticksToSend = GetWheelBurstTicks(rowsHint);
 
-            Log(() => "viewport-scroll " + reason + ": " + (goDown ? "↓" : "↑")
-                + " topRow=" + currentTop
-                + " rowsHint=" + rowsHint
-                + " ticks=" + ticksToSend
-                + " wheel=1 (no-sleep)", s7o_AutoGemUpgradeState.DebugLevelState);
+
 
             _identityLossCheckPending = true;
             _lastLiveCellCountBeforeScroll = _currentSnapshot != null && _currentSnapshot.LiveVisibleCells != null
@@ -7854,11 +5760,11 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             if (goDown)
                 _scrollAtBottom = false;
 
-            // Schedule async verification on next tick — no Thread.Sleep needed.
+            // Schedule verification on the next collection tick.
             _afterScrollWait = 0;
             _lastActionTick = NowTick();
 
-            Log(() => "viewport-scroll " + reason + ": wheel ticks sent, async verify on next capture", s7o_AutoGemUpgradeState.DebugLevelState);
+
             return true;
         }
 
@@ -7871,8 +5777,8 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             VisibleCell alreadyVisibleTarget;
             if (TryGetLiveVisibleTargetCell(out alreadyVisibleTarget))
             {
-                Log(() => "direct-seek skipped: target already visible at row=" + alreadyVisibleTarget.RowIndex.ToString(CultureInfo.InvariantCulture));
-                UpdateSharedDebugState("skip-scroll-visible-target", "row=" + alreadyVisibleTarget.RowIndex.ToString(CultureInfo.InvariantCulture), _target != null ? _target.AbsoluteIndex : int.MinValue, alreadyVisibleTarget.RowIndex);
+
+
                 return true;
             }
 
@@ -7887,7 +5793,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             bool downward = deltaRows > 0;
             int absRows = Math.Abs(deltaRows);
 
-            // REWRITTEN: was click-and-hold on scrollbar track with Thread.Sleep (up to 42ms blocking per call).
+            // The old blocking scrollbar-track click was replaced with wheel input.
             // Now uses wheel ticks exclusively — zero blocking, same-tick delivery.
             RectangleF listBounds = cap.ListBounds;
             float cx = listBounds.Left + listBounds.Width * 0.50f;
@@ -7902,11 +5808,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
 
             int ticksToSend = GetWheelBurstTicks(absRows);
 
-            Log(() => "direct-seek desiredTop=" + desiredTopRow
-                + " currentTop=" + currentTopRow
-                + " deltaRows=" + deltaRows
-                + " ticks=" + ticksToSend
-                + " wheel=1 (no-sleep)", s7o_AutoGemUpgradeState.DebugLevelState);
+
 
             _lastLiveCellCountBeforeScroll = _currentSnapshot != null && _currentSnapshot.LiveVisibleCells != null
                 ? _currentSnapshot.LiveVisibleCells.Count : 0;
@@ -7934,9 +5836,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             if (!moved)
                 return false;
 
-            Log(() => "end viewport-guided search scroll: topRow=" + currentTop + "→" + GetAuthoritativeViewportTopRow()
-                + ", desired=" + desiredTop
-                + (scrollToBottom ? " [bottom]" : string.Empty));
+
             return true;
         }
 
@@ -7945,51 +5845,23 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             if (element == null)
                 return;
 
-            _savedCursorX = Hud.Window.CursorX;
-            _savedCursorY = Hud.Window.CursorY;
-            bool clicked = FreeHudInput.ClickUiElement(Hud, MouseButtons.Left, element);
-            if (!ShouldKeepCursorAtAutomationActionPoint())
-                FreeHudInput.MouseMoveClient(Hud, _savedCursorX, _savedCursorY);
+            RectangleF rectangle;
+            try { rectangle = element.Rectangle; }
+            catch { return; }
 
-            if (!clicked)
-            {
-                UpdateSharedDebugState("click-ui-failed", element.Path, _target != null ? _target.AbsoluteIndex : int.MinValue);
-                return;
-            }
-
-            MarkAutomationInputAction();
-            UpdateSharedDebugState("click-ui", element.Path, _target != null ? _target.AbsoluteIndex : int.MinValue);
+            int x = (int)Math.Round(rectangle.Left + rectangle.Width * 0.5f);
+            int y = (int)Math.Round(rectangle.Top + rectangle.Height * 0.5f);
+            BeginMousePulseAt(x, y, InputPulseMs, ShouldKeepCursorAtAutomationActionPoint());
         }
 
         private void ClickPoint(PointF point, string reason = null, int holdMs = 0)
         {
-            _savedCursorX = Hud.Window.CursorX;
-            _savedCursorY = Hud.Window.CursorY;
             int x = (int)Math.Round(point.X);
             int y = (int)Math.Round(point.Y);
-            if (!string.IsNullOrWhiteSpace(reason))
-                Log(() => "click " + reason + " @(" + x + "," + y + ") hold=" + holdMs);
-            if (!FreeHudInput.MouseMoveClient(Hud, x, y) || !FreeHudInput.MouseDown(MouseButtons.Left))
-            {
-                UpdateSharedDebugState("click-point-failed", reason ?? string.Empty, _target != null ? _target.AbsoluteIndex : int.MinValue);
-                return;
-            }
-            // All scroll callers now use WheelScrollTick (holdMs=0). The only remaining
-            // callers that pass holdMs>0 are the urshi-cancel path (intentional) and
-            // reset-scroll-up (ScrollHoldMs=0). Cap to 12ms as a hard safety ceiling
-            // so no future holdMs regressions can block the thread meaningfully.
+            // Reset-scroll clicks normally use a zero-length pulse. Preserve the existing
+            // 12 ms safety ceiling for any configured nonzero hold without blocking capture.
             int clampedHold = Math.Min(holdMs, 12);
-            if (clampedHold > 0)
-            {
-                try { Thread.Sleep(clampedHold); } catch { }
-            }
-            bool released = FreeHudInput.MouseUp(MouseButtons.Left);
-            if (!ShouldKeepCursorAtAutomationActionPoint())
-                FreeHudInput.MouseMoveClient(Hud, _savedCursorX, _savedCursorY);
-            if (!released)
-                UpdateSharedDebugState("click-point-release-failed", reason ?? string.Empty, _target != null ? _target.AbsoluteIndex : int.MinValue);
-            MarkAutomationInputAction(clampedHold > 0 ? UserInterferenceIgnoreAfterPluginInputMs + clampedHold : -1);
-            UpdateSharedDebugState("click-point", (reason ?? string.Empty) + "|hold=" + holdMs.ToString(CultureInfo.InvariantCulture), _target != null ? _target.AbsoluteIndex : int.MinValue);
+            BeginMousePulseAt(x, y, clampedHold, ShouldKeepCursorAtAutomationActionPoint());
         }
 
         private int GetUpgradeAttempts()
@@ -8109,27 +5981,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
 
         private void SetTownRewardState(TownRewardSpaceState state, string reason)
         {
-            bool changed = _townRewardSpaceState != state;
             _townRewardSpaceState = state;
-            PublishTownRewardLifecycle(reason);
-
-            if (!changed)
-                return;
-
-            string detail = state.ToString()
-                + "|reason=" + (reason ?? string.Empty)
-                + "|session=" + _townRewardSessionId.ToString(CultureInfo.InvariantCulture)
-                + "|spaces=" + _townRewardSpaceCount.ToString(CultureInfo.InvariantCulture);
-            Log(() => "town reward state: " + detail);
-            UpdateSharedDebugState("town-reward-state", detail, _townRewardSessionId);
-        }
-
-        private void PublishTownRewardLifecycle(string reason)
-        {
-            s7o_AutoGemUpgradeState.AutoGemTownRewardState = _townRewardSpaceState.ToString();
-            s7o_AutoGemUpgradeState.AutoGemTownRewardReason = reason ?? string.Empty;
-            s7o_AutoGemUpgradeState.AutoGemTownRewardSession = _townRewardSessionId;
-            s7o_AutoGemUpgradeState.AutoGemTownRewardSpaceCount = _townRewardSpaceCount;
         }
 
         private bool IsNewGreaterRiftInProgress()
@@ -8190,10 +6042,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
                 // tick after chat closes can still dismiss the same reward dialog.
                 if (IsChatEntryOpen())
                 {
-                    UpdateSharedDebugState(
-                        "skip-town-reward-space-chat-open",
-                        BuildTownRewardSignalDetail(),
-                        _townRewardSessionId);
+
                     return true;
                 }
 
@@ -8202,29 +6051,15 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
                 // second Space from this reward session, even if SendInput is ambiguous.
                 _townRewardSpaceCount = 1;
                 SetTownRewardState(TownRewardSpaceState.RewardSpaceSent, "town-rift-close-dialog");
-                bool sent = FreeHudInput.SendSpace();
-                MarkAutomationInputAction(ConversationCloseThrottleMs + 30);
-                UpdateSharedDebugState(
-                    "space-town-reward-dialog-once",
-                    BuildTownRewardSignalDetail() + "|sent=" + (sent ? "1" : "0"),
-                    _townRewardSessionId);
+                BeginKeyPulse(FreeHudInput.VK_SPACE);
+                MarkAutomationInputAction(ConversationCloseThrottleMs + 30 + InputPulseMs);
+
                 return true;
             }
             catch
             {
                 return false;
             }
-        }
-
-        private string BuildTownRewardSignalDetail()
-        {
-            return "conversation_dialog_main"
-                + "|town=" + (Hud.Game.IsInTown ? "1" : "0")
-                + "|dialog=" + (SafeUiVisible(_conversationDialogMain) ? "1" : "0")
-                + "|chat=" + (IsChatEntryOpen() ? "1" : "0")
-                + "|stash=" + (IsStashUiOpen() ? "1" : "0")
-                + "|gemPane=" + (SafeUiVisible(_gemUpgradePane) ? "1" : "0")
-                + "|state=" + _townRewardSpaceState.ToString();
         }
 
         private bool TryCloseChatBeforeGemPaneAutomation(int remainingAttempts)
@@ -8309,7 +6144,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
                     {
                         if (FreeHudInput.MouseMoveClient(Hud, ux, uy))
                         {
-                            UpdateSharedDebugState("hover-urshi-after-chat-close", reason ?? string.Empty, _target != null ? _target.AbsoluteIndex : int.MinValue);
+
                             return true;
                         }
                     }
@@ -8333,7 +6168,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
                 {
                     if (FreeHudInput.MouseMoveClient(Hud, x, y))
                     {
-                        UpdateSharedDebugState("hover-safe-after-chat-close", reason ?? string.Empty, _target != null ? _target.AbsoluteIndex : int.MinValue);
+
                         return true;
                     }
                 }
@@ -8346,14 +6181,13 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
         private void StartChatCloseFadeWait(bool pendingDialogSpace, int remainingAttempts, string reason)
         {
             int delay = GetChatCloseFadeDelayMs();
-            FreeHudInput.SendEscape();
+            BeginKeyPulse(FreeHudInput.VK_ESCAPE);
             TryHoverUrshiAfterChatClose(reason);
-            _chatCloseFadeWaitUntilTick = NowTick() + delay;
+            _chatCloseFadeWaitUntilTick = NowTick() + delay + InputPulseMs;
             _chatCloseFadePendingDialogSpace = pendingDialogSpace;
             _chatCloseFadePendingAttempts = remainingAttempts;
-            MarkAutomationInputAction(delay + 120);
-            UpdateSharedDebugState(pendingDialogSpace ? "escape-chat-before-urshi-dialog" : "escape-chat-before-gem-pane-automation",
-                (reason ?? string.Empty) + "|fade=" + delay.ToString(CultureInfo.InvariantCulture), remainingAttempts);
+            MarkAutomationInputAction(delay + 120 + InputPulseMs);
+
         }
 
         private bool HandleChatCloseFadeWait()
@@ -8374,7 +6208,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
                     // The configured delay elapsed but the chat edit line is still visible.
                     // Keep waiting without sending Space into chat.
                     _chatCloseFadeWaitUntilTick = now + 50;
-                    UpdateSharedDebugState("wait-chat-fade-still-visible", "fade=" + GetChatCloseFadeDelayMs().ToString(CultureInfo.InvariantCulture), _chatCloseFadePendingAttempts);
+
                     return true;
                 }
 
@@ -8386,14 +6220,14 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
                 {
                     if (!CanSendConversationDialogSpace())
                     {
-                        UpdateSharedDebugState("skip-conversation-space-text-or-storage-open", "conversation_dialog_main", pendingAttempts);
+
                         return true;
                     }
 
                     _lastConversationCloseTick = NowTick();
-                    FreeHudInput.SendSpace();
-                    MarkAutomationInputAction(ConversationCloseThrottleMs + 30);
-                    UpdateSharedDebugState("space-conversation-dialog-after-chat-fade", "conversation_dialog_main", pendingAttempts);
+                    BeginKeyPulse(FreeHudInput.VK_SPACE);
+                    MarkAutomationInputAction(ConversationCloseThrottleMs + 30 + InputPulseMs);
+
                     return true;
                 }
 
@@ -8445,7 +6279,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
                     {
                         // No gem upgrades remain: this is usually a generic reward/close-rift dialog.
                         // Preserve the player's typed chat message and do not send Space into chat.
-                        UpdateSharedDebugState("skip-conversation-chat-open-no-upgrades", "conversation_dialog_main", 0);
+
                     }
 
                     return true;
@@ -8453,16 +6287,16 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
 
                 if (!CanSendConversationDialogSpace())
                 {
-                    UpdateSharedDebugState("skip-conversation-space-text-or-storage-open", "conversation_dialog_main", -1);
+
                     return true;
                 }
 
                 // Do not use Escape here.
                 // Space advances conversation without world-clicking after the dialog closes.
-                FreeHudInput.SendSpace();
+                BeginKeyPulse(FreeHudInput.VK_SPACE);
 
-                MarkAutomationInputAction(ConversationCloseThrottleMs + 30);
-                UpdateSharedDebugState("space-conversation-dialog", "conversation_dialog_main", -1);
+                MarkAutomationInputAction(ConversationCloseThrottleMs + 30 + InputPulseMs);
+
 
                 return true;
             }
@@ -8524,22 +6358,6 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             return idx >= 0 ? path.Substring(idx) : path;
         }
 
-        private static string ShortSignature(string signature)
-        {
-            if (string.IsNullOrWhiteSpace(signature)) return "<empty>";
-            if (signature.Length <= 42) return signature;
-            return signature.Substring(0, 42) + "...";
-        }
-
-        private static string ShortEvidence(string text)
-        {
-            if (string.IsNullOrWhiteSpace(text)) return string.Empty;
-            string compact = text.Replace("\n", " ").Replace("\r", " ").Replace("\t", " ").Trim();
-            while (compact.Contains("  ")) compact = compact.Replace("  ", " ");
-            if (compact.Length <= 96) return compact;
-            return compact.Substring(0, 96) + "...";
-        }
-
         private bool HasActiveAutomationContext()
         {
             return _autoRunning
@@ -8571,32 +6389,127 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             ResetCursorWatchToCurrent(Math.Max(0, delay));
         }
 
-        private void PublishAutomationDebugSnapshot()
+        private bool BeginKeyPulse(ushort virtualKey, int holdMs = InputPulseMs)
         {
-            try
-            {
-                s7o_AutoGemUpgradeState.AutoGemDebugStage = _stage.ToString();
-                s7o_AutoGemUpgradeState.AutoGemDebugTargetName = _target != null ? (_target.Name ?? string.Empty) : string.Empty;
-                s7o_AutoGemUpgradeState.AutoGemDebugTargetRank = _target != null ? _target.Rank : -1;
-                s7o_AutoGemUpgradeState.AutoGemDebugTargetAbs = _target != null ? _target.AbsoluteIndex : -1;
-                s7o_AutoGemUpgradeState.AutoGemDebugUpgradeAttempts = Hud.Game.Me != null ? GetUpgradeAttempts() : -1;
-                s7o_AutoGemUpgradeState.AutoGemDebugSelectedAcd = SafeItemButtonAcd();
-            }
-            catch { }
+            if (_pendingInputKind != PendingInputKind.None || virtualKey == 0)
+                return false;
+
+            if (!FreeHudInput.KeyDown(virtualKey))
+                return false;
+
+            _pendingInputKind = PendingInputKind.Key;
+            _pendingKey = virtualKey;
+            _pendingInputReleaseTick = NowTick() + Math.Max(0, holdMs);
+            _pendingInputReleaseSucceeded = true;
+            return true;
         }
 
-        private void UpdateSharedDebugState(string action, string detail = null, int targetAbs = int.MinValue, int targetRow = int.MinValue)
+        private bool BeginMousePulseAt(int x, int y, int holdMs, bool keepCursor)
         {
+            if (_pendingInputKind != PendingInputKind.None)
+                return false;
+
+            int oldX;
+            int oldY;
             try
             {
-                PublishAutomationDebugSnapshot();
-                s7o_AutoGemUpgradeState.AutoGemDebugAction = action ?? string.Empty;
-                s7o_AutoGemUpgradeState.AutoGemDebugDetail = detail ?? string.Empty;
-                unchecked { s7o_AutoGemUpgradeState.AutoGemDebugActionSequence++; }
-                if (targetAbs != int.MinValue) s7o_AutoGemUpgradeState.AutoGemDebugTargetAbs = targetAbs;
-                if (targetRow != int.MinValue) s7o_AutoGemUpgradeState.AutoGemDebugTargetRow = targetRow;
+                oldX = Hud.Window.CursorX;
+                oldY = Hud.Window.CursorY;
             }
-            catch { }
+            catch
+            {
+                oldX = x;
+                oldY = y;
+            }
+
+            if (!FreeHudInput.MouseMoveClient(Hud, x, y))
+                return false;
+
+            if (!FreeHudInput.MouseDown(MouseButtons.Left))
+            {
+                if (!keepCursor)
+                    FreeHudInput.MouseMoveClient(Hud, oldX, oldY);
+                return false;
+            }
+
+            int clampedHold = Math.Max(0, holdMs);
+            if (clampedHold == 0)
+            {
+                bool released = FreeHudInput.MouseUp(MouseButtons.Left);
+                if (!keepCursor)
+                    FreeHudInput.MouseMoveClient(Hud, oldX, oldY);
+                MarkAutomationInputAction();
+                return released;
+            }
+
+            _pendingInputKind = PendingInputKind.Mouse;
+            _pendingInputReleaseTick = NowTick() + clampedHold;
+            _pendingRestoreCursor = !keepCursor;
+            _pendingRestoreCursorX = oldX;
+            _pendingRestoreCursorY = oldY;
+            _pendingInputReleaseSucceeded = true;
+            MarkAutomationInputAction(UserInterferenceIgnoreAfterPluginInputMs + clampedHold);
+            return true;
+        }
+
+        private bool BeginMousePulseAtCurrentCursor(int holdMs)
+        {
+            if (_pendingInputKind != PendingInputKind.None)
+                return false;
+
+            if (!FreeHudInput.MouseDown(MouseButtons.Left))
+                return false;
+
+            _pendingInputKind = PendingInputKind.Mouse;
+            _pendingInputReleaseTick = NowTick() + Math.Max(0, holdMs);
+            _pendingRestoreCursor = false;
+            _pendingInputReleaseSucceeded = true;
+            return true;
+        }
+
+        private bool AdvancePendingInput()
+        {
+            if (_pendingInputKind == PendingInputKind.None)
+                return false;
+
+            if (unchecked(_pendingInputReleaseTick - NowTick()) > 0)
+                return true;
+
+            bool released = _pendingInputKind == PendingInputKind.Key
+                ? FreeHudInput.KeyUp(_pendingKey)
+                : FreeHudInput.MouseUp(MouseButtons.Left);
+
+            if (_pendingInputKind == PendingInputKind.Mouse && _pendingRestoreCursor)
+            {
+                FreeHudInput.MouseMoveClient(Hud, _pendingRestoreCursorX, _pendingRestoreCursorY);
+                ResetCursorWatchToCurrent(UserInterferenceIgnoreAfterPluginInputMs);
+            }
+
+            _pendingInputReleaseSucceeded = released;
+            _pendingInputKind = PendingInputKind.None;
+            _pendingKey = 0;
+            _pendingInputReleaseTick = int.MinValue;
+            _pendingRestoreCursor = false;
+            return false;
+        }
+
+        private void CancelPendingInput()
+        {
+            if (_pendingInputKind == PendingInputKind.Key)
+                _pendingInputReleaseSucceeded = FreeHudInput.KeyUp(_pendingKey);
+            else if (_pendingInputKind == PendingInputKind.Mouse)
+                _pendingInputReleaseSucceeded = FreeHudInput.MouseUp(MouseButtons.Left);
+
+            if (_pendingInputKind == PendingInputKind.Mouse && _pendingRestoreCursor)
+            {
+                FreeHudInput.MouseMoveClient(Hud, _pendingRestoreCursorX, _pendingRestoreCursorY);
+                ResetCursorWatchToCurrent(UserInterferenceIgnoreAfterPluginInputMs);
+            }
+
+            _pendingInputKind = PendingInputKind.None;
+            _pendingKey = 0;
+            _pendingInputReleaseTick = int.MinValue;
+            _pendingRestoreCursor = false;
         }
 
         private bool ShouldKeepCursorAtAutomationActionPoint()
@@ -8614,7 +6527,8 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
                     && _currentSnapshot.TargetCell.VisibleCell != null
                     && _currentSnapshot.TargetCell.MatchTarget
                     && !_currentSnapshot.TargetCell.VisibleCell.IsProjected
-                    && IsCurrentEpochLiveSlot(_currentSnapshot.TargetCell.VisibleCell))
+                    && IsCurrentEpochLiveSlot(_currentSnapshot.TargetCell.VisibleCell)
+                    && (!HasKnownTargetAcd() || IsLiveTargetIdentityCell(_currentSnapshot.TargetCell.VisibleCell)))
                 {
                     liveCell = _currentSnapshot.TargetCell.VisibleCell;
                     return true;
@@ -8622,6 +6536,12 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
 
                 if (_currentSnapshot.LiveVisibleCells == null || _currentSnapshot.LiveVisibleCells.Count == 0)
                     return false;
+
+                if (HasKnownTargetAcd())
+                {
+                    liveCell = FindLiveTargetCell(_currentSnapshot.LiveVisibleCells);
+                    return liveCell != null && IsCurrentEpochLiveSlot(liveCell);
+                }
 
                 foreach (var cell in _currentSnapshot.LiveVisibleCells)
                 {
@@ -8657,10 +6577,8 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
 
             PointF p = new PointF(rect.Left + rect.Width * 0.50f, rect.Top + rect.Height * 0.50f);
             MoveCursorToPointNoClick(p, "keep-upgrade-button-" + modeTag);
-            Log(() => "keep-upgrade-button: mode=" + modeTag
-                + ", abs=" + plannedTarget.AbsoluteIndex.ToString(CultureInfo.InvariantCulture)
-                + ", name='" + plannedTarget.Name + "'");
-            UpdateSharedDebugState("keep-upgrade-button", modeTag + " same-target", plannedTarget.AbsoluteIndex, int.MinValue);
+
+
             return true;
         }
 
@@ -8673,13 +6591,11 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             int y = (int)Math.Round(point.Y);
             if (!FreeHudInput.MouseMoveClient(Hud, x, y))
             {
-                UpdateSharedDebugState("hover-client-to-screen-failed", reason ?? string.Empty, _target != null ? _target.AbsoluteIndex : int.MinValue);
+
                 return;
             }
 
             MarkAutomationInputAction();
-            if (!string.IsNullOrWhiteSpace(reason))
-                Log(() => "hover " + reason + " @(" + x.ToString(CultureInfo.InvariantCulture) + "," + y.ToString(CultureInfo.InvariantCulture) + ")");
         }
 
         private bool TryFindLiveVisibleCellByAbsIndex(int absoluteIndex, out VisibleCell liveCell)
@@ -8726,6 +6642,8 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
                         && c.Ref.CachedLegendaryGemAcdId == plannedAcd);
                     if (liveCell != null)
                         return true;
+
+                    return false;
                 }
 
                 return TryFindLiveVisibleCellByAbsIndex(plannedTarget.AbsoluteIndex, out liveCell);
@@ -8808,9 +6726,6 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
         {
             try
             {
-                if (!string.IsNullOrWhiteSpace(reason))
-                    Log(() => "wheel " + reason + " " + (downward ? "down" : "up") + " tick=1");
-
                 if (downward)
                     FreeHudInput.ScrollDown(1);
                 else
@@ -8911,7 +6826,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
 
             // Move cursor into the safe activation area.
             MoveCursorToPointNoClick(safePoint, "arm-wheel-" + reason);
-            UpdateSharedDebugState("wheel-arm", reason, targetAbs, targetRow);
+
             _lastActionTick = NowTick();
 
             // Rev 5.6.11: ALWAYS return false on the arm tick.  Previously late-TP mode
@@ -9008,7 +6923,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
 
             // send the wheel tick immediately
             WheelScrollTick(downward, "adjacent-direct");
-            UpdateSharedDebugState("adjacent-commit-immediate", (downward ? "down" : "up"), _target.AbsoluteIndex, targetRow);
+
 
             // mark that we have performed the immediate adjacent commit
             _directAdjacentStepDone = true;
@@ -9051,7 +6966,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             if (!insideSafe)
             {
                 MoveCursorToPointNoClick(actualPoint, "wheel-correct-" + reason);
-                UpdateSharedDebugState("wheel-correct", reason, _target.AbsoluteIndex, cell.RowIndex);
+
             }
 
             _wheelPostNudgeCorrectionPending = false;
@@ -9098,7 +7013,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             MoveCursorToPointNoClick(safePoint, "hover-target-" + modeTag + "-predicted");
 
             int localRow = slot.AbsoluteRow - Math.Max(0, _absoluteGrid.ViewportTopRowInt);
-            UpdateSharedDebugState("hover-target", modeTag + " predicted-visible", plannedTarget.AbsoluteIndex, localRow);
+
 
             return true;
         }
@@ -9154,10 +7069,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
                 : (listBounds.Top + halfH + margin);
 
             MoveCursorToPointNoClick(new PointF(cx, cy), "hover-wheel-target-" + modeTag);
-            UpdateSharedDebugState("hover-wheel-target",
-                modeTag + " adjacent-" + (downward ? "down" : "up"),
-                plannedTarget.AbsoluteIndex,
-                slot.AbsoluteRow - currentTop);
+
 
             return true;
         }
@@ -9210,7 +7122,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
                 if (TryGetSafeVisibleClickRect(visible, out safeVisibleRect, out safeVisiblePoint))
                 {
                     MoveCursorToPointNoClick(safeVisiblePoint, "hover-target-" + modeTag);
-                    UpdateSharedDebugState("hover-target", modeTag + " safe-visible", abs, visible.RowIndex);
+
                     return;
                 }
 
@@ -9219,14 +7131,14 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
                 if (TryGetWheelComfortHoverPoint(visible, out wheelHoverPoint, out wheelDownward))
                 {
                     MoveCursorToPointNoClick(wheelHoverPoint, "hover-wheel-target-" + modeTag);
-                    UpdateSharedDebugState("hover-wheel-target", modeTag + " " + (wheelDownward ? "down" : "up"), abs, visible.RowIndex);
+
                     return;
                 }
 
                 float cx = visible.Rect.Left + (visible.Rect.Width * 0.50f);
                 float cy = visible.Rect.Top + (visible.Rect.Height * 0.50f);
                 MoveCursorToPointNoClick(new PointF(cx, cy), "hover-target-" + modeTag);
-                UpdateSharedDebugState("hover-target", modeTag + " cell", abs, visible.RowIndex);
+
                 return;
             }
 
@@ -9240,7 +7152,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
 
             if (IsTargetRowInCurrentViewport(planned))
             {
-                UpdateSharedDebugState("hold-preposition", modeTag + " row-visible-no-live", abs, int.MinValue);
+
                 return;
             }
 
@@ -9250,7 +7162,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             bool downward = desiredTop > currentTop;
             PointF p = GetFastScrollPoint(_currentSnapshot.PaneRect, _currentSnapshot.ListBounds, downward);
             MoveCursorToPointNoClick(p, "hover-scroll-" + modeTag);
-            UpdateSharedDebugState("hover-scroll", modeTag + " scroll", abs, int.MinValue);
+
         }
 
         private void ClearSoftRestartWait(bool clearWindow)
@@ -9301,7 +7213,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             _softRestartBlockedUntilTick = int.MinValue;
             _userSettleUntilTick = int.MinValue;
             ResetCursorWatchToCurrent(UserInterferenceIgnoreAfterPluginInputMs);
-            Log(() => "soft restart resume: cursor settled, restarting acquisition");
+
             return false;
         }
 
@@ -9378,7 +7290,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             int  savedLastUpgradeProgressTick = _lastUpgradeProgressTick;
             int  savedNoProgressAbortTick     = _noProgressAbortTick;
 
-            Log(() => "soft restart: " + (reason ?? "recoverable failure"));
+
             ResetState();
 
             // Restore run-level portal fields only when a run was already in progress.
@@ -9396,11 +7308,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
                 _upgradeProgressObservedThisRun = savedUpgradeProgressObserved;
                 _lastUpgradeProgressTick        = savedLastUpgradeProgressTick;
                 _noProgressAbortTick            = savedNoProgressAbortTick;
-                Log(() => "soft restart: run-level portal state preserved"
-                    + " (initialAttempts=" + savedInitialAttempts
-                    + " portalRequested=" + (savedPortalRequestedThisRun ? "1" : "0")
-                    + " lastObserved=" + (savedLastObservedAttempts == int.MinValue ? "na" : savedLastObservedAttempts.ToString(CultureInfo.InvariantCulture))
-                    + ")");
+
             }
 
             _softRestartPending = true;
@@ -9417,13 +7325,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             _stage = AutomationStage.Failed;
             _autoRunning = false;
             _lastFailureReason = reason ?? "unknown failure";
-            Log(() => "FAIL: " + _lastFailureReason);
-        }
 
-        private void Log(string message)
-        {
-            // Forward simple log calls to the lazy logger with state-level severity.
-            Log(() => message, s7o_AutoGemUpgradeState.DebugLevelState);
         }
 
         private void ResetState()
@@ -9483,12 +7385,25 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             _arrowScrollAttempts = 0;
             _virtualGrid = null;
             _absoluteGrid = null;
-            _estimatedTopVisibleRow = -1;
             _viewportOriginRowFloat = -1f;
             _viewportOriginRowInt = -1;
             _viewportEpoch = 0;
             _lastGoodStackPanelTop = float.NaN;
             _lastMeasuredRowPitch = float.NaN;
+            _lastMeasuredColumnPitch = float.NaN;
+            _lastMeasuredCellHeight = float.NaN;
+            _stableGridAnchorRect = RectangleF.Empty;
+            _lastStableStackTop = float.NaN;
+            _noProgressSeekCount = 0;
+            _runtimeBottomLocked = false;
+            _runtimeBottomTopRow = -1;
+            _lastLiveCellCountBeforeScroll = 0;
+            _postScrollRealignAttempts = 0;
+            _postScrollSettlePasses = 0;
+            _trackedLiveCells.Clear();
+            _highestNativeAbsoluteIndexSeen = -1;
+            _lastExtendedNativeCells.Clear();
+            _lastExtendedNativeRowCount = 0;
             _lastMeasuredVisibleRowCount = 0;
             _currentProbeAbsoluteIndex = -1;
             _scannedAbsoluteIndices.Clear();
@@ -9518,8 +7433,6 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             _capRetargetInProgress = false;  // Rev 5.6.9: clear on reset
             _capRetargetResolvedTick = int.MinValue;  // Rev 5.6.11: clear click-delay gate
             _capRetargetFirstClickPending = false;  // Rev 5.6.12
-            _navTargetLogged = false;
-
             _probeActive = false;
             _probeReason = ProbeReason.None;
             _probeCells.Clear();
@@ -9529,421 +7442,12 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             _probePendingCell = null;
             _probeActionTick = int.MinValue;
             _probeNoIdentityRetryCount = 0;
+            _directAdjacentStepDone = false;
 
             _cursorIgnoreUntilTick = int.MinValue;
             _lastGemPaneChatCloseTick = int.MinValue;
             ClearChatCloseFadeWait();
             _tailWaitAfterFinalAttempt = false;
-        }
-
-        // === Instrumentation & Debug Logging ===
-        // The following fields and helpers implement a non-intrusive run metrics recorder and
-        // buffered logging system. When debug is enabled via the overlay, these metrics are
-        // collected in real time without altering the plugin’s automation behaviour. See the
-        // revision plan for details.
-
-        // instrumentation state
-        private bool _runActive = false;
-        private bool _runOutcomeLogged = false;
-        private int _runSequence = 0;
-        private int _runStartTick = int.MinValue;
-        private int _runInitialAttempts = int.MinValue;
-        private int _runLastObservedAttempts = int.MinValue;
-        private int _runFinalAttemptConsumedTick = int.MinValue;
-        private int _runFinalResultTick = int.MinValue;
-        private string _runFinalResultText = string.Empty;
-        private int _runPaneHiddenTick = int.MinValue;
-        private int _runFinalResultToPaneHideMs = int.MinValue;
-        private int _runTpEndToPaneHideMs = int.MinValue;
-        private int _runPortalRequestedToPaneHideMs = int.MinValue;
-        private int _runFinalAttemptToResultMs = int.MinValue;
-        private bool _runPass = false;
-        private int _runPortalRequestedTick = int.MinValue;
-        private int _runPortalCastStartTick = int.MinValue;
-        private int _runPortalCastEndTick = int.MinValue;
-        private bool _runPortalCastingLastTick = false;
-        private bool _runFinalResultLatched = false;
-        private bool _tailWaitAfterFinalAttempt = false;
-        private bool _runIgnoreStalePaneOpenOutcome = false;
-        private int _runFreshAttemptDropCount = 0;
-        private int _lastUpgradeResultSeenTick = int.MinValue;
-        private string _lastUpgradeResultSeenText = string.Empty;
-        // debug session and pane visibility tracking
-        private bool _debugSessionStarted = false;
-        private bool _paneVisibleLastTick = false;
-        private AutomationStage _lastStageLogged = AutomationStage.Idle;
-        private string _lastGemOrderLogSignature = string.Empty;
-        // debug log buffer
-        private readonly List<string> _debugBuffer = new List<string>();
-
-        // Begin a new run if not already tracking one. Captures the starting tick and attempts count.
-        private void BeginRunMetricsIfNeeded(int upgrades, int now)
-        {
-            if (_runActive)
-                return;
-            _runActive = true;
-            _runOutcomeLogged = false;
-            _tailWaitAfterFinalAttempt = false;
-            _runStartTick = now;
-            _runInitialAttempts = upgrades;
-            _runLastObservedAttempts = upgrades;
-            _runFinalAttemptConsumedTick = int.MinValue;
-            _runFinalResultTick = int.MinValue;
-            _runFinalResultText = string.Empty;
-            _runPaneHiddenTick = int.MinValue;
-            _runFinalResultToPaneHideMs = int.MinValue;
-            _runTpEndToPaneHideMs = int.MinValue;
-            _runPortalRequestedToPaneHideMs = int.MinValue;
-            _runFinalAttemptToResultMs = int.MinValue;
-            _runPass = false;
-            _runPortalRequestedTick = int.MinValue;
-            _runPortalCastStartTick = int.MinValue;
-            _runPortalCastEndTick = int.MinValue;
-            _runPortalCastingLastTick = false;
-            _runFinalResultLatched = false;
-            _runIgnoreStalePaneOpenOutcome = true;
-            _runFreshAttemptDropCount = 0;
-            _lastUpgradeResultSeenTick = int.MinValue;
-            _lastUpgradeResultSeenText = string.Empty;
-            _runSequence++;
-            Log(() => "run note: pane-open result text ignored until first fresh attempt transition", s7o_AutoGemUpgradeState.DebugLevelState);
-            Log(() => "run start: attempts=" + upgrades.ToString(CultureInfo.InvariantCulture) + " startTick=" + now.ToString(CultureInfo.InvariantCulture), s7o_AutoGemUpgradeState.DebugLevelState);
-        }
-
-        // Track portal cast animation transitions. Logs when casting starts and ends.
-        private void TrackPortalCastWindow(int now)
-        {
-            if (!_runActive)
-                return;
-            bool casting = false;
-            try
-            {
-                casting = Hud.Game?.Me != null && Hud.Game.Me.AnimationState == AcdAnimationState.CastingPortal;
-            }
-            catch { }
-            if (casting && !_runPortalCastingLastTick)
-            {
-                _runPortalCastStartTick = now;
-                Log(() => "portal cast start", s7o_AutoGemUpgradeState.DebugLevelState);
-            }
-            else if (!casting && _runPortalCastingLastTick)
-            {
-                _runPortalCastEndTick = now;
-                Log(() => "portal cast end", s7o_AutoGemUpgradeState.DebugLevelState);
-            }
-            _runPortalCastingLastTick = casting;
-        }
-
-        private bool TryReadUpgradeOutcomeText(out string outcomeText)
-        {
-            outcomeText = string.Empty;
-
-            string statusText = ReadText(_gemStatusText);
-            string paneText = ReadText(_gemUpgradePane);
-            string combined = (statusText ?? string.Empty) + "\n" + (paneText ?? string.Empty);
-            if (string.IsNullOrWhiteSpace(combined))
-                return false;
-
-            if (combined.IndexOf("Upgrade Succeeded", StringComparison.OrdinalIgnoreCase) >= 0)
-            {
-                outcomeText = "Upgrade Succeeded";
-                return true;
-            }
-
-            if (combined.IndexOf("Upgrade Failed", StringComparison.OrdinalIgnoreCase) >= 0)
-            {
-                outcomeText = "Upgrade Failed";
-                return true;
-            }
-
-            return false;
-        }
-
-        private bool IsFreshOutcomeEligibleForCurrentRun(int upgrades)
-        {
-            if (!_runIgnoreStalePaneOpenOutcome)
-                return true;
-            if (_runFreshAttemptDropCount > 0)
-                return true;
-            if (_tailWaitAfterFinalAttempt && upgrades == 0)
-                return true;
-            return false;
-        }
-
-        private void TrackRunOutcomeWhilePaneVisible(int upgrades, int now)
-        {
-            if (!_runActive)
-                BeginRunMetricsIfNeeded(upgrades, now);
-
-            _runLastObservedAttempts = upgrades;
-
-            string outcomeText;
-            if (TryReadUpgradeOutcomeText(out outcomeText))
-            {
-                if (!IsFreshOutcomeEligibleForCurrentRun(upgrades))
-                {
-                    TrackPortalCastWindow(now);
-                    return;
-                }
-
-                if (_lastUpgradeResultSeenTick == int.MinValue || !string.Equals(_lastUpgradeResultSeenText, outcomeText, StringComparison.Ordinal))
-                {
-                    _lastUpgradeResultSeenTick = now;
-                    _lastUpgradeResultSeenText = outcomeText;
-                    Log(() => "upgrade result visible: '" + outcomeText + "' at=" + (_lastUpgradeResultSeenTick - _runStartTick).ToString(CultureInfo.InvariantCulture), s7o_AutoGemUpgradeState.DebugLevelState);
-                }
-
-                if (upgrades == 0 && !_runFinalResultLatched)
-                {
-                    _runFinalResultTick = now;
-                    _runFinalResultText = outcomeText;
-                    _runFinalResultLatched = true;
-                    Log(() => "final result latched: '" + outcomeText + "' at=" + (_runFinalResultTick - _runStartTick).ToString(CultureInfo.InvariantCulture), s7o_AutoGemUpgradeState.DebugLevelState);
-                }
-            }
-
-            TrackPortalCastWindow(now);
-        }
-
-        // Track consumption of upgrade attempts by comparing the current and last observed counts.
-        private void TrackUpgradeAttemptConsumption(int upgrades, int now)
-        {
-            if (!_runActive)
-                return;
-            if (_runLastObservedAttempts == int.MinValue)
-            {
-                _runLastObservedAttempts = upgrades;
-            }
-            else if (upgrades < _runLastObservedAttempts)
-            {
-                int previous = _runLastObservedAttempts;
-                _runFreshAttemptDropCount++;
-                _runIgnoreStalePaneOpenOutcome = false;
-                _runLastObservedAttempts = upgrades;
-                Log(() => "upgrade attempt consumed: " + previous.ToString(CultureInfo.InvariantCulture) + " -> " + upgrades.ToString(CultureInfo.InvariantCulture), s7o_AutoGemUpgradeState.DebugLevelState);
-
-                if (upgrades == 0)
-                {
-                    _runFinalAttemptConsumedTick = now;
-                    _tailWaitAfterFinalAttempt = true;
-                    Log(() => "final attempt consumed; entering tail-wait monitor", s7o_AutoGemUpgradeState.DebugLevelState);
-                }
-            }
-            else if (upgrades > _runLastObservedAttempts)
-            {
-                _runLastObservedAttempts = upgrades;
-            }
-        }
-
-        // Finalize a run, computing timing metrics and writing a summary line. Called once per run.
-        private void FinalizeRunOutcome(int now)
-        {
-            if (!_runActive || _runOutcomeLogged)
-                return;
-            // ensure pane hidden tick
-            if (_runPaneHiddenTick == int.MinValue)
-                _runPaneHiddenTick = now;
-            // compute metrics
-            if (_runFinalResultTick != int.MinValue && _runPaneHiddenTick != int.MinValue)
-                _runFinalResultToPaneHideMs = _runPaneHiddenTick - _runFinalResultTick;
-            if (_runPortalCastEndTick != int.MinValue && _runPaneHiddenTick != int.MinValue)
-                _runTpEndToPaneHideMs = _runPaneHiddenTick - _runPortalCastEndTick;
-            if (_runPortalRequestedTick != int.MinValue && _runPaneHiddenTick != int.MinValue)
-                _runPortalRequestedToPaneHideMs = _runPaneHiddenTick - _runPortalRequestedTick;
-            if (_runFinalAttemptConsumedTick != int.MinValue && _runFinalResultTick != int.MinValue)
-                _runFinalAttemptToResultMs = _runFinalResultTick - _runFinalAttemptConsumedTick;
-            // determine pass/fail
-            _runPass = (_runFinalResultTick != int.MinValue && _runPaneHiddenTick != int.MinValue && _runFinalResultTick < _runPaneHiddenTick);
-
-            string Ms(int v) => (v == int.MinValue ? "na" : v.ToString(CultureInfo.InvariantCulture));
-            Log(() =>
-            {
-                return "RUN " + (_runPass ? "PASS" : "FAIL")
-                    + " run#" + _runSequence.ToString(CultureInfo.InvariantCulture)
-                    + " initialAttempts=" + _runInitialAttempts.ToString(CultureInfo.InvariantCulture)
-                    + " finalObservedAttempts=" + _runLastObservedAttempts.ToString(CultureInfo.InvariantCulture)
-                    + " finalAttemptConsumedAt=" + Ms(_runFinalAttemptConsumedTick == int.MinValue ? int.MinValue : (_runFinalAttemptConsumedTick - _runStartTick))
-                    + " finalResultAt=" + Ms(_runFinalResultTick == int.MinValue ? int.MinValue : (_runFinalResultTick - _runStartTick))
-                    + " finalResult='" + (_runFinalResultText ?? string.Empty) + "'"
-                    + " portalRequestedAt=" + Ms(_runPortalRequestedTick == int.MinValue ? int.MinValue : (_runPortalRequestedTick - _runStartTick))
-                    + " portalCastStartAt=" + Ms(_runPortalCastStartTick == int.MinValue ? int.MinValue : (_runPortalCastStartTick - _runStartTick))
-                    + " portalCastEndAt=" + Ms(_runPortalCastEndTick == int.MinValue ? int.MinValue : (_runPortalCastEndTick - _runStartTick))
-                    + " paneHiddenAt=" + Ms(_runPaneHiddenTick == int.MinValue ? int.MinValue : (_runPaneHiddenTick - _runStartTick))
-                    + " finalResultToPaneHideMs=" + Ms(_runFinalResultToPaneHideMs)
-                    + " tpEndToPaneHideMs=" + Ms(_runTpEndToPaneHideMs)
-                    + " portalRequestedToPaneHideMs=" + Ms(_runPortalRequestedToPaneHideMs)
-                    + " finalAttemptToResultMs=" + Ms(_runFinalAttemptToResultMs);
-            }, s7o_AutoGemUpgradeState.DebugLevelState);
-            _runOutcomeLogged = true;
-            _runActive = false;
-            // flush any remaining buffered lines to disk
-            try { FlushDebugLines(); } catch { }
-        }
-
-        // Instrumentation hook invoked once per AfterCollect tick. Performs debug state sync,
-        // pane open/hide detection, stage transition logging, run metric updates, and finalization.
-        private void InstrumentationHook()
-        {
-            // sync debug state and manage session boundaries
-            if (!s7o_AutoGemUpgradeState.DebugEnabled)
-            {
-                _debugSessionStarted = false;
-                _debugBuffer.Clear();
-                s7o_AutoGemUpgradeState.DebugFileEnabled = false;
-                s7o_AutoGemUpgradeState.DebugLevel = s7o_AutoGemUpgradeState.DebugLevelOff;
-                s7o_AutoGemUpgradeState.DebugLogPath = string.Empty;
-                return;
-            }
-            // debug is enabled: ensure file and level are set
-            if (!s7o_AutoGemUpgradeState.DebugFileEnabled)
-                s7o_AutoGemUpgradeState.DebugFileEnabled = true;
-            if (s7o_AutoGemUpgradeState.DebugLevel != s7o_AutoGemUpgradeState.DebugLevelState)
-                s7o_AutoGemUpgradeState.DebugLevel = s7o_AutoGemUpgradeState.DebugLevelState;
-            if (!_debugSessionStarted)
-            {
-                try { StartDebugSession(); } catch { }
-                _debugSessionStarted = true;
-            }
-
-            int now = NowTick();
-            bool paneVisible = false;
-            try { paneVisible = _gemUpgradePane != null && _gemUpgradePane.Visible; } catch { }
-
-            // pane open/hide detection logs
-            if (paneVisible && !_paneVisibleLastTick)
-            {
-                Log(() => "pane-open", s7o_AutoGemUpgradeState.DebugLevelState);
-                _paneVisibleLastTick = true;
-            }
-            else if (!paneVisible && _paneVisibleLastTick)
-            {
-                Log(() => "pane-hide", s7o_AutoGemUpgradeState.DebugLevelState);
-                _paneVisibleLastTick = false;
-            }
-
-            // stage transition logging
-            if (_stage != _lastStageLogged)
-            {
-                Log(() => "stage " + _lastStageLogged.ToString() + " -> " + _stage.ToString(), s7o_AutoGemUpgradeState.DebugLevelState);
-                _lastStageLogged = _stage;
-            }
-
-            // get current upgrade attempts
-            int upgrades = int.MinValue;
-            try { upgrades = GetUpgradeAttempts(); } catch { }
-
-            // begin run when pane is visible and there are upgrade attempts
-            if (!_runActive && paneVisible && upgrades > 0)
-            {
-                BeginRunMetricsIfNeeded(upgrades, now);
-            }
-
-            // track portal requested tick if set by automation logic
-            if (_runActive)
-            {
-                if (_runPortalRequestedTick == int.MinValue && _portalRequestedTick != int.MinValue)
-                {
-                    _runPortalRequestedTick = _portalRequestedTick;
-                    Log(() => "portal requested", s7o_AutoGemUpgradeState.DebugLevelState);
-                }
-
-                if (upgrades != int.MinValue)
-                    TrackUpgradeAttemptConsumption(upgrades, now);
-
-                if (paneVisible)
-                    TrackRunOutcomeWhilePaneVisible(upgrades, now);
-
-                // finalize only when pane hides; attempts reaching zero enter observer-only tail-wait
-                if (!paneVisible)
-                {
-                    if (_runPaneHiddenTick == int.MinValue)
-                        _runPaneHiddenTick = now;
-                    FinalizeRunOutcome(now);
-                }
-            }
-        }
-
-        // Determine whether to log a message at the given level. Returns false when
-        // debugging is disabled or the message level exceeds the configured level.
-        private bool ShouldLog(int level)
-        {
-            if (!s7o_AutoGemUpgradeState.DebugEnabled)
-                return false;
-            return level <= s7o_AutoGemUpgradeState.DebugLevel;
-        }
-
-        // Append a single line to the in-memory debug buffer. Each message is prefixed with a timestamp.
-        private void AppendDebugLine(string message)
-        {
-            try
-            {
-                string time = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture);
-                _debugBuffer.Add(time + " " + (message ?? string.Empty));
-                if (_debugBuffer.Count >= s7o_AutoGemUpgradeState.MaxBufferedLines)
-                    FlushDebugLines();
-            }
-            catch { }
-        }
-
-        // Flush buffered log lines to disk. Handles directory creation and basic file size limiting.
-        private void FlushDebugLines()
-        {
-            if (!s7o_AutoGemUpgradeState.DebugFileEnabled)
-            {
-                _debugBuffer.Clear();
-                return;
-            }
-            if (string.IsNullOrWhiteSpace(s7o_AutoGemUpgradeState.DebugLogPath))
-                s7o_AutoGemUpgradeState.DebugLogPath = s7o_AutoGemUpgradeState.ResolveDebugLogPath();
-            try
-            {
-                string dirName = Path.GetDirectoryName(s7o_AutoGemUpgradeState.DebugLogPath);
-                if (!string.IsNullOrEmpty(dirName) && !Directory.Exists(dirName))
-                    Directory.CreateDirectory(dirName);
-                if (File.Exists(s7o_AutoGemUpgradeState.DebugLogPath))
-                {
-                    long length = new FileInfo(s7o_AutoGemUpgradeState.DebugLogPath).Length;
-                    long maxBytes = (long)s7o_AutoGemUpgradeState.MaxFileSizeMb * 1024L * 1024L;
-                    if (length > maxBytes)
-                    {
-                        File.Delete(s7o_AutoGemUpgradeState.DebugLogPath);
-                    }
-                }
-                File.AppendAllLines(s7o_AutoGemUpgradeState.DebugLogPath, _debugBuffer);
-            }
-            catch { }
-            _debugBuffer.Clear();
-        }
-
-        // Start a new debug session by resolving the log path and emitting a session header.
-        private void StartDebugSession()
-        {
-            if (string.IsNullOrWhiteSpace(s7o_AutoGemUpgradeState.DebugLogPath))
-                s7o_AutoGemUpgradeState.DebugLogPath = s7o_AutoGemUpgradeState.ResolveDebugLogPath();
-            Log(() =>
-            {
-                return "=== session start | plugin=" + s7o_AutoGemUpgradeState.DebugPluginName
-                    + " | level=" + s7o_AutoGemUpgradeState.DebugLevel.ToString(CultureInfo.InvariantCulture)
-                    + " | file=" + (s7o_AutoGemUpgradeState.DebugFileEnabled ? "1" : "0")
-                    + " | path='" + s7o_AutoGemUpgradeState.DebugLogPath + "' ===";
-            }, s7o_AutoGemUpgradeState.DebugLevelState);
-        }
-
-        // Lazy logging overload. Evaluates the message factory only when logging is enabled and level allows.
-        private void Log(Func<string> messageFactory, int level = 1)
-        {
-            if (!ShouldLog(level))
-                return;
-            string msg;
-            try
-            {
-                msg = messageFactory != null ? messageFactory() : string.Empty;
-            }
-            catch
-            {
-                msg = "[log message factory threw]";
-            }
-            AppendDebugLine(msg);
         }
 
         public void PaintTopInGame(ClipState clipState)
@@ -10180,9 +7684,9 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             RebuildVirtualGrid(cap.ListBounds, liveCells);
             TryEnrichCellsFromDirectText(liveCells);
             UpdateViewportMetricsFromSnapshot();
-            LogViewportMetrics("refresh");
-            LogViewportGridMismatch(_currentSnapshot);
-            LogScrollLane("refresh", cap.PaneRect, cap.ListBounds);
+
+
+
             UpdateRuntimeBottomLock();
             return liveCells.Count > 0;
         }
@@ -10466,9 +7970,6 @@ private bool ValidateLoadedSelectionAgainstTarget(GemTarget target, out string o
                             sourceText = "acd-fast";
                             if (target.AbsoluteIndex >= 0)
                                 _confirmedSlotMap[target.AbsoluteIndex] = Tuple.Create(target.Name, target.Rank);
-                            // Rev 5.6.3 polish: log so debug runs can confirm the fast-path is firing.
-                            // State-level so it's on by default at DebugLevelState, off at DebugLevelOff.
-                            Log(() => "validate acd-fast: buttonAcd=" + fastButtonAcd + " == target acd=" + _targetAcd + " → confirmed (skipped text reads)", s7o_AutoGemUpgradeState.DebugLevelState);
                             return true;
                         }
                     }
@@ -10485,9 +7986,6 @@ private bool ValidateLoadedSelectionAgainstTarget(GemTarget target, out string o
                     && !string.IsNullOrEmpty(observedName) && observedRank >= 0)
                 {
                     _confirmedSlotMap[target.AbsoluteIndex] = Tuple.Create(observedName, observedRank);
-                    // observedName/observedRank are out params — capture locally before lambda
-                    string _logName = observedName; int _logRank = observedRank;
-                    Log(() => "confirmed slot a" + target.AbsoluteIndex + " = " + _logName + "#" + _logRank);
                 }
                 return true;
             }
@@ -10506,7 +8004,7 @@ private bool ValidateLoadedSelectionAgainstTarget(GemTarget target, out string o
                 if (target.AbsoluteIndex >= 0)
                 {
                     _confirmedSlotMap[target.AbsoluteIndex] = Tuple.Create(target.Name, target.Rank);
-                    Log(() => "confirmed slot a" + target.AbsoluteIndex + " = " + target.Name + "#" + target.Rank + " (rawmatch)");
+
                 }
                 return true;
             }
@@ -10520,8 +8018,7 @@ private bool ValidateLoadedSelectionAgainstTarget(GemTarget target, out string o
                 && SafeAnimState(_itemButton) != _preClickItemButtonAnim;
             if (stalePostUpgrade && !itemAnimChanged && buttonAnim == 27)
             {
-                Log(() => "validate fallback blocked: stale text, no item anim change (pre="
-                    + _preClickItemButtonAnim + " curr=" + SafeAnimState(_itemButton) + ")");
+
                 return false;
             }
             if (!FullListVerificationMode
@@ -10543,7 +8040,7 @@ private bool ValidateLoadedSelectionAgainstTarget(GemTarget target, out string o
                         uint buttonAcd = (uint)_itemButton.LegendaryGemAcdId;
                         if (buttonAcd == _targetAcd)
                         {
-                            Log(() => "validate ACD match: _itemButton.LegendaryGemAcdId=" + buttonAcd + " == target acd=" + _targetAcd + " → confirmed");
+
                             sourceText = string.IsNullOrWhiteSpace(sourceText) ? "acd-identity" : sourceText + "+acd";
                             if (string.IsNullOrWhiteSpace(observedName)) observedName = "<acd:" + target.Name + ">";
                             if (observedRank < 0) observedRank = target.Rank;
@@ -10555,27 +8052,22 @@ private bool ValidateLoadedSelectionAgainstTarget(GemTarget target, out string o
                                              && SafeAnimState(_itemButton) != _preClickItemButtonAnim;
                             if (!freshLoad)
                             {
-                                Log(() => "validate fallback blocked: ACD dead and no fresh anim change (preAnim="
-                                    + _preClickItemButtonAnim + " currAnim=" + SafeAnimState(_itemButton)
-                                    + ", targetAcd=" + _targetAcd
-                                    + (_lostLiveIdentityAfterScroll ? " [identity-loss]" : "") + ")");
+
                                 return false;
                             }
-                            Log(() => "validate blocked: ACD dead" + (_lostLiveIdentityAfterScroll ? " [identity-loss after scroll]" : "")
-                                + ", fresh gem load observed but permissive confirmation is disabled (preAnim=" + _preClickItemButtonAnim
-                                + "→" + SafeAnimState(_itemButton) + ", targetAcd=" + _targetAcd + ")");
+
                             return false;
                         }
                         else
                         {
-                            Log(() => "validate fallback blocked: ACD mismatch (buttonAcd=" + buttonAcd + " != targetAcd=" + _targetAcd + ") — wrong gem selected");
+
                             return false;
                         }
                     }
                     catch { }
                 }
 
-                Log(() => "validate blocked: projected slot a" + target.AbsoluteIndex + " loaded without hard proof, epoch=" + _viewportEpoch + " — permissive slot-loaded confirmation disabled");
+
                 return false;
             }
 
@@ -10731,9 +8223,7 @@ private void RebuildVirtualGrid(RectangleF listBounds, List<VisibleCell> visible
             if (_lastVirtualGridColumnSignature != -1
                 && (_lastVirtualGridColumnSignature != columnCount || _lastVirtualGridRowSignature != totalRowCount))
             {
-                Log(() => "grid-shape change: cols " + _lastVirtualGridColumnSignature + "→" + columnCount
-                    + ", rows " + _lastVirtualGridRowSignature + "→" + totalRowCount
-                    + " — invalidating cached bottom calibration");
+
                 _lastKnownPhysicalBottomTopRow = -1;
             _lastOrderedGemCountSignature = -1;
             _lastVirtualGridColumnSignature = -1;
@@ -10916,8 +8406,8 @@ private RectangleF GetTargetComfortBounds(RectangleF listBounds)
             {
                 _targetComfortNudgeAttempts = 0;
                 MoveCursorToPointNoClick(safeVisiblePoint, "skip-wheel-visible-target-" + reason);
-                Log(() => "comfort-nudge skipped: visible target is sufficiently exposed, reason=" + reason);
-                UpdateSharedDebugState("skip-nudge-visible-target", reason + " safe-visible", _target != null ? _target.AbsoluteIndex : int.MinValue, cell.RowIndex);
+
+
                 return false;
             }
 
@@ -10936,33 +8426,21 @@ private RectangleF GetTargetComfortBounds(RectangleF listBounds)
             if (edgeRow)
                 comfortable = false;
 
-            Log(() => "comfort-check: target a" + (_target != null ? _target.AbsoluteIndex.ToString(CultureInfo.InvariantCulture) : "-1")
-                + " topOverflow=" + topOverflow.ToString("0.0", CultureInfo.InvariantCulture)
-                + " bottomOverflow=" + bottomOverflow.ToString("0.0", CultureInfo.InvariantCulture)
-                + " edgeRow=" + (edgeRow ? "1" : "0")
-                + " comfortable=" + (comfortable ? "1" : "0")
-                + " reason=" + reason);
-            UpdateSharedDebugState("comfort-check",
-                "top=" + topOverflow.ToString("0.0", CultureInfo.InvariantCulture)
-                + " bottom=" + bottomOverflow.ToString("0.0", CultureInfo.InvariantCulture)
-                + " edge=" + (edgeRow ? "1" : "0")
-                + " ok=" + (comfortable ? "1" : "0")
-                + " reason=" + reason,
-                _target != null ? _target.AbsoluteIndex : int.MinValue,
-                cell.RowIndex);
+
+
 
             if (comfortable)
             {
                 _targetComfortNudgeAttempts = 0;
-                Log(() => "comfort-nudge skipped: visible target already comfortably clickable, reason=" + reason);
-                UpdateSharedDebugState("skip-nudge-visible-target", reason, _target != null ? _target.AbsoluteIndex : int.MinValue, cell.RowIndex);
+
+
                 return false;
             }
 
             if (_targetComfortNudgeAttempts >= MaxTargetComfortNudgeAttempts)
             {
-                Log(() => "comfort-nudge: giving up after " + MaxTargetComfortNudgeAttempts.ToString(CultureInfo.InvariantCulture) + " attempts");
-                UpdateSharedDebugState("comfort-giveup", reason, _target != null ? _target.AbsoluteIndex : int.MinValue, cell.RowIndex);
+
+
                 return false;
             }
 
@@ -10971,7 +8449,7 @@ private RectangleF GetTargetComfortBounds(RectangleF listBounds)
 
             // CHANGED: was (edgeRow || overflow < rowPitch*0.22f).
             // 0.22 was too narrow — a 34px clip on a 70px row (49%) fell through to legacy
-            // click-hold (Thread.Sleep). Now always prefer wheel; one tick = one row, which
+            // blocking click-hold. Always prefer wheel; one tick = one row, which
             // is exactly right for any partial-clip scenario. The legacy path is removed.
             bool useWheel = true;
             bool lateTp = _portalRequestedThisRun || (Hud.Game?.Me != null && Hud.Game.Me.AnimationState == AcdAnimationState.CastingPortal);
@@ -10995,18 +8473,8 @@ private RectangleF GetTargetComfortBounds(RectangleF listBounds)
                     ? _currentSnapshot.LiveVisibleCells.Count
                     : 0;
 
-                Log(() => "comfort-wheel-nudge: " + (downward ? "downward" : "upward")
-                    + " tick=1 because " + (downward ? "bottomOverflow=" : "topOverflow=")
-                    + overflow.ToString("0.0", CultureInfo.InvariantCulture)
-                    + (edgeRow ? " edgeRow=1" : string.Empty)
-                    + " reason=" + reason
-                    + (lateTp ? " [late-tp]" : string.Empty));
-                UpdateSharedDebugState("comfort-wheel-nudge",
-                    (downward ? "down" : "up") + " tick=1 overflow=" + overflow.ToString("0.0", CultureInfo.InvariantCulture)
-                    + " edge=" + (edgeRow ? "1" : "0")
-                    + " reason=" + reason,
-                    _target != null ? _target.AbsoluteIndex : int.MinValue,
-                    cell.RowIndex);
+
+
 
                 WheelScrollTick(downward, "comfort-nudge");
                 _wheelPostNudgeCorrectionPending = true;
@@ -11027,17 +8495,17 @@ private void ClickVisibleCell(VisibleCell cell)
                 return;
             if (!HasLiveViewportTruth())
             {
-                Log(() => "click blocked: no live viewport truth on current epoch");
+
                 return;
             }
             if (cell.IsProjected)
             {
-                Log(() => "click blocked: projected cell is travel-only and cannot be committed");
+
                 return;
             }
             if (!IsCurrentEpochLiveSlot(cell))
             {
-                Log(() => "click blocked: cell is not a verified live slot on the current viewport epoch");
+
                 return;
             }
 
@@ -11047,19 +8515,16 @@ private void ClickVisibleCell(VisibleCell cell)
             string cellTag = "probe-cell" + (_currentProbeAbsoluteIndex >= 0 ? (" a" + _currentProbeAbsoluteIndex) : string.Empty)
                 + " " + GetShortPath(cell.Ref != null ? cell.Ref.Path : string.Empty);
 
-            bool forceCoordinate = _lostLiveIdentityAfterScroll;
+            bool forceCoordinate = _lostLiveIdentityAfterScroll && !HasKnownTargetAcd();
 
             if (cell.Ref?.Element != null && !cell.IsProjected && !forceCoordinate)
             {
-                Log(() => "click " + cellTag + " via UIElement");
-                UpdateSharedDebugState("select-visible", cellTag + "|ui", _target != null ? _target.AbsoluteIndex : int.MinValue, cell.RowIndex);
+
+
                 ClickUi(cell.Ref.Element);
             }
             else
             {
-                if (forceCoordinate)
-                    Log(() => "click " + cellTag + " via coordinate (identity-loss: stale UIElement skipped)");
-
                 float x = cell.Rect.Left + cell.Rect.Width * 0.5f;
                 bool edgeBiasedClick = cell.IsProjected || forceCoordinate || _lostLiveIdentityAfterScroll;
                 float y;
@@ -11115,7 +8580,7 @@ private void ClickVisibleCell(VisibleCell cell)
                 {
                     y = cell.Rect.Top + cell.Rect.Height * 0.5f;
                 }
-                UpdateSharedDebugState("select-visible", cellTag + "|coord", _target != null ? _target.AbsoluteIndex : int.MinValue, cell.RowIndex);
+
                 ClickPoint(new PointF(x, y), cellTag, 0);
             }
         }
