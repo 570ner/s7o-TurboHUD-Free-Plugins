@@ -33,6 +33,7 @@ namespace Turbo.Plugins.s7o
         public bool EnableManualSlotAutoCast = true;
         public bool EnableAutomaticBuffUpkeep = true;
         public bool EnableConditionalAutoCastProfiles = true;
+        public bool PauseWhileWindowsKeyHeld = true;
 
         public int ConditionalProfileRecheckMs = 25;
         public int ConditionalProfileDelayMinMs = 100;
@@ -327,6 +328,11 @@ namespace Turbo.Plugins.s7o
         public void AfterCollect()
         {
             int now = Environment.TickCount;
+            if (PauseWhileWindowsKeyHeld && IsWindowsKeyDown())
+            {
+                ResetHoverToggle();
+                return;
+            }
 
             UpdateRecentMapTicks(now);
             RefreshSkillCacheIfNeeded(now);
@@ -476,6 +482,7 @@ namespace Turbo.Plugins.s7o
             if (Hud.Game.IsPaused) { reason = "paused"; return false; }
             if (Hud.Game.IsInTown && !allowTown) { reason = "in town"; return false; }
             if (Hud.Window == null || !Hud.Window.IsForeground) { reason = "window not foreground"; return false; }
+            if (PauseWhileWindowsKeyHeld && IsWindowsKeyDown()) { reason = "windows key held"; return false; }
             if (Hud.Render == null || Hud.Render.MinimapUiElement == null || !IsUiVisible(Hud.Render.MinimapUiElement)) { reason = "minimap hidden"; return false; }
 
             var me = Hud.Game.Me;
@@ -3851,6 +3858,11 @@ namespace Turbo.Plugins.s7o
         private static bool IsKeyPhysicallyDown(ushort virtualKey)
         {
             return (GetAsyncKeyState(virtualKey) & unchecked((short)0x8000)) != 0;
+        }
+
+        private static bool IsWindowsKeyDown()
+        {
+            return IsKeyPhysicallyDown(0x5B) || IsKeyPhysicallyDown(0x5C);
         }
 
         #endregion
