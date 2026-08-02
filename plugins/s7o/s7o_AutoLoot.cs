@@ -6,12 +6,17 @@ using Turbo.Plugins.Default;
 
 namespace Turbo.Plugins.s7o
 {
-    // REV20 commits to Urshi as soon as the established primary reward pile is clear.
+    // Commits to Urshi as soon as the established primary reward pile is clear.
     public class s7o_AutoLoot : BasePlugin, IAfterCollectHandler, IItemPickedHandler, IItemLocationChangedHandler, INewAreaHandler
     {
-        private const int RunRange = 5;
-        private const int IdleRange = 10;
-        private const int SpecialCleanupRange = 40;
+        public const int DefaultNormalPickupRangeYards = 10;
+        public const int DefaultEventPickupRangeYards = 40;
+        public const int MinNormalPickupRangeYards = 3;
+        public const int MaxNormalPickupRangeYards = 30;
+        public const int MinEventPickupRangeYards = 10;
+        public const int MaxEventPickupRangeYards = 120;
+
+        private const int MovingPickupRangeCapYards = 5;
         private const int LootBurstMonsterBlockYards = 45;
         private const int LootBurstThreshold = 8;
         private const int LootBurstLatchMs = 5000;
@@ -69,6 +74,8 @@ namespace Turbo.Plugins.s7o
         private const int AutoUrshiTalkLootCancelRetryMs = 70;
         private const int AutoUrshiTalkLootCancelMaxAttempts = 3;
         private const float AutoUrshiFarLootRiskYards = 55f;
+        private const float AutoUrshiBloodShardDetourYards = 12f;
+        private const int AutoUrshiBloodShardDetourMs = 1600;
         private const float AutoUrshiBreadcrumbStepYards = 12f;
         private const float AutoUrshiReturnMinClickYards = 5f;
         private const int AutoUrshiBreadcrumbMax = 8;
@@ -171,6 +178,9 @@ namespace Turbo.Plugins.s7o
         private NativePoint _autoUrshiRestorePoint;
         private long _postRiftCleanupStartedMs;
         private long _autoUrshiRewardGateStartedMs;
+        private int _autoUrshiBloodShardDetourSeed;
+        private long _autoUrshiBloodShardDetourUntilMs;
+        private bool _autoUrshiBloodShardDetourUsed;
         private readonly List<AutoUrshiReturnPoint> _autoUrshiReturnTrail = new List<AutoUrshiReturnPoint>(AutoUrshiBreadcrumbMax);
         private bool _autoUrshiHasLastSeenWorld;
         private float _autoUrshiLastSeenX;
@@ -194,6 +204,8 @@ namespace Turbo.Plugins.s7o
         private bool _enabled;
         private bool _paused;
         private bool _talkToUrshiAfterLoot;
+        private int _normalPickupRangeYards = DefaultNormalPickupRangeYards;
+        private int _eventPickupRangeYards = DefaultEventPickupRangeYards;
         private bool _primals = true, _ancients = true, _legendaries = true, _gems = true, _gifts = true, _screams = true, _trash, _materials = true, _deathsBreath;
         private uint _lastAreaSno;
         private bool _areaIsTown;
@@ -204,6 +216,8 @@ namespace Turbo.Plugins.s7o
         private float _lastPlayerX;
         private float _lastPlayerY;
         private bool _playerMoving;
+        private bool _deathSuspended;
+        private bool _townSuspended;
         private bool _pendingCursorRestore;
         private NativePoint _pendingCursorPoint;
         private long _pendingCursorRestoreAtMs;
@@ -238,10 +252,15 @@ namespace Turbo.Plugins.s7o
 
         public void ConfigureAutoLoot(bool enabled, bool primals, bool ancients, bool legendaries, bool gems, bool gifts, bool screams, bool trash, bool materials, bool deathsBreath)
         {
-            ConfigureAutoLoot(enabled, primals, ancients, legendaries, gems, gifts, screams, trash, materials, deathsBreath, false);
+            ConfigureAutoLoot(enabled, primals, ancients, legendaries, gems, gifts, screams, trash, materials, deathsBreath, false, DefaultNormalPickupRangeYards, DefaultEventPickupRangeYards);
         }
 
         public void ConfigureAutoLoot(bool enabled, bool primals, bool ancients, bool legendaries, bool gems, bool gifts, bool screams, bool trash, bool materials, bool deathsBreath, bool talkToUrshiAfterLoot)
+        {
+            ConfigureAutoLoot(enabled, primals, ancients, legendaries, gems, gifts, screams, trash, materials, deathsBreath, talkToUrshiAfterLoot, DefaultNormalPickupRangeYards, DefaultEventPickupRangeYards);
+        }
+
+        public void ConfigureAutoLoot(bool enabled, bool primals, bool ancients, bool legendaries, bool gems, bool gifts, bool screams, bool trash, bool materials, bool deathsBreath, bool talkToUrshiAfterLoot, int normalPickupRangeYards, int eventPickupRangeYards)
         {
             _enabled = enabled;
             _primals = primals;
@@ -254,6 +273,8 @@ namespace Turbo.Plugins.s7o
             _materials = materials;
             _deathsBreath = deathsBreath;
             _talkToUrshiAfterLoot = talkToUrshiAfterLoot;
+            _normalPickupRangeYards = Clamp(normalPickupRangeYards, MinNormalPickupRangeYards, MaxNormalPickupRangeYards);
+            _eventPickupRangeYards = Clamp(eventPickupRangeYards, MinEventPickupRangeYards, MaxEventPickupRangeYards);
             if (!_talkToUrshiAfterLoot)
             {
                 _autoUrshiHandoffCommitted = false;
@@ -267,6 +288,8 @@ namespace Turbo.Plugins.s7o
         }
 
         public bool IsPaused { get { return _paused; } }
+        public int NormalPickupRangeYards { get { return _normalPickupRangeYards; } }
+        public int EventPickupRangeYards { get { return _eventPickupRangeYards; } }
 
         public void SetPaused(bool paused)
         {
@@ -351,6 +374,8 @@ namespace Turbo.Plugins.s7o
                 ClearGenericUrshiRecoveryState();
             if (_accidentalUrshiRecoverySeed == item.Seed)
                 ClearAccidentalUrshiRecoveryState();
+            if (_autoUrshiBloodShardDetourSeed == item.Seed)
+                CompleteAutoUrshiBloodShardDetour();
         }
 
         public void OnItemLocationChanged(IItem item, ItemLocation from, ItemLocation to)
@@ -358,6 +383,8 @@ namespace Turbo.Plugins.s7o
             if (item == null) return;
             if (from == ItemLocation.Floor && to != ItemLocation.Floor)
             {
+                if (item.Seed == _autoUrshiBloodShardDetourSeed)
+                    CompleteAutoUrshiBloodShardDetour();
                 if (to == ItemLocation.Inventory)
                     TrackAutoUrshiRewardPickup(item);
                 MarkLootPickupProgress();
@@ -390,25 +417,24 @@ namespace Turbo.Plugins.s7o
 
         public void AfterCollect()
         {
-            if (Hud != null && Hud.Game != null && Hud.Game.IsInGame)
-                ProcessPendingCursorRestore(Hud.Game.CurrentRealTimeMilliseconds);
-
-            if (!_enabled || _paused || Hud == null || Hud.Game == null || !Hud.Game.IsInGame || Hud.Game.IsPaused || !Hud.Window.IsForeground)
-                return;
-
-            long now = Hud.Game.CurrentRealTimeMilliseconds;
-            if (Hud.Game.IsLoading)
+            if (Hud == null || Hud.Game == null || !Hud.Game.IsInGame)
                 return;
 
             IPlayer me = Hud.Game.Me;
             if (me == null)
                 return;
 
-            if (HandlePendingAccidentalUrshiRecovery(now, me))
+            if (me.IsDead || me.IsDeadSafeCheck)
+            {
+                if (!_deathSuspended)
+                {
+                    ResetRuntimeState(true);
+                    _deathSuspended = true;
+                }
                 return;
+            }
 
-            if (me.Powers == null || me.Powers.CantMove)
-                return;
+            _deathSuspended = false;
 
             ISnoArea area = me.SnoArea;
             uint areaSno = area != null ? area.Sno : 0;
@@ -420,21 +446,38 @@ namespace Turbo.Plugins.s7o
             }
 
             ISnoArea sceneArea = me.Scene != null ? me.Scene.SnoArea : null;
+            bool townContext = _areaIsTown || Hud.Game.IsInTown || me.IsInTown ||
+                (area != null && area.IsTown) || (sceneArea != null && sceneArea.IsTown);
+            if (townContext)
+            {
+                if (!_townSuspended)
+                {
+                    ResetRuntimeState(true);
+                    _townSuspended = true;
+                }
+                return;
+            }
+
+            _townSuspended = false;
+            ProcessPendingCursorRestore(Hud.Game.CurrentRealTimeMilliseconds);
+
+            if (!_enabled || _paused || Hud.Game.IsPaused || !Hud.Window.IsForeground)
+                return;
+
+            long now = Hud.Game.CurrentRealTimeMilliseconds;
+            if (Hud.Game.IsLoading)
+                return;
+
+            if (HandlePendingAccidentalUrshiRecovery(now, me))
+                return;
+
+            if (me.Powers == null || me.Powers.CantMove)
+                return;
+
             if (area != null && sceneArea != null && area.IsTown != sceneArea.IsTown)
             {
                 _lootBurstCleanupUntilMs = 0;
                 return;
-            }
-
-            bool townContext = _areaIsTown || Hud.Game.IsInTown || me.IsInTown ||
-                (area != null && area.IsTown) || (sceneArea != null && sceneArea.IsTown);
-            bool townLootBurst = false;
-            if (townContext)
-            {
-                IActor townProtectedChest = GetUnopenedProtectedChest();
-                townLootBurst = townProtectedChest == null && IsLootBurstCleanup(now, true);
-                if (!townLootBurst)
-                    return;
             }
 
             if (ShouldPauseForGoblinPack(now))
@@ -463,9 +506,9 @@ namespace Turbo.Plugins.s7o
 
             IActor protectedChest = GetUnopenedProtectedChest();
             bool protectedChestBlocked = protectedChest != null;
-            bool postRiftCleanup = !townContext && !protectedChestBlocked && IsPostRiftCleanup();
+            bool postRiftCleanup = !protectedChestBlocked && IsPostRiftCleanup();
             TrackPostRiftCleanupWindow(postRiftCleanup, now);
-            bool lootBurstCleanup = townLootBurst || (!protectedChestBlocked && IsLootBurstCleanup(now, false));
+            bool lootBurstCleanup = !protectedChestBlocked && IsLootBurstCleanup(now);
             bool wideCleanup = postRiftCleanup || lootBurstCleanup;
             var state = me.AnimationState;
             bool combatAction = state == AcdAnimationState.Attacking || state == AcdAnimationState.Casting || state == AcdAnimationState.Channeling;
@@ -476,11 +519,16 @@ namespace Turbo.Plugins.s7o
             if (!wideCleanup && combatAction && !playerMoving)
                 return;
 
-            int range = postRiftCleanup ? int.MaxValue : (lootBurstCleanup ? SpecialCleanupRange : ((state == AcdAnimationState.Running || (combatAction && playerMoving)) ? RunRange : IdleRange));
+            int normalRange = (state == AcdAnimationState.Running || (combatAction && playerMoving))
+                ? Math.Min(MovingPickupRangeCapYards, _normalPickupRangeYards)
+                : _normalPickupRangeYards;
+            int range = wideCleanup ? _eventPickupRangeYards : normalRange;
             int freeSlots = SafeFreeSlots();
             IActor urshi = GetUrshiActor();
             TrackAutoUrshiReturnState(postRiftCleanup, now, urshi);
             BeginAutoUrshiRewardBatch(postRiftCleanup, now, urshi != null);
+            if (postRiftCleanup && _autoUrshiHandoffCommitted)
+                TryArmAutoUrshiBloodShardDetour(now);
 
             var candidates = Hud.Game.Items
                 .Where(i => i != null && i.Location == ItemLocation.Floor && i.IsOnScreen && !IsExcludedPickup(i) && !IsSuppressedDroppedItem(i, now) && !IsCleanupStuckIgnored(i, now) && !IsProtectedChestRisk(i, protectedChest) && i.CentralXyDistanceToMe <= range)
@@ -601,6 +649,66 @@ namespace Turbo.Plugins.s7o
         {
             _autoUrshiRewardSeedsSeen.Clear();
             _autoUrshiRewardGateStartedMs = 0;
+            ResetAutoUrshiBloodShardDetour();
+        }
+
+        private void ResetAutoUrshiBloodShardDetour()
+        {
+            _autoUrshiBloodShardDetourSeed = 0;
+            _autoUrshiBloodShardDetourUntilMs = 0;
+            _autoUrshiBloodShardDetourUsed = false;
+        }
+
+        private void CompleteAutoUrshiBloodShardDetour()
+        {
+            _autoUrshiBloodShardDetourSeed = 0;
+            _autoUrshiBloodShardDetourUntilMs = 0;
+            _autoUrshiBloodShardDetourUsed = true;
+        }
+
+        private void TryArmAutoUrshiBloodShardDetour(long now)
+        {
+            if (_autoUrshiBloodShardDetourUsed)
+                return;
+            if (IsBloodShardCapped())
+            {
+                _autoUrshiBloodShardDetourUsed = true;
+                return;
+            }
+
+            try
+            {
+                float maxDistance = Math.Min(AutoUrshiBloodShardDetourYards, _eventPickupRangeYards);
+                IItem shard = Hud.Game.Items
+                    .Where(i => i != null && i.Location == ItemLocation.Floor && i.IsOnScreen &&
+                        IsBloodShard(i) && !IsSuppressedDroppedItem(i, now) &&
+                        !IsCleanupStuckIgnored(i, now) && i.CentralXyDistanceToMe <= maxDistance)
+                    .OrderBy(i => i.CentralXyDistanceToMe)
+                    .FirstOrDefault();
+
+                if (shard == null)
+                    return;
+
+                _autoUrshiBloodShardDetourUsed = true;
+                _autoUrshiBloodShardDetourSeed = shard.Seed;
+                _autoUrshiBloodShardDetourUntilMs = now + AutoUrshiBloodShardDetourMs;
+            }
+            catch { }
+        }
+
+        private bool IsAutoUrshiBloodShardDetour(IItem item)
+        {
+            if (item == null || item.Seed != _autoUrshiBloodShardDetourSeed)
+                return false;
+
+            long now = Hud.Game.CurrentRealTimeMilliseconds;
+            if (now > _autoUrshiBloodShardDetourUntilMs || IsBloodShardCapped())
+            {
+                CompleteAutoUrshiBloodShardDetour();
+                return false;
+            }
+
+            return IsBloodShard(item);
         }
 
         private void BeginAutoUrshiRewardBatch(bool postRiftCleanup, long now, bool urshiAvailable)
@@ -1020,8 +1128,32 @@ namespace Turbo.Plugins.s7o
             return a.FloorCoordinate != null && b.FloorCoordinate != null && a.FloorCoordinate.XYDistanceTo(b.FloorCoordinate) <= StackedLootWorldRadiusYards;
         }
 
+        private void PauseDhStrafeForPickup()
+        {
+            try
+            {
+                s7o_DHStrafePrimaryPlugin strafe = Hud.GetPlugin<s7o_DHStrafePrimaryPlugin>();
+                if (strafe != null && strafe.Enabled)
+                    strafe.PauseForAutoLootPickup();
+            }
+            catch { }
+        }
+
+        private void StopDhStrafeForUrshiHandoff()
+        {
+            try
+            {
+                s7o_DHStrafePrimaryPlugin strafe = Hud.GetPlugin<s7o_DHStrafePrimaryPlugin>();
+                if (strafe != null)
+                    strafe.StopForAutoLootUrshiHandoff();
+            }
+            catch { }
+        }
+
         private void ClickItem(IItem item, bool riskyUrshi, bool cleanup, bool stackedLoot, long now)
         {
+            PauseDhStrafeForPickup();
+
             NativePoint old = new NativePoint();
             bool restore = !cleanup && GetCursorPos(out old);
             int tries = 0;
@@ -1051,7 +1183,7 @@ namespace Turbo.Plugins.s7o
             _lastClickSeed = item.Seed;
             if (stackedLoot)
                 _stackedLootSkipUntilMs[item.Seed] = now + StackedLootSkipMs;
-            _lastCleanupClickFar = cleanup && item.CentralXyDistanceToMe > IdleRange;
+            _lastCleanupClickFar = cleanup && item.CentralXyDistanceToMe > _normalPickupRangeYards;
             _lastClickMs = now;
         }
 
@@ -1085,6 +1217,8 @@ namespace Turbo.Plugins.s7o
                 if (Hud == null || Hud.Game == null || Hud.Game.Items == null) return false;
 
                 long now = Hud.Game.CurrentRealTimeMilliseconds;
+                if (_autoUrshiHandoffCommitted && !_autoUrshiTalkDone && !_autoUrshiGemHandoffActive)
+                    TryArmAutoUrshiBloodShardDetour(now);
                 IActor protectedChest = GetUnopenedProtectedChest();
                 int freeSlots = SafeFreeSlots();
 
@@ -1154,7 +1288,7 @@ namespace Turbo.Plugins.s7o
                     MouseLeftClick();
 
                     _lastClickSeed = item.Seed;
-                    _lastCleanupClickFar = item.CentralXyDistanceToMe > IdleRange;
+                    _lastCleanupClickFar = item.CentralXyDistanceToMe > _normalPickupRangeYards;
                     _lastClickMs = now;
                     return true;
                 }
@@ -1309,7 +1443,7 @@ namespace Turbo.Plugins.s7o
 
             if (actor == ActorSnoEnum._horadricrelic) return IsBloodShardCapped() ? -1 : 0;
             if (IsGreaterRiftKey(actor)) return 1;
-            if (PlanActors.Contains(actor) || IsWhisper(item)) return 2;
+            if (IsPlan(item) || IsWhisper(item)) return 2;
             if (actor == ActorSnoEnum._crafting_looted_reagent_05) return _deathsBreath ? 40 : -1;
             if (_materials && NoSpaceActors.Contains(actor)) return 3;
             if (_gifts && (itemSno == RamaladniGiftSno || actor == ActorSnoEnum._consumable_add_sockets || actor == ActorSnoEnum._consumable_add_sockets_flippy)) return 4;
@@ -1329,11 +1463,52 @@ namespace Turbo.Plugins.s7o
         {
             if (IsNoSpacePickup(item)) return true;
             if (item.AccountBound && !item.BoundToMyAccount) return false;
+            if (IsPlan(item)) return HasFreeInventoryCell();
             if (freeSlots <= 0) return HasMatchingStack(item);
             if (freeSlots > 1 || item.SnoItem == null) return true;
             string group = item.SnoItem.MainGroupCode ?? string.Empty;
             ItemKind kind = item.SnoItem.Kind;
             return kind == ItemKind.uberstuff || kind == ItemKind.craft || kind == ItemKind.gem || group == "gems_unique" || group == "ring" || group == "amulet" || group == "belt" || group == "consumable";
+        }
+
+        private static bool IsPlan(IItem item)
+        {
+            return item != null && item.SnoActor != null && PlanActors.Contains(item.SnoActor.Sno);
+        }
+
+        private bool HasFreeInventoryCell()
+        {
+            try
+            {
+                IPlayer me = Hud != null && Hud.Game != null ? Hud.Game.Me : null;
+                if (me == null || Hud.Inventory == null) return false;
+
+                int total = me.InventorySpaceTotal;
+                if (total <= 0) return false;
+
+                const int columns = 10;
+                var occupied = new bool[total];
+                foreach (IItem inventoryItem in Hud.Inventory.ItemsInInventory)
+                {
+                    if (inventoryItem == null || inventoryItem.InventoryX < 0 || inventoryItem.InventoryY < 0)
+                        continue;
+
+                    int width = inventoryItem.SnoItem != null ? Math.Max(1, inventoryItem.SnoItem.ItemWidth) : 1;
+                    int height = inventoryItem.SnoItem != null ? Math.Max(1, inventoryItem.SnoItem.ItemHeight) : 1;
+                    for (int y = 0; y < height; y++)
+                    {
+                        for (int x = 0; x < width; x++)
+                        {
+                            int slot = (inventoryItem.InventoryY + y) * columns + inventoryItem.InventoryX + x;
+                            if (slot >= 0 && slot < total)
+                                occupied[slot] = true;
+                        }
+                    }
+                }
+
+                return occupied.Any(slot => !slot);
+            }
+            catch { return false; }
         }
 
         private bool HasMatchingStack(IItem item)
@@ -1381,6 +1556,38 @@ namespace Turbo.Plugins.s7o
             return item.SnoItem.Kind == ItemKind.gem || string.Equals(item.SnoItem.MainGroupCode, "gems_unique", StringComparison.OrdinalIgnoreCase);
         }
 
+        private static bool IsLegendaryGem(IItem item)
+        {
+            return item != null && item.SnoItem != null &&
+                string.Equals(item.SnoItem.MainGroupCode, "gems_unique", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private bool IsUnownedLegendaryGem(IItem item)
+        {
+            if (!IsLegendaryGem(item))
+                return false;
+
+            uint sno = item.SnoItem.Sno;
+            try
+            {
+                return !Hud.Game.Items.Any(owned =>
+                    owned != null && owned.Location != ItemLocation.Floor &&
+                    ContainsLegendaryGem(owned, sno));
+            }
+            catch { return true; }
+        }
+
+        private static bool ContainsLegendaryGem(IItem item, uint sno)
+        {
+            return (IsLegendaryGem(item) && item.SnoItem.Sno == sno) ||
+                (item.ItemsInSocket != null && item.ItemsInSocket.Any(g => IsLegendaryGem(g) && g.SnoItem.Sno == sno));
+        }
+
+        private static bool IsBloodShard(IItem item)
+        {
+            return item != null && item.SnoActor != null && item.SnoActor.Sno == ActorSnoEnum._horadricrelic;
+        }
+
         private static bool IsLegendaryLike(IItem item)
         {
             if (item == null) return false;
@@ -1409,7 +1616,9 @@ namespace Turbo.Plugins.s7o
         {
             return !_talkToUrshiAfterLoot
                 || !_autoUrshiHandoffCommitted
-                || (item != null && item.AncientRank >= 1 && IsLegendaryLike(item));
+                || (item != null && item.AncientRank >= 1 && IsLegendaryLike(item))
+                || IsUnownedLegendaryGem(item)
+                || IsAutoUrshiBloodShardDetour(item);
         }
 
         private static bool IsWhisper(IItem item)
@@ -1430,7 +1639,7 @@ namespace Turbo.Plugins.s7o
         private int SafeFreeSlots()
         {
             try { return Hud.Game.Me.InventorySpaceTotal - Hud.Game.InventorySpaceUsed; }
-            catch { return 2; }
+            catch { return 0; }
         }
 
         private bool UpdatePlayerMovement(long now)
@@ -1465,7 +1674,7 @@ namespace Turbo.Plugins.s7o
             catch { return false; }
         }
 
-        private bool IsLootBurstCleanup(long now, bool allowTown)
+        private bool IsLootBurstCleanup(long now)
         {
             if (HasUnopenedProtectedChestNearby(ProtectedChestBlockYards) || HasActiveVisionFight())
             {
@@ -1473,7 +1682,7 @@ namespace Turbo.Plugins.s7o
                 return false;
             }
 
-            if (!allowTown && HasNearbyAttackableMonster(LootBurstMonsterBlockYards))
+            if (HasNearbyAttackableMonster(LootBurstMonsterBlockYards))
             {
                 _lootBurstCleanupUntilMs = 0;
                 return false;
@@ -1487,7 +1696,7 @@ namespace Turbo.Plugins.s7o
                 int count = 0;
                 foreach (var item in Hud.Game.Items)
                 {
-                    if (item == null || item.Location != ItemLocation.Floor || !item.IsOnScreen || item.CentralXyDistanceToMe > SpecialCleanupRange) continue;
+                    if (item == null || item.Location != ItemLocation.Floor || !item.IsOnScreen || item.CentralXyDistanceToMe > _eventPickupRangeYards) continue;
                     if (IsExcludedPickup(item) || IsSuppressedDroppedItem(item, now) || WantedPriority(item) < 0 || !CanFit(item, freeSlots)) continue;
                     if (++count >= LootBurstThreshold)
                     {
@@ -1824,7 +2033,9 @@ namespace Turbo.Plugins.s7o
             if (!IsAutoUrshiRewardBatchReady(now))
                 return false;
 
+            TryArmAutoUrshiBloodShardDetour(now);
             _autoUrshiHandoffCommitted = true;
+            StopDhStrafeForUrshiHandoff();
             return true;
         }
 
@@ -2373,6 +2584,7 @@ namespace Turbo.Plugins.s7o
             _autoUrshiTalkDone = true;
             _autoUrshiHandoffCommitted = true;
             _autoUrshiGemHandoffActive = true;
+            CompleteAutoUrshiBloodShardDetour();
 
             _autoUrshiHasRestorePoint = false;
             _autoUrshiRestorePoint = new NativePoint();
@@ -2938,6 +3150,13 @@ namespace Turbo.Plugins.s7o
             public readonly int Priority;
             public readonly bool UrshiRisk;
             public LootCandidate(IItem item, int priority, bool urshiRisk) { Item = item; Priority = priority; UrshiRisk = urshiRisk; }
+        }
+
+        private static int Clamp(int value, int min, int max)
+        {
+            if (value < min) return min;
+            if (value > max) return max;
+            return value;
         }
     }
 }
