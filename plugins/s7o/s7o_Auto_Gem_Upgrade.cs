@@ -3838,6 +3838,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
                 AddEquippedJewelryGemIfAny(ordered, ItemLocation.LeftRing);
                 AddEquippedJewelryGemIfAny(ordered, ItemLocation.RightRing);
                 AddEquippedJewelryGemIfAny(ordered, ItemLocation.Neck);
+                AddAdditionalSocketedLegendaryGems(ordered);
             }
             catch { }
 
@@ -3903,6 +3904,30 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
                 var directGem = Hud.Game.Items.Where(IsLegendaryGem).FirstOrDefault(i => i.Location == location);
                 if (directGem != null)
                     list.Add(directGem);
+            }
+            catch { }
+        }
+
+        private void AddAdditionalSocketedLegendaryGems(List<IItem> list)
+        {
+            try
+            {
+                foreach (var gem in Hud.Game.Items.Where(i => IsLegendaryGem(i) && i.Location == ItemLocation.InSocket))
+                    list.Add(gem);
+            }
+            catch { }
+
+            try
+            {
+                foreach (var parent in Hud.Game.Items.Where(i => i != null))
+                {
+                    var socketed = parent.ItemsInSocket;
+                    if (socketed == null)
+                        continue;
+
+                    foreach (var gem in socketed.Where(IsLegendaryGem))
+                        list.Add(gem);
+                }
             }
             catch { }
         }
@@ -5030,6 +5055,16 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
                 return false;
 
             deltaRows = desiredTopRow - currentTopRow;
+
+            int liveDirection;
+            if (TryGetTargetDirectionFromLiveMappedRange(_target, out liveDirection)
+                && liveDirection != 0
+                && (deltaRows == 0 || Math.Sign(deltaRows) != liveDirection))
+            {
+                desiredTopRow = currentTopRow + liveDirection;
+                deltaRows = liveDirection;
+            }
+
             return deltaRows != 0;
         }
 
@@ -5101,6 +5136,10 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
         {
             if (target == null || _absoluteGrid == null)
                 return false;
+
+            int liveDirection;
+            if (TryGetTargetDirectionFromLiveMappedRange(target, out liveDirection))
+                return liveDirection == 0;
 
             int targetRow = Math.Max(0, target.AbsoluteIndex / 5);
             int currentTop = Math.Max(0, _absoluteGrid.ViewportTopRowInt);
@@ -5547,6 +5586,59 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             return _targetAcd != 0 && _targetAcd != 0xFFFFFFFF;
         }
 
+        private bool TryGetTargetDirectionFromLiveMappedRange(GemTarget target, out int direction)
+        {
+            direction = 0;
+            if (target == null || _currentSnapshot == null || _currentSnapshot.LiveVisibleCells == null
+                || _orderedGems == null || _orderedGems.Count == 0)
+                return false;
+
+            if (FindLiveTargetCell(_currentSnapshot.LiveVisibleCells) != null)
+                return true;
+
+            int firstAbsoluteIndex = int.MaxValue;
+            int lastAbsoluteIndex = int.MinValue;
+            int mappedCount = 0;
+
+            foreach (var cell in _currentSnapshot.LiveVisibleCells)
+            {
+                if (cell == null || cell.IsProjected || cell.Ref == null)
+                    continue;
+
+                uint acd = cell.Ref.CachedLegendaryGemAcdId;
+                if (acd == 0 || acd == 0xFFFFFFFF)
+                    continue;
+
+                GemOrderEntry match = null;
+                for (int i = 0; i < _orderedGems.Count; i++)
+                {
+                    GemOrderEntry candidate = _orderedGems[i];
+                    if (SafeGemOrderEntryAcd(candidate) == acd)
+                    {
+                        match = candidate;
+                        break;
+                    }
+                }
+
+                if (match == null)
+                    continue;
+
+                firstAbsoluteIndex = Math.Min(firstAbsoluteIndex, match.AbsoluteIndex);
+                lastAbsoluteIndex = Math.Max(lastAbsoluteIndex, match.AbsoluteIndex);
+                mappedCount++;
+            }
+
+            if (mappedCount < 2)
+                return false;
+
+            if (target.AbsoluteIndex < firstAbsoluteIndex)
+                direction = -1;
+            else if (target.AbsoluteIndex > lastAbsoluteIndex)
+                direction = 1;
+
+            return true;
+        }
+
         private bool IsLiveTargetIdentityCell(VisibleCell cell)
         {
             return cell != null
@@ -5604,6 +5696,14 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
 
             if (_target == null || _virtualGrid == null || _virtualGrid.ColumnCount <= 0)
                 return false;
+
+            int liveDirection;
+            if (TryGetTargetDirectionFromLiveMappedRange(_target, out liveDirection))
+            {
+                targetAbove = liveDirection < 0;
+                targetBelow = liveDirection > 0;
+                return liveDirection != 0;
+            }
 
             int currentTop = GetAuthoritativeViewportTopRow();
             int currentBottom = GetCurrentViewportBottomRow();
@@ -6321,7 +6421,22 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
 
         private static string BuildItemKey(IItem item)
         {
-            return GetGemName(item) + "|" + item.JewelRank.ToString() + "|" + item.Location.ToString() + "|" + item.InventoryX.ToString() + "|" + item.InventoryY.ToString();
+            try
+            {
+                uint acd = item != null ? (uint)item.AcdId : 0u;
+                if (acd != 0u && acd != 0xFFFFFFFFu)
+                    return "acd|" + acd.ToString();
+            }
+            catch { }
+
+            try
+            {
+                if (item != null && !string.IsNullOrWhiteSpace(item.ItemUniqueId))
+                    return "uid|" + item.ItemUniqueId;
+            }
+            catch { }
+
+            return GetGemName(item) + "|" + item.JewelRank.ToString() + "|" + item.Location.ToString() + "|" + item.InventoryX.ToString() + "|" + item.InventoryY.ToString() + "|" + item.Seed.ToString();
         }
 
         private static int GetHardCap(string gemName)
