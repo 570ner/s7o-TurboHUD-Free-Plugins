@@ -258,6 +258,7 @@ namespace Turbo.Plugins.s7o
         private Key _zbarbAutoSnapHotkey = Key.Space;
         private bool _zbarbAutoSnapHotkeyCapture = false;
         private bool _zbarbAutoSnapExpanded = false;
+        private bool _zdhHelperExpanded = false;
         private int _zbarbAutoSnapConeDegrees = 30;
         private const int ZBarbAutoSnapConeMin = 8;
         private const int ZBarbAutoSnapConeMax = 45;
@@ -3191,6 +3192,14 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
+            if (action.Equals("zdh:expand", StringComparison.OrdinalIgnoreCase)
+                || action.Equals("zdh:toggle", StringComparison.OrdinalIgnoreCase)
+                || action.StartsWith("zdh:option:", StringComparison.OrdinalIgnoreCase))
+            {
+                HandleZdhHelperOptionAction(action);
+                return;
+            }
+
             if (action.Equals("autoloot:expand", StringComparison.OrdinalIgnoreCase)
                 || action.Equals("autoloot:toggle", StringComparison.OrdinalIgnoreCase)
                 || action.Equals("autoloot:hotkey", StringComparison.OrdinalIgnoreCase)
@@ -5888,7 +5897,6 @@ namespace Turbo.Plugins.s7o
                 bool showHotkeyBindRow = _autoSnapHotkeysExpanded;
                 return _autoSnapExpanded ? (showHotkeyBindRow ? 236f : 176f) : 72f;
             }
-
 
             if (kind == MainPanelKind.Hotkeys)
             {
@@ -11808,6 +11816,9 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             public bool   IsZBarbSelector;
             public bool   IsZBarbChild;
             public int    ZBarbOptionKind;
+            public bool   IsZdhHelperSelector;
+            public bool   IsZdhHelperChild;
+            public int    ZdhHelperOptionKind;
             public RiftMapGroup RiftGroup;
             public RiftMapGroup RiftGroupRight;
             public string[] PluginTypeNames;
@@ -11887,6 +11898,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
         private const float OpenGrMapChildSlotH = 22f;
         private const float AutoSkillKeybindChildSlotH = 58f;
         private const float PestilenceChildSlotH = 36f;
+        private const float ZdhHelperChildSlotH = 66f;
         private const float ZBarbConeChildSlotH = 84f;
         private const float MacroEntryH = 76f;
         private const float MacroHeaderH = 36f;
@@ -11910,6 +11922,9 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             if (item.Entry.IsZBarbChild)
                 return ZBarbConeChildSlotH;
+
+            if (item.Entry.IsZdhHelperChild)
+                return ZdhHelperChildSlotH;
 
             return MacroListSlotH;
         }
@@ -11949,6 +11964,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             if (entry.IsZBarbChild)
             {
                 DrawZBarbAutoSnapChildRow(slot, entry, rowIdx);
+                return;
+            }
+
+            if (entry.IsZdhHelperChild)
+            {
+                DrawZdhHelperChildRow(slot, entry, rowIdx);
                 return;
             }
 
@@ -12019,6 +12040,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 installed = plugin != null;
                 enabled = installed && SafePluginEnabled(plugin);
             }
+            else if (entry.IsZdhHelperSelector)
+            {
+                installed = FindPluginByTypeName("s7o_ZDH_Helper") != null;
+                s7o_ZDH_HelperState.EnsureLoaded();
+                enabled = installed && s7o_ZDH_HelperState.Enabled;
+            }
             else if (entry.IsPlugin)
             {
                 IPlugin plugin = FindPluginByTypeName(entry.PluginTypeNames);
@@ -12038,7 +12065,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             RectangleF stateR = new RectangleF(rr.Right - stateW - 8f, rr.Top + 6f, stateW, rr.Height - 12f);
             RectangleF expandR = RectangleF.Empty;
-            if (entry.IsPestilenceSelector || entry.IsInariusSelector || entry.IsAutoLootSelector || entry.IsInventoryDropSelector || entry.IsZBarbSelector)
+            if (entry.IsPestilenceSelector || entry.IsInariusSelector || entry.IsAutoLootSelector || entry.IsInventoryDropSelector || entry.IsZBarbSelector || entry.IsZdhHelperSelector)
             {
                 expandR = new RectangleF(stateR.Left - 34f - buttonGap, rr.Top + 6f, 34f, rr.Height - 12f);
             }
@@ -12046,14 +12073,14 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             RectangleF hotkeyR = RectangleF.Empty;
             if (entry.HasHotkeyButton)
             {
-                float hotkeyLeft = ((entry.IsPestilenceSelector || entry.IsInariusSelector || entry.IsAutoLootSelector || entry.IsInventoryDropSelector || entry.IsZBarbSelector) && expandR != RectangleF.Empty)
+                float hotkeyLeft = ((entry.IsPestilenceSelector || entry.IsInariusSelector || entry.IsAutoLootSelector || entry.IsInventoryDropSelector || entry.IsZBarbSelector || entry.IsZdhHelperSelector) && expandR != RectangleF.Empty)
                     ? (expandR.Left - hotkeyW - hotkeyExpandGap)
                     : (stateR.Left - hotkeyW - buttonGap);
                 hotkeyR = new RectangleF(hotkeyLeft, rr.Top + 6f, hotkeyW, rr.Height - 12f);
             }
 
             float textX = starR.Right + 10f;
-            float textRight = entry.HasHotkeyButton ? hotkeyR.Left - 10f : ((entry.IsPestilenceSelector || entry.IsInariusSelector || entry.IsAutoLootSelector || entry.IsInventoryDropSelector) ? expandR.Left - 10f : stateR.Left - 10f);
+            float textRight = entry.HasHotkeyButton ? hotkeyR.Left - 10f : ((entry.IsPestilenceSelector || entry.IsInariusSelector || entry.IsAutoLootSelector || entry.IsInventoryDropSelector || entry.IsZdhHelperSelector) ? expandR.Left - 10f : stateR.Left - 10f);
             float textW = Math.Max(40f, textRight - textX);
 
             string localizedTitle = GetMacroTitleDisplay(entry);
@@ -12093,6 +12120,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 stateLabel = installed ? (_autoLootEnabled ? "ON" : "OFF") : "NOT INSTALLED";
             else if (entry.IsInventoryDropSelector)
                 stateLabel = installed ? (_inventoryDropEnabled ? "ON" : "OFF") : "NOT INSTALLED";
+            else if (entry.IsZdhHelperSelector)
+                stateLabel = installed ? (s7o_ZDH_HelperState.Enabled ? "ON" : "OFF") : "NOT INSTALLED";
             else if (entry.IsPlugin)
                 stateLabel = installed ? (enabled ? "ON" : "OFF") : "NOT INSTALLED";
             else
@@ -12103,6 +12132,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 entry.IsAutoSkillKeybindSelector ||
                 entry.IsAutoLootSelector ||
                 entry.IsInventoryDropSelector ||
+                entry.IsZdhHelperSelector ||
                 entry.IsPestilenceStackTarget ||
                 entry.IsPlugin)
             {
@@ -12135,6 +12165,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             {
                 DrawGlossButton(expandR, _inventoryDropExpanded ? "-" : "+", _inventoryDropExpanded, false, false);
                 RegisterToggleHit("inventorydrop:expand", expandR);
+            }
+
+            if (entry.IsZdhHelperSelector)
+            {
+                DrawGlossButton(expandR, _zdhHelperExpanded ? "-" : "+", _zdhHelperExpanded, false, false);
+                RegisterToggleHit("zdh:expand", expandR);
             }
 
             if (entry.IsPestilenceSelector)
@@ -12172,6 +12208,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     RegisterToggleHit("autoloot:toggle", stateR);
                 else if (entry.IsInventoryDropSelector)
                     RegisterToggleHit("inventorydrop:toggle", stateR);
+                else if (entry.IsZdhHelperSelector)
+                    RegisterToggleHit("zdh:toggle", stateR);
                 else if (entry.IsPestilenceStackTarget)
                     RegisterToggleHit(entry.PestilenceStackKind == 2 ? "pestilence:stacks:power" : "pestilence:stacks:normal", stateR);
                 else if (entry.IsPlugin)
@@ -12199,7 +12237,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 entry.IsInventoryDropSelector || entry.IsInventoryDropChild ||
                 entry.IsPestilenceSelector || entry.IsPestilenceChild ||
                 entry.IsInariusSelector || entry.IsInariusChild ||
-                entry.IsZBarbSelector || entry.IsZBarbChild)
+                entry.IsZBarbSelector || entry.IsZBarbChild ||
+                entry.IsZdhHelperSelector || entry.IsZdhHelperChild)
             {
                 return translated;
             }
@@ -12322,6 +12361,11 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                         AddZBarbAutoSnapChildItems(items, true);
                     }
 
+                    if (entry.IsZdhHelperSelector && _zdhHelperExpanded)
+                    {
+                        AddZdhHelperChildItems(items, true);
+                    }
+
                     if (entry.IsAutoLootSelector && _autoLootExpanded)
                     {
                         AddAutoLootChildItems(items, true);
@@ -12387,6 +12431,11 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                         AddZBarbAutoSnapChildItems(items, false);
                     }
 
+                    if (entry.IsZdhHelperSelector && _zdhHelperExpanded)
+                    {
+                        AddZdhHelperChildItems(items, false);
+                    }
+
                     if (entry.IsPestilenceSelector && _pestilenceRgkExpanded)
                     {
                         AddPestilenceChildItems(items, false);
@@ -12403,6 +12452,115 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
         }
 
 
+
+        private void AddZdhHelperChildItems(List<MacroListItem> items, bool favoriteDisplay)
+        {
+            AddZdhHelperChildItem(items, favoriteDisplay, T("zdh.menu.auto_entangle", "Auto Entangle"),
+                T("zdh.menu.auto_entangle.description", "Briefly stop Strafe, apply Entangling Shot to engaged elites missing Odyssey damage, then restore movement aim."), 1);
+            AddZdhHelperChildItem(items, favoriteDisplay, T("zdh.menu.auto_multishot", "Auto Multishot"),
+                T("zdh.menu.auto_multishot.description", "Apply Wind Chill and Iceblink to engaged elites, with verified refreshes instead of continuous spam."), 2);
+            AddZdhHelperChildItem(items, favoriteDisplay, T("zdh.menu.auto_mfd", "Auto Valley of Death"),
+                T("zdh.menu.auto_mfd.description", "Place Valley of Death for weighted elite coverage and replace it only when coverage meaningfully improves."), 3);
+            AddZdhHelperChildItem(items, favoriteDisplay, T("zdh.menu.auto_sentry", "Auto Guardian Sentry"),
+                T("zdh.menu.auto_sentry.description", "Build a spaced Guardian Turret field around a stable elite fight and protect uncovered DPS players."), 4);
+            AddZdhHelperChildItem(items, favoriteDisplay, T("zdh.menu.labels", "Elite Labels"),
+                T("zdh.menu.labels.description", "Show compact IB, DMG, and MFD status below eligible elite health bars."), 5);
+            AddZdhHelperChildItem(items, favoriteDisplay, T("zdh.menu.uptime", "Uptime Stats"),
+                T("zdh.menu.uptime.description", "Track debuff uptime only while eligible elites are actively being fought."), 6);
+        }
+
+        private void AddZdhHelperChildItem(List<MacroListItem> items, bool favoriteDisplay, string title, string description, int kind)
+        {
+            items.Add(new MacroListItem
+            {
+                Kind = MacroListItemKind.Entry,
+                Entry = new MacroEntry
+                {
+                    Title = title,
+                    Description = description,
+                    Code = "zdh_helper_option_" + kind.ToString(CultureInfo.InvariantCulture),
+                    IsZdhHelperChild = true,
+                    ZdhHelperOptionKind = kind
+                },
+                IsFavoriteDisplay = favoriteDisplay
+            });
+        }
+
+        private void DrawZdhHelperChildRow(RectangleF r, MacroEntry entry, int rowIdx)
+        {
+            (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
+            bool installed = FindPluginByTypeName("s7o_ZDH_Helper") != null;
+            s7o_ZDH_HelperState.EnsureLoaded();
+            bool on = GetZdhHelperOptionEnabled(entry.ZdhHelperOptionKind);
+            const float stateW = 120f;
+            RectangleF stateR = new RectangleF(r.Right - stateW - 8f, r.Top + 9f, stateW, r.Height - 18f);
+            float textX = r.Left + 44f;
+            float textW = Math.Max(40f, stateR.Left - textX - 10f);
+            DrawOutlinedFittedText(_fRowText, _fRowTextShadow, _fSmall, _fSmallShadow,
+                "• " + entry.Title, textX, r.Top + 7f, textW);
+            string[] lines = WrapTextApprox(entry.Description ?? string.Empty,
+                ApproxCharsForToggleDescription(textW), 2);
+            if (lines.Length > 0)
+                DrawOutlinedTextAtRaw(_fSmall, _fSmallShadow, lines[0], textX, r.Top + 28f);
+            if (lines.Length > 1)
+                DrawOutlinedTextAtRaw(_fSmall, _fSmallShadow, lines[1], textX, r.Top + 44f);
+            DrawGlossButton(stateR, installed ? (on ? "ON" : "OFF") : "NOT INSTALLED", installed && on, false, false);
+            if (installed)
+                RegisterToggleHit("zdh:option:" + entry.ZdhHelperOptionKind.ToString(CultureInfo.InvariantCulture), stateR);
+        }
+
+        private bool GetZdhHelperOptionEnabled(int kind)
+        {
+            switch (kind)
+            {
+                case 1: return s7o_ZDH_HelperState.AutoEntangle;
+                case 2: return s7o_ZDH_HelperState.AutoMultishot;
+                case 3: return s7o_ZDH_HelperState.AutoMarkedForDeath;
+                case 4: return s7o_ZDH_HelperState.AutoSentry;
+                case 5: return s7o_ZDH_HelperState.ShowEliteDebuffs;
+                case 6: return s7o_ZDH_HelperState.TrackUptime;
+                default: return false;
+            }
+        }
+
+        private void HandleZdhHelperOptionAction(string action)
+        {
+            s7o_ZDH_HelperState.EnsureLoaded();
+            int now = Environment.TickCount;
+            if (string.Equals(action, "zdh:expand", StringComparison.OrdinalIgnoreCase))
+            {
+                _zdhHelperExpanded = !_zdhHelperExpanded;
+                _macroToggleFlashTicks["zdh_helper_plugin"] = now;
+                _status = _zdhHelperExpanded ? "ZDH HELPER OPTIONS: EXPANDED" : "ZDH HELPER OPTIONS: COLLAPSED";
+                SaveSettings();
+                return;
+            }
+            if (string.Equals(action, "zdh:toggle", StringComparison.OrdinalIgnoreCase))
+            {
+                s7o_ZDH_HelperState.Enabled = !s7o_ZDH_HelperState.Enabled;
+                _macroToggleFlashTicks["zdh_helper_plugin"] = now;
+                _status = "ZDH HELPER: " + (s7o_ZDH_HelperState.Enabled ? "ON" : "OFF");
+                s7o_ZDH_HelperState.Save();
+                return;
+            }
+            const string prefix = "zdh:option:";
+            if (!action.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return;
+            int kind;
+            if (!int.TryParse(action.Substring(prefix.Length), NumberStyles.Integer, CultureInfo.InvariantCulture, out kind)) return;
+            switch (kind)
+            {
+                case 1: s7o_ZDH_HelperState.AutoEntangle = !s7o_ZDH_HelperState.AutoEntangle; break;
+                case 2: s7o_ZDH_HelperState.AutoMultishot = !s7o_ZDH_HelperState.AutoMultishot; break;
+                case 3: s7o_ZDH_HelperState.AutoMarkedForDeath = !s7o_ZDH_HelperState.AutoMarkedForDeath; break;
+                case 4: s7o_ZDH_HelperState.AutoSentry = !s7o_ZDH_HelperState.AutoSentry; break;
+                case 5: s7o_ZDH_HelperState.ShowEliteDebuffs = !s7o_ZDH_HelperState.ShowEliteDebuffs; break;
+                case 6: s7o_ZDH_HelperState.TrackUptime = !s7o_ZDH_HelperState.TrackUptime; break;
+                default: return;
+            }
+            _macroToggleFlashTicks["zdh_helper_plugin"] = now;
+            _status = "ZDH HELPER OPTION: " + (GetZdhHelperOptionEnabled(kind) ? "ON" : "OFF");
+            s7o_ZDH_HelperState.Save();
+        }
 
         private void AddZBarbAutoSnapChildItems(List<MacroListItem> items, bool favoriteDisplay)
         {
@@ -13068,6 +13226,14 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 IsPlugin=true,
                 PluginTypeNames=new[]{"s7o_Paragon_Builds"},
                 PluginAction="toggles:plugin:paragonbuilds"
+            });
+
+            allEntries.Add(new MacroEntry
+            {
+                Title=T("zdh.menu.title", "ZDH Helper"),
+                Description=T("zdh.menu.description", "Elite debuff uptime and optional support casts."),
+                Code="zdh_helper_plugin",
+                IsZdhHelperSelector=true
             });
 
             allEntries.Add(new MacroEntry
@@ -18096,6 +18262,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 lines.Add("OPEN_GR_MAP_OVERRIDE=" + _riftMapSelectionHasOverride.ToString(CultureInfo.InvariantCulture));
                 lines.Add("OPEN_GR_MAP_IDS=" + string.Join("|", _riftEnabledMapIds.OrderBy(v => v).Select(v => v.ToString(CultureInfo.InvariantCulture)).ToArray()));
                 lines.Add("AUTO_LOOT_EXPANDED=" + _autoLootExpanded.ToString(CultureInfo.InvariantCulture));
+                lines.Add("ZDH_HELPER_EXPANDED=" + _zdhHelperExpanded.ToString(CultureInfo.InvariantCulture));
                 lines.Add("AUTO_LOOT_ENABLED=" + _autoLootEnabled.ToString(CultureInfo.InvariantCulture));
                 lines.Add("AUTO_LOOT_PAUSE_HOTKEY=" + _autoLootPauseHotkey.ToString());
                 lines.Add("AUTO_LOOT_PRIMALS=" + _autoLootPrimals.ToString(CultureInfo.InvariantCulture));
@@ -18749,6 +18916,10 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     else if (string.Equals(key, "AUTO_LOOT_EXPANDED", StringComparison.OrdinalIgnoreCase))
                     {
                         _autoLootExpanded = ParseBool(val, _autoLootExpanded);
+                    }
+                    else if (string.Equals(key, "ZDH_HELPER_EXPANDED", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _zdhHelperExpanded = ParseBool(val, _zdhHelperExpanded);
                     }
                     else if (string.Equals(key, "AUTO_LOOT_ENABLED", StringComparison.OrdinalIgnoreCase))
                     {
