@@ -478,6 +478,7 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
         private const int ConversationCloseThrottleMs = 150;
         private const int TownRewardSessionTimeoutMs = 30 * 60 * 1000;
         private const int InputPulseMs = 10;
+        private const int PortalKeyPulseMs = 40;
         private const int UrshiMoveDelayMs = 20;
         private const int UrshiMouseHoldMs = 30;
         private const int UrshiPortalPollMs = 25;
@@ -1730,9 +1731,9 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
             // anchor click or configured delay in these recovery tails.
             if (s7o_AutoGemUpgradeState.IsBelowConfiguredPortalAnchorAtRunStart(_initialUpgradeAttemptsThisRun))
             {
-                // Rev 5.6.3 polish: sleepAfter=0 overrides the default 10ms post-key wait.
-                // The key has already been sent; the capture thread should not idle after the call.
-                BeginKeyPulse(FreeHudInput.VirtualKeyForTownPortal);
+                if (!BeginKeyPulse(FreeHudInput.VirtualKeyForTownPortal, PortalKeyPulseMs))
+                    return false;
+
                 _lastPortalActionTick = now;
                 _portalRequestedTick = now;
                 _portalRequestedThisRun = true;
@@ -1747,9 +1748,9 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
             if (ElapsedMs(_portalAnchorClickTick) < effectiveDelayMs)
                 return false;
 
-            // Rev 5.6.3 polish: sleepAfter=0 overrides the default 10ms post-key wait.
-            // Saves ~10ms against the tight final-upgrade TP margin.
-            BeginKeyPulse(FreeHudInput.VirtualKeyForTownPortal);
+            if (!BeginKeyPulse(FreeHudInput.VirtualKeyForTownPortal, PortalKeyPulseMs))
+                return false;
+
             _lastPortalActionTick = now;
             _portalRequestedTick = now;
             _portalRequestedThisRun = true;
@@ -6356,6 +6357,16 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
                     return false;
                 }
 
+                // Only Urshi's completed-rift reward conversation is eligible here.
+                // Guardian-spawn announcements also use conversation_dialog_main but
+                // have no jewel upgrade attempts and must never receive synthetic Space.
+                int remainingAttempts = GetUpgradeAttempts();
+                if (remainingAttempts <= 0)
+                {
+                    _lastConversationCloseTick = int.MinValue;
+                    return false;
+                }
+
                 int now = NowTick();
 
                 if (_lastConversationCloseTick != int.MinValue &&
@@ -6368,20 +6379,9 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
 
                 if (IsChatEntryOpen())
                 {
-                    int remainingAttempts = GetUpgradeAttempts();
-                    if (remainingAttempts > 0)
-                    {
-                        // Chat input owns Space. When upgrade attempts remain, close chat, move the
-                        // cursor away from the chat area, wait for the chat fade, then send Space.
-                        StartChatCloseFadeWait(true, remainingAttempts, "conversation_dialog_main");
-                    }
-                    else
-                    {
-                        // No gem upgrades remain: this is usually a generic reward/close-rift dialog.
-                        // Preserve the player's typed chat message and do not send Space into chat.
-
-                    }
-
+                    // Chat input owns Space. Close chat, move away from the chat area,
+                    // wait for its fade, then resume the same verified Urshi dialog path.
+                    StartChatCloseFadeWait(true, remainingAttempts, "conversation_dialog_main");
                     return true;
                 }
 
