@@ -9,8 +9,30 @@ namespace Turbo.Plugins.s7o
     // Standalone FREEHUD Demon Hunter Strafe + primary macro.
     // F3 toggles Strafe macro. F2 toggles attack / movement primary mode while running.
     // Uses a local raw input helper and local buff/clickable actor checks.
+    // REV11: preserve targetless Speed guard while rebuilding Momentum to 20 stacks first.
     public class s7o_DHStrafePrimaryPlugin : BasePlugin, IKeyEventHandler, IAfterCollectHandler, IInGameTopPainter, INewAreaHandler
     {
+        private static bool _zdhMacroRunning;
+        private static bool _zdhHighFrequencyMode;
+        private static int _zdhLastPrimaryFireTick = int.MinValue;
+        private static bool _zdhPylonPauseActive;
+        private static int _zdhMomentumStacks;
+        private static int _zdhMomentumTargetStacks = 20;
+        private static bool _zdhMomentumBuildActive;
+        public static bool IsMacroRunningForZdh { get { return _zdhMacroRunning; } }
+        public static bool IsHighFrequencyModeForZdh { get { return _zdhHighFrequencyMode; } }
+        public static bool IsCombatModeForZdh { get { return _zdhHighFrequencyMode; } }
+        public static bool IsPylonPauseActiveForZdh { get { return _zdhPylonPauseActive; } }
+        public static int MomentumStacksForZdh { get { return _zdhMomentumStacks; } }
+        public static int MomentumTargetStacksForZdh { get { return _zdhMomentumTargetStacks; } }
+        public static bool IsMomentumBuildActiveForZdh { get { return _zdhMomentumBuildActive; } }
+        public static int PrimaryQuietAgeForZdh(int now)
+        {
+            return _zdhLastPrimaryFireTick == int.MinValue
+                ? int.MaxValue
+                : Math.Max(0, unchecked(now - _zdhLastPrimaryFireTick));
+        }
+
         // ============================================================
         // USER SETTINGS
         // ============================================================
@@ -64,9 +86,10 @@ namespace Turbo.Plugins.s7o
         public bool HoldStrafeContinuously = true;
 
         // ── Timings ────────────────────────────────────────────────
-        // LightningMod fires primary pulses on a 30ms gate. Keep attack mode aligned.
-        public int PrimaryNormalDelayMs = 35;
-        public int PrimaryHighFrequencyDelayMs = 30;
+        // Combat mode keeps its accepted cadence. Speed mode uses a slower
+        // Momentum refresh and never pulses primary without an on-screen target.
+        public int PrimaryNormalDelayMs = 350;
+        public int PrimaryHighFrequencyDelayMs = 140;
         public int StrafeCheckDelayMs = 50;
         public int KeyPressHoldMs = 8;
         // Set to 0 so entering a new area does not create a delayed restart window.
@@ -90,7 +113,8 @@ namespace Turbo.Plugins.s7o
 
         // ── GoD / Momentum behavior ────────────────────────────────
         public double MomentumRefreshSeconds = 21.0;
-        public int NoMonsterStackRefreshThreshold = 16;
+        public int MomentumTargetStacks = 20;
+        public int MomentumBuildDelayMs = 140;
         public uint MomentumBuffSno = 484289;
         public int MomentumBuffIconIndex = 10;
 
@@ -110,6 +134,8 @@ namespace Turbo.Plugins.s7o
         public bool BlockPrimaryOnClickableActor = true;
         public bool PauseForAutoLootPickups = true;
         public int AutoLootPauseMs = 300;
+        public bool PauseNearUnoperatedPylon = true;
+        public float PylonPauseRange = 15f;
         // Original Lightning used 5 yards for the main Strafe pause and 10 yards
         // for primary-fire suppression. 8 yards is a practical FREEHUD default
         // for comfortably interacting with pylons, shrines, chests, doors, portals, etc.
@@ -253,14 +279,19 @@ namespace Turbo.Plugins.s7o
             _nextStrafeCheckTick = 0;
             _nextPrimaryFireTick = 0;
             _lastPrimaryFireTick = 0;
+            _zdhLastPrimaryFireTick = int.MinValue;
+            _zdhMomentumStacks = 0;
+            _zdhMomentumBuildActive = false;
             _actMapRecentlyVisibleUntilTick = 0;
             _worldMapRecentlyVisibleUntilTick = 0;
             _nextBuildRefreshTick = 0;
             _autoLootPauseUntilTick = 0;
+            _zdhPylonPauseActive = false;
 
             if (newGame)
             {
                 _running = false;
+                _zdhMacroRunning = false;
                 _temporarilyPaused = false;
                 _pendingStartUntilTick = 0;
                 _lastStartBlockedReason = string.Empty;
@@ -339,7 +370,8 @@ namespace Turbo.Plugins.s7o
                 if (GetEffectiveSetItemCount() >= 4)
                 {
                     _highFrequencyMode = !_highFrequencyMode;
-                    _lastStatus = _highFrequencyMode ? "mode: fast attack" : "mode: movement";
+                    _zdhHighFrequencyMode = _highFrequencyMode;
+                    _lastStatus = _highFrequencyMode ? "mode: combat" : "mode: speed";
                     DebugLog("mode: " + _lastStatus);
                 }
 
@@ -350,12 +382,14 @@ namespace Turbo.Plugins.s7o
         public void AfterCollect()
         {
             int now = Environment.TickCount;
+            _zdhHighFrequencyMode = _highFrequencyMode;
 
             FinishPendingPrimaryPress(now, false);
             AdvanceTownPortalSequence(now);
 
             RefreshBuildStateIfNeeded(now, false);
             TrackRecentlyVisibleMaps(now);
+            _zdhPylonPauseActive = PauseNearUnoperatedPylon && IsUnoperatedPylonNearby(PylonPauseRange);
 
             ProcessPendingStartRequest(now);
 
@@ -378,6 +412,25 @@ namespace Turbo.Plugins.s7o
 
             if (!_running)
                 return;
+
+            if (s7o_ZDH_Helper.IsDhStrafePauseRequested(now))
+            {
+                FinishPendingPrimaryPress(now, true);
+                StopStrafeHold();
+                s7o_ZDH_Helper.ConfirmDhStrafePaused(now);
+                _temporarilyPaused = true;
+                _lastStatus = "paused: ZDH cast";
+                return;
+            }
+
+            if (_zdhPylonPauseActive)
+            {
+                FinishPendingPrimaryPress(now, true);
+                StopStrafeHold();
+                _temporarilyPaused = true;
+                _lastStatus = "paused: pylon nearby";
+                return;
+            }
 
             if (_autoLootPauseUntilTick != 0 && TickReached(now, _autoLootPauseUntilTick))
                 _autoLootPauseUntilTick = 0;
@@ -456,6 +509,11 @@ namespace Turbo.Plugins.s7o
             }
 
             MaintainStrafe(now);
+            if (s7o_ZDH_Helper.IsDhStrafePrimarySuppressed(now))
+            {
+                FinishPendingPrimaryPress(now, true);
+                return;
+            }
             MaybeFirePrimary(now);
         }
 
@@ -506,12 +564,12 @@ namespace Turbo.Plugins.s7o
             {
                 if (GetEffectiveSetItemCount() >= 4 && _highFrequencyMode)
                 {
-                    text = "Attack: " + FireModeHotkey + " = Move | " + ToggleHotkey + " = Stop";
+                    text = "Combat: " + FireModeHotkey + " = Speed | " + ToggleHotkey + " = Stop";
                     font = _highFont;
                 }
                 else if (GetEffectiveSetItemCount() >= 4)
                 {
-                    text = "Move: " + FireModeHotkey + " = Attack | " + ToggleHotkey + " = Stop";
+                    text = "Speed: " + FireModeHotkey + " = Combat | " + ToggleHotkey + " = Stop";
                     font = _runningFont;
                 }
                 else
@@ -599,11 +657,14 @@ namespace Turbo.Plugins.s7o
             _lastStartBlockedReason = string.Empty;
 
             _running = true;
+            _zdhMacroRunning = true;
+            _zdhHighFrequencyMode = _highFrequencyMode;
             _temporarilyPaused = false;
             _autoLootPauseUntilTick = 0;
             _nextStrafeCheckTick = 0;
             _nextPrimaryFireTick = 0;
             _lastPrimaryFireTick = 0;
+            _zdhLastPrimaryFireTick = int.MinValue;
             _lastStatus = GetEffectiveSetItemCount() >= 4
                 ? (_highFrequencyMode ? "running fast attack" : "running movement")
                 : "running strafe only";
@@ -704,6 +765,7 @@ namespace Turbo.Plugins.s7o
             StopStrafeHold();
 
             _running = false;
+            _zdhMacroRunning = false;
             _temporarilyPaused = false;
             _autoLootPauseUntilTick = 0;
             _pendingStartUntilTick = 0;
@@ -711,8 +773,12 @@ namespace Turbo.Plugins.s7o
             _nextStrafeCheckTick = 0;
             _nextPrimaryFireTick = 0;
             _lastPrimaryFireTick = 0;
+            _zdhLastPrimaryFireTick = int.MinValue;
+            _zdhMomentumStacks = 0;
+            _zdhMomentumBuildActive = false;
             _actMapRecentlyVisibleUntilTick = 0;
             _worldMapRecentlyVisibleUntilTick = 0;
+            _zdhPylonPauseActive = false;
             _lastStatus = string.IsNullOrEmpty(reason) ? "stopped" : reason;
 
             DebugLog("stopped: " + _lastStatus);
@@ -1196,7 +1262,15 @@ namespace Turbo.Plugins.s7o
             if (RequireGoD4ForPrimary && GetEffectiveSetItemCount() < 4)
                 return;
 
-            int delay = Math.Max(5, _highFrequencyMode ? PrimaryHighFrequencyDelayMs : PrimaryNormalDelayMs);
+            int momentumTarget = Math.Max(1, MomentumTargetStacks);
+            int momentumStacks = GetBuffCount(MomentumBuffSno, MomentumBuffIconIndex);
+            bool momentumBuild = momentumStacks < momentumTarget;
+            _zdhMomentumStacks = momentumStacks;
+            _zdhMomentumTargetStacks = momentumTarget;
+            _zdhMomentumBuildActive = momentumBuild;
+
+            int delay = Math.Max(5, momentumBuild ? MomentumBuildDelayMs
+                : _highFrequencyMode ? PrimaryHighFrequencyDelayMs : PrimaryNormalDelayMs);
 
             if (!TickReached(now, _nextPrimaryFireTick))
                 return;
@@ -1213,7 +1287,7 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
-            bool momentumWantsPrimary = ShouldFirePrimaryNormalMode();
+            bool momentumWantsPrimary = momentumBuild || ShouldFirePrimaryNormalMode();
 
             if (!_highFrequencyMode && !momentumWantsPrimary)
             {
@@ -1224,6 +1298,7 @@ namespace Turbo.Plugins.s7o
             if (DoActionAutoShift(primaryKey, now))
             {
                 _lastPrimaryFireTick = now;
+                _zdhLastPrimaryFireTick = now;
                 _nextPrimaryFireTick = now + delay;
 
             }
@@ -1238,9 +1313,7 @@ namespace Turbo.Plugins.s7o
             if (GetEffectiveSetItemCount() < 4)
                 return false;
 
-            if (GetOnScreenMonsterCount() == 0)
-                return GetBuffCount(MomentumBuffSno, MomentumBuffIconIndex) <= NoMonsterStackRefreshThreshold;
-
+            if (GetOnScreenMonsterCount() == 0) return false;
             return GetBuffLeftTime(MomentumBuffSno, MomentumBuffIconIndex) <= MomentumRefreshSeconds;
         }
 
@@ -1278,6 +1351,20 @@ namespace Turbo.Plugins.s7o
             {
                 return 0;
             }
+        }
+
+        private bool IsUnoperatedPylonNearby(float range)
+        {
+            try
+            {
+                if (Hud == null || Hud.Game == null || Hud.Game.Me == null
+                    || Hud.Game.Me.FloorCoordinate == null || Hud.Game.Shrines == null) return false;
+                float limit = Math.Max(0, range);
+                return Hud.Game.Shrines.Any(shrine => shrine != null && shrine.IsPylon
+                    && !shrine.IsDisabled && !shrine.IsOperated && shrine.FloorCoordinate != null
+                    && Hud.Game.Me.FloorCoordinate.XYDistanceTo(shrine.FloorCoordinate) <= limit);
+            }
+            catch { return false; }
         }
 
         private bool IsHoverValidActor(float distance)
@@ -2161,14 +2248,15 @@ namespace Turbo.Plugins.s7o
             p.TownPortalBetweenAttemptsMs = 65;
             p.TownPortalCastingPollMs = 25;
 
-            p.PrimaryNormalDelayMs = 35;
-            p.PrimaryHighFrequencyDelayMs = 30;
+            p.PrimaryNormalDelayMs = 350;
+            p.PrimaryHighFrequencyDelayMs = 140;
             p.StrafeCheckDelayMs = 50;
             p.KeyPressHoldMs = 8;
             p.RecentMapBlockMs = 0;
 
             p.MomentumRefreshSeconds = 21.0;
-            p.NoMonsterStackRefreshThreshold = 16;
+            p.MomentumTargetStacks = 20;
+            p.MomentumBuildDelayMs = 140;
             p.MomentumBuffSno = 484289;
             p.MomentumBuffIconIndex = 10;
 
@@ -2176,6 +2264,8 @@ namespace Turbo.Plugins.s7o
             p.PrimaryClickableActorBlockDistance = 10.0f;
             p.PauseForAutoLootPickups = true;
             p.AutoLootPauseMs = 300;
+            p.PauseNearUnoperatedPylon = true;
+            p.PylonPauseRange = 15f;
 
             p.StatusTextCenterXFrac = 0.50f;
             p.StatusTextYFrac = 0.58f;
