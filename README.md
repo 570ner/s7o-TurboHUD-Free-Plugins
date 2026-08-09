@@ -62,6 +62,7 @@ Use the HUD Menu to toggle plugins, change visual options, manage TTS alerts, se
 | **s7o_TTS_Broadcast**          | Type `.tts your message here` to speak a custom TTS message.                                                                                                            |
 | **s7o_TTS_EnablePlugin**       | Small TTS helper/cleanup plugin. Leave it installed if using TTS alerts.                                                                                                |
 | **s7o_ZB_AutoSnap**            | AutoSnap helper mainly for support/zBarb-style gameplay.                                                                                                                |
+| **s7o_ZDH_Helper**             | zDH debuff uptime tracker with optional smart automation for Entangling Shot, Multishot, Valley of Death, and Guardian Sentries. |
 
 ## Notes
 
