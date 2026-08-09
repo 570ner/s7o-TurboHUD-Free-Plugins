@@ -8,8 +8,7 @@ using Turbo.Plugins.Default;
 
 namespace Turbo.Plugins.s7o
 {
-    // REV68 preserves REV67's drop-once notification state and renders simultaneous
-    // above-player alerts as a compact upward-growing list.
+    // s7o Tips Helper - visual alerts, party markers, and gameplay status overlays.
     public class s7o_TipsHelper : BasePlugin, IInGameWorldPainter, IInGameTopPainter, IAfterCollectHandler, INewAreaHandler, IItemLocationChangedHandler, ITransparentCollection, IKeyEventHandler, ISkillCooldownHandler
     {
         private const int AncientRank = 1;
@@ -42,6 +41,7 @@ namespace Turbo.Plugins.s7o
         private const uint ChannelingPylonBuffSno = 266258u;
         private const uint BloodForBloodSno = 465821u;
         private const uint RathmasShieldSno = 472910u;
+        private const uint CustomEngineeringSno = 208610u;
         private const int BloodIsPowerShortActionLockMaxTicks = 90;
         private const int BloodIsPowerSharedActionLockMinimumSkills = 3;
         private const int BloodIsPowerCooldownShiftToleranceTicks = 3;
@@ -3608,7 +3608,7 @@ namespace Turbo.Plugins.s7o
                 if (actor == null || actor.SnoActor == null || actor.FloorCoordinate == null) continue;
                 if (actor.SnoActor.Sno != ValleyOfDeathActorSno) continue;
 
-                float seconds = Math.Max(1.0f, ValleyOfDeathTimerSeconds);
+                float seconds = GetValleyOfDeathTimerSeconds();
                 if (Hud.Game.CurrentGameTick > actor.CreatedAtInGameTick + (int)Math.Round(seconds * 60.0f) + 30)
                     continue;
 
@@ -3616,6 +3616,31 @@ namespace Turbo.Plugins.s7o
                 ValleyOfDeathBrush.DrawWorldEllipse(Math.Max(1.0f, ValleyOfDeathRadiusYards), -1, actor.FloorCoordinate);
                 PaintValleyOfDeathTimer(actor, seconds);
             }
+        }
+
+        private float GetValleyOfDeathTimerSeconds()
+        {
+            float seconds = Math.Max(1.0f, ValleyOfDeathTimerSeconds);
+            try
+            {
+                if (Hud.Game != null && Hud.Game.Me != null && Hud.Game.Me.Powers != null
+                    && Hud.Game.Me.Powers.BuffIsActive(CustomEngineeringSno, 0))
+                    return seconds * 2.0f;
+
+                if (Hud.Game != null && Hud.Game.Players != null)
+                {
+                    foreach (var player in Hud.Game.Players)
+                    {
+                        if (player == null || !player.IsInGame || player.HeroClassDefinition == null
+                            || player.HeroClassDefinition.HeroClass != HeroClass.DemonHunter || player.Powers == null)
+                            continue;
+                        if (player.Powers.UsedPassives.Any(passive => passive != null && passive.Sno == CustomEngineeringSno))
+                            return seconds * 2.0f;
+                    }
+                }
+            }
+            catch { }
+            return seconds;
         }
 
         private void PaintValleyOfDeathTimer(IActor actor, float seconds)
