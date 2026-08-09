@@ -38,7 +38,7 @@ Use the HUD Menu to toggle plugins, change visual options, manage TTS alerts, se
 | **s7o_Auto_Gem_Upgrade**       | Urshi gem upgrade helper with town portal timing.                                                                                                                       |
 | **s7o_BannerSoundPlugin**      | TTS/sound alert for banner drops.                                                                                                                                       |
 | **s7o_DangerousSkillOverlays** | Extra danger overlays for boss and Rift Guardian attacks.                                                                                                               |
-| **s7o_DHStrafe**               | Demon Hunter Strafe/primary helper. Defaults: **F3** start/stop, **F2** attack/move mode, **T** town portal sequence.                                                   |
+| **s7o_DHStrafe**               | Demon Hunter Strafe/primary helper. Defaults: **F3** start/stop, **F2** Combat/Speed mode, **T** town portal sequence.                                                              |
 | **s7o_DoorsMinimap**           | Door indicators on the minimap.                                                                                                                                         |
 | **s7o_EliteHealthBars**        | Elite/Champion health bars and offscreen elite indicators.                                                                                                              |
 | **s7o_ExitArchon**             | Wizard Archon cancel helper. Default hotkey: **Space**.                                                                                                                 |
