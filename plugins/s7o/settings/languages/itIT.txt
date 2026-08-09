@@ -1692,6 +1692,7 @@ overlay.paragon_helper.primary=Attributo primario
 overlay.paragon_helper.vitality=Vitalità
 overlay.paragon_helper.movement=Velocità movimento
 overlay.paragon_helper.resource=Risorsa massima
+overlay.paragon_helper.build_sync=Build Eccellenza: {0}
 overlay.paragon_builds.current=configurazione attuale
 overlay.paragon_builds.save_current_setup=Salva configurazione attuale
 overlay.paragon_builds.save_setup=Salva configurazione in: «{0}»
@@ -1838,6 +1839,10 @@ overlay.dh.portal_failed=portale fallito
 overlay.dh.prompt_paused=In pausa
 overlay.dh.prompt_attack=Attacco: {0} = Movimento | {1} = Ferma
 overlay.dh.prompt_move=Movimento: {0} = Attacco | {1} = Ferma
+overlay.dh.prompt_combat=Combattimento: {0} = Velocità | {1} = Ferma
+overlay.dh.prompt_speed=Velocità: {0} = Combattimento | {1} = Ferma
+overlay.dh.paused_zdh_cast=In pausa: abilità ZDH
+overlay.dh.paused_pylon_nearby=In pausa: pilone vicino
 overlay.dh.prompt_strafe=Strafe: {0} = Ferma
 overlay.dh.prompt_start={0} = Turbinio
 overlay.dangerous.in_wormhole=Nel portale
@@ -1944,3 +1949,32 @@ audio.pylon.shield_lost=Scudo terminato
 audio.pylon.speed_found=Pilone della velocità
 audio.pylon.speed_active=Velocità attiva
 audio.pylon.speed_lost=Velocità terminata
+
+hud.text.zdh_helper_options_expanded=OPZIONI ASSISTENTE ZDH: APERTE
+hud.text.zdh_helper_options_collapsed=OPZIONI ASSISTENTE ZDH: CHIUSE
+hud.text.zdh_helper_state=ASSISTENTE ZDH: {0}
+hud.text.zdh_helper_option_state=OPZIONE ASSISTENTE ZDH: {0}
+
+# ZDH Helper
+zdh.menu.title=Assistente ZDH
+zdh.menu.description=Durata dei malus élite e abilità di supporto opzionali.
+zdh.menu.labels=Etichette élite
+zdh.menu.uptime=Statistiche durata
+zdh.menu.restore=Ripristina cursore
+zdh.menu.auto_entangle=Tiro Vincolante auto
+zdh.menu.auto_multishot=Tiro Multiplo auto
+zdh.menu.auto_mfd=Valle della Morte auto
+zdh.menu.auto_sentry=Torretta Guardiana auto
+zdh.tooltip.title=Durata malus ZDH
+zdh.tooltip.eligible=Tempo élite valido
+zdh.menu.auto_entangle.description=Usa Tiro vincolante a bassa priorità dopo aver gestito Tiro multiplo, Valle e Torretta guardiana.
+zdh.menu.auto_multishot.description=Applica Vento gelido e Iceblink agli élite ingaggiati, con rinnovi verificati invece di lanci continui.
+zdh.menu.auto_mfd.description=Piazza Valle della Morte per una copertura ponderata degli élite e la sostituisce solo quando la copertura migliora davvero.
+zdh.menu.auto_sentry.description=Crea un campo distanziato di torrette guardiane attorno a uno scontro stabile con élite e protegge i DPS scoperti.
+zdh.menu.labels.description=Mostra stati compatti IB, DMG e MFD sotto le barre della vita degli élite validi.
+zdh.menu.uptime.description=Registra la durata dei malus solo mentre gli élite validi vengono combattuti attivamente.
+zdh.menu.restore.description=Riporta il cursore al punto di movimento esatto salvato dopo ogni abilità di supporto. Obbligatorio per un’automazione sicura.
+zdh.tooltip.iceblink=Iceblink
+zdh.tooltip.odyssey=Odissea
+zdh.tooltip.mark=Marchio
+zdh.tooltip.average=Attività media

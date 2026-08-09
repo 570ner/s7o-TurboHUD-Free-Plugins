@@ -1692,6 +1692,7 @@ overlay.paragon_helper.primary=Primary Stat
 overlay.paragon_helper.vitality=Vitality
 overlay.paragon_helper.movement=Movement Speed
 overlay.paragon_helper.resource=Max Resource
+overlay.paragon_helper.build_sync=Paragon Build: {0}
 overlay.paragon_builds.current=current build
 overlay.paragon_builds.save_current_setup=Save current build setup
 overlay.paragon_builds.save_setup=Save setup to build: "{0}"
@@ -1838,6 +1839,10 @@ overlay.dh.portal_failed=portal failed
 overlay.dh.prompt_paused=Paused
 overlay.dh.prompt_attack=Attack: {0} = Move | {1} = Stop
 overlay.dh.prompt_move=Move: {0} = Attack | {1} = Stop
+overlay.dh.prompt_combat=Combat: {0} = Speed | {1} = Stop
+overlay.dh.prompt_speed=Speed: {0} = Combat | {1} = Stop
+overlay.dh.paused_zdh_cast=Paused: ZDH cast
+overlay.dh.paused_pylon_nearby=Paused: pylon nearby
 overlay.dh.prompt_strafe=Strafe: {0} = Stop
 overlay.dh.prompt_start={0} = Strafe
 overlay.dangerous.in_wormhole=In Wormhole
@@ -1944,3 +1949,32 @@ audio.pylon.shield_lost=Shield Lost
 audio.pylon.speed_found=Speed Pylon
 audio.pylon.speed_active=You have Speed
 audio.pylon.speed_lost=Speed Lost
+
+hud.text.zdh_helper_options_expanded=ZDH HELPER OPTIONS: EXPANDED
+hud.text.zdh_helper_options_collapsed=ZDH HELPER OPTIONS: COLLAPSED
+hud.text.zdh_helper_state=ZDH HELPER: {0}
+hud.text.zdh_helper_option_state=ZDH HELPER OPTION: {0}
+
+# ZDH Helper
+zdh.menu.title=ZDH Helper
+zdh.menu.description=Elite debuff uptime and optional support casts.
+zdh.menu.labels=Elite Labels
+zdh.menu.uptime=Uptime Stats
+zdh.menu.restore=Cursor Restore
+zdh.menu.auto_entangle=Auto Entangle
+zdh.menu.auto_multishot=Auto Multishot
+zdh.menu.auto_mfd=Auto Valley of Death
+zdh.menu.auto_sentry=Auto Guardian Sentry
+zdh.tooltip.title=ZDH Debuff Uptime
+zdh.tooltip.eligible=Eligible elite time
+zdh.menu.auto_entangle.description=Use low-priority Entangling Shot support after Multishot, Valley, and Guardian Sentry needs are satisfied.
+zdh.menu.auto_multishot.description=Apply Wind Chill and Iceblink to engaged elites, with verified refreshes instead of continuous spam.
+zdh.menu.auto_mfd.description=Place Valley of Death for weighted elite coverage and replace it only when coverage meaningfully improves.
+zdh.menu.auto_sentry.description=Build a spaced Guardian Turret field around a stable elite fight and protect uncovered DPS players.
+zdh.menu.labels.description=Show compact IB, DMG, and MFD status below eligible elite health bars.
+zdh.menu.uptime.description=Track debuff uptime only while eligible elites are actively being fought.
+zdh.menu.restore.description=Return the cursor to the exact saved movement point after every support cast. Required for safe automation.
+zdh.tooltip.iceblink=Iceblink
+zdh.tooltip.odyssey=Odyssey
+zdh.tooltip.mark=Mark
+zdh.tooltip.average=Average Uptime

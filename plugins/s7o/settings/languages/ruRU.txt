@@ -1692,6 +1692,7 @@ overlay.paragon_helper.primary=Основной параметр
 overlay.paragon_helper.vitality=Живучесть
 overlay.paragon_helper.movement=Скорость движения
 overlay.paragon_helper.resource=Макс. ресурс
+overlay.paragon_helper.build_sync=Профиль совершенствования: {0}
 overlay.paragon_builds.current=текущий комплект
 overlay.paragon_builds.save_current_setup=Сохранить текущий комплект
 overlay.paragon_builds.save_setup=Сохранить комплект для сборки: «{0}»
@@ -1838,6 +1839,10 @@ overlay.dh.portal_failed=портал ошибка
 overlay.dh.prompt_paused=Пауза
 overlay.dh.prompt_attack=Атака: {0} = Движение | {1} = Стоп
 overlay.dh.prompt_move=Движение: {0} = Атака | {1} = Стоп
+overlay.dh.prompt_combat=Бой: {0} = Скорость | {1} = Стоп
+overlay.dh.prompt_speed=Скорость: {0} = Бой | {1} = Стоп
+overlay.dh.paused_zdh_cast=Пауза: применение ZDH
+overlay.dh.paused_pylon_nearby=Пауза: пилон рядом
 overlay.dh.prompt_strafe=Strafe: {0} = Стоп
 overlay.dh.prompt_start={0} = Обстрел
 overlay.dangerous.in_wormhole=В червоточине
@@ -1944,3 +1949,32 @@ audio.pylon.shield_lost=Щит закончился
 audio.pylon.speed_found=Пилон скорости
 audio.pylon.speed_active=Скорость активна
 audio.pylon.speed_lost=Скорость закончилась
+
+hud.text.zdh_helper_options_expanded=ПАРАМЕТРЫ ПОМОЩНИКА ZDH: РАЗВЁРНУТО
+hud.text.zdh_helper_options_collapsed=ПАРАМЕТРЫ ПОМОЩНИКА ZDH: СВЁРНУТО
+hud.text.zdh_helper_state=ПОМОЩНИК ZDH: {0}
+hud.text.zdh_helper_option_state=ПАРАМЕТР ПОМОЩНИКА ZDH: {0}
+
+# ZDH Helper
+zdh.menu.title=Помощник ZDH
+zdh.menu.description=Время действия ослаблений элит и дополнительные автоумения поддержки.
+zdh.menu.labels=Метки элит
+zdh.menu.uptime=Статистика времени
+zdh.menu.restore=Возврат курсора
+zdh.menu.auto_entangle=Авто Сковывающий выстрел
+zdh.menu.auto_multishot=Авто Залп
+zdh.menu.auto_mfd=Авто Долина смерти
+zdh.menu.auto_sentry=Авто Защитная турель
+zdh.tooltip.title=Время ослаблений ZDH
+zdh.tooltip.eligible=Учитываемое время элит
+zdh.menu.auto_entangle.description=Использует Опутывающий выстрел с низким приоритетом после обработки Залпа, Долины и Турелей-хранителей.
+zdh.menu.auto_multishot.description=Накладывает Холод и Iceblink на атакуемых элитных противников, обновляя эффекты по проверке без постоянного спама.
+zdh.menu.auto_mfd.description=Размещает Долину смерти с учётом приоритета элит и заменяет её только при заметном улучшении покрытия.
+zdh.menu.auto_sentry.description=Создаёт разнесённое поле Турелей-хранителей вокруг устойчивого боя с элитами и защищает игроков урона без покрытия.
+zdh.menu.labels.description=Показывает компактные статусы IB, DMG и MFD под полосами здоровья подходящих элит.
+zdh.menu.uptime.description=Учитывает время действия ослаблений только во время активного боя с подходящими элитами.
+zdh.menu.restore.description=Возвращает курсор точно в сохранённую точку движения после каждого умения поддержки. Обязательно для безопасной автоматизации.
+zdh.tooltip.iceblink=Iceblink
+zdh.tooltip.odyssey=Одиссея
+zdh.tooltip.mark=Метка
+zdh.tooltip.average=Среднее время действия

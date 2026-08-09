@@ -1692,6 +1692,7 @@ overlay.paragon_helper.primary=Atributo principal
 overlay.paragon_helper.vitality=Vitalidad
 overlay.paragon_helper.movement=Vel. de movimiento
 overlay.paragon_helper.resource=Recurso máximo
+overlay.paragon_helper.build_sync=Configuración de Paragón: {0}
 overlay.paragon_builds.current=configuración actual
 overlay.paragon_builds.save_current_setup=Guardar configuración actual
 overlay.paragon_builds.save_setup=Guardar configuración en: "{0}"
@@ -1838,6 +1839,10 @@ overlay.dh.portal_failed=portal falló
 overlay.dh.prompt_paused=Pausado
 overlay.dh.prompt_attack=Ataque: {0} = Mover | {1} = Parar
 overlay.dh.prompt_move=Mover: {0} = Ataque | {1} = Parar
+overlay.dh.prompt_combat=Combate: {0} = Velocidad | {1} = Parar
+overlay.dh.prompt_speed=Velocidad: {0} = Combate | {1} = Parar
+overlay.dh.paused_zdh_cast=Pausado: lanzamiento ZDH
+overlay.dh.paused_pylon_nearby=Pausado: pilón cercano
 overlay.dh.prompt_strafe=Strafe: {0} = Parar
 overlay.dh.prompt_start={0} = Disparo evasivo
 overlay.dangerous.in_wormhole=En agujero
@@ -1944,3 +1949,32 @@ audio.pylon.shield_lost=Escudo terminado
 audio.pylon.speed_found=Pilón de velocidad
 audio.pylon.speed_active=Velocidad activa
 audio.pylon.speed_lost=Velocidad terminada
+
+hud.text.zdh_helper_options_expanded=OPCIONES DEL AYUDANTE ZDH: ABIERTAS
+hud.text.zdh_helper_options_collapsed=OPCIONES DEL AYUDANTE ZDH: CERRADAS
+hud.text.zdh_helper_state=AYUDANTE ZDH: {0}
+hud.text.zdh_helper_option_state=OPCIÓN DEL AYUDANTE ZDH: {0}
+
+# ZDH Helper
+zdh.menu.title=Ayudante ZDH
+zdh.menu.description=Tiempo activo de perjuicios y lanzamientos de apoyo opcionales.
+zdh.menu.labels=Etiquetas de élite
+zdh.menu.uptime=Estadísticas de actividad
+zdh.menu.restore=Restaurar cursor
+zdh.menu.auto_entangle=Enredante automático
+zdh.menu.auto_multishot=Multidisparo automático
+zdh.menu.auto_mfd=Valle de la Muerte automático
+zdh.menu.auto_sentry=Torreta guardiana automática
+zdh.tooltip.title=Actividad de perjuicios ZDH
+zdh.tooltip.eligible=Tiempo de élite válido
+zdh.menu.auto_entangle.description=Usa Disparo enredante con prioridad baja después de cubrir Multidisparo, Valle y Torreta guardiana.
+zdh.menu.auto_multishot.description=Aplica Escalofrío e Iceblink a élites en combate, con renovaciones verificadas en vez de uso continuo.
+zdh.menu.auto_mfd.description=Coloca Valle de la Muerte para cubrir élites por prioridad y solo lo reemplaza cuando la cobertura mejora de forma significativa.
+zdh.menu.auto_sentry.description=Crea un campo espaciado de torretas guardianas alrededor de combates estables con élites y protege a los DPS sin cobertura.
+zdh.menu.labels.description=Muestra estados compactos de IB, DMG y MFD bajo las barras de vida de élites válidos.
+zdh.menu.uptime.description=Mide la actividad de perjuicios solo mientras se combate activamente a élites válidos.
+zdh.menu.restore.description=Devuelve el cursor al punto exacto de movimiento guardado después de cada lanzamiento de apoyo. Obligatorio para una automatización segura.
+zdh.tooltip.iceblink=Iceblink
+zdh.tooltip.odyssey=Odisea
+zdh.tooltip.mark=Marca
+zdh.tooltip.average=Actividad media

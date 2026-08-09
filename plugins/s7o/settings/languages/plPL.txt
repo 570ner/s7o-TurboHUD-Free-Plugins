@@ -1692,6 +1692,7 @@ overlay.paragon_helper.primary=Główna cecha
 overlay.paragon_helper.vitality=Witalność
 overlay.paragon_helper.movement=Szybkość ruchu
 overlay.paragon_helper.resource=Maks. zasób
+overlay.paragon_helper.build_sync=Profil mistrzostwa: {0}
 overlay.paragon_builds.current=aktualny zestaw
 overlay.paragon_builds.save_current_setup=Zapisz aktualny zestaw
 overlay.paragon_builds.save_setup=Zapisz zestaw do konfiguracji: „{0}”
@@ -1838,6 +1839,10 @@ overlay.dh.portal_failed=portal błąd
 overlay.dh.prompt_paused=Pauza
 overlay.dh.prompt_attack=Atak: {0} = Ruch | {1} = Stop
 overlay.dh.prompt_move=Ruch: {0} = Atak | {1} = Stop
+overlay.dh.prompt_combat=Walka: {0} = Szybkość | {1} = Stop
+overlay.dh.prompt_speed=Szybkość: {0} = Walka | {1} = Stop
+overlay.dh.paused_zdh_cast=Pauza: użycie ZDH
+overlay.dh.paused_pylon_nearby=Pauza: pylon w pobliżu
 overlay.dh.prompt_strafe=Ostrzał: {0} = Stop
 overlay.dh.prompt_start={0} = Ostrzał
 overlay.dangerous.in_wormhole=W tunelu
@@ -1944,3 +1949,32 @@ audio.pylon.shield_lost=Tarcza wygasła
 audio.pylon.speed_found=Pylon szybkości
 audio.pylon.speed_active=Szybkość aktywna
 audio.pylon.speed_lost=Szybkość wygasła
+
+hud.text.zdh_helper_options_expanded=OPCJE POMOCNIKA ZDH: ROZWINIĘTE
+hud.text.zdh_helper_options_collapsed=OPCJE POMOCNIKA ZDH: ZWINIĘTE
+hud.text.zdh_helper_state=POMOCNIK ZDH: {0}
+hud.text.zdh_helper_option_state=OPCJA POMOCNIKA ZDH: {0}
+
+# ZDH Helper
+zdh.menu.title=Pomocnik ZDH
+zdh.menu.description=Czas działania osłabień elit i opcjonalne automatyczne wsparcie.
+zdh.menu.labels=Etykiety elit
+zdh.menu.uptime=Statystyki czasu
+zdh.menu.restore=Przywróć kursor
+zdh.menu.auto_entangle=Auto Splątujący Strzał
+zdh.menu.auto_multishot=Auto Wielostrzał
+zdh.menu.auto_mfd=Auto Dolina Śmierci
+zdh.menu.auto_sentry=Auto Wieżyczka Strażnicza
+zdh.tooltip.title=Czas osłabień ZDH
+zdh.tooltip.eligible=Kwalifikowany czas elit
+zdh.menu.auto_entangle.description=Używa Strzału oplatającego z niskim priorytetem po obsłużeniu Wielostrzału, Doliny i Wieżyczek strażniczych.
+zdh.menu.auto_multishot.description=Nakłada Zimny wiatr i Iceblink na walczące elity, odnawiając je po weryfikacji zamiast ciągłego spamowania.
+zdh.menu.auto_mfd.description=Umieszcza Dolinę Śmierci dla ważonego pokrycia elit i zastępuje ją tylko przy wyraźnej poprawie.
+zdh.menu.auto_sentry.description=Buduje rozstawione pole Wieżyczek strażniczych wokół stabilnej walki z elitami i chroni nieosłoniętych graczy DPS.
+zdh.menu.labels.description=Pokazuje skrócone stany IB, DMG i MFD pod paskami życia kwalifikujących się elit.
+zdh.menu.uptime.description=Mierzy czas działania osłabień tylko podczas aktywnej walki z kwalifikującymi się elitami.
+zdh.menu.restore.description=Przywraca kursor dokładnie do zapisanego punktu ruchu po każdym zaklęciu wsparcia. Wymagane do bezpiecznej automatyzacji.
+zdh.tooltip.iceblink=Iceblink
+zdh.tooltip.odyssey=Odyseja
+zdh.tooltip.mark=Znak
+zdh.tooltip.average=Średni czas działania

@@ -1692,6 +1692,7 @@ overlay.paragon_helper.primary=Primärattribut
 overlay.paragon_helper.vitality=Vitalität
 overlay.paragon_helper.movement=Bewegungstempo
 overlay.paragon_helper.resource=Max. Ressource
+overlay.paragon_helper.build_sync=Paragon-Build: {0}
 overlay.paragon_builds.current=Aktueller Build
 overlay.paragon_builds.save_current_setup=Aktuelles Setup speichern
 overlay.paragon_builds.save_setup=Setup für Build speichern: "{0}"
@@ -1838,6 +1839,10 @@ overlay.dh.portal_failed=Portal fehlgeschlagen
 overlay.dh.prompt_paused=Pausiert
 overlay.dh.prompt_attack=Angriff: {0} = Bewegen | {1} = Stopp
 overlay.dh.prompt_move=Bewegen: {0} = Angriff | {1} = Stopp
+overlay.dh.prompt_combat=Kampf: {0} = Tempo | {1} = Stopp
+overlay.dh.prompt_speed=Tempo: {0} = Kampf | {1} = Stopp
+overlay.dh.paused_zdh_cast=Pausiert: ZDH-Zauber
+overlay.dh.paused_pylon_nearby=Pausiert: Pylon in der Nähe
 overlay.dh.prompt_strafe=Strafe: {0} = Stopp
 overlay.dh.prompt_start={0} = Salto
 overlay.dangerous.in_wormhole=Im Wurmloch
@@ -1944,3 +1949,32 @@ audio.pylon.shield_lost=Schild beendet
 audio.pylon.speed_found=Geschwindigkeitsschrein
 audio.pylon.speed_active=Geschwindigkeit aktiv
 audio.pylon.speed_lost=Geschwindigkeit beendet
+
+hud.text.zdh_helper_options_expanded=ZDH-HELFER OPTIONEN: GEÖFFNET
+hud.text.zdh_helper_options_collapsed=ZDH-HELFER OPTIONEN: EINGEKLAPPT
+hud.text.zdh_helper_state=ZDH-HELFER: {0}
+hud.text.zdh_helper_option_state=ZDH-HELFER OPTION: {0}
+
+# ZDH Helper
+zdh.menu.title=ZDH-Helfer
+zdh.menu.description=Elite-Debuff-Uptime und optionale Support-Fähigkeiten.
+zdh.menu.labels=Elite-Anzeigen
+zdh.menu.uptime=Uptime-Werte
+zdh.menu.restore=Mauszeiger zurück
+zdh.menu.auto_entangle=Auto-Fesselnder Schuss
+zdh.menu.auto_multishot=Auto-Mehrfachschuss
+zdh.menu.auto_mfd=Auto-Tal des Todes
+zdh.menu.auto_sentry=Auto-Wächtergeschütz
+zdh.tooltip.title=ZDH-Debuff-Uptime
+zdh.tooltip.eligible=Gewertete Elitezeit
+zdh.menu.auto_entangle.description=Setzt den Fesselnden Schuss mit niedriger Priorität ein, nachdem Mehrfachschuss, Tal des Todes und Wächtergeschütz versorgt sind.
+zdh.menu.auto_multishot.description=Wendet Windkälte und Eisglanz auf bekämpfte Elitegegner an und erneuert sie geprüft statt dauerhaft zu spammen.
+zdh.menu.auto_mfd.description=Platziert Tal des Todes für gewichtete Eliteabdeckung und ersetzt es nur bei einer deutlichen Verbesserung.
+zdh.menu.auto_sentry.description=Errichtet ein verteiltes Wächtergeschütz-Feld um stabile Elitekämpfe und schützt ungeschützte Schadensspieler.
+zdh.menu.labels.description=Zeigt kompakte IB-, DMG- und MFD-Statusanzeigen unter geeigneten Elite-Lebensbalken.
+zdh.menu.uptime.description=Erfasst die Schwächungsdauer nur, während geeignete Elitegegner aktiv bekämpft werden.
+zdh.menu.restore.description=Setzt den Mauszeiger nach jedem Unterstützungszauber exakt an den gespeicherten Bewegungspunkt zurück. Für sichere Automatisierung erforderlich.
+zdh.tooltip.iceblink=Eisglanz
+zdh.tooltip.odyssey=Odyssee
+zdh.tooltip.mark=Mal
+zdh.tooltip.average=Durchschnittliche Aktivzeit

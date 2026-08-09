@@ -1692,6 +1692,7 @@ overlay.paragon_helper.primary=Caractéristique principale
 overlay.paragon_helper.vitality=Vitalité
 overlay.paragon_helper.movement=Vitesse de déplacement
 overlay.paragon_helper.resource=Ressource max.
+overlay.paragon_helper.build_sync=Configuration de parangon : {0}
 overlay.paragon_builds.current=configuration actuelle
 overlay.paragon_builds.save_current_setup=Enregistrer la configuration
 overlay.paragon_builds.save_setup=Enregistrer pour la configuration : « {0} »
@@ -1838,6 +1839,10 @@ overlay.dh.portal_failed=portail échec
 overlay.dh.prompt_paused=En pause
 overlay.dh.prompt_attack=Attaque: {0} = Déplacement | {1} = Arrêt
 overlay.dh.prompt_move=Déplacement: {0} = Attaque | {1} = Arrêt
+overlay.dh.prompt_combat=Combat : {0} = Vitesse | {1} = Arrêt
+overlay.dh.prompt_speed=Vitesse : {0} = Combat | {1} = Arrêt
+overlay.dh.paused_zdh_cast=En pause : lancement ZDH
+overlay.dh.paused_pylon_nearby=En pause : pylône à proximité
 overlay.dh.prompt_strafe=Strafe: {0} = Arrêt
 overlay.dh.prompt_start={0} = Rafale
 overlay.dangerous.in_wormhole=Dans le vortex
@@ -1944,3 +1949,32 @@ audio.pylon.shield_lost=Bouclier terminé
 audio.pylon.speed_found=Pylône de vitesse
 audio.pylon.speed_active=Vitesse active
 audio.pylon.speed_lost=Vitesse terminée
+
+hud.text.zdh_helper_options_expanded=OPTIONS DE L’ASSISTANT ZDH : OUVERTES
+hud.text.zdh_helper_options_collapsed=OPTIONS DE L’ASSISTANT ZDH : REPLIÉES
+hud.text.zdh_helper_state=ASSISTANT ZDH : {0}
+hud.text.zdh_helper_option_state=OPTION DE L’ASSISTANT ZDH : {0}
+
+# ZDH Helper
+zdh.menu.title=Assistant ZDH
+zdh.menu.description=Temps de présence des affaiblissements et lancers de soutien optionnels.
+zdh.menu.labels=Étiquettes élites
+zdh.menu.uptime=Statistiques de présence
+zdh.menu.restore=Restaurer le curseur
+zdh.menu.auto_entangle=Tir entravant auto
+zdh.menu.auto_multishot=Flèche multiple auto
+zdh.menu.auto_mfd=Vallée de la mort auto
+zdh.menu.auto_sentry=Tourelle gardienne auto
+zdh.tooltip.title=Présence des affaiblissements ZDH
+zdh.tooltip.eligible=Temps élite admissible
+zdh.menu.auto_entangle.description=Utilise Tir entravant en faible priorité après les besoins de Tir multiple, Vallée et Tourelle gardienne.
+zdh.menu.auto_multishot.description=Applique Frisson et Iceblink aux élites engagés, avec des rafraîchissements vérifiés plutôt qu’un lancement continu.
+zdh.menu.auto_mfd.description=Place Vallée de la mort pour une couverture pondérée des élites et ne la remplace que si la couverture s’améliore nettement.
+zdh.menu.auto_sentry.description=Crée un champ espacé de tourelles gardiennes autour d’un combat d’élites stable et protège les DPS non couverts.
+zdh.menu.labels.description=Affiche des états IB, DMG et MFD compacts sous les barres de vie des élites admissibles.
+zdh.menu.uptime.description=Mesure la disponibilité des affaiblissements uniquement pendant le combat actif contre des élites admissibles.
+zdh.menu.restore.description=Replace le curseur au point de déplacement exact mémorisé après chaque sort de soutien. Requis pour une automatisation sûre.
+zdh.tooltip.iceblink=Iceblink
+zdh.tooltip.odyssey=Odyssée
+zdh.tooltip.mark=Marque
+zdh.tooltip.average=Disponibilité moyenne

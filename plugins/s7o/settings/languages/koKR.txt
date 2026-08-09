@@ -1692,6 +1692,7 @@ overlay.paragon_helper.primary=주 능력치
 overlay.paragon_helper.vitality=활력
 overlay.paragon_helper.movement=이동 속도
 overlay.paragon_helper.resource=최대 자원
+overlay.paragon_helper.build_sync=정복자 설정: {0}
 overlay.paragon_builds.current=현재 세팅
 overlay.paragon_builds.save_current_setup=현재 세팅 저장
 overlay.paragon_builds.save_setup=세팅에 저장: "{0}"
@@ -1838,6 +1839,10 @@ overlay.dh.portal_failed=차원문 실패
 overlay.dh.prompt_paused=일시 정지
 overlay.dh.prompt_attack=공격: {0} = 이동 | {1} = 중지
 overlay.dh.prompt_move=이동: {0} = 공격 | {1} = 중지
+overlay.dh.prompt_combat=전투: {0} = 속도 | {1} = 중지
+overlay.dh.prompt_speed=속도: {0} = 전투 | {1} = 중지
+overlay.dh.paused_zdh_cast=일시 정지: ZDH 시전
+overlay.dh.paused_pylon_nearby=일시 정지: 근처 수정탑
 overlay.dh.prompt_strafe=난사: {0} = 중지
 overlay.dh.prompt_start={0} = 난사
 overlay.dangerous.in_wormhole=웜홀 내부
@@ -1944,3 +1949,32 @@ audio.pylon.shield_lost=보호막 종료
 audio.pylon.speed_found=신속의 수정탑
 audio.pylon.speed_active=신속 활성
 audio.pylon.speed_lost=신속 종료
+
+hud.text.zdh_helper_options_expanded=ZDH 도우미 옵션: 펼침
+hud.text.zdh_helper_options_collapsed=ZDH 도우미 옵션: 접힘
+hud.text.zdh_helper_state=ZDH 도우미: {0}
+hud.text.zdh_helper_option_state=ZDH 도우미 옵션: {0}
+
+# ZDH Helper
+zdh.menu.title=ZDH 도우미
+zdh.menu.description=정예 약화 효과 유지율과 선택형 지원 기술 자동 시전.
+zdh.menu.labels=정예 표시
+zdh.menu.uptime=유지율 통계
+zdh.menu.restore=커서 복원
+zdh.menu.auto_entangle=자동 올가미 사격
+zdh.menu.auto_multishot=자동 다발 사격
+zdh.menu.auto_mfd=자동 죽음의 계곡
+zdh.menu.auto_sentry=자동 수호 포탑
+zdh.tooltip.title=ZDH 약화 효과 유지율
+zdh.tooltip.eligible=유효 정예 시간
+zdh.menu.auto_entangle.description=다발 사격, 죽음의 계곡, 수호 포탑 처리가 끝난 뒤 낮은 우선순위로 올가미 사격을 보조합니다.
+zdh.menu.auto_multishot.description=교전 중인 정예에게 냉기와 얼음점멸을 적용하고, 연속 난사 대신 확인된 갱신만 수행합니다.
+zdh.menu.auto_mfd.description=정예 가중치를 기준으로 죽음의 계곡을 배치하고 범위가 의미 있게 좋아질 때만 교체합니다.
+zdh.menu.auto_sentry.description=안정된 정예 전투 지역에 수호 포탑을 분산 배치하고 보호받지 못한 공격 역할 플레이어를 보호합니다.
+zdh.menu.labels.description=대상 정예 생명력 막대 아래에 IB, DMG, MFD 상태를 간단히 표시합니다.
+zdh.menu.uptime.description=대상 정예와 실제로 전투 중일 때만 약화 효과 유지율을 기록합니다.
+zdh.menu.restore.description=각 지원 기술 후 커서를 저장된 정확한 이동 지점으로 되돌립니다. 안전한 자동화에 필수입니다.
+zdh.tooltip.iceblink=얼음점멸
+zdh.tooltip.odyssey=오디세이
+zdh.tooltip.mark=징표
+zdh.tooltip.average=평균 유지율

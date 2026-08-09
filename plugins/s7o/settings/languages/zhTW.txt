@@ -1692,6 +1692,7 @@ overlay.paragon_helper.primary=主要屬性
 overlay.paragon_helper.vitality=體能
 overlay.paragon_helper.movement=移動速度
 overlay.paragon_helper.resource=最大資源
+overlay.paragon_helper.build_sync=顛峰配置：{0}
 overlay.paragon_builds.current=目前配置
 overlay.paragon_builds.save_current_setup=儲存目前配置
 overlay.paragon_builds.save_setup=儲存到配置：「{0}」
@@ -1838,6 +1839,10 @@ overlay.dh.portal_failed=傳送門 失敗
 overlay.dh.prompt_paused=已暫停
 overlay.dh.prompt_attack=攻擊: {0} = 移動 | {1} = 停止
 overlay.dh.prompt_move=移動: {0} = 攻擊 | {1} = 停止
+overlay.dh.prompt_combat=戰鬥：{0} = 速度 | {1} = 停止
+overlay.dh.prompt_speed=速度：{0} = 戰鬥 | {1} = 停止
+overlay.dh.paused_zdh_cast=已暫停：ZDH 施法
+overlay.dh.paused_pylon_nearby=已暫停：附近有塔
 overlay.dh.prompt_strafe=掃射: {0} = 停止
 overlay.dh.prompt_start={0} = 掃射
 overlay.dangerous.in_wormhole=位於蟲洞內
@@ -1944,3 +1949,32 @@ audio.pylon.shield_lost=護盾已結束
 audio.pylon.speed_found=加速塔
 audio.pylon.speed_active=加速已啟用
 audio.pylon.speed_lost=加速已結束
+
+hud.text.zdh_helper_options_expanded=ZDH 輔助工具選項：已展開
+hud.text.zdh_helper_options_collapsed=ZDH 輔助工具選項：已收合
+hud.text.zdh_helper_state=ZDH 輔助工具：{0}
+hud.text.zdh_helper_option_state=ZDH 輔助工具選項：{0}
+
+# ZDH Helper
+zdh.menu.title=ZDH 輔助工具
+zdh.menu.description=精英減益覆蓋率與可選的輔助技能自動施放。
+zdh.menu.labels=精英標籤
+zdh.menu.uptime=覆蓋率統計
+zdh.menu.restore=還原游標
+zdh.menu.auto_entangle=自動縛錘彈
+zdh.menu.auto_multishot=自動多重射擊
+zdh.menu.auto_mfd=自動死亡谷地
+zdh.menu.auto_sentry=自動守護箭塔
+zdh.tooltip.title=ZDH 減益覆蓋率
+zdh.tooltip.eligible=有效精英時間
+zdh.menu.auto_entangle.description=在多重射擊、死亡谷地與守護箭塔需求處理完成後，以較低優先順序補施縛錘彈。
+zdh.menu.auto_multishot.description=對正在交戰的精英施加寒風與冰閃，並在驗證後刷新，而不是持續連發。
+zdh.menu.auto_mfd.description=依精英權重放置死亡谷地，只有覆蓋範圍明顯改善時才重新放置。
+zdh.menu.auto_sentry.description=在穩定的精英戰鬥區域周圍分散部署守護箭塔，並保護未被覆蓋的輸出隊友。
+zdh.menu.labels.description=在符合條件的精英生命條下顯示精簡的 IB、DMG 與 MFD 狀態。
+zdh.menu.uptime.description=只有在實際攻擊符合條件的精英時才統計減益覆蓋率。
+zdh.menu.restore.description=每次輔助施法後將游標還原到精確儲存的移動位置。安全自動化必須啟用。
+zdh.tooltip.iceblink=冰閃
+zdh.tooltip.odyssey=奧德賽
+zdh.tooltip.mark=標記
+zdh.tooltip.average=平均覆蓋率
