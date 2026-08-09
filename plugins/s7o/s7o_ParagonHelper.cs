@@ -15,7 +15,8 @@ namespace Turbo.Plugins.s7o
     public class s7o_ParagonHelper : BasePlugin, IAfterCollectHandler, IInGameTopPainter, IKeyEventHandler, IMouseClickHandler
     {
         private const string SettingsFileName = "s7o_ParagonHelper.ini";
-        private const int SettingsVersion = 10;
+        private const string ParagonBuildSyncFileName = "s7o_ParagonBuild_HelperSync.ini";
+        private const int SettingsVersion = 11;
         private const int ActiveTabAnim = 13;
         private const int CoreCategory = 0;
         private const int PrimaryStatRow = 0;
@@ -28,6 +29,7 @@ namespace Turbo.Plugins.s7o
         private const int CloseDelayMs = 35;
         private const int SpendClickLimit = 500;
         private const int MaxSavedProfiles = 16;
+        private const int BuildSyncPollMs = 50;
         private const int NoTick = int.MinValue;
         private const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
         private const uint MOUSEEVENTF_LEFTUP = 0x0004;
@@ -75,8 +77,14 @@ namespace Turbo.Plugins.s7o
         private IKeyEvent _markKeyEvent;
         private IKeyEvent _spendKeyEvent;
         private string _settingsPath;
+        private string _paragonBuildSyncPath;
+        private DateTime _buildSyncWriteUtc = DateTime.MinValue;
+        private long _buildSyncLength = -1;
+        private int _lastBuildSyncPollTick = NoTick;
+        private BuildSyncRecord _buildSyncRecord;
         private int _selectedCoreRow = -1;
         private int _legacySelectedCoreRow = -1;
+        private int _spendCoreRow = -1;
         private string _activeProfileKey;
         private string _activeProfileLabel;
         private readonly Dictionary<string, ProfileSelection> _profileSelections = new Dictionary<string, ProfileSelection>(StringComparer.OrdinalIgnoreCase);
@@ -124,6 +132,7 @@ namespace Turbo.Plugins.s7o
             base.Load(hud);
             ResolveSettingsPath();
             LoadSettings();
+            ReloadParagonBuildSync(true);
             RegisterHotkeys();
             RegisterUiElements();
             BuildResources();
@@ -162,6 +171,9 @@ namespace Turbo.Plugins.s7o
         {
             if (!Enabled)
                 return;
+
+            EnsureActiveProfile();
+            TryApplyParagonBuildSync(false);
 
             if (!IsParagonOpen())
             {
@@ -272,6 +284,7 @@ namespace Turbo.Plugins.s7o
             _clicks = 0;
             _changed = false;
             _under800Spend = IsUnderParagon800();
+            _spendCoreRow = -1;
 
             if (_under800Spend)
             {
@@ -524,6 +537,10 @@ namespace Turbo.Plugins.s7o
                     return;
                 }
 
+                TryApplyParagonBuildSync(true);
+                _spendCoreRow = IsSupportedCoreRow(_selectedCoreRow)
+                    ? _selectedCoreRow
+                    : -1;
                 _state = SpendState.SpendCore;
                 _nextTick = now;
                 return;
@@ -539,7 +556,7 @@ namespace Turbo.Plugins.s7o
                     return;
                 }
 
-                if (_selectedCoreRow != PrimaryStatRow && _selectedCoreRow != VitalityRow)
+                if (_spendCoreRow != PrimaryStatRow && _spendCoreRow != VitalityRow)
                 {
                     _state = SpendState.CloseNoSpend;
                     _nextTick = now + CloseDelayMs;
@@ -547,14 +564,14 @@ namespace Turbo.Plugins.s7o
                     return;
                 }
 
-                RowState row = GetRowState(_selectedCoreRow);
+                RowState row = GetRowState(_spendCoreRow);
                 if (!row.Valid)
                 {
                     _nextTick = now + RowSettleMs;
                     return;
                 }
 
-                if (row.IsCapped || !IsVisible(_plusButtons[_selectedCoreRow]))
+                if (row.IsCapped || !IsVisible(_plusButtons[_spendCoreRow]))
                 {
                     _state = SpendState.CloseNoSpend;
                     _nextTick = now + CloseDelayMs;
@@ -562,12 +579,12 @@ namespace Turbo.Plugins.s7o
                     return;
                 }
 
-                if (ClickUi(_plusButtons[_selectedCoreRow], true))
+                if (ClickUi(_plusButtons[_spendCoreRow], true))
                 {
                     _clicks++;
                     _changed = true;
                     _nextTick = now + SpendDelayMs;
-                    ShowStatus("spent Core into " + CoreRowNames[_selectedCoreRow], StatusHoldMs);
+                    ShowStatus("spent Core into " + CoreRowNames[_spendCoreRow], StatusHoldMs);
                 }
                 else
                 {
@@ -622,6 +639,7 @@ namespace Turbo.Plugins.s7o
             _under800Spend = false;
             _under800Category = 0;
             _under800Row = 0;
+            _spendCoreRow = -1;
             _captureMarkHotkey = false;
             _captureSpendHotkey = false;
             ReleaseCtrl();
@@ -877,7 +895,8 @@ namespace Turbo.Plugins.s7o
             try
             {
                 if (ctrl) PressCtrl();
-                SetCursorPos(x, y);
+                if (!MoveCursorToClientPoint(x, y))
+                    return false;
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
                 return true;
@@ -887,6 +906,31 @@ namespace Turbo.Plugins.s7o
             {
                 if (ctrl) ReleaseCtrl();
             }
+        }
+
+        private bool MoveCursorToClientPoint(int clientX, int clientY)
+        {
+            try
+            {
+                if (Hud == null || Hud.Window == null || !Hud.Window.IsForeground)
+                    return false;
+
+                var size = Hud.Window.Size;
+                if (clientX < 0 || clientY < 0 ||
+                    clientX >= size.Width || clientY >= size.Height)
+                    return false;
+
+                var offset = Hud.Window.Offset;
+                long screenX = (long)offset.X + clientX;
+                long screenY = (long)offset.Y + clientY;
+                if (screenX < int.MinValue || screenX > int.MaxValue ||
+                    screenY < int.MinValue || screenY > int.MaxValue)
+                    return false;
+
+                return SetCursorPos((int)screenX, (int)screenY) &&
+                    Hud.Window.IsForeground;
+            }
+            catch { return false; }
         }
 
         private bool IsSafeParagonClick(int x, int y)
@@ -1371,8 +1415,15 @@ namespace Turbo.Plugins.s7o
                 string dir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "plugins", "s7o", "settings");
                 Directory.CreateDirectory(dir);
                 _settingsPath = Path.Combine(dir, SettingsFileName);
+                _paragonBuildSyncPath = Path.Combine(
+                    dir,
+                    ParagonBuildSyncFileName);
             }
-            catch { _settingsPath = null; }
+            catch
+            {
+                _settingsPath = null;
+                _paragonBuildSyncPath = null;
+            }
         }
 
         private void EnsureActiveProfile()
@@ -1390,6 +1441,9 @@ namespace Turbo.Plugins.s7o
             if (_profileSelections.TryGetValue(key, out profile))
             {
                 _selectedCoreRow = IsSupportedCoreRow(profile.Row) ? profile.Row : -1;
+                profile.LastBuildSyncSequence = Math.Max(
+                    0L,
+                    profile.LastBuildSyncSequence);
                 profile.LastSeenUtcTicks = DateTime.UtcNow.Ticks;
                 profile.Label = _activeProfileLabel;
                 _profileSelections[key] = profile;
@@ -1406,11 +1460,18 @@ namespace Turbo.Plugins.s7o
             if (string.IsNullOrEmpty(_activeProfileKey))
                 return;
 
+            ProfileSelection existing;
+            _profileSelections.TryGetValue(
+                _activeProfileKey,
+                out existing);
             _profileSelections[_activeProfileKey] = new ProfileSelection
             {
                 Row = IsSupportedCoreRow(_selectedCoreRow) ? _selectedCoreRow : -1,
                 LastSeenUtcTicks = DateTime.UtcNow.Ticks,
-                Label = string.IsNullOrEmpty(_activeProfileLabel) ? GetProfileLabel() : _activeProfileLabel
+                Label = string.IsNullOrEmpty(_activeProfileLabel) ? GetProfileLabel() : _activeProfileLabel,
+                LastBuildSyncSequence = Math.Max(
+                    0L,
+                    existing.LastBuildSyncSequence)
             };
 
             PruneSavedProfiles();
@@ -1478,6 +1539,205 @@ namespace Turbo.Plugins.s7o
             return "unknown hero";
         }
 
+        private void TryApplyParagonBuildSync(bool force)
+        {
+            ReloadParagonBuildSync(force);
+
+            uint heroId = CurrentHeroId();
+            if (!_buildSyncRecord.Valid ||
+                heroId == 0u ||
+                _buildSyncRecord.HeroId != heroId ||
+                !IsSupportedCoreRow(
+                    _buildSyncRecord.OverflowRow))
+            {
+                return;
+            }
+
+            ProfileSelection profile;
+            if (!_profileSelections.TryGetValue(
+                    _activeProfileKey,
+                    out profile))
+            {
+                profile = new ProfileSelection();
+            }
+
+            long sequence =
+                _buildSyncRecord.SequenceUtcTicks;
+            if (sequence <= 0L ||
+                sequence <= profile.LastBuildSyncSequence)
+            {
+                return;
+            }
+
+            _selectedCoreRow =
+                _buildSyncRecord.OverflowRow;
+            profile.Row = _selectedCoreRow;
+            profile.LastSeenUtcTicks =
+                DateTime.UtcNow.Ticks;
+            profile.Label =
+                string.IsNullOrEmpty(_activeProfileLabel)
+                    ? GetProfileLabel()
+                    : _activeProfileLabel;
+            profile.LastBuildSyncSequence = sequence;
+            _profileSelections[_activeProfileKey] = profile;
+            PruneSavedProfiles();
+            SaveSettings();
+
+            ShowStatus(
+                "Paragon Build: " +
+                CoreRowNames[_selectedCoreRow],
+                StatusHoldMs);
+        }
+
+        private void ReloadParagonBuildSync(bool force)
+        {
+            if (string.IsNullOrEmpty(
+                    _paragonBuildSyncPath))
+            {
+                return;
+            }
+
+            int now = Environment.TickCount;
+            if (!force &&
+                _lastBuildSyncPollTick != NoTick &&
+                unchecked(now - _lastBuildSyncPollTick) <
+                    BuildSyncPollMs)
+            {
+                return;
+            }
+
+            _lastBuildSyncPollTick = now;
+            try
+            {
+                FileInfo info =
+                    new FileInfo(_paragonBuildSyncPath);
+                if (!info.Exists)
+                {
+                    if (force || _buildSyncRecord.Valid)
+                    {
+                        _buildSyncRecord =
+                            new BuildSyncRecord();
+                        _buildSyncWriteUtc =
+                            DateTime.MinValue;
+                        _buildSyncLength = -1;
+                    }
+                    return;
+                }
+
+                if (!force &&
+                    info.LastWriteTimeUtc ==
+                        _buildSyncWriteUtc &&
+                    info.Length == _buildSyncLength)
+                {
+                    return;
+                }
+
+                BuildSyncRecord record;
+                _buildSyncRecord =
+                    TryParseBuildSyncRecord(
+                        File.ReadAllLines(
+                            _paragonBuildSyncPath),
+                        out record)
+                        ? record
+                        : new BuildSyncRecord();
+                _buildSyncWriteUtc =
+                    info.LastWriteTimeUtc;
+                _buildSyncLength = info.Length;
+            }
+            catch { }
+        }
+
+        private static bool TryParseBuildSyncRecord(
+            string[] lines,
+            out BuildSyncRecord record)
+        {
+            record = new BuildSyncRecord();
+            foreach (string raw in
+                lines ?? new string[0])
+            {
+                string line =
+                    (raw ?? string.Empty).Trim();
+                if (!line.StartsWith(
+                        "Sync1=",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                string[] parts =
+                    line.Substring(
+                        line.IndexOf('=') + 1)
+                    .Split('|');
+                uint heroId;
+                int armoryIndex;
+                int overflowRow;
+                long profileTicks;
+                long sequenceTicks;
+                if (parts.Length < 5 ||
+                    !uint.TryParse(
+                        parts[0],
+                        NumberStyles.Integer,
+                        CultureInfo.InvariantCulture,
+                        out heroId) ||
+                    !int.TryParse(
+                        parts[1],
+                        NumberStyles.Integer,
+                        CultureInfo.InvariantCulture,
+                        out armoryIndex) ||
+                    !int.TryParse(
+                        parts[2],
+                        NumberStyles.Integer,
+                        CultureInfo.InvariantCulture,
+                        out overflowRow) ||
+                    !long.TryParse(
+                        parts[3],
+                        NumberStyles.Integer,
+                        CultureInfo.InvariantCulture,
+                        out profileTicks) ||
+                    !long.TryParse(
+                        parts[4],
+                        NumberStyles.Integer,
+                        CultureInfo.InvariantCulture,
+                        out sequenceTicks) ||
+                    heroId == 0u ||
+                    !IsSupportedCoreRow(overflowRow) ||
+                    sequenceTicks <= 0L)
+                {
+                    return false;
+                }
+
+                record.Valid = true;
+                record.HeroId = heroId;
+                record.ArmoryIndex = armoryIndex;
+                record.OverflowRow = overflowRow;
+                record.ProfileUpdatedUtcTicks =
+                    Math.Max(0L, profileTicks);
+                record.SequenceUtcTicks = sequenceTicks;
+                record.Source = parts.Length >= 6
+                    ? CleanProfileValue(parts[5])
+                    : string.Empty;
+                return true;
+            }
+
+            return false;
+        }
+
+        private uint CurrentHeroId()
+        {
+            try
+            {
+                return Hud != null &&
+                    Hud.Game != null &&
+                    Hud.Game.Me != null
+                    ? Hud.Game.Me.HeroId
+                    : 0u;
+            }
+            catch
+            {
+                return 0u;
+            }
+        }
+
         private static bool IsSupportedCoreRow(int row)
         {
             return row == PrimaryStatRow || row == VitalityRow;
@@ -1518,11 +1778,21 @@ namespace Turbo.Plugins.s7o
                 long.TryParse(parts[2].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out ticks);
 
             string label = parts.Length >= 4 ? CleanProfileValue(parts[3]) : string.Empty;
+            long syncSequence = 0L;
+            if (parts.Length >= 5)
+            {
+                long.TryParse(
+                    parts[4].Trim(),
+                    NumberStyles.Integer,
+                    CultureInfo.InvariantCulture,
+                    out syncSequence);
+            }
             _profileSelections[key] = new ProfileSelection
             {
                 Row = IsSupportedCoreRow(row) ? row : -1,
                 LastSeenUtcTicks = ticks > 0 ? ticks : DateTime.UtcNow.Ticks,
-                Label = label
+                Label = label,
+                LastBuildSyncSequence = Math.Max(0L, syncSequence)
             };
             return true;
         }
@@ -1579,7 +1849,14 @@ namespace Turbo.Plugins.s7o
                     sb.Append('|');
                     sb.Append(pair.Value.LastSeenUtcTicks.ToString(CultureInfo.InvariantCulture));
                     sb.Append('|');
-                    sb.AppendLine(CleanProfileValue(pair.Value.Label));
+                    sb.Append(CleanProfileValue(pair.Value.Label));
+                    sb.Append('|');
+                    sb.AppendLine(
+                        Math.Max(
+                            0L,
+                            pair.Value.LastBuildSyncSequence)
+                        .ToString(
+                            CultureInfo.InvariantCulture));
                 }
                 File.WriteAllText(_settingsPath, sb.ToString());
             }
@@ -1708,6 +1985,18 @@ namespace Turbo.Plugins.s7o
             public int Row;
             public long LastSeenUtcTicks;
             public string Label;
+            public long LastBuildSyncSequence;
+        }
+
+        private struct BuildSyncRecord
+        {
+            public bool Valid;
+            public uint HeroId;
+            public int ArmoryIndex;
+            public int OverflowRow;
+            public long ProfileUpdatedUtcTicks;
+            public long SequenceUtcTicks;
+            public string Source;
         }
 
         private struct RowState
