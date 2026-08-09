@@ -9,7 +9,7 @@ using Turbo.Plugins.Default;
 
 namespace Turbo.Plugins.s7o
 {
-    // REV46 preserves REV45 and hardens Blood Rush casting plus exact post-teleport reacquisition.
+    // Pestilence RGK targeting, Siphon support, and circle mobility assistance.
     public class s7o_Pestilence_RGK : BasePlugin, IAfterCollectHandler, INewAreaHandler, IInGameWorldPainter
     {
         private const uint PestilenceSetSno = 740282;
@@ -173,11 +173,14 @@ namespace Turbo.Plugins.s7o
         private const float MobilityCircleExpiringSeconds = 1.25f;
         private const float CircleTeleportArrivalDistanceSq = 9.0f;
         private const int CircleTeleportAimSettleTicks = 2;
-        private const int CircleTeleportCastHoldTicks = 2;
+        private const int CircleTeleportCastHoldTicks = 3;
         private const int CircleTeleportPostCastMinTicks = 2;
+        private const int CircleTeleportMaxCastRetries = 1;
         private const int CircleTeleportSameCircleGuardTicks = 5;
         private const int CircleTeleportPostCastTimeoutTicks = 12;
         private const int CircleTeleportReacquireTicks = 36;
+        private const int CircleReengageSnapshotTicks = 120;
+        private const float CircleReengageManualOverrideThresholdSq = 900f;
         private const uint TriuneProxySno = 488071u;
         private const float MorluRecoveryHealthThreshold = 0.12f;
         private const float MorluRecoveryPriorityBonus = 10.0f;
@@ -428,18 +431,32 @@ namespace Turbo.Plugins.s7o
         private int _postTeleportReacquireUntilTick;
         private int _postTeleportReacquireMoveTick;
         private bool _oculusTeleportHotkeyWasDown;
+        private bool _postBossRewardSpaceHandoffActive;
         private CircleTeleportStage _circleTeleportStage;
         private int _circleTeleportAimReadyTick;
         private int _circleTeleportCastTick;
         private int _circleTeleportKeyUpTick;
         private int _circleTeleportTimeoutTick;
         private bool _circleTeleportBloodRushKeyOwned;
+        private bool _circleTeleportTransformObserved;
+        private int _circleTeleportRetryCount;
         private uint _circleTeleportTargetAcdId;
         private float _circleTeleportCursorX;
         private float _circleTeleportCursorY;
         private float _circleTeleportStartX;
         private float _circleTeleportStartY;
         private bool _circleTeleportSameCircleRecast;
+        private uint _circleReengageAcdId;
+        private float _circleReengageDx;
+        private float _circleReengageDy;
+        private float _circleReengageBodyRatio;
+        private float _circleReengageSideRatio;
+        private bool _circleReengageHasBodyPoint;
+        private int _circleReengageUntilTick;
+        private int _circleReengageReleaseTick;
+        private float _circleReengageReleaseCursorX;
+        private float _circleReengageReleaseCursorY;
+        private bool _circleReengageReleaseCursorCaptured;
         private bool _movementEscapeLatched;
         private bool _openingSiphonPending;
         private int _openingSiphonExpireTick;
@@ -500,6 +517,7 @@ namespace Turbo.Plugins.s7o
         private int _lastSeenGameTick;
 
         private IUiElement _chatEditLine;
+        private IUiElement _conversationDialogMain;
         private int _lastOwnedMouseSiphonPulseTick;
         private int _lastOwnedChatRiskPulseTick;
         private int _lastOwnedUiCloseTick;
@@ -525,6 +543,7 @@ namespace Turbo.Plugins.s7o
             try { _snoBloodRush = hud.Sno.SnoPowers.Necromancer_BloodRush.Sno; } catch { _snoBloodRush = 454090u; }
 
             try { _chatEditLine = Hud.Render.GetUiElement("Root.NormalLayer.chatentry_dialog_backgroundScreen.chatentry_content.chat_editline"); } catch { }
+            try { _conversationDialogMain = Hud.Render.RegisterUiElement("Root.NormalLayer.conversation_dialog_main", null, null); } catch { }
             RegisterClickDangerUiElements();
             try
             {
@@ -754,6 +773,7 @@ namespace Turbo.Plugins.s7o
                     _movementDisengageUntilTick = 0;
                     _manualCursorOverrideUntilTick = 0;
                     CaptureFreshManualEngagementFocus(tick);
+                    TryResumeCircleReengageSnapshot(tick);
                     _openingSiphonPending = true;
                     _openingSiphonExpireTick = tick + OpeningSiphonRetryWindowTicks;
                     _openingSiphonHandoffPending = false;
@@ -942,6 +962,7 @@ namespace Turbo.Plugins.s7o
         {
             StopPulseNow();
             CancelForcedAutosnap();
+            ClearCircleReengageSnapshot();
             SuppressCursorRestoreForEngagement();
             _lastPluginCursorX = 0f;
             _lastPluginCursorY = 0f;
@@ -980,6 +1001,10 @@ namespace Turbo.Plugins.s7o
         private IMonster PickImmediateReengageTarget()
         {
             IMonster target = GetManualJuggerLockTarget();
+            if (IsPestilenceImmediateReengageTarget(target))
+                return target;
+
+            target = GetCircleReengageSnapshotTarget(SafeGameTick());
             if (IsPestilenceImmediateReengageTarget(target))
                 return target;
 
@@ -1029,6 +1054,7 @@ namespace Turbo.Plugins.s7o
             // long elite-target holds stay parked, and all plugin input ownership
             // is cleared before this collection returns.
             TryRestoreCursorImmediately(tick);
+            MarkCircleReengageRelease(tick);
             ResetRuntime(false);
         }
 
@@ -1507,6 +1533,18 @@ namespace Turbo.Plugins.s7o
 
             IMonster selected = null;
             try { selected = Hud.Game.SelectedMonster2; } catch { }
+
+            IMonster circleReengage = GetCircleReengageSnapshotTarget(tick);
+            if (IsAliveTarget(circleReengage))
+            {
+                uint circleAcd = GetMonsterAcdId(circleReengage);
+                if (SameMonster(selected, circleReengage) || TryMoveCircleReengageSnapshot(circleReengage, tick))
+                {
+                    RememberEngagementFocus(circleReengage, tick);
+                    _lastSiphonTargetAcdId = circleAcd;
+                    return !IsCursorOverClickDangerUi();
+                }
+            }
 
             if (!IsCursorOverClickDangerUi() && IsPreferredSiphonAnchorUsable(selected))
             {
@@ -2294,14 +2332,38 @@ namespace Turbo.Plugins.s7o
             if (!OculusTeleportAssistEnabled || OculusTeleportVirtualKey == 0)
             {
                 _oculusTeleportHotkeyWasDown = false;
+                _postBossRewardSpaceHandoffActive = false;
                 return false;
             }
 
-            // Sample SPACE even while a staged cast is active so a release cannot be
-            // missed and consume the next legitimate press.
-            bool down = IsKeyPhysicallyDown(OculusTeleportVirtualKey);
-            bool pressed = down && !_oculusTeleportHotkeyWasDown;
+            // Use both the live-down bit and the pressed-since-last-query bit so a
+            // short physical tap between HUD collections is not silently lost.
+            bool down;
+            bool pressedSinceLastQuery;
+            ReadKeyState(OculusTeleportVirtualKey, out down, out pressedSinceLastQuery);
+            bool pressed = (down && !_oculusTeleportHotkeyWasDown) || pressedSinceLastQuery;
             _oculusTeleportHotkeyWasDown = down;
+
+            // A reward-dialog Space received while Lance is still held is synthetic input
+            // from Auto Gem, not a new mobility command. Immediately release all Pestilence
+            // ownership and remain inert until that already-held Lance key is released.
+            // This is state-based and adds no timed delay to loot pickup or other plugins.
+            if (_postBossRewardSpaceHandoffActive)
+            {
+                if (lanceHeld)
+                    return true;
+
+                _postBossRewardSpaceHandoffActive = false;
+                ResetRuntime(true);
+                _oculusTeleportHotkeyWasDown = down;
+                return true;
+            }
+
+            if (pressed && lanceHeld && IsCompletedGreaterRiftRewardDialogVisible())
+            {
+                BeginPostBossRewardSpaceHandoff();
+                return true;
+            }
 
             if (_circleTeleportStage != CircleTeleportStage.Idle)
                 return ContinueCircleTeleport(tick, lanceHeld);
@@ -2312,6 +2374,33 @@ namespace Turbo.Plugins.s7o
                 return false;
 
             return TryBeginCircleTeleport(tick);
+        }
+
+        private void BeginPostBossRewardSpaceHandoff()
+        {
+            _postBossRewardSpaceHandoffActive = true;
+
+            StopPulseNow();
+            ClearCircleTeleportState();
+            ClearLateRefreshIntent();
+            _openingSiphonPending = false;
+            _openingSiphonExpireTick = 0;
+            _openingSiphonHandoffPending = false;
+            _openingSiphonHandoffUntilTick = 0;
+            _openingSiphonStartedWhileMoving = false;
+            _movementEscapeLatched = false;
+            _movementDisengageUntilTick = 0;
+            _manualCursorOverrideUntilTick = 0;
+            CancelForcedAutosnap();
+            ClearAutosnapLockState();
+            ClearPostTeleportReacquire();
+            ClearEngagementFocus();
+            ReleaseStandstillIfOwned();
+            ReleaseCursorOwnershipWithoutRestore();
+            _lastPluginCursorX = 0f;
+            _lastPluginCursorY = 0f;
+            _lastPluginCursorMoveTick = 0;
+            ClearCircleReengageSnapshot();
         }
 
         private bool TryBeginCircleTeleport(int tick)
@@ -2346,6 +2435,7 @@ namespace Turbo.Plugins.s7o
             _movementDisengageUntilTick = 0;
             _manualCursorOverrideUntilTick = 0;
             CancelForcedAutosnap();
+            CaptureCircleReengageSnapshot(target, tick);
             ClearSoftHoverLocks();
 
             uint acd = GetMonsterAcdId(target);
@@ -2362,6 +2452,8 @@ namespace Turbo.Plugins.s7o
             _circleTeleportCursorX = screen.X;
             _circleTeleportCursorY = screen.Y;
             _circleTeleportSameCircleRecast = sameCircleRecast;
+            _circleTeleportTransformObserved = false;
+            _circleTeleportRetryCount = 0;
             _circleTeleportAimReadyTick = tick + CircleTeleportAimSettleTicks;
             _circleTeleportStage = CircleTeleportStage.Aiming;
 
@@ -2382,6 +2474,8 @@ namespace Turbo.Plugins.s7o
                 return false;
             }
 
+            ObserveCircleTeleportAcceptance();
+
             if (_circleTeleportStage == CircleTeleportStage.Aiming)
             {
                 // Hold the exact circle center for at least two collections so normal
@@ -2400,24 +2494,12 @@ namespace Turbo.Plugins.s7o
 
                 // TryBeginCircleTeleport already verified Blood Rush and its key. Do
                 // not abort here on a transient skill-state sample after the cursor is ready.
-                try
+                if (!BeginCircleTeleportBloodRushPress(tick, false))
                 {
-                    IWorldCoordinate me = Hud.Game.Me.FloorCoordinate;
-                    _circleTeleportStartX = me != null ? me.X : 0f;
-                    _circleTeleportStartY = me != null ? me.Y : 0f;
-                }
-                catch
-                {
-                    _circleTeleportStartX = 0f;
-                    _circleTeleportStartY = 0f;
+                    ClearCircleTeleportState();
+                    return true;
                 }
 
-                SendActionDown(_bloodRushKey);
-                _circleTeleportBloodRushKeyOwned = true;
-                _circleTeleportCastTick = tick;
-                _circleTeleportKeyUpTick = tick + CircleTeleportCastHoldTicks;
-                _circleTeleportTimeoutTick = tick + CircleTeleportPostCastTimeoutTicks;
-                _circleTeleportStage = CircleTeleportStage.Casting;
                 return true;
             }
 
@@ -2449,12 +2531,91 @@ namespace Turbo.Plugins.s7o
                 if (!moved && !sameCircleComplete && tick < _circleTeleportTimeoutTick)
                     return true;
 
+                // If neither movement nor the native Blood Rush transform was observed,
+                // retry the staged cast once while retaining the same verified destination.
+                // A cast that was accepted and then cancelled is never restarted.
+                if (!moved && !sameCircleComplete && !_circleTeleportTransformObserved &&
+                    _circleTeleportRetryCount < CircleTeleportMaxCastRetries &&
+                    TryRetryCircleTeleportBloodRush(tick))
+                {
+                    return true;
+                }
+
                 ResumeCircleTeleportTarget(tick);
                 return true;
             }
 
             ClearCircleTeleportState();
             return false;
+        }
+
+        private bool BeginCircleTeleportBloodRushPress(int tick, bool retry)
+        {
+            try
+            {
+                IWorldCoordinate me = Hud.Game.Me.FloorCoordinate;
+                _circleTeleportStartX = me != null ? me.X : 0f;
+                _circleTeleportStartY = me != null ? me.Y : 0f;
+            }
+            catch
+            {
+                _circleTeleportStartX = 0f;
+                _circleTeleportStartY = 0f;
+            }
+
+            if (!TrySendCircleTeleportActionDown(_bloodRushKey))
+                return false;
+
+            _circleTeleportBloodRushKeyOwned = true;
+            _circleTeleportTransformObserved = false;
+            if (retry)
+                _circleTeleportRetryCount++;
+
+            _circleTeleportCastTick = tick;
+            _circleTeleportKeyUpTick = tick + CircleTeleportCastHoldTicks;
+            _circleTeleportTimeoutTick = tick + CircleTeleportPostCastTimeoutTicks;
+            _circleTeleportStage = CircleTeleportStage.Casting;
+            return true;
+        }
+
+        private bool TryRetryCircleTeleportBloodRush(int tick)
+        {
+            IPlayerSkill bloodRush = ResolveBloodRushSkill();
+            if (!CanCastBloodRush(bloodRush) || !MoveCircleTeleportCursor(tick))
+                return false;
+
+            return BeginCircleTeleportBloodRushPress(tick, true);
+        }
+
+        private void ObserveCircleTeleportAcceptance()
+        {
+            if (_circleTeleportTransformObserved)
+                return;
+
+            try
+            {
+                _circleTeleportTransformObserved = Hud.Game.Me != null &&
+                    Hud.Game.Me.AnimationState == AcdAnimationState.Transform;
+            }
+            catch { }
+        }
+
+        private bool IsCompletedGreaterRiftRewardDialogVisible()
+        {
+            try
+            {
+                if (_conversationDialogMain == null || !_conversationDialogMain.Visible)
+                    return false;
+
+                bool inGreaterRift = Hud.Game.Me != null &&
+                    (Hud.Game.Me.InGreaterRift || Hud.Game.SpecialArea == SpecialArea.GreaterRift);
+
+                return inGreaterRift && Hud.Game.RiftPercentage >= 100.0d && !BossAlive();
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private bool CanCastBloodRush(IPlayerSkill bloodRush)
@@ -2531,6 +2692,8 @@ namespace Turbo.Plugins.s7o
             _forcedSnapUntilTick = Math.Max(_forcedSnapUntilTick, tick + CircleTeleportReacquireTicks);
             ArmPostTeleportReacquireTarget(acd, tick);
             _postTeleportReacquireUntilTick = Math.Max(_postTeleportReacquireUntilTick, tick + CircleTeleportReacquireTicks);
+            if (_circleReengageAcdId == acd)
+                _circleReengageUntilTick = Math.Max(_circleReengageUntilTick, tick + CircleReengageSnapshotTicks);
 
             if (IsAliveTarget(target))
                 TrySnap(target, tick);
@@ -2553,12 +2716,182 @@ namespace Turbo.Plugins.s7o
             _circleTeleportCastTick = 0;
             _circleTeleportKeyUpTick = 0;
             _circleTeleportTimeoutTick = 0;
+            _circleTeleportTransformObserved = false;
+            _circleTeleportRetryCount = 0;
             _circleTeleportTargetAcdId = 0;
             _circleTeleportCursorX = 0f;
             _circleTeleportCursorY = 0f;
             _circleTeleportStartX = 0f;
             _circleTeleportStartY = 0f;
             _circleTeleportSameCircleRecast = false;
+        }
+
+        private void CaptureCircleReengageSnapshot(IMonster target, int tick)
+        {
+            uint acd = GetMonsterAcdId(target);
+            if (acd == 0 || !IsPestilenceImmediateReengageTarget(target))
+            {
+                ClearCircleReengageSnapshot();
+                return;
+            }
+
+            _circleReengageAcdId = acd;
+            _circleReengageDx = 0f;
+            _circleReengageDy = 0f;
+            _circleReengageBodyRatio = 0.40f;
+            _circleReengageSideRatio = 0f;
+            _circleReengageHasBodyPoint = true;
+
+            if (_verifiedHoverAcdId == acd)
+            {
+                if (_verifiedHoverHasBodyPoint)
+                {
+                    _circleReengageBodyRatio = _verifiedHoverBodyRatio;
+                    _circleReengageSideRatio = _verifiedHoverSideRatio;
+                }
+                else if (_verifiedHoverHasTargetAnchor)
+                {
+                    _circleReengageDx = _verifiedHoverScreenX - _verifiedHoverTargetScreenX;
+                    _circleReengageDy = _verifiedHoverScreenY - _verifiedHoverTargetScreenY;
+                    _circleReengageHasBodyPoint = false;
+                }
+            }
+            else if (_cachedHoverAcdId == acd)
+            {
+                _circleReengageDx = _cachedHoverDx;
+                _circleReengageDy = _cachedHoverDy;
+                _circleReengageBodyRatio = _cachedHoverBodyRatio;
+                _circleReengageSideRatio = _cachedHoverSideRatio;
+                _circleReengageHasBodyPoint = _cachedHoverHasBodyPoint;
+            }
+            else if (_stableLockAcdId == acd)
+            {
+                _circleReengageDx = _stableLockDx;
+                _circleReengageDy = _stableLockDy;
+                _circleReengageHasBodyPoint = false;
+            }
+            else if (_lastHoverAcdId == acd && tick - _lastHoverTick <= HoverTruthRecentTicks)
+            {
+                _circleReengageDx = _lastHoverDx;
+                _circleReengageDy = _lastHoverDy;
+                _circleReengageHasBodyPoint = false;
+            }
+
+            _circleReengageUntilTick = tick + CircleReengageSnapshotTicks;
+            _circleReengageReleaseTick = 0;
+            _circleReengageReleaseCursorCaptured = false;
+        }
+
+        private IMonster GetCircleReengageSnapshotTarget(int tick)
+        {
+            if (_circleReengageAcdId == 0 || tick <= 0 || tick > _circleReengageUntilTick)
+            {
+                ClearCircleReengageSnapshot();
+                return null;
+            }
+
+            IMonster target = FindAliveMonsterByAcdId(_circleReengageAcdId);
+            if (!IsPestilenceImmediateReengageTarget(target) || IsInvulnerable(target) || IsIllusionOrClone(target))
+            {
+                ClearCircleReengageSnapshot();
+                return null;
+            }
+
+            return target;
+        }
+
+        private bool TryResumeCircleReengageSnapshot(int tick)
+        {
+            IMonster target = GetCircleReengageSnapshotTarget(tick);
+            if (!IsAliveTarget(target))
+                return false;
+
+            if (_circleReengageReleaseCursorCaptured && _circleReengageReleaseTick > 0)
+            {
+                float cursorDx = Hud.Window.CursorX - _circleReengageReleaseCursorX;
+                float cursorDy = Hud.Window.CursorY - _circleReengageReleaseCursorY;
+                if (cursorDx * cursorDx + cursorDy * cursorDy > CircleReengageManualOverrideThresholdSq)
+                {
+                    ClearCircleReengageSnapshot();
+                    return false;
+                }
+            }
+
+            uint acd = GetMonsterAcdId(target);
+            PrepareImmediateRetarget(target, tick);
+            LockTarget(target, tick);
+            _reacquireAcdId = acd;
+            _reacquireUntilTick = Math.Max(_reacquireUntilTick, tick + CircleTeleportReacquireTicks);
+            RememberEngagementFocus(target, tick);
+            return TryMoveCircleReengageSnapshot(target, tick);
+        }
+
+        private bool TryMoveCircleReengageSnapshot(IMonster target, int tick)
+        {
+            if (!IsAliveTarget(target) || GetMonsterAcdId(target) != _circleReengageAcdId)
+                return false;
+
+            float targetX, targetY;
+            if (!TryGetMonsterScreen(target, out targetX, out targetY))
+                return false;
+
+            float dx = _circleReengageDx;
+            float dy = _circleReengageDy;
+            if (_circleReengageHasBodyPoint)
+            {
+                ProbeGeometry geometry;
+                if (TryBuildProbeGeometry(target, targetX, targetY, out geometry))
+                    GetBodyProbeOffset(geometry, _circleReengageBodyRatio, _circleReengageSideRatio, out dx, out dy);
+            }
+
+            float pointX = targetX + dx;
+            float pointY = targetY + dy;
+            if (!IsAutoSnapHoverPoint(pointX, pointY) || !SafeMouseMove(pointX, pointY, tick))
+                return false;
+
+            uint acd = _circleReengageAcdId;
+            _lastMouseMoveTick = tick;
+            RememberCachedHoverPoint(target, acd, dx, dy, tick, CircleReengageSnapshotTicks, ReacquireWindowTicks);
+            _stableLockAcdId = acd;
+            _stableLockDx = dx;
+            _stableLockDy = dy;
+            _stableLockUntilTick = Math.Max(_stableLockUntilTick, tick + StableLockTicks);
+            _softLockAcdId = acd;
+            _softLockDx = dx;
+            _softLockDy = dy;
+            _softLockUntilTick = Math.Max(_softLockUntilTick, tick + SoftLockTicks);
+            return true;
+        }
+
+        private void MarkCircleReengageRelease(int tick)
+        {
+            if (_circleReengageAcdId == 0 || tick > _circleReengageUntilTick)
+                return;
+
+            _circleReengageReleaseTick = tick;
+            _circleReengageUntilTick = Math.Max(_circleReengageUntilTick, tick + CircleReengageSnapshotTicks);
+            try
+            {
+                _circleReengageReleaseCursorX = Hud.Window.CursorX;
+                _circleReengageReleaseCursorY = Hud.Window.CursorY;
+                _circleReengageReleaseCursorCaptured = true;
+            }
+            catch { _circleReengageReleaseCursorCaptured = false; }
+        }
+
+        private void ClearCircleReengageSnapshot()
+        {
+            _circleReengageAcdId = 0;
+            _circleReengageDx = 0f;
+            _circleReengageDy = 0f;
+            _circleReengageBodyRatio = 0f;
+            _circleReengageSideRatio = 0f;
+            _circleReengageHasBodyPoint = false;
+            _circleReengageUntilTick = 0;
+            _circleReengageReleaseTick = 0;
+            _circleReengageReleaseCursorX = 0f;
+            _circleReengageReleaseCursorY = 0f;
+            _circleReengageReleaseCursorCaptured = false;
         }
 
         private IPlayerSkill ResolveBloodRushSkill()
@@ -3889,6 +4222,9 @@ namespace Turbo.Plugins.s7o
             if (_postTeleportReacquireAcdId != 0 && FindAliveMonsterByAcdId(_postTeleportReacquireAcdId) == null)
                 ClearPostTeleportReacquire();
 
+            if (_circleReengageAcdId != 0 && FindAliveMonsterByAcdId(_circleReengageAcdId) == null)
+                ClearCircleReengageSnapshot();
+
             if (_reacquireAcdId != 0 && FindAliveMonsterByAcdId(_reacquireAcdId) == null)
             {
                 _reacquireAcdId = 0;
@@ -4438,6 +4774,7 @@ namespace Turbo.Plugins.s7o
                     : ManualCursorOverridePauseTicks;
                 _manualCursorOverrideUntilTick = Math.Max(_manualCursorOverrideUntilTick, tick + pauseTicks);
                 _movementDisengageUntilTick = Math.Max(_movementDisengageUntilTick, tick + MovementDisengageAfterCursorOverrideTicks);
+                ClearCircleReengageSnapshot();
                 SuppressCursorRestoreForEngagement();
             }
             catch { }
@@ -6157,6 +6494,7 @@ namespace Turbo.Plugins.s7o
                 RecordProbeZoneSuccess(acd, _lastSnapAttemptZone, tick);
 
             if (_reacquireAcdId == acd) { _reacquireAcdId = 0; _reacquireUntilTick = 0; }
+            if (_circleReengageAcdId == acd) ClearCircleReengageSnapshot();
             if (_alternateScanAcdId == acd) { _alternateScanAcdId = 0; _alternateScanUntilTick = 0; }
             if (_leaderPackCoreRetryAcdId == acd)
             {
@@ -8309,6 +8647,7 @@ namespace Turbo.Plugins.s7o
             {
                 StopPulseNow();
                 ReleaseCircleTeleportBloodRushKey();
+                ClearCircleReengageSnapshot();
             }
 
             _lockedTargetAcdId = 0;
@@ -8426,12 +8765,15 @@ namespace Turbo.Plugins.s7o
             _siphonKey = ActionKey.Unknown;
             _bloodRushKey = ActionKey.Unknown;
             _oculusTeleportHotkeyWasDown = false;
+            _postBossRewardSpaceHandoffActive = false;
             _circleTeleportStage = CircleTeleportStage.Idle;
             _circleTeleportAimReadyTick = 0;
             _circleTeleportCastTick = 0;
             _circleTeleportKeyUpTick = 0;
             _circleTeleportTimeoutTick = 0;
             _circleTeleportBloodRushKeyOwned = false;
+            _circleTeleportTransformObserved = false;
+            _circleTeleportRetryCount = 0;
             _circleTeleportTargetAcdId = 0;
             _circleTeleportCursorX = 0f;
             _circleTeleportCursorY = 0f;
@@ -8485,6 +8827,44 @@ namespace Turbo.Plugins.s7o
 
             SendKeyUp(ForceStandstillVirtualKey);
             _standstillOwned = false;
+        }
+
+        private bool TrySendCircleTeleportActionDown(ActionKey key)
+        {
+            switch (key)
+            {
+                case ActionKey.LeftSkill:
+                    return TrySendMouse(LeftDown);
+                case ActionKey.RightSkill:
+                    return TrySendMouse(RightDown);
+                case ActionKey.Skill1:
+                case ActionKey.Skill2:
+                case ActionKey.Skill3:
+                case ActionKey.Skill4:
+                    return TrySendKey(VirtualKeyForAction(key), false);
+                default:
+                    return false;
+            }
+        }
+
+        private static bool TrySendKey(ushort virtualKey, bool keyUp)
+        {
+            if (virtualKey == 0)
+                return false;
+
+            var input = new Input[1];
+            input[0].Type = InputKeyboard;
+            input[0].U.Keyboard.VirtualKey = virtualKey;
+            input[0].U.Keyboard.Flags = keyUp ? KeyUp : 0;
+            return SendInput(1, input, Marshal.SizeOf(typeof(Input))) == 1;
+        }
+
+        private static bool TrySendMouse(uint flags)
+        {
+            var input = new Input[1];
+            input[0].Type = InputMouse;
+            input[0].U.Mouse.Flags = flags;
+            return SendInput(1, input, Marshal.SizeOf(typeof(Input))) == 1;
         }
 
         private void SendActionDown(ActionKey key)
@@ -8632,6 +9012,13 @@ namespace Turbo.Plugins.s7o
 
         [DllImport("user32.dll")]
         private static extern bool SetCursorPos(int x, int y);
+
+        private static void ReadKeyState(ushort virtualKey, out bool down, out bool pressedSinceLastQuery)
+        {
+            short state = GetAsyncKeyState(virtualKey);
+            down = (state & unchecked((short)0x8000)) != 0;
+            pressedSinceLastQuery = (state & 0x0001) != 0;
+        }
 
         private static bool IsKeyPhysicallyDown(ushort virtualKey)
         {
