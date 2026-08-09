@@ -26,6 +26,7 @@ namespace Turbo.Plugins.s7o
         IInGameTopPainter
     {
         private const string SettingsFileName = "s7o_Paragon_Builds.ini";
+        private const string HelperSyncFileName = "s7o_ParagonBuild_HelperSync.ini";
         private const int SettingsVersion = 16;
         private const int NoTick = int.MinValue;
         private const int ActiveTabAnim = 13;
@@ -269,6 +270,9 @@ namespace Turbo.Plugins.s7o
         private IBrush _toggleIndicatorOffBrush;
 
         private string _settingsPath;
+        private string _helperSyncPath;
+        private string _lastHelperSyncToken = string.Empty;
+        private long _lastHelperSyncSequence;
         private readonly Dictionary<string, ParagonProfile> _profiles =
             new Dictionary<string, ParagonProfile>(StringComparer.Ordinal);
         private readonly HashSet<uint> _disabledHeroIds =
@@ -572,6 +576,10 @@ namespace Turbo.Plugins.s7o
                     if (existing != null &&
                         existing.HasParagonProfile)
                     {
+                        PublishParagonHelperSelection(
+                            existing,
+                            false,
+                            "active-profile");
                         CopyProfileToCapture(existing);
                     }
                     else
@@ -583,6 +591,15 @@ namespace Turbo.Plugins.s7o
                 RefreshCurrentBuildDisplay();
                 if (paragonEnabled)
                 {
+                    if (existing != null &&
+                        existing.HasParagonProfile)
+                    {
+                        PublishParagonHelperSelection(
+                            existing,
+                            false,
+                            "active-profile");
+                    }
+
                     TryBeginPassiveCurrentProfileVerification(
                         existing,
                         now);
@@ -1001,8 +1018,9 @@ namespace Turbo.Plugins.s7o
             if (includeParagon)
             {
                 profile.Rows = captured.Rows;
-                profile.OverflowRow = NormalizeOverflowRow(
+                profile.OverflowRow = ResolveOverflowRow(
                     _currentOverflowRow,
+                    _currentOverflowExplicit,
                     profile.Rows);
                 profile.OverflowExplicit =
                     _currentOverflowExplicit;
@@ -1045,7 +1063,13 @@ namespace Turbo.Plugins.s7o
             SaveSettings();
 
             if (includeParagon)
+            {
+                PublishParagonHelperSelection(
+                    profile,
+                    true,
+                    "profile-save");
                 ScheduleNativeFingerprintCapture(profile, now);
+            }
 
             ClearWarning();
             ShowStatus(
@@ -1431,6 +1455,8 @@ namespace Turbo.Plugins.s7o
             }
 
             _applyProfile = CloneProfile(profile);
+            _applyProfile.OverflowRow =
+                ResolveProfileOverflowRow(_applyProfile);
             _currentOverflowRow =
                 _applyProfile.OverflowRow;
             _currentOverflowExplicit =
@@ -2280,6 +2306,13 @@ namespace Turbo.Plugins.s7o
             {
                 _currentOverflowRow = PrimaryRow;
                 _currentOverflowExplicit = true;
+                PublishParagonHelperRow(
+                    CurrentHeroId,
+                    _activeArmoryIndex,
+                    _currentOverflowRow,
+                    DateTime.UtcNow.Ticks,
+                    true,
+                    "selector-click");
                 return true;
             }
 
@@ -2287,6 +2320,13 @@ namespace Turbo.Plugins.s7o
             {
                 _currentOverflowRow = VitalityRow;
                 _currentOverflowExplicit = true;
+                PublishParagonHelperRow(
+                    CurrentHeroId,
+                    _activeArmoryIndex,
+                    _currentOverflowRow,
+                    DateTime.UtcNow.Ticks,
+                    true,
+                    "selector-click");
                 return true;
             }
 
@@ -2331,7 +2371,10 @@ namespace Turbo.Plugins.s7o
                 for (int row = 0; row < 4; row++)
                     rows[tab, row] = _capturedRows[tab, row];
 
-            int overflow = NormalizeOverflowRow(_currentOverflowRow, rows);
+            int overflow = ResolveOverflowRow(
+                _currentOverflowRow,
+                _currentOverflowExplicit,
+                rows);
             profile = new ParagonProfile
             {
                 HeroId = CurrentHeroId,
@@ -2348,6 +2391,226 @@ namespace Turbo.Plugins.s7o
                 UpdatedUtcTicks = DateTime.UtcNow.Ticks
             };
             return true;
+        }
+
+        private void PublishParagonHelperSelection(
+            ParagonProfile profile,
+            bool force,
+            string source)
+        {
+            if (profile == null ||
+                !profile.HasParagonProfile)
+            {
+                return;
+            }
+
+            PublishParagonHelperRow(
+                profile.HeroId,
+                profile.ArmoryIndex,
+                ResolveProfileOverflowRow(profile),
+                profile.UpdatedUtcTicks,
+                force,
+                source);
+        }
+
+        private void PublishParagonHelperRow(
+            uint heroId,
+            int armoryIndex,
+            int overflow,
+            long profileUpdatedUtcTicks,
+            bool force,
+            string source)
+        {
+            if (heroId == 0u ||
+                (overflow != PrimaryRow &&
+                 overflow != VitalityRow) ||
+                string.IsNullOrEmpty(_helperSyncPath))
+            {
+                return;
+            }
+
+            string token =
+                heroId.ToString(
+                    CultureInfo.InvariantCulture) + "|" +
+                armoryIndex.ToString(
+                    CultureInfo.InvariantCulture) + "|" +
+                overflow.ToString(
+                    CultureInfo.InvariantCulture) + "|" +
+                profileUpdatedUtcTicks.ToString(
+                    CultureInfo.InvariantCulture);
+
+            if (!force &&
+                string.Equals(
+                    _lastHelperSyncToken,
+                    token,
+                    StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            _lastHelperSyncToken = token;
+            long utcTicks = DateTime.UtcNow.Ticks;
+            _lastHelperSyncSequence = Math.Max(
+                utcTicks,
+                _lastHelperSyncSequence + 1L);
+
+            StringBuilder sb = new StringBuilder(192);
+            sb.AppendLine(
+                "# s7o Paragon Builds -> Paragon Helper sync");
+            sb.Append("Sync1=")
+                .Append(
+                    heroId.ToString(
+                        CultureInfo.InvariantCulture))
+                .Append('|')
+                .Append(
+                    armoryIndex.ToString(
+                        CultureInfo.InvariantCulture))
+                .Append('|')
+                .Append(
+                    overflow.ToString(
+                        CultureInfo.InvariantCulture))
+                .Append('|')
+                .Append(
+                    profileUpdatedUtcTicks.ToString(
+                        CultureInfo.InvariantCulture))
+                .Append('|')
+                .Append(
+                    _lastHelperSyncSequence.ToString(
+                        CultureInfo.InvariantCulture))
+                .Append('|')
+                .AppendLine(CleanSyncValue(source));
+
+            WriteSyncAtomically(sb.ToString());
+        }
+
+        private long ReadHelperSyncSequence()
+        {
+            if (string.IsNullOrEmpty(_helperSyncPath) ||
+                !File.Exists(_helperSyncPath))
+            {
+                return 0L;
+            }
+
+            try
+            {
+                foreach (string raw in
+                    File.ReadAllLines(_helperSyncPath))
+                {
+                    string line =
+                        (raw ?? string.Empty).Trim();
+                    if (!line.StartsWith(
+                            "Sync1=",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    string[] parts =
+                        line.Substring(
+                            line.IndexOf('=') + 1)
+                        .Split('|');
+                    long sequence;
+                    return parts.Length >= 5 &&
+                        long.TryParse(
+                            parts[4],
+                            NumberStyles.Integer,
+                            CultureInfo.InvariantCulture,
+                            out sequence)
+                        ? Math.Max(0L, sequence)
+                        : 0L;
+                }
+            }
+            catch { }
+
+            return 0L;
+        }
+
+        private void WriteSyncAtomically(string content)
+        {
+            if (string.IsNullOrEmpty(_helperSyncPath))
+                return;
+
+            string temporary = _helperSyncPath + ".tmp";
+            try
+            {
+                File.WriteAllText(
+                    temporary,
+                    content ?? string.Empty);
+
+                if (File.Exists(_helperSyncPath))
+                {
+                    try
+                    {
+                        File.Replace(
+                            temporary,
+                            _helperSyncPath,
+                            null);
+                        return;
+                    }
+                    catch
+                    {
+                        File.Copy(
+                            temporary,
+                            _helperSyncPath,
+                            true);
+                        File.Delete(temporary);
+                        return;
+                    }
+                }
+
+                File.Move(
+                    temporary,
+                    _helperSyncPath);
+            }
+            catch
+            {
+                try
+                {
+                    if (File.Exists(temporary))
+                        File.Delete(temporary);
+                }
+                catch { }
+            }
+        }
+
+        private static string CleanSyncValue(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+                return string.Empty;
+
+            return value
+                .Replace("\r", " ")
+                .Replace("\n", " ")
+                .Replace("=", "-")
+                .Replace("|", "/")
+                .Trim();
+        }
+
+        private static int ResolveOverflowRow(
+            int selected,
+            bool explicitSelection,
+            int[,] rows)
+        {
+            if (explicitSelection &&
+                (selected == PrimaryRow ||
+                 selected == VitalityRow))
+            {
+                return selected;
+            }
+
+            return NormalizeOverflowRow(-1, rows);
+        }
+
+        private static int ResolveProfileOverflowRow(
+            ParagonProfile profile)
+        {
+            if (profile == null)
+                return PrimaryRow;
+
+            return ResolveOverflowRow(
+                profile.OverflowRow,
+                profile.OverflowExplicit,
+                profile.Rows);
         }
 
         private static int NormalizeOverflowRow(int selected, int[,] rows)
@@ -3091,7 +3354,8 @@ namespace Turbo.Plugins.s7o
                 _capturedAvailable[tab] = 0;
                 _capturedTabsSeen[tab] = true;
             }
-            _currentOverflowRow = profile.OverflowRow;
+            _currentOverflowRow =
+                ResolveProfileOverflowRow(profile);
             _currentOverflowExplicit = profile.OverflowExplicit;
         }
         private void ClearCapturedProfile()
@@ -3575,6 +3839,11 @@ namespace Turbo.Plugins.s7o
             {
                 return;
             }
+
+            PublishParagonHelperSelection(
+                profile,
+                true,
+                "armory-equip");
 
             if (KnownCurrentLayoutMatches(profile))
             {
@@ -4148,9 +4417,7 @@ namespace Turbo.Plugins.s7o
             }
 
             int overflow =
-                NormalizeOverflowRow(
-                    profile.OverflowRow,
-                    profile.Rows);
+                ResolveProfileOverflowRow(profile);
 
             StringBuilder sb =
                 new StringBuilder(96);
@@ -6176,7 +6443,8 @@ namespace Turbo.Plugins.s7o
             if (profile == null ||
                 !profile.HasParagonProfile ||
                 fingerprint == null ||
-                profile.OverflowRow != PrimaryRow ||
+                ResolveProfileOverflowRow(profile) !=
+                    PrimaryRow ||
                 !fingerprint.Valid[0] ||
                 !fingerprint.Valid[10])
             {
@@ -6210,10 +6478,7 @@ namespace Turbo.Plugins.s7o
             ParagonProfile profile)
         {
             int overflow =
-                profile != null &&
-                profile.OverflowRow == VitalityRow
-                    ? VitalityRow
-                    : PrimaryRow;
+                ResolveProfileOverflowRow(profile);
 
             StringBuilder sb =
                 new StringBuilder(512);
@@ -6285,9 +6550,7 @@ namespace Turbo.Plugins.s7o
             }
 
             int overflow =
-                profile.OverflowRow == VitalityRow
-                    ? VitalityRow
-                    : PrimaryRow;
+                ResolveProfileOverflowRow(profile);
 
             for (int row = 0; row < 16; row++)
             {
@@ -6335,9 +6598,7 @@ namespace Turbo.Plugins.s7o
             }
 
             int overflow =
-                profile.OverflowRow == VitalityRow
-                    ? VitalityRow
-                    : PrimaryRow;
+                ResolveProfileOverflowRow(profile);
 
             for (int row = 0; row < 16; row++)
             {
@@ -6440,10 +6701,14 @@ namespace Turbo.Plugins.s7o
                     "plugins", "s7o", "settings");
                 Directory.CreateDirectory(settingsDir);
                 _settingsPath = Path.Combine(settingsDir, SettingsFileName);
+                _helperSyncPath = Path.Combine(settingsDir, HelperSyncFileName);
+                _lastHelperSyncSequence = ReadHelperSyncSequence();
             }
             catch
             {
                 _settingsPath = null;
+                _helperSyncPath = null;
+                _lastHelperSyncSequence = 0L;
             }
         }
 
@@ -6935,8 +7200,9 @@ namespace Turbo.Plugins.s7o
                     ArmoryIndex =
                         armoryIndex,
                     OverflowRow =
-                        NormalizeOverflowRow(
+                        ResolveOverflowRow(
                             overflow,
+                            explicitValue != 0,
                             rows),
                     OverflowExplicit =
                         explicitValue != 0,
