@@ -363,6 +363,12 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
         public int ChatCloseFadeDelayMs { get; set; } = 500;
         public int PortalAtFourDelayMs { get; set; } = 400;
         public int PortalAfterInitialClickDelayMs { get; set; } = 150;
+        // Preserve the proven first T timing. Only a dropped first request enters retry mode,
+        // after a short grace window so AutoLoot can finish its existing Urshi safety arbitration.
+        public int PortalRetryInitialDelayMs { get; set; } = 220;
+        public int PortalRetryIntervalMs { get; set; } = 30;
+        public int PortalMaxAttempts { get; set; } = 4;
+        public int PortalConfirmationGraceMs { get; set; } = 220;
         private const int DefaultThreePhasePortalReadyTimeoutMs = 900;
         private const int DefaultThreePhasePortalPostStartLeadMs = 250;
         private const int DefaultThreePhasePortalPostStartLeadSafeMs = 1000;
@@ -479,6 +485,7 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
         private const int TownRewardSessionTimeoutMs = 30 * 60 * 1000;
         private const int InputPulseMs = 10;
         private const int PortalKeyPulseMs = 40;
+        private const int PortalRetryKeyPulseMs = 20;
         private const int UrshiMoveDelayMs = 20;
         private const int UrshiMouseHoldMs = 30;
         private const int UrshiPortalPollMs = 25;
@@ -507,6 +514,9 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
         private int _noProgressAbortTick = int.MinValue;
         private bool _hasSentInitialUpgradeClick;
         private bool _portalRequestedThisRun;
+        private bool _portalRequestPending;
+        private bool _portalRetryExhaustedThisRun;
+        private int _portalRequestAttempts;
         private bool _upgradeProgressObservedThisRun;
         private bool _tailWaitAfterFinalAttempt;
         private PendingInputKind _pendingInputKind;
@@ -1713,34 +1723,67 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
             }
         }
 
-        private bool TryRequestTimedPortalDuringRun(int upgrades, int now)
+        private bool TryRequestTimedPortalDuringRun(int now)
         {
-            if (_portalRequestedThisRun) return false;
-            if (_pendingInputKind != PendingInputKind.None) return false;
             if (Hud.Game?.Me == null) return false;
-            if (Hud.Game.Me.AnimationState == AcdAnimationState.CastingPortal) return false;
-            if (_portalRequestedTick != int.MinValue && ElapsedMs(_portalRequestedTick) < 1500) return false;
 
-            int configuredAnchorRemaining = s7o_AutoGemUpgradeState.GetConfiguredPortalAnchorRemaining();
-            int effectiveAnchorRemaining = s7o_AutoGemUpgradeState.GetEffectivePortalAnchorRemaining(_initialUpgradeAttemptsThisRun);
-            int effectiveDelayMs = s7o_AutoGemUpgradeState.GetFullPortalDelayMs();
-
-            // Cleanup / below-threshold runs should immediately overlap TP again.
-            // Example: configured 4R and reopen with 3/2/1 attempts remaining, or
-            // configured 3R and reopen with 2/1 remaining. Do not wait for another
-            // anchor click or configured delay in these recovery tails.
-            if (s7o_AutoGemUpgradeState.IsBelowConfiguredPortalAnchorAtRunStart(_initialUpgradeAttemptsThisRun))
+            bool castingPortal = Hud.Game.Me.AnimationState == AcdAnimationState.CastingPortal;
+            if (_portalRequestPending && castingPortal)
             {
-                if (!BeginKeyPulse(FreeHudInput.VirtualKeyForTownPortal, PortalKeyPulseMs))
+                // Native confirmation ends the retry burst permanently for this upgrade run.
+                // If the player cancels the cast afterward, Auto Gem does not start it again.
+                _portalRequestPending = false;
+                _portalRequestAttempts = 0;
+                _portalRequestedThisRun = true;
+                return false;
+            }
+
+            if (_portalRequestedThisRun || _portalRetryExhaustedThisRun) return false;
+
+            if (_portalRequestPending)
+            {
+                if (_pendingInputKind != PendingInputKind.None) return false;
+
+                // Do not turn a transient/unsafe Urshi pane into an immediate retry storm.
+                // AutoLoot already owns the pane-vs-loot arbitration; the original first T is
+                // unchanged, and only a genuinely unconfirmed request waits before retrying.
+                int initialRetryDelayMs = Math.Max(0, PortalRetryInitialDelayMs);
+                if (_portalRequestAttempts <= 1 && _portalRequestedTick != int.MinValue
+                    && ElapsedMs(_portalRequestedTick) < initialRetryDelayMs)
                     return false;
 
-                _lastPortalActionTick = now;
-                _portalRequestedTick = now;
-                _portalRequestedThisRun = true;
+                int retryMs = Math.Max(10, PortalRetryIntervalMs);
+                if (_lastPortalActionTick != int.MinValue && ElapsedMs(_lastPortalActionTick) < retryMs)
+                    return false;
 
+                int maxAttempts = Math.Max(1, PortalMaxAttempts);
+                if (_portalRequestAttempts >= maxAttempts)
+                {
+                    // Give the last pulse time to surface as CastingPortal, then stop. This is
+                    // deliberately bounded so a blocked or intentionally cancelled portal can
+                    // never become a persistent T-spam loop.
+                    if (_lastPortalActionTick != int.MinValue
+                        && ElapsedMs(_lastPortalActionTick) < Math.Max(retryMs, PortalConfirmationGraceMs))
+                        return false;
 
-                return true;
+                    _portalRequestPending = false;
+                    _portalRequestAttempts = 0;
+                    _portalRetryExhaustedThisRun = true;
+                    return false;
+                }
+
+                return BeginPortalRequestAttempt(now, true);
             }
+
+            // Preserve the old behavior for a portal cast started outside this request path.
+            if (castingPortal) return false;
+            if (_pendingInputKind != PendingInputKind.None) return false;
+
+            int effectiveDelayMs = s7o_AutoGemUpgradeState.GetFullPortalDelayMs();
+
+            // Cleanup / below-threshold runs immediately overlap TP again.
+            if (s7o_AutoGemUpgradeState.IsBelowConfiguredPortalAnchorAtRunStart(_initialUpgradeAttemptsThisRun))
+                return BeginPortalRequestAttempt(now, false);
 
             if (_portalAnchorClickTick == int.MinValue)
                 return false;
@@ -1748,13 +1791,20 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
             if (ElapsedMs(_portalAnchorClickTick) < effectiveDelayMs)
                 return false;
 
-            if (!BeginKeyPulse(FreeHudInput.VirtualKeyForTownPortal, PortalKeyPulseMs))
+            return BeginPortalRequestAttempt(now, false);
+        }
+
+        private bool BeginPortalRequestAttempt(int now, bool retry)
+        {
+            int pulseMs = retry ? PortalRetryKeyPulseMs : PortalKeyPulseMs;
+            if (!BeginKeyPulse(FreeHudInput.VirtualKeyForTownPortal, pulseMs))
                 return false;
 
             _lastPortalActionTick = now;
-            _portalRequestedTick = now;
-            _portalRequestedThisRun = true;
-
+            if (!_portalRequestPending)
+                _portalRequestedTick = now;
+            _portalRequestPending = true;
+            _portalRequestAttempts++;
             return true;
         }
 
@@ -1786,7 +1836,7 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
                 _noProgressAbortTick = int.MinValue;
             }
 
-            if (TryRequestTimedPortalDuringRun(upgrades, now))
+            if (TryRequestTimedPortalDuringRun(now))
                 return;
 
             if (AutoPercentMode && upgrades > 0)
@@ -2092,7 +2142,7 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
             bool initialClickSent = _hasSentInitialUpgradeClick && _firstUpgradeClickTick != int.MinValue;
             if (initialClickSent)
             {
-                if (TryRequestTimedPortalDuringRun(upgrades, now))
+                if (TryRequestTimedPortalDuringRun(now))
                     return;
             }
 
@@ -2416,16 +2466,23 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
             _initialUpgradeAttemptsThisRun = _lastObservedUpgradeAttempts;
             _lastUpgradeProgressTick = NowTick();
             _portalAnchorClickTick = int.MinValue;
-            bool preservePortalRequest = _portalRequestedThisRun;
+            bool preservePortalState = _portalRequestedThisRun || _portalRequestPending || _portalRetryExhaustedThisRun;
+            bool preservePortalConfirmed = _portalRequestedThisRun;
+            bool preservePortalPending = _portalRequestPending;
+            bool preservePortalExhausted = _portalRetryExhaustedThisRun;
+            int preservePortalAttempts = _portalRequestAttempts;
             int preservePortalRequestedTick = _portalRequestedTick;
             int preserveLastPortalActionTick = _lastPortalActionTick;
-            _lastPortalActionTick = preservePortalRequest ? preserveLastPortalActionTick : int.MinValue;
+            _lastPortalActionTick = preservePortalState ? preserveLastPortalActionTick : int.MinValue;
             _lastRecoveryUpgradeAttempts = int.MinValue;
-            _portalRequestedTick = preservePortalRequest ? preservePortalRequestedTick : int.MinValue;
+            _portalRequestedTick = preservePortalState ? preservePortalRequestedTick : int.MinValue;
             _runningStartTick = _lastUpgradeProgressTick;
             _firstUpgradeClickTick = int.MinValue;
             _hasSentInitialUpgradeClick = false;
-            _portalRequestedThisRun = preservePortalRequest;
+            _portalRequestedThisRun = preservePortalConfirmed;
+            _portalRequestPending = preservePortalPending;
+            _portalRetryExhaustedThisRun = preservePortalExhausted;
+            _portalRequestAttempts = preservePortalAttempts;
             _upgradeProgressObservedThisRun = false;
             _noProgressAbortTick = int.MinValue;
 
@@ -3087,7 +3144,7 @@ private GemOrderEntry FindOrderedEntryForTarget(GemTarget target)
 
 private bool IsPortalActiveOrRequested()
 {
-    if (_portalRequestedThisRun)
+    if (_portalRequestedThisRun || _portalRequestPending)
         return true;
     try { return Hud.Game != null && Hud.Game.Me != null && Hud.Game.Me.AnimationState == AcdAnimationState.CastingPortal; }
     catch { return false; }
@@ -7390,15 +7447,17 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
 
             // Save run-level portal baseline before wiping state.
             // A soft restart is a navigation/viewport recovery — it is NOT a new run.
-            // ResetState() clears _initialUpgradeAttemptsThisRun and _portalRequestedThisRun,
-            // causing TryRequestTimedPortalDuringRun to misclassify the surviving run as a
-            // fresh below-threshold reopen and fire a second DoAction(TownPortal) — which
-            // closes the pane before the in-flight upgrade result can land.
+            // ResetState() clears run-level portal state. Preserve it here so an internal
+            // navigation restart cannot lose or duplicate an in-flight Town Portal request.
             int  savedInitialAttempts         = _initialUpgradeAttemptsThisRun;
             int  savedLastObservedAttempts    = _lastObservedUpgradeAttempts;
             bool savedPortalRequestedThisRun  = _portalRequestedThisRun;
+            bool savedPortalRequestPending    = _portalRequestPending;
+            bool savedPortalRetryExhausted    = _portalRetryExhaustedThisRun;
+            int  savedPortalRequestAttempts   = _portalRequestAttempts;
             int  savedPortalAnchorClickTick   = _portalAnchorClickTick;
             int  savedPortalRequestedTick     = _portalRequestedTick;
+            int  savedLastPortalActionTick    = _lastPortalActionTick;
             bool savedHasSentInitialClick     = _hasSentInitialUpgradeClick;
             int  savedFirstUpgradeClickTick   = _firstUpgradeClickTick;
             bool savedUpgradeProgressObserved = _upgradeProgressObservedThisRun;
@@ -7416,8 +7475,12 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
                 _initialUpgradeAttemptsThisRun  = savedInitialAttempts;
                 _lastObservedUpgradeAttempts    = savedLastObservedAttempts;
                 _portalRequestedThisRun         = savedPortalRequestedThisRun;
+                _portalRequestPending           = savedPortalRequestPending;
+                _portalRetryExhaustedThisRun    = savedPortalRetryExhausted;
+                _portalRequestAttempts          = savedPortalRequestAttempts;
                 _portalAnchorClickTick          = savedPortalAnchorClickTick;
                 _portalRequestedTick            = savedPortalRequestedTick;
+                _lastPortalActionTick           = savedLastPortalActionTick;
                 _hasSentInitialUpgradeClick     = savedHasSentInitialClick;
                 _firstUpgradeClickTick          = savedFirstUpgradeClickTick;
                 _upgradeProgressObservedThisRun = savedUpgradeProgressObserved;
@@ -7466,6 +7529,9 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             _noProgressAbortTick = int.MinValue;
             _hasSentInitialUpgradeClick = false;
             _portalRequestedThisRun = false;
+            _portalRequestPending = false;
+            _portalRetryExhaustedThisRun = false;
+            _portalRequestAttempts = 0;
             _upgradeProgressObservedThisRun = false;
             _autoRunning = false;
             _target = null;
@@ -8567,7 +8633,8 @@ private RectangleF GetTargetComfortBounds(RectangleF listBounds)
             // blocking click-hold. Always prefer wheel; one tick = one row, which
             // is exactly right for any partial-clip scenario. The legacy path is removed.
             bool useWheel = true;
-            bool lateTp = _portalRequestedThisRun || (Hud.Game?.Me != null && Hud.Game.Me.AnimationState == AcdAnimationState.CastingPortal);
+            bool lateTp = _portalRequestedThisRun || _portalRequestPending
+                || (Hud.Game?.Me != null && Hud.Game.Me.AnimationState == AcdAnimationState.CastingPortal);
 
             if (useWheel)
             {
