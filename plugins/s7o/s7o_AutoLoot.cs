@@ -65,6 +65,10 @@ namespace Turbo.Plugins.s7o
         private const int UrshiFallbackMaxTries = 8;
         private const int AutoUrshiRewardWaveMinimum = 10;
         private const int AutoUrshiRewardFallbackMs = 4000;
+        // Harden only the primary reward-wave gate. Ordinary late-tail loot remains governed
+        // by the original fast handoff filter below.
+        private const int AutoUrshiPrimaryRewardSettleMs = 450;
+        private const int AutoUrshiPrimaryRewardClearConfirmMs = 120;
         private const int AutoUrshiTalkClickDelayMs = 700;
         private const int AutoUrshiTalkMaxAttempts = 12;
         private const int AutoUrshiTalkRetryCooldownMs = 8000;
@@ -78,9 +82,10 @@ namespace Turbo.Plugins.s7o
         private const int AutoUrshiBloodShardDetourMs = 1600;
         private const float AutoUrshiBreadcrumbStepYards = 12f;
         private const float AutoUrshiReturnMinClickYards = 5f;
-        private const int AutoUrshiBreadcrumbMax = 8;
+        private const float AutoUrshiReturnIntermediateYards = 6f;
+        private const int AutoUrshiBreadcrumbMax = 16;
         private const int AutoUrshiReturnClickDelayMs = 120;
-        private const int AutoUrshiReturnMaxClicks = 10;
+        private const int AutoUrshiReturnMaxClicks = 20;
         private const int AutoUrshiApproachStallMs = AutoUrshiTalkClickDelayMs * 2;
         private const int AutoUrshiApproachHardLimitMs = AutoUrshiTalkClickDelayMs * 6;
         private const float AutoUrshiApproachProgressYards = 1.0f;
@@ -178,6 +183,8 @@ namespace Turbo.Plugins.s7o
         private NativePoint _autoUrshiRestorePoint;
         private long _postRiftCleanupStartedMs;
         private long _autoUrshiRewardGateStartedMs;
+        private long _autoUrshiLastPrimaryRewardSeenMs;
+        private long _autoUrshiPrimaryRewardClearSinceMs;
         private int _autoUrshiBloodShardDetourSeed;
         private long _autoUrshiBloodShardDetourUntilMs;
         private bool _autoUrshiBloodShardDetourUsed;
@@ -191,7 +198,6 @@ namespace Turbo.Plugins.s7o
         private int _autoUrshiReturnClicks;
         private bool _autoUrshiReturning;
         private bool _autoUrshiActorPathActive;
-        private bool _autoUrshiApproachAborted;
         private bool _autoUrshiProbeFallbackPending;
         private long _autoUrshiApproachStartedMs;
         private long _autoUrshiApproachSampleMs;
@@ -553,9 +559,6 @@ namespace Turbo.Plugins.s7o
             {
                 if (postRiftCleanup)
                 {
-                    if (_autoUrshiApproachAborted)
-                        return;
-
                     if (!TryCommitAutoUrshiHandoff(now))
                         return;
 
@@ -649,6 +652,8 @@ namespace Turbo.Plugins.s7o
         {
             _autoUrshiRewardSeedsSeen.Clear();
             _autoUrshiRewardGateStartedMs = 0;
+            _autoUrshiLastPrimaryRewardSeenMs = 0;
+            _autoUrshiPrimaryRewardClearSinceMs = 0;
             ResetAutoUrshiBloodShardDetour();
         }
 
@@ -731,7 +736,11 @@ namespace Turbo.Plugins.s7o
                 if (!IsAutoUrshiPrimaryReward(item))
                     continue;
 
-                _autoUrshiRewardSeedsSeen.Add(item.Seed);
+                if (_autoUrshiRewardSeedsSeen.Add(item.Seed))
+                {
+                    _autoUrshiLastPrimaryRewardSeenMs = Hud.Game.CurrentRealTimeMilliseconds;
+                    _autoUrshiPrimaryRewardClearSinceMs = 0;
+                }
             }
         }
 
@@ -742,7 +751,11 @@ namespace Turbo.Plugins.s7o
                 !IsAutoUrshiPrimaryReward(item))
                 return;
 
-            _autoUrshiRewardSeedsSeen.Add(item.Seed);
+            if (_autoUrshiRewardSeedsSeen.Add(item.Seed))
+            {
+                _autoUrshiLastPrimaryRewardSeenMs = Hud.Game.CurrentRealTimeMilliseconds;
+                _autoUrshiPrimaryRewardClearSinceMs = 0;
+            }
         }
 
         private void ClearGenericUrshiRecoveryState()
@@ -776,7 +789,6 @@ namespace Turbo.Plugins.s7o
             _autoUrshiReturnClicks = 0;
             _autoUrshiReturning = false;
             _autoUrshiActorPathActive = false;
-            _autoUrshiApproachAborted = false;
             _autoUrshiProbeFallbackPending = false;
             ResetAutoUrshiApproachSample();
         }
@@ -813,7 +825,10 @@ namespace Turbo.Plugins.s7o
                 if (!_autoUrshiHasLastSeenWorld || me == null || me.FloorCoordinate == null)
                     return;
 
-                if (_autoUrshiReturning)
+                // Preserve the outbound breadcrumb trail while any return movement is active.
+                // Recording the return journey here can overwrite the exact path we need if
+                // Diablo's actor-path click later stalls and breadcrumb recovery takes over.
+                if (_autoUrshiReturning || _autoUrshiActorPathActive)
                     return;
 
                 float x = me.FloorCoordinate.X;
@@ -1734,34 +1749,51 @@ namespace Turbo.Plugins.s7o
         private bool TryReturnTowardAutoUrshi(long now)
         {
             if (!_talkToUrshiAfterLoot || !_autoUrshiHasLastSeenWorld ||
-                _autoUrshiActorPathActive || _autoUrshiApproachAborted)
+                _autoUrshiActorPathActive)
                 return false;
 
             if (_autoUrshiReturnTrail.Count == 0)
                 return false;
 
-            _autoUrshiReturning = true;
-
-            if (_autoUrshiProbeFallbackPending && _autoUrshiReturnClicks > 0)
+            if (_autoUrshiProbeFallbackPending && _autoUrshiReturning
+                && _autoUrshiReturnClicks > 0)
                 return true;
 
             if (_autoUrshiReturnClicks >= AutoUrshiReturnMaxClicks)
             {
-                AbortAutoUrshiApproach(now);
+                // The click budget throttles recovery; it must not permanently strand cleanup.
+                // Keep the known-safe trail and retry after a short cooldown.
+                _autoUrshiReturnClicks = 0;
+                _autoUrshiReturning = false;
+                _autoUrshiProbeFallbackPending = false;
+                _nextAutoUrshiReturnMs = now + AutoUrshiTalkClickDelayMs;
+                ResetAutoUrshiApproachSample();
                 return false;
             }
 
             if (now < _nextAutoUrshiReturnMs)
-                return true;
+                return _autoUrshiReturning;
 
             int x, y;
             if (!TryGetAutoUrshiReturnPoint(out x, out y))
+            {
+                // Do not latch return ownership until a legal movement point actually exists.
+                _autoUrshiReturning = false;
+                ResetAutoUrshiApproachSample();
+                _nextAutoUrshiReturnMs = now + AutoUrshiReturnClickDelayMs;
                 return false;
+            }
 
             if (!SetCursorPos(x, y))
+            {
+                _autoUrshiReturning = false;
+                ResetAutoUrshiApproachSample();
+                _nextAutoUrshiReturnMs = now + AutoUrshiReturnClickDelayMs;
                 return false;
+            }
 
             MouseLeftClick();
+            _autoUrshiReturning = true;
             BeginAutoUrshiApproach(now, false);
 
             _autoUrshiReturnClicks++;
@@ -1778,7 +1810,8 @@ namespace Turbo.Plugins.s7o
                 _autoUrshiProbeFallbackPending = false;
                 _autoUrshiActorPathActive = true;
                 _autoUrshiReturning = false;
-                _autoUrshiReturnTrail.Clear();
+                // Keep the outbound trail until the Urshi UI actually succeeds. If Diablo's
+                // actor path stalls, breadcrumb recovery can resume from the same known path.
                 _autoUrshiReturnClicks = 0;
                 _nextAutoUrshiReturnMs = 0;
                 ResetAutoUrshiApproachSample();
@@ -1813,7 +1846,7 @@ namespace Turbo.Plugins.s7o
                 if (_autoUrshiApproachStartedMs != 0
                     && now - _autoUrshiApproachStartedMs >= AutoUrshiApproachHardLimitMs)
                 {
-                    AbortAutoUrshiApproach(now);
+                    ResetAutoUrshiApproachForRetry(now);
                     return false;
                 }
 
@@ -1841,7 +1874,7 @@ namespace Turbo.Plugins.s7o
                     if (now - _autoUrshiApproachSampleMs < AutoUrshiApproachStallMs)
                         return true;
 
-                    AbortAutoUrshiApproach(now);
+                    ResetAutoUrshiApproachForRetry(now);
                     return false;
                 }
 
@@ -1869,7 +1902,7 @@ namespace Turbo.Plugins.s7o
                 if (now - _autoUrshiApproachSampleMs < AutoUrshiApproachStallMs)
                     return true;
 
-                AbortAutoUrshiApproach(now);
+                ResetAutoUrshiApproachForRetry(now);
                 return false;
             }
             catch
@@ -1905,15 +1938,14 @@ namespace Turbo.Plugins.s7o
             _autoUrshiApproachHasGoalDistance = false;
         }
 
-        private void AbortAutoUrshiApproach(long now)
+        private void ResetAutoUrshiApproachForRetry(long now)
         {
-            _autoUrshiApproachAborted = true;
+            // A movement stall is recoverable. Release the failed movement owner but preserve
+            // the outbound trail so the next pass can retry the actor or reverse breadcrumbs.
             _autoUrshiActorPathActive = false;
             _autoUrshiReturning = false;
             _autoUrshiProbeFallbackPending = false;
-            _autoUrshiReturnTrail.Clear();
-            _autoUrshiReturnClicks = 0;
-            _nextAutoUrshiReturnMs = 0;
+            _nextAutoUrshiReturnMs = now + AutoUrshiReturnClickDelayMs;
             ResetAutoUrshiApproachSample();
             _nextAutoUrshiTalkMs = 0;
             _autoUrshiTalkCooldownUntilMs = 0;
@@ -1944,28 +1976,57 @@ namespace Turbo.Plugins.s7o
                     _autoUrshiReturnTrail.RemoveAt(lastIndex);
                 }
 
-                for (int i = _autoUrshiReturnTrail.Count - 1; i >= 0; i--)
+                if (_autoUrshiReturnTrail.Count == 0)
+                    return false;
+
+                // Strict reverse order preserves the route the player actually traversed.
+                var point = _autoUrshiReturnTrail[_autoUrshiReturnTrail.Count - 1];
+                if (TryProjectAutoUrshiReturnPoint(point.X, point.Y, point.Z, 0.80d, out x, out y))
+                    return true;
+
+                // If the exact breadcrumb sits just beyond the conservative screen envelope,
+                // take a short step along that same known-safe segment until it becomes visible.
+                float dx = point.X - me.FloorCoordinate.X;
+                float dy = point.Y - me.FloorCoordinate.Y;
+                float dz = point.Z - me.FloorCoordinate.Z;
+                float distance = (float)Math.Sqrt(dx * dx + dy * dy);
+                if (distance <= 0.01f)
+                    return false;
+
+                float step = Math.Min(AutoUrshiReturnIntermediateYards, Math.Max(1.5f, distance * 0.5f));
+                for (int attempt = 0; attempt < 3; attempt++)
                 {
-                    var point = _autoUrshiReturnTrail[i];
-                    var world = Hud.Window.CreateWorldCoordinate(point.X, point.Y, point.Z);
-
-                    if (world == null || !world.IsOnScreen(0.8d))
-                        continue;
-
-                    var screen = world.ToScreenCoordinate(false, true);
-                    if (screen == null)
-                        continue;
-
-                    x = (int)Math.Round((double)screen.X + (double)Hud.Window.Offset.X);
-                    y = (int)Math.Round((double)screen.Y + (double)Hud.Window.Offset.Y);
-
-                    if (IsInsideGameWindow(x, y))
+                    float ratio = Math.Min(1f, step / distance);
+                    float worldX = me.FloorCoordinate.X + dx * ratio;
+                    float worldY = me.FloorCoordinate.Y + dy * ratio;
+                    float worldZ = me.FloorCoordinate.Z + dz * ratio;
+                    if (TryProjectAutoUrshiReturnPoint(worldX, worldY, worldZ, 0.98d, out x, out y))
                         return true;
+                    step *= 0.5f;
                 }
             }
             catch { }
 
             return false;
+        }
+
+        private bool TryProjectAutoUrshiReturnPoint(float worldX, float worldY, float worldZ,
+            double screenRatio, out int x, out int y)
+        {
+            x = 0;
+            y = 0;
+
+            var world = Hud.Window.CreateWorldCoordinate(worldX, worldY, worldZ);
+            if (world == null || !world.IsOnScreen(screenRatio))
+                return false;
+
+            var screen = world.ToScreenCoordinate(false, true);
+            if (screen == null)
+                return false;
+
+            x = (int)Math.Round((double)screen.X + (double)Hud.Window.Offset.X);
+            y = (int)Math.Round((double)screen.Y + (double)Hud.Window.Offset.Y);
+            return IsInsideGameWindow(x, y);
         }
 
         private void ResetAutoUrshiTalkReadyState()
@@ -1988,12 +2049,31 @@ namespace Turbo.Plugins.s7o
 
             if (_autoUrshiRewardSeedsSeen.Count < AutoUrshiRewardWaveMinimum &&
                 gateAge < AutoUrshiRewardFallbackMs)
+            {
+                _autoUrshiPrimaryRewardClearSinceMs = 0;
                 return false;
+            }
+
+            if (_autoUrshiLastPrimaryRewardSeenMs != 0 &&
+                now - _autoUrshiLastPrimaryRewardSeenMs < AutoUrshiPrimaryRewardSettleMs)
+            {
+                _autoUrshiPrimaryRewardClearSinceMs = 0;
+                return false;
+            }
 
             if (HasLiveAutoUrshiPrimaryReward())
+            {
+                _autoUrshiPrimaryRewardClearSinceMs = 0;
                 return false;
+            }
 
-            return true;
+            if (_autoUrshiPrimaryRewardClearSinceMs == 0)
+            {
+                _autoUrshiPrimaryRewardClearSinceMs = now;
+                return false;
+            }
+
+            return now - _autoUrshiPrimaryRewardClearSinceMs >= AutoUrshiPrimaryRewardClearConfirmMs;
         }
 
         private bool HasLiveAutoUrshiPrimaryReward()
@@ -2099,7 +2179,7 @@ namespace Turbo.Plugins.s7o
 
         private bool TryTalkToUrshiAfterLoot(long now, IActor urshi)
         {
-            if (_autoUrshiTalkDone || !_talkToUrshiAfterLoot || _autoUrshiApproachAborted ||
+            if (_autoUrshiTalkDone || !_talkToUrshiAfterLoot ||
                 urshi == null || !urshi.IsOnScreen || urshi.ScreenCoordinate == null)
             {
                 ResetAutoUrshiTalkReadyState();
@@ -2171,8 +2251,7 @@ namespace Turbo.Plugins.s7o
 
         private bool TryFallbackAutoUrshiTalkToBreadcrumb(long now)
         {
-            if (_autoUrshiActorPathActive || _autoUrshiApproachAborted ||
-                _autoUrshiReturnTrail.Count == 0)
+            if (_autoUrshiActorPathActive || _autoUrshiReturnTrail.Count == 0)
                 return false;
 
             ClearAutoUrshiTalkHover();
