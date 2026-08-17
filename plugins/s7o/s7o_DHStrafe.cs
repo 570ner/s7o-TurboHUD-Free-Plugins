@@ -9,16 +9,32 @@ namespace Turbo.Plugins.s7o
     // Standalone FREEHUD Demon Hunter Strafe + primary macro.
     // F3 toggles Strafe macro. F2 toggles attack / movement primary mode while running.
     // Uses a local raw input helper and local buff/clickable actor checks.
-    // REV11: preserve targetless Speed guard while rebuilding Momentum to 20 stacks first.
+    // Keep GoD Hungering Arrow Combat cadence independent from zDH Entangling Shot.
+    // zDH Entangle is injected independently while Strafe remains held. Combat support casts and
+    // direct primary pulses share one soft action clock, while native Momentum confirmation owns
+    // the separate hard refresh deadline.
     public class s7o_DHStrafePrimaryPlugin : BasePlugin, IKeyEventHandler, IAfterCollectHandler, IInGameTopPainter, INewAreaHandler
     {
         private static bool _zdhMacroRunning;
         private static bool _zdhHighFrequencyMode;
         private static int _zdhLastPrimaryFireTick = int.MinValue;
+        private static int _zdhLastMomentumRefreshTick = int.MinValue;
+        private static double _zdhLastObservedMomentumTimeLeft = -1.0;
         private static bool _zdhPylonPauseActive;
         private static int _zdhMomentumStacks;
         private static int _zdhMomentumTargetStacks = 20;
         private static bool _zdhMomentumBuildActive;
+        private static bool _zdhCombatPrimaryMaintenanceDue;
+        private static bool _zdhCombatMomentumRefreshDue;
+        private static bool _zdhCombatMomentumRefreshInputDue;
+        private static bool _zdhCombatFillerPrimaryDue;
+        private static bool _zdhPrimaryTransactionPending;
+        private static uint _zdhPrimarySno;
+        private static int _zdhLastCombatActionTick = int.MinValue;
+        private static int _zdhMomentumDeadlineAnchorTick = int.MinValue;
+        // At 20 stacks, a successful Entangle is visible as a native time-left rise even though
+        // the count cannot increase. Keep the threshold above frame jitter and below that rise.
+        private const double MomentumRefreshDetectRiseSeconds = 0.50;
         public static bool IsMacroRunningForZdh { get { return _zdhMacroRunning; } }
         public static bool IsHighFrequencyModeForZdh { get { return _zdhHighFrequencyMode; } }
         public static bool IsCombatModeForZdh { get { return _zdhHighFrequencyMode; } }
@@ -26,11 +42,82 @@ namespace Turbo.Plugins.s7o
         public static int MomentumStacksForZdh { get { return _zdhMomentumStacks; } }
         public static int MomentumTargetStacksForZdh { get { return _zdhMomentumTargetStacks; } }
         public static bool IsMomentumBuildActiveForZdh { get { return _zdhMomentumBuildActive; } }
+        // For Entangling Shot this means a real <20-stack recovery input window is open now.
+        // Scheduler ownership must use IsCombatMomentumLaneReservedForZdh instead: a retry
+        // cooldown is not permission for ordinary support. Helper's only exception is its
+        // separately bounded Combat/new-pack opening before a preventive at-cap refresh.
+        public static bool IsCombatPrimaryMaintenanceDueForZdh { get { return _zdhCombatPrimaryMaintenanceDue; } }
+        // Routine at-cap refresh is separate from deficit recovery. The default three-second
+        // trigger leaves retry margin before the roughly six-second first-stack decay point.
+        public static bool IsCombatMomentumRefreshDueForZdh { get { return _zdhCombatMomentumRefreshDue; } }
+        // True only when the confirmed refresh is due and the bounded retry window is open now.
+        public static bool IsCombatMomentumRefreshInputDueForZdh { get { return _zdhCombatMomentumRefreshInputDue; } }
+        // Level-triggered Helper handoff. The claim remains asserted across every retry cooldown
+        // until native Momentum proves success. Helper may defer an at-cap claim for its bounded
+        // opening pipeline, but a <20 recovery and an in-flight input remain strict. The claim is
+        // derived from authoritative state, so it cannot become a stale latch.
+        public static bool IsCombatMomentumLaneReservedForZdh
+        {
+            get
+            {
+                return _zdhMacroRunning && _zdhHighFrequencyMode && IsEntanglingPrimaryForZdh
+                    && (_zdhMomentumStacks < Math.Max(1, _zdhMomentumTargetStacks)
+                        || _zdhCombatMomentumRefreshDue);
+            }
+        }
+        public static string CombatMomentumLaneReasonForZdh
+        {
+            get
+            {
+                if (!IsCombatMomentumLaneReservedForZdh) return "none";
+                return _zdhMomentumStacks < Math.Max(1, _zdhMomentumTargetStacks)
+                    ? "rebuild" : "refresh";
+            }
+        }
+        public static bool IsCombatFillerPrimaryDueForZdh { get { return _zdhCombatFillerPrimaryDue; } }
+        // Speed-mode ownership mirrors the actual rebuild threshold used by MaybeFirePrimary.
+        // This prevents Helper from yielding at 19/20 when DHStrafe itself has no Primary work.
+        public static bool IsSpeedMomentumBuildActiveForZdh
+        {
+            get
+            {
+                return _zdhMacroRunning && !_zdhHighFrequencyMode && IsEntanglingPrimaryForZdh
+                    && _zdhMomentumBuildActive;
+            }
+        }
+        public static bool IsPrimaryTransactionPendingForZdh { get { return _zdhPrimaryTransactionPending; } }
+        public static uint PrimarySnoForZdh { get { return _zdhPrimarySno; } }
+        public static bool IsEntanglingPrimaryForZdh { get { return _zdhPrimarySno == 361936; } }
+        public static bool IsHungeringArrowPrimaryForZdh { get { return _zdhPrimarySno == 129215; } }
         public static int PrimaryQuietAgeForZdh(int now)
         {
             return _zdhLastPrimaryFireTick == int.MinValue
                 ? int.MaxValue
                 : Math.Max(0, unchecked(now - _zdhLastPrimaryFireTick));
+        }
+
+        public static int MomentumRefreshAgeForZdh(int now)
+        {
+            int anchor = _zdhLastMomentumRefreshTick != int.MinValue
+                ? _zdhLastMomentumRefreshTick : _zdhMomentumDeadlineAnchorTick;
+            return anchor == int.MinValue
+                ? int.MaxValue
+                : Math.Max(0, unchecked(now - anchor));
+        }
+
+        public static int CombatActionQuietAgeForZdh(int now)
+        {
+            return _zdhLastCombatActionTick == int.MinValue
+                ? int.MaxValue
+                : Math.Max(0, unchecked(now - _zdhLastCombatActionTick));
+        }
+
+        // Behavioral handoff: a completed Helper pause consumes the current soft Combat slot so
+        // a filler Entangle cannot immediately follow it.
+        public static void NotifySupportActionCompletedForZdh(int now)
+        {
+            if (_zdhMacroRunning)
+                _zdhLastCombatActionTick = now;
         }
 
         // ============================================================
@@ -86,12 +173,31 @@ namespace Turbo.Plugins.s7o
         public bool HoldStrafeContinuously = true;
 
         // ── Timings ────────────────────────────────────────────────
-        // Combat mode keeps its accepted cadence. Speed mode uses a slower
-        // Momentum refresh and never pulses primary without an on-screen target.
-        public int PrimaryNormalDelayMs = 350;
-        public int PrimaryHighFrequencyDelayMs = 140;
+        // Keep normal GoD Combat behavior independent from zDH support cadence.
+        // Hungering Arrow / non-Entangling Combat uses the 140 ms GoD cadence.
+        // zDH Entangling Shot uses an acknowledged short-pulse transaction. At cap, only the
+        // confirmed-refresh deadline is authoritative; optional filler pulses stay disabled so
+        // Strafe and support keep the lane between refreshes.
+        public int PrimaryNormalDelayMs = 500;
+        public int PrimaryCombatMaintenanceDelayMs = 140;
         public int StrafeCheckDelayMs = 50;
         public int KeyPressHoldMs = 8;
+        // zDH Entangling Shot uses short acknowledged pulses rather than one long blind hold.
+        // Short pulses plus a brief retry gap create clean input edges while the native attack
+        // animation and Momentum buff remain the acceptance and success authorities.
+        public int ZdhPrimaryShiftLeadMs = 16;
+        public int ZdhPrimaryPulseHoldMs = 30;
+        public int ZdhPrimaryPulseRetryGapMs = 40;
+        public int ZdhPrimaryMomentumConfirmWaitMs = 240;
+        public int ZdhPrimaryMaxPulseAttempts = 4;
+        public int ZdhPrimaryTransactionMaxMs = 320;
+        public int ZdhPrimaryFailedTransactionRetryMs = 80;
+        public int ZdhMomentumConfirmedBuildGapMs = 80;
+        // Zero disables optional at-cap filler pulses. A non-zero value is retained only as an
+        // advanced compatibility setting; it must never replace native Momentum confirmation.
+        public int ZdhCombatFillerIntervalMs = 0;
+        public int ZdhMomentumMaintenanceIntervalMs = 3000;
+        // Time-left is evidence only; it never controls the desired stack count or interval.
         // Set to 0 so entering a new area does not create a delayed restart window.
         // Increase only if map-transition UI causes accidental key input.
         public int RecentMapBlockMs = 0;
@@ -112,9 +218,10 @@ namespace Turbo.Plugins.s7o
         public int CachedSkillStartGraceMs = 4000;
 
         // ── GoD / Momentum behavior ────────────────────────────────
-        public double MomentumRefreshSeconds = 21.0;
         public int MomentumTargetStacks = 20;
-        public int MomentumBuildDelayMs = 140;
+        public int MomentumSpeedRefreshStacks = 18;
+        // MomentumTargetStacks is the stack cap. Combat mode preserves 20/20 so switching
+        // to Speed mode never needs a dangerous pre-build before an emergency escape.
         public uint MomentumBuffSno = 484289;
         public int MomentumBuffIconIndex = 10;
 
@@ -130,19 +237,17 @@ namespace Turbo.Plugins.s7o
         public bool RequireGoD4ForPrimary = true;
         public bool DisableInTown = true;
         public bool StopOnInventoryOpen = true;
-        public bool StopOnBlockingUi = true;
         public bool BlockPrimaryOnClickableActor = true;
         public bool PauseForAutoLootPickups = true;
         public int AutoLootPauseMs = 300;
         public bool PauseNearUnoperatedPylon = true;
         public float PylonPauseRange = 15f;
-        // Original Lightning used 5 yards for the main Strafe pause and 10 yards
-        // for primary-fire suppression. 8 yards is a practical FREEHUD default
-        // for comfortably interacting with pylons, shrines, chests, doors, portals, etc.
+        // Use a slightly wider Strafe pause than primary suppression so nearby
+        // interactables remain comfortable to click while the macro is armed.
         public float StrafeClickableActorBlockDistance = 8.0f;
         public float PrimaryClickableActorBlockDistance = 10.0f;
 
-        // ── UI/debug ───────────────────────────────────────────────
+        // ── UI ───────────────────────────────────────────────────
         public bool ShowStatusText = true;
 
         // Compact status text location.
@@ -156,8 +261,6 @@ namespace Turbo.Plugins.s7o
         // Extra pixel offset applied after StatusTextYFrac.
         // Positive moves text down. Negative moves text up.
         public float StatusTextYOffsetPx = 1.0f;
-
-        public bool DebugLogEnabled = false;
 
         // ============================================================
         // Runtime state
@@ -227,15 +330,28 @@ namespace Turbo.Plugins.s7o
         private bool _strafeHeld;
         private ActionKey _heldStrafeActionKey;
 
-
         private ActionKey _pendingPrimaryActionKey = ActionKey.Unknown;
         private int _pendingPrimaryUpTick;
         private bool _pendingPrimaryStandstillHeld;
 
+        public enum ZdhPrimaryStage
+        {
+            Idle,
+            ShiftLead,
+            PressHold,
+            RetryGap,
+            AwaitMomentum
+        }
+
+        private ZdhPrimaryStage _zdhPrimaryStage = ZdhPrimaryStage.Idle;
+        private ActionKey _zdhPrimaryActionKey = ActionKey.Unknown;
+        private int _zdhPrimaryTransactionStartTick = int.MinValue;
+        private int _zdhPrimaryStageDueTick = int.MinValue;
+        private int _zdhPrimaryAcceptedTick = int.MinValue;
+        private int _zdhPrimaryPulseAttempts;
+        private bool _zdhPrimaryShiftOwned;
+
         private string _lastStatus = "ready";
-        private string _lastRuntimeBlockSignature = string.Empty;
-        private int _nextRuntimeBlockDebugTick;
-        private string _lastBuildStateSignature = string.Empty;
 
         private IUiElement _chatEditLine;
         private IUiElement _bossBattleRequestBox;
@@ -245,9 +361,145 @@ namespace Turbo.Plugins.s7o
         private IFont _runningFont;
         private IFont _highFont;
 
+
+        // Optional read-only diagnostics bridge. Gameplay never depends on this state.
+        public const int DiagnosticsBridgeVersion = 1;
+
+        public enum DiagnosticDecision : byte
+        {
+            None,
+            NewArea,
+            ModeCombat,
+            ModeSpeed,
+            MacroStarted,
+            MacroStopped,
+            PrimaryBlocked,
+            CombatMomentumSatisfied,
+            SpeedMomentumSatisfied,
+            RetryCooldown,
+            TransactionActive,
+            TransactionRunning,
+            AwaitMomentum,
+            Confirmed,
+            RetryAfterFailure,
+            PrimarySent,
+            SendInputFailed
+        }
+
+        public enum DiagnosticPrimaryPurpose : byte
+        {
+            None,
+            CombatRebuild,
+            CombatRefresh,
+            CombatFiller,
+            SpeedRebuild,
+            Primary
+        }
+
+        public enum DiagnosticTransactionResult : byte
+        {
+            None,
+            Confirmed,
+            InitialPulseFailed,
+            NoAttackTimeout,
+            PulseFailed,
+            MaxNoAttackPulses,
+            RetryPulseFailed,
+            AcceptedNoMomentum,
+            Aborted
+        }
+
+        public struct DiagnosticSnapshot
+        {
+            public DiagnosticDecision Decision;
+            public ZdhPrimaryStage PrimaryStage;
+            public DiagnosticPrimaryPurpose Purpose;
+            public DiagnosticTransactionResult LastResult;
+            public DiagnosticPrimaryPurpose LastResultPurpose;
+            public int LastResultAttempts;
+            public int ResultSequence;
+            public int ResultTick;
+            public int PulseAttempts;
+            public bool TransactionPending;
+            public bool StrafeHeld;
+            public bool StrafeBuffActive;
+            public bool LaunchReady;
+            public ActionKey StrafeKey;
+            public ActionKey PendingPrimaryKey;
+            public bool PrimaryPhysical;
+            public bool ShiftOwned;
+            public bool ShiftPhysical;
+            public int RetryRemainingMs;
+            public int StageRemainingMs;
+        }
+
+        private DiagnosticDecision _diagnosticDecision;
+        private DiagnosticPrimaryPurpose _diagnosticPrimaryPurpose;
+        private DiagnosticTransactionResult _diagnosticLastResult;
+        private DiagnosticPrimaryPurpose _diagnosticLastResultPurpose;
+        private int _diagnosticLastResultAttempts;
+        private int _diagnosticResultSequence;
+        private int _diagnosticResultTick = int.MinValue;
+
+        public DiagnosticSnapshot GetDiagnosticSnapshot()
+        {
+            int now = Environment.TickCount;
+            int stageRemaining = 0;
+            if (_zdhPrimaryStage != ZdhPrimaryStage.Idle
+                && _zdhPrimaryStageDueTick != int.MinValue)
+                stageRemaining = TickReached(now, _zdhPrimaryStageDueTick)
+                    ? 0 : Math.Max(0, unchecked(_zdhPrimaryStageDueTick - now));
+            else if (_pendingPrimaryActionKey != ActionKey.Unknown
+                && !TickReached(now, _pendingPrimaryUpTick))
+                stageRemaining = Math.Max(0, unchecked(_pendingPrimaryUpTick - now));
+
+            return new DiagnosticSnapshot
+            {
+                Decision = _diagnosticDecision,
+                PrimaryStage = _zdhPrimaryStage,
+                Purpose = _diagnosticPrimaryPurpose,
+                LastResult = _diagnosticLastResult,
+                LastResultPurpose = _diagnosticLastResultPurpose,
+                LastResultAttempts = _diagnosticLastResultAttempts,
+                ResultSequence = _diagnosticResultSequence,
+                ResultTick = _diagnosticResultTick,
+                PulseAttempts = _zdhPrimaryPulseAttempts,
+                TransactionPending = _zdhPrimaryTransactionPending,
+                StrafeHeld = _strafeHeld,
+                StrafeBuffActive = IsStrafeBuffActive(),
+                LaunchReady = IsEntanglingPrimaryLaunchReady(),
+                StrafeKey = _heldStrafeActionKey,
+                PendingPrimaryKey = _pendingPrimaryActionKey,
+                PrimaryPhysical = IsActionPhysicallyDown(_pendingPrimaryActionKey),
+                ShiftOwned = _zdhPrimaryShiftOwned || _pendingPrimaryStandstillHeld,
+                ShiftPhysical = ForceStandstillVirtualKey != 0
+                    && s7o_DHStrafePrimaryInput.IsVirtualKeyDown(ForceStandstillVirtualKey),
+                RetryRemainingMs = TickReached(now, _nextPrimaryFireTick)
+                    ? 0 : Math.Max(0, unchecked(_nextPrimaryFireTick - now)),
+                StageRemainingMs = stageRemaining,
+            };
+        }
+
+        private void SetDiagnosticDecision(DiagnosticDecision decision)
+        {
+            _diagnosticDecision = decision;
+        }
+
+        private void PublishDiagnosticResult(DiagnosticTransactionResult result, int now)
+        {
+            _diagnosticLastResult = result;
+            _diagnosticLastResultPurpose = _diagnosticPrimaryPurpose;
+            _diagnosticLastResultAttempts = _zdhPrimaryPulseAttempts;
+            _diagnosticResultTick = now;
+            _diagnosticResultSequence++;
+        }
+
         public s7o_DHStrafePrimaryPlugin()
         {
             Enabled = true;
+            // Helper plans and claims support work first; DHStrafe fills only a lane that remains
+            // free in the same collection frame.
+            Order = 21000;
             _heldStrafeActionKey = ActionKey.Unknown;
         }
 
@@ -270,18 +522,32 @@ namespace Turbo.Plugins.s7o
         {
             int now = Environment.TickCount;
 
-            DebugLogState("new-area-enter", null, newGame, area);
-
             FinishPendingPrimaryPress(now, true);
             CancelTownPortalSequence(now, "new area");
             StopStrafeHold();
+            _diagnosticDecision = DiagnosticDecision.NewArea;
+            _diagnosticPrimaryPurpose = DiagnosticPrimaryPurpose.None;
+            _diagnosticLastResult = DiagnosticTransactionResult.None;
+            _diagnosticLastResultPurpose = DiagnosticPrimaryPurpose.None;
+            _diagnosticLastResultAttempts = 0;
+            _diagnosticResultSequence = 0;
+            _diagnosticResultTick = int.MinValue;
 
             _nextStrafeCheckTick = 0;
             _nextPrimaryFireTick = 0;
             _lastPrimaryFireTick = 0;
             _zdhLastPrimaryFireTick = int.MinValue;
+            _zdhLastMomentumRefreshTick = int.MinValue;
+            _zdhLastCombatActionTick = now;
+            _zdhMomentumDeadlineAnchorTick = now;
+            _zdhLastObservedMomentumTimeLeft = -1.0;
             _zdhMomentumStacks = 0;
             _zdhMomentumBuildActive = false;
+            _zdhCombatPrimaryMaintenanceDue = false;
+            _zdhCombatMomentumRefreshDue = false;
+            _zdhCombatMomentumRefreshInputDue = false;
+            _zdhCombatFillerPrimaryDue = false;
+            ResetZdhPrimaryTransactionState();
             _actMapRecentlyVisibleUntilTick = 0;
             _worldMapRecentlyVisibleUntilTick = 0;
             _nextBuildRefreshTick = 0;
@@ -312,7 +578,6 @@ namespace Turbo.Plugins.s7o
                 _lastStatus = _running ? "paused: new area" : "new area";
             }
 
-            DebugLogState("new-area-exit", null, newGame, area);
         }
 
         public void ForceStopForDisable()
@@ -344,7 +609,6 @@ namespace Turbo.Plugins.s7o
                     if (!IsTownPortalSequenceActive())
                         BeginTownPortalSequence(now);
 
-                    DebugLog("town portal key handled by sequence");
                 }
 
                 return;
@@ -369,10 +633,17 @@ namespace Turbo.Plugins.s7o
             {
                 if (GetEffectiveSetItemCount() >= 4)
                 {
+                    // F2 is an explicit control handoff. Do not let a Primary/Shift transaction
+                    // started under the previous mode delay emergency Speed movement or the next
+                    // Combat opening. Only inputs owned by DHStrafe are released here.
+                    FinishPendingPrimaryPress(now, true);
                     _highFrequencyMode = !_highFrequencyMode;
                     _zdhHighFrequencyMode = _highFrequencyMode;
+                    _zdhLastCombatActionTick = now;
+                    _zdhCombatFillerPrimaryDue = false;
+                    SetDiagnosticDecision(_highFrequencyMode
+                        ? DiagnosticDecision.ModeCombat : DiagnosticDecision.ModeSpeed);
                     _lastStatus = _highFrequencyMode ? "mode: combat" : "mode: speed";
-                    DebugLog("mode: " + _lastStatus);
                 }
 
                 return;
@@ -388,6 +659,7 @@ namespace Turbo.Plugins.s7o
             AdvanceTownPortalSequence(now);
 
             RefreshBuildStateIfNeeded(now, false);
+            RefreshMomentumStateForZdh(now);
             TrackRecentlyVisibleMaps(now);
             _zdhPylonPauseActive = PauseNearUnoperatedPylon && IsUnoperatedPylonNearby(PylonPauseRange);
 
@@ -451,11 +723,35 @@ namespace Turbo.Plugins.s7o
                 bool allowFastTransitionRuntime = IsFastTransitionStartWindowActive(now)
                     && CanFastStartAfterTransition(out fastReason);
 
-                DebugLogRuntimeBlock(now, reason, allowFastTransitionRuntime, fastReason);
-
                 if (!allowFastTransitionRuntime)
                 {
-                    // Match the original intent: temporary UI/foreground blockers release Strafe,
+                    if (reason == "dead")
+                    {
+                        // Release owned Primary/Shift input before clearing transaction state.
+                        // Resetting first could forget Shift ownership and leave standstill held
+                        // across death/revive. Rebuild is allowed immediately after revival.
+                        FinishPendingPrimaryPress(now, true);
+                        _nextPrimaryFireTick = 0;
+                        _zdhMomentumStacks = 0;
+                        _zdhMomentumBuildActive = true;
+                        _zdhCombatPrimaryMaintenanceDue = false;
+                        _zdhCombatMomentumRefreshDue = false;
+                        _zdhCombatMomentumRefreshInputDue = false;
+                        _zdhCombatFillerPrimaryDue = false;
+                        _zdhLastMomentumRefreshTick = int.MinValue;
+                        _zdhLastCombatActionTick = now;
+                        _zdhMomentumDeadlineAnchorTick = now;
+                        _zdhLastObservedMomentumTimeLeft = -1.0;
+                    }
+                    else if (reason == "casting/ghosted")
+                    {
+                        // RefreshMomentumStateForZdh() already sampled the real buff before this
+                        // runtime gate. Preserve that sample through transient Transform/cast frames
+                        // instead of publishing a false 0/20 deficit to ZDH Helper.
+                        _nextPrimaryFireTick = 0;
+                    }
+
+                    // Temporary UI/foreground blockers release Strafe,
                     // but leave the macro armed so it can resume when the blocker disappears.
                     FinishPendingPrimaryPress(now, true);
                     StopStrafeHold();
@@ -482,7 +778,7 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
-            // Context is valid and no temporary pause is active.
+            // Context is valid and no pause condition is active.
             // Clear stale pause text from transitions so the status color matches the actual mode.
             if (_temporarilyPaused || (!string.IsNullOrEmpty(_lastStatus) && _lastStatus.StartsWith("paused:", StringComparison.OrdinalIgnoreCase)))
             {
@@ -498,14 +794,21 @@ namespace Turbo.Plugins.s7o
                 if (IsFastTransitionStartWindowActive(now) && IsCachedSkillValid(now))
                 {
                     _lastStatus = "initializing skills";
-                    DebugLogState("build-stop-suppressed", buildStopReason, null, null);
                 }
                 else
                 {
-                    DebugLogState("build-stop-before-stop", buildStopReason, null, null);
                     StopMacro(buildStopReason);
                     return;
                 }
+            }
+
+            // Keep one acknowledged zDH Primary transaction atomic from Helper. Rapid retry
+            // pulses occur only inside this bounded state machine; once native Momentum confirms
+            // or the transaction fails, the normal support scheduler immediately regains access.
+            if (_zdhPrimaryTransactionPending)
+            {
+                AdvanceZdhPrimaryTransaction(now);
+                if (_zdhPrimaryTransactionPending) return;
             }
 
             MaintainStrafe(now);
@@ -549,7 +852,7 @@ namespace Turbo.Plugins.s7o
             if (RequireDemonHunter && (Hud.Game.Me.HeroClassDefinition == null || Hud.Game.Me.HeroClassDefinition.HeroClass != HeroClass.DemonHunter))
                 return;
 
-            if (RequireStrafeEquipped && !_strafeEquipped)
+            if (RequireStrafeEquipped && !HasEffectiveStrafe())
                 return;
 
             string text;
@@ -633,7 +936,8 @@ namespace Turbo.Plugins.s7o
 
         private bool TryStartMacro()
         {
-            RefreshBuildStateIfNeeded(Environment.TickCount, true);
+            int now = Environment.TickCount;
+            RefreshBuildStateIfNeeded(now, true);
 
             string reason;
             bool normalStart = CanStart(out reason);
@@ -649,12 +953,16 @@ namespace Turbo.Plugins.s7o
                 _lastStartBlockedReason = reason ?? string.Empty;
                 _lastStatus = _lastStartBlockedReason;
 
-                DebugLog("start blocked: " + _lastStartBlockedReason);
                 return false;
             }
 
             _pendingStartUntilTick = 0;
             _lastStartBlockedReason = string.Empty;
+
+            // Defensive lifecycle boundary: a new start must never inherit an owned Primary,
+            // synthetic standstill, or stale Strafe hold from an interrupted prior state.
+            FinishPendingPrimaryPress(now, true);
+            StopStrafeHold();
 
             _running = true;
             _zdhMacroRunning = true;
@@ -665,14 +973,20 @@ namespace Turbo.Plugins.s7o
             _nextPrimaryFireTick = 0;
             _lastPrimaryFireTick = 0;
             _zdhLastPrimaryFireTick = int.MinValue;
+            _zdhLastMomentumRefreshTick = int.MinValue;
+            _zdhLastCombatActionTick = now;
+            _zdhMomentumDeadlineAnchorTick = now;
+            _zdhLastObservedMomentumTimeLeft = -1.0;
+            _zdhCombatPrimaryMaintenanceDue = false;
+            _zdhCombatMomentumRefreshDue = false;
+            _zdhCombatMomentumRefreshInputDue = false;
+            _zdhCombatFillerPrimaryDue = false;
+            ResetZdhPrimaryTransactionState();
+            SetDiagnosticDecision(DiagnosticDecision.MacroStarted);
             _lastStatus = GetEffectiveSetItemCount() >= 4
                 ? (_highFrequencyMode ? "running fast attack" : "running movement")
                 : "running strafe only";
 
-            if (fastStart)
-                DebugLog("started via fast transition path");
-
-            DebugLogState("started", _lastStatus, null, null);
             return true;
         }
 
@@ -689,7 +1003,6 @@ namespace Turbo.Plugins.s7o
             _pendingStartUntilTick = now + Math.Max(250, StartRequestAfterTransitionMs);
             _lastStatus = "waiting for area";
 
-            DebugLog("start request queued: " + _lastStartBlockedReason);
         }
 
         private void ProcessPendingStartRequest(int now)
@@ -701,7 +1014,6 @@ namespace Turbo.Plugins.s7o
             {
                 _pendingStartUntilTick = 0;
                 _lastStatus = "ready";
-                DebugLog("start request expired");
                 return;
             }
 
@@ -718,7 +1030,6 @@ namespace Turbo.Plugins.s7o
             if (!CanQueueStartAfterTransition(_lastStartBlockedReason))
             {
                 _pendingStartUntilTick = 0;
-                DebugLog("start request cancelled: " + _lastStartBlockedReason);
             }
         }
 
@@ -758,8 +1069,6 @@ namespace Turbo.Plugins.s7o
         {
             int now = Environment.TickCount;
 
-            DebugLogState("stop-before-reset", reason, null, null);
-
             CancelTownPortalSequence(now, "stop macro");
             FinishPendingPrimaryPress(now, true);
             StopStrafeHold();
@@ -774,14 +1083,23 @@ namespace Turbo.Plugins.s7o
             _nextPrimaryFireTick = 0;
             _lastPrimaryFireTick = 0;
             _zdhLastPrimaryFireTick = int.MinValue;
+            _zdhLastMomentumRefreshTick = int.MinValue;
+            _zdhLastCombatActionTick = int.MinValue;
+            _zdhMomentumDeadlineAnchorTick = int.MinValue;
+            _zdhLastObservedMomentumTimeLeft = -1.0;
             _zdhMomentumStacks = 0;
             _zdhMomentumBuildActive = false;
+            _zdhCombatPrimaryMaintenanceDue = false;
+            _zdhCombatMomentumRefreshDue = false;
+            _zdhCombatMomentumRefreshInputDue = false;
+            _zdhCombatFillerPrimaryDue = false;
+            ResetZdhPrimaryTransactionState();
+            SetDiagnosticDecision(DiagnosticDecision.MacroStopped);
             _actMapRecentlyVisibleUntilTick = 0;
             _worldMapRecentlyVisibleUntilTick = 0;
             _zdhPylonPauseActive = false;
             _lastStatus = string.IsNullOrEmpty(reason) ? "stopped" : reason;
 
-            DebugLog("stopped: " + _lastStatus);
         }
 
         private void RefreshBuildStateIfNeeded(int now, bool force)
@@ -805,59 +1123,70 @@ namespace Turbo.Plugins.s7o
                 || !Hud.Game.IsInGame || Hud.Game.IsLoading || Hud.Game.IsPaused)
                 return;
 
-            _skillStrafe = null;
-            _skillPrimary = null;
-            _primarySno = 0;
-            _setItemCount = 0;
-            _strafeEquipped = false;
-
             if (RequireDemonHunter && (Hud.Game.Me.HeroClassDefinition == null || Hud.Game.Me.HeroClassDefinition.HeroClass != HeroClass.DemonHunter))
                 return;
 
             var powers = Hud.Game.Me.Powers;
             var dh = powers.UsedDemonHunterPowers;
-
-            _skillStrafe = dh == null ? null : dh.Strafe;
+            IPlayerSkill nextStrafe = dh == null ? null : dh.Strafe;
+            IPlayerSkill nextPrimary = null;
+            uint nextPrimarySno = 0;
+            bool nextStrafeEquipped = false;
+            int validSkillCount = 0;
 
             foreach (var skill in powers.UsedSkills)
             {
                 if (skill == null || skill.SnoPower == null)
                     continue;
 
+                validSkillCount++;
                 uint sno = skill.SnoPower.Sno;
 
                 if (sno == 134030)
-                    _strafeEquipped = true;
+                    nextStrafeEquipped = true;
 
                 switch (sno)
                 {
                     case 129215:
-                        _skillPrimary = dh == null ? null : dh.HungeringArrow;
-                        _primarySno = 129215;
+                        nextPrimary = dh == null ? null : dh.HungeringArrow;
+                        nextPrimarySno = 129215;
                         break;
                     case 361936:
-                        _skillPrimary = dh == null ? null : dh.EntanglingShot;
-                        _primarySno = 361936;
+                        nextPrimary = dh == null ? null : dh.EntanglingShot;
+                        nextPrimarySno = 361936;
                         break;
                     case 77552:
-                        _skillPrimary = dh == null ? null : dh.Bolas;
-                        _primarySno = 77552;
+                        nextPrimary = dh == null ? null : dh.Bolas;
+                        nextPrimarySno = 77552;
                         break;
                     case 377450:
-                        _skillPrimary = dh == null ? null : dh.EvasiveFire;
-                        _primarySno = 377450;
+                        nextPrimary = dh == null ? null : dh.EvasiveFire;
+                        nextPrimarySno = 377450;
                         break;
                     case 86610:
-                        _skillPrimary = dh == null ? null : dh.Grenades;
-                        _primarySno = 86610;
+                        nextPrimary = dh == null ? null : dh.Grenades;
+                        nextPrimarySno = 86610;
                         break;
                 }
             }
 
-            try { _setItemCount = Hud.Game.Me.GetSetItemCount(791249); }
-            catch { _setItemCount = 0; }
-
             int now = Environment.TickCount;
+
+            // FreeHUD can briefly publish an empty UsedSkills collection during transitions.
+            // Preserve the last good live snapshot while its bounded cache is still valid rather
+            // than publishing a false "Strafe not equipped" state to F3/start/status logic.
+            if (validSkillCount == 0 && IsCachedSkillValid(now))
+                return;
+
+            int nextSetItemCount;
+            try { nextSetItemCount = Hud.Game.Me.GetSetItemCount(791249); }
+            catch { nextSetItemCount = 0; }
+
+            _skillStrafe = nextStrafe;
+            _skillPrimary = nextPrimary;
+            _primarySno = nextPrimarySno;
+            _setItemCount = nextSetItemCount;
+            _strafeEquipped = nextStrafeEquipped;
 
             if (_skillStrafe != null && _skillStrafe.Key != ActionKey.Unknown)
             {
@@ -876,7 +1205,6 @@ namespace Turbo.Plugins.s7o
             if (_setItemCount > 0)
                 _cachedSetItemCount = _setItemCount;
 
-            DebugLogBuildStateIfChanged("refresh-build");
         }
 
         private bool ShouldStopForBuildChange(out string reason)
@@ -889,13 +1217,13 @@ namespace Turbo.Plugins.s7o
                 return true;
             }
 
-            if (RequireStrafeEquipped && (!_strafeEquipped || _skillStrafe == null))
+            if (RequireStrafeEquipped && !HasEffectiveStrafe())
             {
                 reason = "Strafe not equipped";
                 return true;
             }
 
-            if (_setItemCount >= 4 && _skillPrimary == null)
+            if (GetEffectiveSetItemCount() >= 4 && !HasEffectivePrimary())
             {
                 reason = "primary skill not equipped";
                 return true;
@@ -923,13 +1251,13 @@ namespace Turbo.Plugins.s7o
                 return false;
             }
 
-            if (RequireStrafeEquipped && (!_strafeEquipped || _skillStrafe == null))
+            if (RequireStrafeEquipped && !HasEffectiveStrafe())
             {
                 reason = "Strafe not equipped";
                 return false;
             }
 
-            if (_setItemCount >= 4 && _skillPrimary == null)
+            if (GetEffectiveSetItemCount() >= 4 && !HasEffectivePrimary())
             {
                 reason = "primary skill not equipped";
                 return false;
@@ -941,6 +1269,16 @@ namespace Turbo.Plugins.s7o
         private bool IsCachedSkillValid(int now)
         {
             return _cachedSkillValidUntilTick != 0 && !TickReached(now, _cachedSkillValidUntilTick);
+        }
+
+        private bool HasEffectiveStrafe()
+        {
+            return GetStrafeActionKey() != ActionKey.Unknown;
+        }
+
+        private bool HasEffectivePrimary()
+        {
+            return GetPrimaryActionKey() != ActionKey.Unknown;
         }
 
         private ActionKey GetStrafeActionKey()
@@ -1058,6 +1396,13 @@ namespace Turbo.Plugins.s7o
                 return false;
             }
 
+            if (Hud.Game.Me.Powers != null
+                && Hud.Game.Me.Powers.BuffIsActive(Hud.Sno.SnoPowers.Generic_ActorGhostedBuff.Sno))
+            {
+                reason = "casting/ghosted";
+                return false;
+            }
+
             if (DisableInTown && Hud.Game.IsInTown)
             {
                 reason = "in town";
@@ -1133,12 +1478,6 @@ namespace Turbo.Plugins.s7o
             if (TickNotExpired(now, _worldMapRecentlyVisibleUntilTick))
             {
                 reason = "world map recently open";
-                return false;
-            }
-
-            if (StopOnBlockingUi && IsAnyBlockingUiElementVisibleSafe())
-            {
-                reason = "blocking UI";
                 return false;
             }
 
@@ -1218,7 +1557,7 @@ namespace Turbo.Plugins.s7o
                 _heldStrafeActionKey = strafeKey;
                 _strafeHeld = true;
 
-                // Original Lightning call released standstill after starting left-skill Strafe.
+                // Left-skill Strafe must not inherit standstill from a preceding input.
                 if (strafeKey == ActionKey.LeftSkill && ForceStandstillVirtualKey != 0)
                     s7o_DHStrafePrimaryInput.KeyUp(ForceStandstillVirtualKey);
             }
@@ -1249,108 +1588,419 @@ namespace Turbo.Plugins.s7o
                 && Hud.Game.Me.Powers.BuffIsActive(Hud.Sno.SnoPowers.DemonHunter_Strafe.Sno, 0);
         }
 
+        private void RefreshMomentumStateForZdh(int now)
+        {
+            _zdhPrimarySno = GetEffectivePrimarySno();
+            int target = Math.Max(1, MomentumTargetStacks);
+            int refresh = Math.Max(1, Math.Min(target, MomentumSpeedRefreshStacks));
+            int previousStacks = Math.Max(0, _zdhMomentumStacks);
+            int stacks;
+            double timeLeft;
+            GetMomentumSample(out stacks, out timeLeft);
+            bool entanglingPrimary = IsEntanglingPrimaryForZdh;
+
+            // Stack count is the policy authority. A first sample after start/area/reset is only
+            // observation; it cannot prove a refresh. Time-left is used only as native confirmation
+            // that a later Entangle really refreshed Momentum while the visible count stayed at 20.
+            bool havePreviousMomentumSample = _zdhLastObservedMomentumTimeLeft >= 0.0;
+            bool stackIncreased = havePreviousMomentumSample && stacks > previousStacks;
+            bool timerRefreshed = entanglingPrimary
+                && havePreviousMomentumSample
+                && timeLeft > 0.0
+                && timeLeft >= _zdhLastObservedMomentumTimeLeft
+                    + MomentumRefreshDetectRiseSeconds;
+            if (_running && entanglingPrimary && (stackIncreased || timerRefreshed))
+            {
+                _zdhLastMomentumRefreshTick = now;
+                _zdhMomentumDeadlineAnchorTick = now;
+            }
+
+            if (_running && _zdhMomentumDeadlineAnchorTick == int.MinValue)
+                _zdhMomentumDeadlineAnchorTick = now;
+
+            _zdhLastObservedMomentumTimeLeft = timeLeft;
+
+            bool combatBuild = _running && _highFrequencyMode && stacks < target;
+            bool speedBuild = _running && !_highFrequencyMode && stacks <= refresh;
+            bool inputWindowReady = TickReached(now, _nextPrimaryFireTick);
+
+            // "Refresh due" remains visible until native Momentum proves success. Input-due is
+            // narrower and reports only the bounded retry cadence. Outside Helper's bounded
+            // opening exception, ordinary support must not consume these retry gaps.
+            bool atCapRefreshDue = _running && _highFrequencyMode && entanglingPrimary
+                && stacks >= target
+                && MomentumRefreshAgeForZdh(now) >= Math.Max(1000, ZdhMomentumMaintenanceIntervalMs);
+            bool fillerPrimaryDue = ZdhCombatFillerIntervalMs > 0
+                && _running && _highFrequencyMode && entanglingPrimary
+                && stacks >= target && !atCapRefreshDue
+                && CombatActionQuietAgeForZdh(now) >= Math.Max(500, ZdhCombatFillerIntervalMs);
+
+            _zdhMomentumStacks = Math.Max(0, stacks);
+            _zdhMomentumTargetStacks = target;
+            _zdhMomentumBuildActive = combatBuild || speedBuild;
+            _zdhCombatPrimaryMaintenanceDue = _running && _highFrequencyMode && inputWindowReady
+                && (entanglingPrimary
+                    ? combatBuild
+                    : !combatBuild && _zdhLastPrimaryFireTick != int.MinValue);
+            _zdhCombatMomentumRefreshDue = atCapRefreshDue;
+            _zdhCombatMomentumRefreshInputDue = atCapRefreshDue && inputWindowReady;
+            _zdhCombatFillerPrimaryDue = fillerPrimaryDue;
+        }
+
+        private void GetMomentumSample(out int stacks, out double timeLeft)
+        {
+            stacks = 0;
+            timeLeft = 0.0;
+            if (Hud == null || Hud.Game == null || Hud.Game.Me == null || Hud.Game.Me.Powers == null)
+                return;
+
+            var buff = Hud.Game.Me.Powers.GetBuff(MomentumBuffSno);
+            if (buff == null) return;
+            int index = MomentumBuffIconIndex;
+            if (buff.IconCounts != null && index >= 0 && index < buff.IconCounts.Length)
+                stacks = Math.Max(0, buff.IconCounts[index]);
+            if (buff.TimeLeftSeconds != null && index >= 0 && index < buff.TimeLeftSeconds.Length)
+                timeLeft = Math.Max(0.0, buff.TimeLeftSeconds[index]);
+        }
+
+        private int GetCombatPrimaryMaintenanceDelayMs()
+        {
+            return Math.Max(5, PrimaryCombatMaintenanceDelayMs);
+        }
+
         private void MaybeFirePrimary(int now)
         {
             var primaryKey = GetPrimaryActionKey();
 
             if (primaryKey == ActionKey.Unknown)
+            {
+                SetDiagnosticDecision(DiagnosticDecision.PrimaryBlocked);
                 return;
+            }
 
-            if (_pendingPrimaryActionKey != ActionKey.Unknown)
+            if (_pendingPrimaryActionKey != ActionKey.Unknown || _zdhPrimaryTransactionPending)
+            {
+                SetDiagnosticDecision(DiagnosticDecision.TransactionActive);
                 return;
+            }
 
             if (RequireGoD4ForPrimary && GetEffectiveSetItemCount() < 4)
+            {
+                SetDiagnosticDecision(DiagnosticDecision.PrimaryBlocked);
                 return;
+            }
 
-            int momentumTarget = Math.Max(1, MomentumTargetStacks);
-            int momentumStacks = GetBuffCount(MomentumBuffSno, MomentumBuffIconIndex);
-            bool momentumBuild = momentumStacks < momentumTarget;
-            _zdhMomentumStacks = momentumStacks;
-            _zdhMomentumTargetStacks = momentumTarget;
-            _zdhMomentumBuildActive = momentumBuild;
+            int momentumTarget = Math.Max(1, _zdhMomentumTargetStacks);
+            int momentumRefresh = Math.Max(1, Math.Min(momentumTarget, MomentumSpeedRefreshStacks));
+            int momentumStacks = Math.Max(0, _zdhMomentumStacks);
+            bool entanglingPrimary = IsEntanglingPrimaryForZdh;
+            bool combatMomentumBuild = _highFrequencyMode && momentumStacks < momentumTarget;
+            bool combatMomentumRefresh = _highFrequencyMode && entanglingPrimary
+                && !combatMomentumBuild && _zdhCombatMomentumRefreshDue;
+            bool combatFillerPrimary = _highFrequencyMode && entanglingPrimary
+                && !combatMomentumBuild && !combatMomentumRefresh
+                && _zdhCombatFillerPrimaryDue;
+            bool speedMomentumBuild = !_highFrequencyMode && momentumStacks <= momentumRefresh;
+            bool speedRefresh = !_highFrequencyMode && momentumStacks <= momentumRefresh;
 
-            int delay = Math.Max(5, momentumBuild ? MomentumBuildDelayMs
-                : _highFrequencyMode ? PrimaryHighFrequencyDelayMs : PrimaryNormalDelayMs);
+            if (_highFrequencyMode && entanglingPrimary && !combatMomentumBuild
+                && !combatMomentumRefresh && !combatFillerPrimary)
+            {
+                SetDiagnosticDecision(DiagnosticDecision.CombatMomentumSatisfied);
+                _nextPrimaryFireTick = now + 10;
+                return;
+            }
+
+            if (!_highFrequencyMode && !speedRefresh)
+            {
+                SetDiagnosticDecision(DiagnosticDecision.SpeedMomentumSatisfied);
+                _nextPrimaryFireTick = now + 10;
+                return;
+            }
 
             if (!TickReached(now, _nextPrimaryFireTick))
+            {
+                SetDiagnosticDecision(DiagnosticDecision.RetryCooldown);
                 return;
+            }
+
+            if (entanglingPrimary && !IsEntanglingPrimaryLaunchReady())
+            {
+                SetDiagnosticDecision(DiagnosticDecision.PrimaryBlocked);
+                return;
+            }
 
             if (BlockPrimaryOnClickableActor && IsHoverValidActor(PrimaryClickableActorBlockDistance))
             {
-                _nextPrimaryFireTick = now + delay;
+                SetDiagnosticDecision(DiagnosticDecision.PrimaryBlocked);
+                _nextPrimaryFireTick = now + Math.Max(10, ZdhPrimaryFailedTransactionRetryMs);
                 return;
             }
 
             if (IsForceMoveHeld())
             {
-                _nextPrimaryFireTick = now + delay;
+                SetDiagnosticDecision(DiagnosticDecision.PrimaryBlocked);
+                _nextPrimaryFireTick = now + Math.Max(10, ZdhPrimaryFailedTransactionRetryMs);
                 return;
             }
 
-            bool momentumWantsPrimary = momentumBuild || ShouldFirePrimaryNormalMode();
-
-            if (!_highFrequencyMode && !momentumWantsPrimary)
+            if (entanglingPrimary)
             {
-                _nextPrimaryFireTick = now + 10;
+                DiagnosticPrimaryPurpose purpose = combatMomentumBuild
+                    ? DiagnosticPrimaryPurpose.CombatRebuild
+                    : combatMomentumRefresh ? DiagnosticPrimaryPurpose.CombatRefresh
+                    : combatFillerPrimary ? DiagnosticPrimaryPurpose.CombatFiller
+                    : speedMomentumBuild ? DiagnosticPrimaryPurpose.SpeedRebuild
+                    : DiagnosticPrimaryPurpose.Primary;
+                if (BeginZdhPrimaryTransaction(primaryKey, now, purpose))
+                {
+                    SetDiagnosticDecision(DiagnosticDecision.TransactionRunning);
+                    _zdhCombatPrimaryMaintenanceDue = false;
+                    _zdhCombatMomentumRefreshInputDue = false;
+                    _zdhCombatFillerPrimaryDue = false;
+                }
+                else
+                {
+                    SetDiagnosticDecision(DiagnosticDecision.RetryAfterFailure);
+                    _nextPrimaryFireTick = now + Math.Max(10, ZdhPrimaryFailedTransactionRetryMs);
+                }
                 return;
             }
 
+            int delay = Math.Max(5, _highFrequencyMode
+                ? GetCombatPrimaryMaintenanceDelayMs()
+                : PrimaryNormalDelayMs);
             if (DoActionAutoShift(primaryKey, now))
             {
+                SetDiagnosticDecision(DiagnosticDecision.PrimarySent);
                 _lastPrimaryFireTick = now;
                 _zdhLastPrimaryFireTick = now;
                 _nextPrimaryFireTick = now + delay;
-
             }
             else
             {
+                SetDiagnosticDecision(DiagnosticDecision.SendInputFailed);
                 _nextPrimaryFireTick = now + 50;
             }
         }
 
-        private bool ShouldFirePrimaryNormalMode()
+        private bool BeginZdhPrimaryTransaction(ActionKey actionKey, int now, DiagnosticPrimaryPurpose purpose)
         {
-            if (GetEffectiveSetItemCount() < 4)
+            if (actionKey == ActionKey.Unknown || _zdhPrimaryTransactionPending
+                || _pendingPrimaryActionKey != ActionKey.Unknown
+                || IsActionPhysicallyDown(actionKey))
                 return false;
 
-            if (GetOnScreenMonsterCount() == 0) return false;
-            return GetBuffLeftTime(MomentumBuffSno, MomentumBuffIconIndex) <= MomentumRefreshSeconds;
-        }
+            if (_strafeHeld && actionKey == _heldStrafeActionKey)
+                return false;
 
-        private int GetBuffCount(uint sno, int index)
-        {
-            if (Hud == null || Hud.Game == null || Hud.Game.Me == null || Hud.Game.Me.Powers == null)
-                return 0;
+            _zdhPrimaryTransactionPending = true;
+            _zdhPrimaryStage = ZdhPrimaryStage.ShiftLead;
+            _zdhPrimaryActionKey = actionKey;
+            _zdhPrimaryTransactionStartTick = now;
+            _zdhPrimaryStageDueTick = unchecked(now + Math.Max(0, ZdhPrimaryShiftLeadMs));
+            _zdhPrimaryAcceptedTick = int.MinValue;
+            _zdhPrimaryPulseAttempts = 0;
+            _diagnosticPrimaryPurpose = purpose;
+            _zdhPrimaryShiftOwned = false;
 
-            var buff = Hud.Game.Me.Powers.GetBuff(sno);
-            if (buff == null || buff.IconCounts == null || index < 0 || index >= buff.IconCounts.Length)
-                return 0;
-
-            return buff.IconCounts[index];
-        }
-
-        private double GetBuffLeftTime(uint sno, int index)
-        {
-            if (Hud == null || Hud.Game == null || Hud.Game.Me == null || Hud.Game.Me.Powers == null)
-                return 0;
-
-            var buff = Hud.Game.Me.Powers.GetBuff(sno);
-            if (buff == null || buff.TimeLeftSeconds == null || index < 0 || index >= buff.TimeLeftSeconds.Length)
-                return 0;
-
-            return buff.TimeLeftSeconds[index];
-        }
-
-        private int GetOnScreenMonsterCount()
-        {
-            try
+            if (!EnsureZdhPrimaryShiftDown())
             {
-                return Hud.Game.AliveMonsters.Count(m => m != null && m.IsAlive && m.IsOnScreen && !m.Hidden && !m.Invisible && !m.Untargetable);
+                ResetZdhPrimaryTransactionState();
+                return false;
             }
-            catch
+
+            if (Math.Max(0, ZdhPrimaryShiftLeadMs) == 0)
             {
-                return 0;
+                if (StartZdhPrimaryPulse(now)) return true;
+                CompleteZdhPrimaryTransaction(now, false, DiagnosticTransactionResult.InitialPulseFailed);
+                return false;
             }
+            return true;
+        }
+
+        private void AdvanceZdhPrimaryTransaction(int now)
+        {
+            if (!_zdhPrimaryTransactionPending)
+                return;
+
+            // Catch a pulse whose short hold expired after the first release pass this frame.
+            FinishPendingPrimaryPress(now, false);
+            if (!_zdhPrimaryTransactionPending)
+                return;
+
+            if (_zdhLastMomentumRefreshTick != int.MinValue
+                && _zdhPrimaryTransactionStartTick != int.MinValue
+                && unchecked(_zdhLastMomentumRefreshTick - _zdhPrimaryTransactionStartTick) >= 0)
+            {
+                CompleteZdhPrimaryTransaction(now, true, DiagnosticTransactionResult.Confirmed);
+                return;
+            }
+
+            bool freshAttack = Hud != null && Hud.Game != null && Hud.Game.Me != null
+                && Hud.Game.Me.AnimationState == AcdAnimationState.Attacking;
+            if (freshAttack && _zdhPrimaryPulseAttempts > 0
+                && _zdhPrimaryAcceptedTick == int.MinValue)
+            {
+                _zdhPrimaryAcceptedTick = now;
+                _zdhPrimaryStage = ZdhPrimaryStage.AwaitMomentum;
+                _zdhPrimaryStageDueTick = unchecked(now
+                    + Math.Max(120, ZdhPrimaryMomentumConfirmWaitMs));
+                // Keep the accepted pulse down only until its normal short hold expires. If the
+                // attack was observed after pulse-up, release our standstill ownership now.
+                if (_pendingPrimaryActionKey == ActionKey.Unknown)
+                    ReleaseZdhPrimaryShift();
+                SetDiagnosticDecision(DiagnosticDecision.AwaitMomentum);
+                return;
+            }
+
+            if (_zdhPrimaryAcceptedTick == int.MinValue
+                && _zdhPrimaryTransactionStartTick != int.MinValue
+                && Elapsed(_zdhPrimaryTransactionStartTick, now)
+                    >= Math.Max(120, ZdhPrimaryTransactionMaxMs))
+            {
+                CompleteZdhPrimaryTransaction(now, false, DiagnosticTransactionResult.NoAttackTimeout);
+                return;
+            }
+
+            switch (_zdhPrimaryStage)
+            {
+                case ZdhPrimaryStage.ShiftLead:
+                    if (!TickReached(now, _zdhPrimaryStageDueTick)) return;
+                    if (!IsEntanglingPrimaryLaunchReady())
+                    {
+                        SetDiagnosticDecision(DiagnosticDecision.PrimaryBlocked);
+                        return;
+                    }
+                    if (!StartZdhPrimaryPulse(now))
+                        CompleteZdhPrimaryTransaction(now, false, DiagnosticTransactionResult.PulseFailed);
+                    return;
+
+                case ZdhPrimaryStage.PressHold:
+                    return;
+
+                case ZdhPrimaryStage.RetryGap:
+                    if (!TickReached(now, _zdhPrimaryStageDueTick)) return;
+                    if (_zdhPrimaryPulseAttempts >= Math.Max(1, ZdhPrimaryMaxPulseAttempts))
+                    {
+                        CompleteZdhPrimaryTransaction(now, false, DiagnosticTransactionResult.MaxNoAttackPulses);
+                        return;
+                    }
+                    if (!IsEntanglingPrimaryLaunchReady())
+                    {
+                        SetDiagnosticDecision(DiagnosticDecision.PrimaryBlocked);
+                        return;
+                    }
+                    if (!StartZdhPrimaryPulse(now))
+                        CompleteZdhPrimaryTransaction(now, false, DiagnosticTransactionResult.RetryPulseFailed);
+                    return;
+
+                case ZdhPrimaryStage.AwaitMomentum:
+                    if (TickReached(now, _zdhPrimaryStageDueTick))
+                        CompleteZdhPrimaryTransaction(now, false, DiagnosticTransactionResult.AcceptedNoMomentum);
+                    return;
+            }
+        }
+
+        private bool StartZdhPrimaryPulse(int now)
+        {
+            if (_zdhPrimaryActionKey == ActionKey.Unknown
+                || _pendingPrimaryActionKey != ActionKey.Unknown
+                || !EnsureZdhPrimaryShiftDown())
+                return false;
+
+            _zdhPrimaryPulseAttempts++;
+            if (!SendActionDown(_zdhPrimaryActionKey))
+            {
+                return false;
+            }
+
+            _pendingPrimaryActionKey = _zdhPrimaryActionKey;
+            _pendingPrimaryUpTick = unchecked(now + Math.Max(8, ZdhPrimaryPulseHoldMs));
+            _zdhPrimaryStage = ZdhPrimaryStage.PressHold;
+            _zdhPrimaryStageDueTick = _pendingPrimaryUpTick;
+            _lastPrimaryFireTick = now;
+            _zdhLastPrimaryFireTick = now;
+            if (_highFrequencyMode)
+                _zdhLastCombatActionTick = now;
+            SetDiagnosticDecision(DiagnosticDecision.TransactionRunning);
+            return true;
+        }
+
+        private bool EnsureZdhPrimaryShiftDown()
+        {
+            if (ForceStandstillVirtualKey == 0
+                || s7o_DHStrafePrimaryInput.IsVirtualKeyDown(ForceStandstillVirtualKey))
+                return true;
+            if (!s7o_DHStrafePrimaryInput.KeyDown(ForceStandstillVirtualKey))
+                return false;
+            _zdhPrimaryShiftOwned = true;
+            return true;
+        }
+
+        private void ReleaseZdhPrimaryShift()
+        {
+            if (_zdhPrimaryShiftOwned && ForceStandstillVirtualKey != 0)
+                s7o_DHStrafePrimaryInput.KeyUp(ForceStandstillVirtualKey);
+            _zdhPrimaryShiftOwned = false;
+        }
+
+        private void ReleaseZdhPrimaryPhysicalInputs()
+        {
+            if (_pendingPrimaryActionKey != ActionKey.Unknown)
+            {
+                SendActionUp(_pendingPrimaryActionKey);
+                _pendingPrimaryActionKey = ActionKey.Unknown;
+                _pendingPrimaryUpTick = 0;
+            }
+            ReleaseZdhPrimaryShift();
+        }
+
+        private void CompleteZdhPrimaryTransaction(int now, bool success, DiagnosticTransactionResult result)
+        {
+            PublishDiagnosticResult(result, now);
+            ReleaseZdhPrimaryPhysicalInputs();
+            ResetZdhPrimaryTransactionState();
+
+            if (success)
+            {
+                int target = Math.Max(1, _zdhMomentumTargetStacks);
+                _nextPrimaryFireTick = unchecked(now + (_zdhMomentumStacks < target
+                    ? Math.Max(10, ZdhMomentumConfirmedBuildGapMs) : 10));
+                SetDiagnosticDecision(DiagnosticDecision.Confirmed);
+            }
+            else
+            {
+                _nextPrimaryFireTick = unchecked(now
+                    + Math.Max(10, ZdhPrimaryFailedTransactionRetryMs));
+                SetDiagnosticDecision(DiagnosticDecision.RetryAfterFailure);
+            }
+        }
+
+        private void ResetZdhPrimaryTransactionState()
+        {
+            _zdhPrimaryTransactionPending = false;
+            _zdhPrimaryStage = ZdhPrimaryStage.Idle;
+            _zdhPrimaryActionKey = ActionKey.Unknown;
+            _zdhPrimaryTransactionStartTick = int.MinValue;
+            _zdhPrimaryStageDueTick = int.MinValue;
+            _zdhPrimaryAcceptedTick = int.MinValue;
+            _zdhPrimaryPulseAttempts = 0;
+            _zdhPrimaryShiftOwned = false;
+            _diagnosticPrimaryPurpose = DiagnosticPrimaryPurpose.None;
+        }
+
+        private bool IsEntanglingPrimaryLaunchReady()
+        {
+            if (!_strafeHeld || !IsStrafeBuffActive()
+                || Hud == null || Hud.Game == null || Hud.Game.Me == null)
+                return false;
+
+            AcdAnimationState animation = Hud.Game.Me.AnimationState;
+            return animation != AcdAnimationState.Attacking
+                && animation != AcdAnimationState.Casting
+                && animation != AcdAnimationState.Transform
+                && animation != AcdAnimationState.CastingPortal;
         }
 
         private bool IsUnoperatedPylonNearby(float range)
@@ -1394,6 +2044,20 @@ namespace Turbo.Plugins.s7o
                 || actor.GizmoType == GizmoType.Waypoint
                 || actor.GizmoType == GizmoType.Chest
                 || actor.GizmoType == GizmoType.BossPortal;
+        }
+
+        private bool IsActionPhysicallyDown(ActionKey key)
+        {
+            switch (key)
+            {
+                case ActionKey.LeftSkill: return s7o_DHStrafePrimaryInput.IsVirtualKeyDown(0x01);
+                case ActionKey.RightSkill: return s7o_DHStrafePrimaryInput.IsVirtualKeyDown(0x02);
+                case ActionKey.Skill1: return s7o_DHStrafePrimaryInput.IsVirtualKeyDown(Skill1VirtualKey);
+                case ActionKey.Skill2: return s7o_DHStrafePrimaryInput.IsVirtualKeyDown(Skill2VirtualKey);
+                case ActionKey.Skill3: return s7o_DHStrafePrimaryInput.IsVirtualKeyDown(Skill3VirtualKey);
+                case ActionKey.Skill4: return s7o_DHStrafePrimaryInput.IsVirtualKeyDown(Skill4VirtualKey);
+                default: return false;
+            }
         }
 
         private bool SendActionDown(ActionKey actionKey)
@@ -1440,54 +2104,74 @@ namespace Turbo.Plugins.s7o
 
         private bool DoActionAutoShift(ActionKey actionKey, int now)
         {
-            if (actionKey == ActionKey.Unknown)
+            if (actionKey == ActionKey.Unknown || _zdhPrimaryTransactionPending)
                 return false;
 
             if (_pendingPrimaryActionKey != ActionKey.Unknown)
                 return false;
 
-            // Avoid releasing the held Strafe key if someone configured primary and Strafe
-            // onto the same action slot.
             if (_strafeHeld && actionKey == _heldStrafeActionKey)
                 return false;
 
             bool standstillDown = false;
-
-            if (ForceStandstillVirtualKey != 0)
+            if (ForceStandstillVirtualKey != 0
+                && !s7o_DHStrafePrimaryInput.IsVirtualKeyDown(ForceStandstillVirtualKey))
                 standstillDown = s7o_DHStrafePrimaryInput.KeyDown(ForceStandstillVirtualKey);
 
             bool actionDown = SendActionDown(actionKey);
-
             if (!actionDown)
             {
                 if (standstillDown && ForceStandstillVirtualKey != 0)
                     s7o_DHStrafePrimaryInput.KeyUp(ForceStandstillVirtualKey);
-
                 return false;
             }
 
             _pendingPrimaryActionKey = actionKey;
-            _pendingPrimaryUpTick = now + Math.Max(1, KeyPressHoldMs);
+            _pendingPrimaryUpTick = unchecked(now + Math.Max(1, KeyPressHoldMs));
             _pendingPrimaryStandstillHeld = standstillDown;
-
             return true;
         }
 
         private void FinishPendingPrimaryPress(int now, bool force)
         {
+            if (force && _zdhPrimaryTransactionPending)
+            {
+                PublishDiagnosticResult(DiagnosticTransactionResult.Aborted, now);
+                ReleaseZdhPrimaryPhysicalInputs();
+                ResetZdhPrimaryTransactionState();
+                _nextPrimaryFireTick = unchecked(now
+                    + Math.Max(10, ZdhPrimaryFailedTransactionRetryMs));
+                return;
+            }
+
             if (_pendingPrimaryActionKey == ActionKey.Unknown)
                 return;
 
             if (!force && !TickReached(now, _pendingPrimaryUpTick))
                 return;
 
-            SendActionUp(_pendingPrimaryActionKey);
+            ActionKey releasedKey = _pendingPrimaryActionKey;
+            SendActionUp(releasedKey);
+            _pendingPrimaryActionKey = ActionKey.Unknown;
+            _pendingPrimaryUpTick = 0;
+
+            if (_zdhPrimaryTransactionPending)
+            {
+                if (_zdhPrimaryStage == ZdhPrimaryStage.PressHold)
+                {
+                    _zdhPrimaryStage = ZdhPrimaryStage.RetryGap;
+                    _zdhPrimaryStageDueTick = unchecked(now
+                        + Math.Max(8, ZdhPrimaryPulseRetryGapMs));
+                }
+                else if (_zdhPrimaryStage == ZdhPrimaryStage.AwaitMomentum)
+                {
+                    ReleaseZdhPrimaryShift();
+                }
+                return;
+            }
 
             if (_pendingPrimaryStandstillHeld && ForceStandstillVirtualKey != 0)
                 s7o_DHStrafePrimaryInput.KeyUp(ForceStandstillVirtualKey);
-
-            _pendingPrimaryActionKey = ActionKey.Unknown;
-            _pendingPrimaryUpTick = 0;
             _pendingPrimaryStandstillHeld = false;
         }
 
@@ -1534,7 +2218,6 @@ namespace Turbo.Plugins.s7o
             _townPortalNextTick = now + Math.Max(0, TownPortalPrePrimarySettleMs);
 
             _lastStatus = "paused: town portal";
-            DebugLog("town portal sequence started");
         }
 
         private void CancelTownPortalSequence(int now, string reason)
@@ -1547,9 +2230,6 @@ namespace Turbo.Plugins.s7o
             _townPortalPrimaryActionKey = ActionKey.Unknown;
             _townPortalPrimaryStandstillHeld = false;
             _townPortalForceMoveVk = 0;
-
-            if (!string.IsNullOrEmpty(reason))
-                DebugLog("town portal sequence cancelled: " + reason);
         }
 
         private void ReleaseTownPortalSequenceInputs()
@@ -1621,7 +2301,6 @@ namespace Turbo.Plugins.s7o
                             _townPortalPrimaryStandstillHeld = standstillDown;
                             _townPortalStage = TownPortalStage.PrimaryUp;
                             _townPortalNextTick = now + Math.Max(5, KeyPressHoldMs);
-                            DebugLog("town portal sequence primary pulse down");
                             return;
                         }
 
@@ -1647,7 +2326,6 @@ namespace Turbo.Plugins.s7o
 
                     _townPortalStage = TownPortalStage.AfterPrimarySettle;
                     _townPortalNextTick = now + Math.Max(0, TownPortalAfterPrimarySettleMs);
-                    DebugLog("town portal sequence primary pulse up");
                     return;
                 }
 
@@ -1669,7 +2347,6 @@ namespace Turbo.Plugins.s7o
                     _townPortalStage = TownPortalStage.PortalKeyUp;
                     _townPortalNextTick = now + Math.Max(5, TownPortalKeyPressHoldMs);
 
-                    DebugLog("town portal T down attempt " + _townPortalAttempt);
                     return;
                 }
 
@@ -1681,7 +2358,6 @@ namespace Turbo.Plugins.s7o
                     _townPortalStage = TownPortalStage.DetectCast;
                     _townPortalNextTick = now + Math.Max(25, TownPortalDetectCastMs);
 
-                    DebugLog("town portal T up attempt " + _townPortalAttempt);
                     return;
                 }
 
@@ -1691,7 +2367,6 @@ namespace Turbo.Plugins.s7o
                     {
                         _townPortalStage = TownPortalStage.Casting;
                         _townPortalNextTick = now + Math.Max(10, TownPortalCastingPollMs);
-                        DebugLog("town portal casting detected");
                         return;
                     }
 
@@ -1702,7 +2377,6 @@ namespace Turbo.Plugins.s7o
                         _townPortalStage = TownPortalStage.ForceMoveUp;
                         _townPortalNextTick = now + Math.Max(5, TownPortalForceMoveTapMs);
 
-                        DebugLog("town portal force-move reset down");
                         return;
                     }
 
@@ -1719,7 +2393,6 @@ namespace Turbo.Plugins.s7o
                     _townPortalStage = TownPortalStage.BetweenAttempts;
                     _townPortalNextTick = now + Math.Max(0, TownPortalBetweenAttemptsMs);
 
-                    DebugLog("town portal force-move reset up");
                     return;
                 }
             }
@@ -1825,28 +2498,6 @@ namespace Turbo.Plugins.s7o
             }
         }
 
-        private bool IsAnyBlockingUiElementVisibleSafe()
-        {
-            // FREEHUD's public IRenderController does not expose this member.
-            // Some forks do, so use reflection without taking a compile-time dependency.
-            try
-            {
-                var render = Hud.Render;
-                if (render == null)
-                    return false;
-
-                var prop = render.GetType().GetProperty("IsAnyBlockingUiElementVisible");
-                if (prop == null || prop.PropertyType != typeof(bool))
-                    return false;
-
-                return (bool)prop.GetValue(render, null);
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
         private static bool TickReached(int now, int targetTick)
         {
             return targetTick == 0 || unchecked(now - targetTick) >= 0;
@@ -1857,242 +2508,11 @@ namespace Turbo.Plugins.s7o
             return untilTick != 0 && unchecked(untilTick - now) > 0;
         }
 
-        private void DebugLogRuntimeBlock(int now, string reason, bool allowFastTransitionRuntime, string fastReason)
+        private static int Elapsed(int then, int now)
         {
-            if (!DebugLogEnabled)
-                return;
-
-            string signature = (reason ?? "null") + "|" + allowFastTransitionRuntime + "|" + (fastReason ?? "null");
-            if (signature == _lastRuntimeBlockSignature && !TickReached(now, _nextRuntimeBlockDebugTick))
-                return;
-
-            _lastRuntimeBlockSignature = signature;
-            _nextRuntimeBlockDebugTick = now + 500;
-
-            DebugLogState("runtime-block", "reason=" + (reason ?? "null") + "; fastAllowed=" + allowFastTransitionRuntime + "; fastReason=" + (fastReason ?? "null"), null, null);
+            return then == int.MinValue ? int.MaxValue : Math.Max(0, unchecked(now - then));
         }
 
-        private void DebugLogBuildStateIfChanged(string phase)
-        {
-            if (!DebugLogEnabled)
-                return;
-
-            string signature = "strafeEquipped=" + _strafeEquipped
-                + "; strafeSkill=" + (_skillStrafe != null)
-                + "; strafeKey=" + GetSkillKeyText(_skillStrafe)
-                + "; primarySkill=" + (_skillPrimary != null)
-                + "; primaryKey=" + GetSkillKeyText(_skillPrimary)
-                + "; primarySno=" + _primarySno
-                + "; set=" + _setItemCount
-                + "; cachedStrafe=" + _cachedStrafeActionKey
-                + "; cachedPrimary=" + _cachedPrimaryActionKey
-                + "; cachedPrimarySno=" + _cachedPrimarySno
-                + "; cachedSet=" + _cachedSetItemCount
-                + "; cachedMs=" + RemainingMs(_cachedSkillValidUntilTick);
-
-            if (signature == _lastBuildStateSignature)
-                return;
-
-            _lastBuildStateSignature = signature;
-            DebugLog("DIAG " + phase + ": " + signature);
-        }
-
-        private string GetSkillKeyText(IPlayerSkill skill)
-        {
-            if (skill == null)
-                return "null";
-
-            try { return skill.Key.ToString(); }
-            catch { return "?"; }
-        }
-
-        private void DebugLogState(string phase, string reason, bool? newGame, ISnoArea area)
-        {
-            if (!DebugLogEnabled)
-                return;
-
-            try
-            {
-                int now = Environment.TickCount;
-                var sb = new System.Text.StringBuilder(512);
-                sb.Append("DIAG ").Append(phase);
-
-                if (newGame.HasValue)
-                    sb.Append(" newGame=").Append(newGame.Value);
-
-                if (!string.IsNullOrEmpty(reason))
-                    sb.Append(" reason=").Append(reason);
-
-                sb.Append(" | running=").Append(_running)
-                    .Append(" temp=").Append(_temporarilyPaused)
-                    .Append(" status=").Append(_lastStatus ?? "null")
-                    .Append(" high=").Append(_highFrequencyMode)
-                    .Append(" strafeHeld=").Append(_strafeHeld)
-                    .Append(" heldStrafe=").Append(_heldStrafeActionKey)
-                    .Append(" pendingPrimary=").Append(_pendingPrimaryActionKey)
-                    .Append(" pendingStartMs=").Append(RemainingMs(_pendingStartUntilTick))
-                    .Append(" fastMs=").Append(RemainingMs(_fastTransitionStartUntilTick))
-                    .Append(" cachedMs=").Append(RemainingMs(_cachedSkillValidUntilTick))
-                    .Append(" townStage=").Append(_townPortalStage);
-
-                sb.Append(" | build strafeEquipped=").Append(_strafeEquipped)
-                    .Append(" strafeSkill=").Append(_skillStrafe != null)
-                    .Append(" strafeKey=").Append(GetSkillKeyText(_skillStrafe))
-                    .Append(" primarySkill=").Append(_skillPrimary != null)
-                    .Append(" primaryKey=").Append(GetSkillKeyText(_skillPrimary))
-                    .Append(" primarySno=").Append(_primarySno)
-                    .Append(" set=").Append(_setItemCount)
-                    .Append(" cachedStrafe=").Append(_cachedStrafeActionKey)
-                    .Append(" cachedPrimary=").Append(_cachedPrimaryActionKey)
-                    .Append(" cachedSet=").Append(_cachedSetItemCount);
-
-                sb.Append(" | game isInGame=").Append(SafeBool("IsInGame"))
-                    .Append(" loading=").Append(SafeBool("IsLoading"))
-                    .Append(" paused=").Append(SafeBool("IsPaused"))
-                    .Append(" town=").Append(SafeBool("IsInTown"))
-                    .Append(" foreground=").Append(SafeWindowForeground())
-                    .Append(" meNull=").Append(SafeMeNull())
-                    .Append(" dead=").Append(SafeMeDead())
-                    .Append(" anim=").Append(SafeMeAnimationState())
-                    .Append(" chat=").Append(IsVisible(_chatEditLine))
-                    .Append(" inv=").Append(SafeInventoryVisible())
-                    .Append(" worldMap=").Append(SafeWorldMapVisible())
-                    .Append(" minimapVisible=").Append(SafeMinimapVisible())
-                    .Append(" cursorInWindow=").Append(SafeCursorInsideGameWindow());
-
-                if (area != null)
-                    sb.Append(" | area=").Append(SafeAreaText(area));
-
-                DebugLog(sb.ToString());
-            }
-            catch
-            {
-                DebugLog("DIAG " + phase + " state unavailable");
-            }
-        }
-
-        private int RemainingMs(int untilTick)
-        {
-            if (untilTick == 0)
-                return 0;
-
-            int remain = unchecked(untilTick - Environment.TickCount);
-            return remain > 0 ? remain : 0;
-        }
-
-        private string SafeBool(string propertyName)
-        {
-            try
-            {
-                if (Hud == null || Hud.Game == null)
-                    return "?";
-
-                var prop = Hud.Game.GetType().GetProperty(propertyName);
-                if (prop == null)
-                    return "?";
-
-                object value = prop.GetValue(Hud.Game, null);
-                return value == null ? "null" : value.ToString();
-            }
-            catch { return "?"; }
-        }
-
-        private string SafeWindowForeground()
-        {
-            try { return Hud != null && Hud.Window != null ? Hud.Window.IsForeground.ToString() : "?"; }
-            catch { return "?"; }
-        }
-
-        private string SafeMeNull()
-        {
-            try { return Hud == null || Hud.Game == null || Hud.Game.Me == null ? "True" : "False"; }
-            catch { return "?"; }
-        }
-
-        private string SafeMeDead()
-        {
-            try { return Hud != null && Hud.Game != null && Hud.Game.Me != null ? Hud.Game.Me.IsDead.ToString() : "?"; }
-            catch { return "?"; }
-        }
-
-        private string SafeMeAnimationState()
-        {
-            try { return Hud != null && Hud.Game != null && Hud.Game.Me != null ? Hud.Game.Me.AnimationState.ToString() : "?"; }
-            catch { return "?"; }
-        }
-
-        private string SafeInventoryVisible()
-        {
-            try { return Hud != null && Hud.Inventory != null ? IsVisible(Hud.Inventory.InventoryMainUiElement).ToString() : "?"; }
-            catch { return "?"; }
-        }
-
-        private string SafeWorldMapVisible()
-        {
-            try { return Hud != null && Hud.Render != null ? IsVisible(Hud.Render.WorldMapUiElement).ToString() : "?"; }
-            catch { return "?"; }
-        }
-
-        private string SafeMinimapVisible()
-        {
-            try { return Hud != null && Hud.Render != null ? IsVisible(Hud.Render.MinimapUiElement).ToString() : "?"; }
-            catch { return "?"; }
-        }
-
-        private string SafeCursorInsideGameWindow()
-        {
-            try { return CursorInsideGameWindow().ToString(); }
-            catch { return "?"; }
-        }
-
-        private string SafeAreaText(ISnoArea area)
-        {
-            if (area == null)
-                return "null";
-
-            try
-            {
-                return "type=" + area.GetType().Name
-                    + "; str=" + SafeObjectText(area)
-                    + "; sno=" + SafePropertyText(area, "Sno")
-                    + "; code=" + SafePropertyText(area, "Code")
-                    + "; name=" + SafePropertyText(area, "NameLocalized")
-                    + "; name2=" + SafePropertyText(area, "Name");
-            }
-            catch { return "unavailable"; }
-        }
-
-        private string SafeObjectText(object value)
-        {
-            try { return value == null ? "null" : value.ToString(); }
-            catch { return "?"; }
-        }
-
-        private string SafePropertyText(object value, string propertyName)
-        {
-            try
-            {
-                if (value == null)
-                    return "null";
-
-                var prop = value.GetType().GetProperty(propertyName);
-                if (prop == null)
-                    return "missing";
-
-                object propValue = prop.GetValue(value, null);
-                return propValue == null ? "null" : propValue.ToString();
-            }
-            catch { return "?"; }
-        }
-
-        private void DebugLog(string message)
-        {
-            if (!DebugLogEnabled || Hud == null || Hud.TextLog == null)
-                return;
-
-            try { Hud.TextLog.Log("s7o_DHStrafePrimary", message, true, true); }
-            catch { }
-        }
     }
 
     internal static class s7o_DHStrafePrimaryInput
@@ -2248,15 +2668,24 @@ namespace Turbo.Plugins.s7o
             p.TownPortalBetweenAttemptsMs = 65;
             p.TownPortalCastingPollMs = 25;
 
-            p.PrimaryNormalDelayMs = 350;
-            p.PrimaryHighFrequencyDelayMs = 140;
+            p.PrimaryNormalDelayMs = 500;
+            p.PrimaryCombatMaintenanceDelayMs = 140;
             p.StrafeCheckDelayMs = 50;
             p.KeyPressHoldMs = 8;
             p.RecentMapBlockMs = 0;
 
-            p.MomentumRefreshSeconds = 21.0;
             p.MomentumTargetStacks = 20;
-            p.MomentumBuildDelayMs = 140;
+            p.MomentumSpeedRefreshStacks = 18;
+            p.ZdhPrimaryShiftLeadMs = 16;
+            p.ZdhPrimaryPulseHoldMs = 30;
+            p.ZdhPrimaryPulseRetryGapMs = 40;
+            p.ZdhPrimaryMomentumConfirmWaitMs = 240;
+            p.ZdhPrimaryMaxPulseAttempts = 4;
+            p.ZdhPrimaryTransactionMaxMs = 320;
+            p.ZdhPrimaryFailedTransactionRetryMs = 80;
+            p.ZdhMomentumConfirmedBuildGapMs = 80;
+            p.ZdhCombatFillerIntervalMs = 0;
+            p.ZdhMomentumMaintenanceIntervalMs = 3000;
             p.MomentumBuffSno = 484289;
             p.MomentumBuffIconIndex = 10;
 
