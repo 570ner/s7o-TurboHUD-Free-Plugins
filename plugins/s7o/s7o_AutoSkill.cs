@@ -24,6 +24,9 @@ namespace Turbo.Plugins.s7o
         private const uint MasqueradeOfTheBurningCarnival2PBuffSno = 484301u;
         private const uint NecromancerLandOfTheDeadPowerSno = 465839u;
         private const int HealSlotIndex = 6;
+        private const ushort RiftEntryDialogVirtualKey = 0x20; // Space
+        private const int RiftEntryDialogStableMs = 30;
+        private const int RiftEntryDialogWindowMs = 12000;
         private const string CommandSkeletonsProfileCode = "Necro_CommandSkeletons_Elite";
         private const string DevourProfileCode = "Necro_Devour_CorpseOrLotD";
         private const string NayrsBlackDeathProfileCode = "Necro_NayrsBlackDeath";
@@ -46,10 +49,6 @@ namespace Turbo.Plugins.s7o
 
         public bool UseForceStandstillForCasts = true;
         public bool AllowBuffUpkeepInTown = true;
-        public bool AutoCloseBlockingRiftDialogs = true;
-        public ushort BlockingRiftDialogCloseVirtualKey = 0x1B; // Escape
-        public int BlockingRiftDialogStableMs = 30;
-        public int BlockingRiftDialogRetryMs = 180;
         public bool BlockLeftSkillOnSelectedClickableActor = true;
         public bool CommandSkeletonsMoveCursorToTarget = false;
         public ushort ForceStandstillVirtualKey = 0x10; // Shift
@@ -124,8 +123,10 @@ namespace Turbo.Plugins.s7o
         private int _lastActMapVisibleTick;
         private int _lastWorldMapVisibleTick;
         private int _nextBlockedLogTick;
-        private int _blockingRiftDialogVisibleSinceTick;
-        private int _nextBlockingRiftDialogCloseTick;
+        private int _areaEnterTick;
+        private bool _currentAreaIsRift;
+        private int _riftEntryDialogVisibleSinceTick;
+        private bool _riftEntryDialogSpaceSent;
         private SteedRenewalStage _steedRenewalStage;
 
         private int _hoverSlotIndex = -1;
@@ -260,6 +261,7 @@ namespace Turbo.Plugins.s7o
             LoadUserSettings();
             BuildChannelingSkillSet();
             RefreshSkillCache(true);
+            _currentAreaIsRift = IsRiftArea(Hud.Game != null && Hud.Game.Me != null ? Hud.Game.Me.SnoArea : null);
 
             if (PersistUserSettings && !File.Exists(_settingsPath))
                 SaveUserSettings();
@@ -272,6 +274,10 @@ namespace Turbo.Plugins.s7o
 
         public void OnNewArea(bool newGame, ISnoArea area)
         {
+            // OnNewArea supplies the authoritative new SNO area immediately, while
+            // Hud.Game.SpecialArea can still describe the previous area for a short time.
+            _currentAreaIsRift = IsRiftArea(area);
+
             _lastGlobalCastTick = 0;
             _lastCastTickByPower.Clear();
             _nextSkipLogTickByKey.Clear();
@@ -284,13 +290,14 @@ namespace Turbo.Plugins.s7o
             _entryBuffBurstStartTick = 0;
             _lastActMapVisibleTick = 0;
             _lastWorldMapVisibleTick = 0;
-            _blockingRiftDialogVisibleSinceTick = 0;
-            _nextBlockingRiftDialogCloseTick = 0;
             _steedRenewalStage = SteedRenewalStage.Idle;
             _lastCommandSkeletonsRequestTick = 0;
             _commandSkeletonsBloodsongLotdCast = false;
             _lastBlockedReason = null;
             _nextBlockedLogTick = 0;
+            _areaEnterTick = Environment.TickCount;
+            _riftEntryDialogVisibleSinceTick = 0;
+            _riftEntryDialogSpaceSent = false;
             ResetHoverToggle();
             RefreshSkillCache(true);
             LogDebug("New area reset.");
@@ -582,48 +589,57 @@ namespace Turbo.Plugins.s7o
 
             if (!conversationVisible && !scriptedVisible)
             {
-                _blockingRiftDialogVisibleSinceTick = 0;
-                _nextBlockingRiftDialogCloseTick = 0;
+                _riftEntryDialogVisibleSinceTick = 0;
                 return false;
             }
 
-            if (_blockingRiftDialogVisibleSinceTick == 0)
-                _blockingRiftDialogVisibleSinceTick = now;
-
-            if (!AutoCloseBlockingRiftDialogs ||
-                Hud == null ||
-                Hud.Game == null ||
-                Hud.Window == null ||
-                !Hud.Window.IsForeground ||
-                BlockingRiftDialogCloseVirtualKey == 0 ||
-                Hud.Game.IsLoading ||
-                Hud.Game.IsPaused ||
-                Hud.Game.IsInTown ||
-                (Hud.Game.SpecialArea != SpecialArea.Rift &&
-                 Hud.Game.SpecialArea != SpecialArea.GreaterRift) ||
-                IsUrshiRewardInteractionActive())
+            // AutoSkill must remain paused while either layer is visible. The normal
+            // Rift-entry dialog is a one-shot Space acknowledgement; never use Escape
+            // and never repeat Space for the same area/dialog episode.
+            if (!_riftEntryDialogSpaceSent &&
+                Hud != null && Hud.Game != null && Hud.Window != null &&
+                Hud.Window.IsForeground && !Hud.Game.IsLoading && !Hud.Game.IsPaused && !Hud.Game.IsInTown &&
+                (_currentAreaIsRift || Hud.Game.SpecialArea == SpecialArea.Rift || Hud.Game.SpecialArea == SpecialArea.GreaterRift) &&
+                Hud.Game.RiftPercentage < 100.0d &&
+                !IsUiVisible(_chatEditLine) &&
+                _areaEnterTick != 0 && unchecked(now - _areaEnterTick) <= RiftEntryDialogWindowMs)
             {
-                return true;
+                if (_riftEntryDialogVisibleSinceTick == 0)
+                    _riftEntryDialogVisibleSinceTick = now;
+
+                if (unchecked(now - _riftEntryDialogVisibleSinceTick) >= RiftEntryDialogStableMs)
+                {
+                    _riftEntryDialogSpaceSent = true;
+                    PressKey(RiftEntryDialogVirtualKey);
+                    LogDebug("Acknowledged Rift entry dialog with Space.");
+                }
             }
 
-            int stableMs = Math.Max(0, BlockingRiftDialogStableMs);
-            if (unchecked(now - _blockingRiftDialogVisibleSinceTick) < stableMs)
-                return true;
-
-            if (!IsTickReached(now, _nextBlockingRiftDialogCloseTick))
-                return true;
-
-            bool stillVisible = conversationVisible
-                ? IsUiVisible(_conversationDialog)
-                : IsUiVisible(_scriptedSequenceDialog);
-
-            if (!stillVisible)
-                return true;
-
-            PressKey(BlockingRiftDialogCloseVirtualKey);
-            _nextBlockingRiftDialogCloseTick = unchecked(now + Math.Max(80, BlockingRiftDialogRetryMs));
-            LogDebug("Closed blocking rift dialog: " + (conversationVisible ? "conversation" : "scripted sequence"));
             return true;
+        }
+
+        private static bool IsRiftArea(ISnoArea area)
+        {
+            try
+            {
+                // Generated Nephalem/Greater Rift floors use X1_LR_Level_* area codes.
+                // Follow HostSnoArea for child/sub-areas hosted by the generated floor.
+                ISnoArea current = area;
+                for (int depth = 0; current != null && depth < 3; depth++)
+                {
+                    string code = current.Code;
+                    if (!string.IsNullOrEmpty(code)
+                        && code.StartsWith("X1_LR_Level_", StringComparison.OrdinalIgnoreCase))
+                        return true;
+
+                    current = current.HostSnoArea;
+                }
+            }
+            catch
+            {
+            }
+
+            return false;
         }
 
         private bool IsUrshiRewardInteractionActive()
