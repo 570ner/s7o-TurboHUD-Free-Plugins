@@ -148,7 +148,6 @@ namespace Turbo.Plugins.s7o
         public int RecentDamageWindowMs = 1800;
         public int PrimaryEliteMaintenanceMs = 4000;
         public int SampleIntervalMs = 100;
-        public int BossEntangleMaintenanceMs = 900;
         public int MultishotMaintenanceMs = 2100;
         // When the shared Combat slot is free, allow an efficient cone refresh from about
         // 1.8 seconds instead of spending that slot on a filler Entangle.
@@ -156,6 +155,9 @@ namespace Turbo.Plugins.s7o
         public float EfficientMultishotCoverageRatio = 0.80f;
         public int AttackMultishotMaintenanceMs = 2100;
         public int BossMultishotMaintenanceMs = 2100;
+        // Odyssey lasts about 2 seconds on the RG. Refresh proactively so the boss never
+        // has to become fully missing before the standalone scheduler reacts.
+        public int BossEntangleMaintenanceMs = 1500;
         public int MultishotFailedRetryMs = 250;
         // A native Multishot animation with no Iceblink is an effect/LOS miss, not an input failure.
         // Keep that elite live, but briefly rotate to other due elites before retrying the same angle.
@@ -178,6 +180,15 @@ namespace Turbo.Plugins.s7o
         public float PylonInteractionPauseRange = 15f;
         public int FailedCastRetryMs = 450;
         public int GlobalCastGapMs = 450;
+        public int ManualDebuffCastGapMs = 50;
+        public int ManualDebuffReleaseMovementMs = 200;
+        public int ElectrifiedAlertPopMs = 560;
+        public int ElectrifiedAlertHoldMs = 1800;
+        public int ElectrifiedAlertFadeMs = 900;
+        public int ElectrifiedAlertRearmMs = 650;
+        public int ElectrifiedAlertPulsePeriodMs = 720;
+        public float ElectrifiedAlertRearmDistance = 70f;
+        public float ElectrifiedAlertTextSize = 11.5f;
         public int EntangleAimSettleMs = 16;
         // One bounded preview frame lets Diablo consume the synthetic support aim before
         // skill-down. Readiness waits happen before cursor ownership; if readiness is lost
@@ -224,9 +235,6 @@ namespace Turbo.Plugins.s7o
         public int BossMfdMovementWindowMs = 400;
         public int AttackSentryMovementWindowMs = 650;
         public int MovementSentryMovementWindowMs = 850;
-        public int BossStandaloneStableMs = 400;
-        public int BossPreSpawnStableMs = 80;
-        public float BossStandaloneMaxSpeed = 4f;
         public float BossStandaloneRange = 65f;
         public int TravelSampleMs = 250;
         public float TravelEngagedClusterRange = 42f;
@@ -252,9 +260,14 @@ namespace Turbo.Plugins.s7o
         public int MfdEliteGainRecastMs = 600;
         // A one-elite gain must persist longer when the current Valley already covers most
         // eligible elites. Multi-elite, boss, focus, and genuinely incomplete fields stay fast.
-        public int MfdSingleEliteGainStableMs = 900;
-        public int MfdSingleEliteGainRecastMs = 1200;
+        public int MfdSingleEliteGainStableMs = 500;
+        public int MfdSingleEliteGainRecastMs = 900;
         public float MfdSatisfiedCoverageRatio = 0.66f;
+        // Low-priority field centering: protect elites already covered by a live Valley when
+        // one is close to the physical edge. This lane uses the normal 2.5s MFD recast gate.
+        public float MfdEdgeSafetyMargin = 2.5f;
+        public float MfdEdgeMinimumImprovement = 2.0f;
+        public int MfdEdgeStableMs = 400;
         public int NewElitePriorityMs = 3000;
         public int MfdSentryBlockedYieldMs = 1200;
         // Never let the first failed hard-MFD attempt open the Guardian burst.
@@ -339,6 +352,24 @@ namespace Turbo.Plugins.s7o
         public float MultishotSafeBottomRatio = 0.78f;
         public float MultishotSafeSideRatio = 0.04f;
         public float GroundCastSafeBottomRatio = 0.84f;
+
+        // Click safety uses the same 1920x1080 red-mask regions as HUD Menu AutoSnap,
+        // uniformly scaled and edge/center anchored for aspect-safe placement. The minimap is intentionally not blocked.
+        private const float ClickGuardReferenceWidth = 1920f;
+        private const float ClickGuardReferenceHeight = 1080f;
+        private const float ClickGuardRayProbeStepPixels = 24f;
+        private static readonly RectangleF[] ClickGuardRects1920x1080 =
+        {
+            new RectangleF(116f, 11f, 76f, 71f),
+            new RectangleF(34f, 57f, 58f, 61f),
+            new RectangleF(871f, 2f, 179f, 21f),
+            new RectangleF(1644f, 23f, 60f, 26f),
+            new RectangleF(1816f, 120f, 25f, 15f),
+            new RectangleF(1863f, 363f, 31f, 29f),
+            new RectangleF(8f, 973f, 85f, 80f),
+            new RectangleF(315f, 893f, 1289f, 187f),
+            new RectangleF(1754f, 961f, 157f, 83f),
+        };
         // Conservative 40-wide triangle at 80-yard range (~14.04° half-angle).
         public float MultishotRange = 80f;
         public float MultishotConeHalfAngleDegrees = 14.04f;
@@ -383,6 +414,7 @@ namespace Turbo.Plugins.s7o
         private static int _dhStrafePauseUntilTick = int.MinValue;
         private static int _dhStrafePausedTick = int.MinValue;
         private static int _dhStrafePrimarySuppressUntilTick = int.MinValue;
+        private static int _manualDebuffMovementUntilTick = int.MinValue;
 
         public static bool IsDhStrafePauseRequested(int now)
         {
@@ -433,6 +465,12 @@ namespace Turbo.Plugins.s7o
         {
             return _dhStrafePrimarySuppressUntilTick != int.MinValue
                 && unchecked(_dhStrafePrimarySuppressUntilTick - now) > 0;
+        }
+
+        public static bool IsManualDebuffMovementRequested(int now)
+        {
+            return _manualDebuffMovementUntilTick != int.MinValue
+                && unchecked(_manualDebuffMovementUntilTick - now) > 0;
         }
 
         public static int DhStrafePrimarySuppressionRemainingMs(int now)
@@ -626,6 +664,8 @@ namespace Turbo.Plugins.s7o
             public float SentryActualWorldY;
             public bool SentryMaintenance;
             public bool SentryBurstChild;
+            public bool ManualDebuff;
+            public bool UseCurrentCursorAim;
         }
 
         private sealed class PendingMultishotValidation
@@ -709,6 +749,7 @@ namespace Turbo.Plugins.s7o
         private bool _hasTrackedUptimeHero;
         private uint _trackedUptimeHeroId;
         private int _lastCastFinishedTick = int.MinValue;
+        private int _lastManualDebuffCastFinishedTick = int.MinValue;
         private CastKind _lastSupportKind = CastKind.None;
         private bool _supportPrimaryGateBlocked;
         private int _lastEntangleMaintenanceTick = int.MinValue;
@@ -755,6 +796,8 @@ namespace Turbo.Plugins.s7o
         private int _lastPauseReleasedTick = int.MinValue;
         private string _mfdImprovementSignature = string.Empty;
         private int _mfdImprovementTick = int.MinValue;
+        private string _mfdEdgeImprovementSignature = string.Empty;
+        private int _mfdEdgeImprovementTick = int.MinValue;
         private float _packCandidateX;
         private float _packCandidateY;
         private float _packCandidateZ;
@@ -781,6 +824,15 @@ namespace Turbo.Plugins.s7o
         private float _localTravelY;
         private int _localTravelSampleTick = int.MinValue;
         private float _localTravelSpeed;
+        private int _electrifiedAbsentSinceTick = int.MinValue;
+        private int _electrifiedAlertTick = int.MinValue;
+        private bool _electrifiedPresenceActive;
+        private string _electrifiedAlertText = string.Empty;
+        private float _electrifiedLastSeenX;
+        private float _electrifiedLastSeenY;
+        private bool _electrifiedLastSeenValid;
+        private readonly HashSet<uint> _electrifiedEncounterAcds = new HashSet<uint>();
+        private bool _wasManualDebuffHold;
         private float _advanceAnchorX;
         private float _advanceAnchorY;
         private float _advanceDistance;
@@ -819,6 +871,11 @@ namespace Turbo.Plugins.s7o
         private IFont _yellowFont;
         private IFont _orangeFont;
         private IFont _redFont;
+        private IFont _purpleFont;
+        private IFont[] _electrifiedPopFonts;
+        private IFont[] _electrifiedOutlinePopFonts;
+        private IFont[] _electrifiedFadeFonts;
+        private IFont[] _electrifiedOutlineFadeFonts;
         private IFont _tooltipLabelFont;
         private IFont _tooltipGreenFont;
         private IFont _tooltipYellowFont;
@@ -826,140 +883,6 @@ namespace Turbo.Plugins.s7o
         private IFont _tooltipRedFont;
         private IUiElement _chatEditLine;
 
-
-        // Optional read-only diagnostics bridge. Gameplay never depends on this state.
-        public const int DiagnosticsBridgeVersion = 1;
-
-        public enum DiagnosticSchedulerState : byte
-        {
-            None,
-            Planning,
-            SupportTransactionActive,
-            PrimaryTransactionPending,
-            SpeedMomentumRebuild,
-            CombatMomentumRebuild,
-            CombatMomentumRefresh,
-            MomentumRetryGapUrgentDebuff,
-            CombatOpeningOverRebuild,
-            CombatOpeningOverRefresh,
-            CombatOpening,
-            MomentumRetryGapYieldPrimary,
-            CombatOpeningWait,
-            SupportStart
-        }
-
-        public enum DiagnosticEvent : byte
-        {
-            None,
-            CombatOpeningReset,
-            CombatOpeningMultishotTimeout,
-            MfdPlan,
-            CastStart,
-            CastFinish,
-            CastCancel,
-            MfdReaim,
-            SentryBurstEnd
-        }
-
-        public struct DiagnosticSnapshot
-        {
-            public DiagnosticSchedulerState Scheduler;
-            public CastKind Cast;
-            public CastStage Stage;
-            public SentryBurstMode BurstMode;
-            public SentryBurstStage BurstStage;
-            public bool InputSent;
-            public bool ActionOwned;
-            public bool ActionPhysical;
-            public bool ShiftOwned;
-            public bool ShiftPhysical;
-            public bool CursorOwned;
-            public bool CancellationPending;
-            public bool BurstChild;
-            public bool BurstShiftOwned;
-            public bool OpeningMultishotAttempted;
-            public bool OpeningMfdSatisfied;
-            public bool MfdLiveReady;
-            public bool MfdRecoveryRequired;
-            public bool CoreAttempted;
-            public int CoreAttempts;
-            public bool PrimaryGateBlocked;
-            public int EventSequence;
-            public int EventTick;
-            public DiagnosticEvent LastEvent;
-            public int EventValue1;
-            public int EventValue2;
-            public uint EventTargetAcd;
-            public float EventX;
-            public float EventY;
-        }
-
-        private DiagnosticSchedulerState _diagnosticScheduler;
-        private bool _diagnosticMfdLiveReady;
-        private bool _diagnosticMfdRecoveryRequired;
-        private int _diagnosticEventSequence;
-        private int _diagnosticEventTick = int.MinValue;
-        private DiagnosticEvent _diagnosticLastEvent;
-        private int _diagnosticEventValue1;
-        private int _diagnosticEventValue2;
-        private uint _diagnosticEventTargetAcd;
-        private float _diagnosticEventX;
-        private float _diagnosticEventY;
-
-        public DiagnosticSnapshot GetDiagnosticSnapshot()
-        {
-            return new DiagnosticSnapshot
-            {
-                Scheduler = _diagnosticScheduler,
-                Cast = _cast.Kind,
-                Stage = _cast.Stage,
-                BurstMode = _sentryBurst.Mode,
-                BurstStage = _sentryBurst.Stage,
-                InputSent = _cast.InputSent,
-                ActionOwned = _cast.ActionHeld,
-                ActionPhysical = _cast.Skill != null && ActionIsDown(_cast.Skill.Key),
-                ShiftOwned = _cast.StandstillHeld,
-                ShiftPhysical = ForceStandstillVirtualKey != 0
-                    && ZdhInput.IsVirtualKeyDown(ForceStandstillVirtualKey),
-                CursorOwned = _cast.CursorOwned,
-                CancellationPending = _cast.CancellationPending,
-                BurstChild = _cast.SentryBurstChild,
-                BurstShiftOwned = _sentryBurst.StandstillOwned,
-                OpeningMultishotAttempted = _openingMultishotAttemptedForEngagement,
-                OpeningMfdSatisfied = _initialMfdSetupSatisfiedForEngagement,
-                MfdLiveReady = _diagnosticMfdLiveReady,
-                MfdRecoveryRequired = _diagnosticMfdRecoveryRequired,
-                CoreAttempted = _coreBurstAttemptedForEngagement,
-                CoreAttempts = _coreBurstAttemptsThisEngagement,
-                PrimaryGateBlocked = _supportPrimaryGateBlocked,
-                EventSequence = _diagnosticEventSequence,
-                EventTick = _diagnosticEventTick,
-                LastEvent = _diagnosticLastEvent,
-                EventValue1 = _diagnosticEventValue1,
-                EventValue2 = _diagnosticEventValue2,
-                EventTargetAcd = _diagnosticEventTargetAcd,
-                EventX = _diagnosticEventX,
-                EventY = _diagnosticEventY,
-            };
-        }
-
-        private void SetDiagnosticScheduler(DiagnosticSchedulerState state)
-        {
-            _diagnosticScheduler = state;
-        }
-
-        private void PublishDiagnosticEvent(DiagnosticEvent eventCode, int now,
-            int value1 = 0, int value2 = 0, uint targetAcd = 0, float x = 0, float y = 0)
-        {
-            _diagnosticLastEvent = eventCode;
-            _diagnosticEventTick = now;
-            _diagnosticEventValue1 = value1;
-            _diagnosticEventValue2 = value2;
-            _diagnosticEventTargetAcd = targetAcd;
-            _diagnosticEventX = x;
-            _diagnosticEventY = y;
-            _diagnosticEventSequence++;
-        }
 
         public s7o_ZDH_Helper()
         {
@@ -975,6 +898,11 @@ namespace Turbo.Plugins.s7o
             _yellowFont = Hud.Render.CreateFont("tahoma", 8.5f, 255, 255, 225, 70, true, false, 235, 0, 0, 0, true);
             _orangeFont = Hud.Render.CreateFont("tahoma", 8.5f, 255, 255, 145, 45, true, false, 235, 0, 0, 0, true);
             _redFont = Hud.Render.CreateFont("tahoma", 8.5f, 255, 255, 70, 70, true, false, 235, 0, 0, 0, true);
+            _purpleFont = Hud.Render.CreateFont("tahoma", 8.5f, 255, 205, 95, 255, true, false, 235, 0, 0, 0, true);
+            _electrifiedPopFonts = CreateAlertPopFonts(70, 170, 255, ElectrifiedAlertTextSize);
+            _electrifiedOutlinePopFonts = CreateAlertPopFonts(0, 0, 0, ElectrifiedAlertTextSize);
+            _electrifiedFadeFonts = CreateAlertFadeFonts(70, 170, 255, ElectrifiedAlertTextSize);
+            _electrifiedOutlineFadeFonts = CreateAlertFadeFonts(0, 0, 0, ElectrifiedAlertTextSize);
             _tooltipLabelFont = Hud.Render.CreateFont("tahoma", 7.5f, 255, 235, 235, 235, true, false, 235, 0, 0, 0, true);
             _tooltipGreenFont = Hud.Render.CreateFont("tahoma", 7.5f, 255, 90, 255, 115, true, false, 235, 0, 0, 0, true);
             _tooltipYellowFont = Hud.Render.CreateFont("tahoma", 7.5f, 255, 255, 225, 70, true, false, 235, 0, 0, 0, true);
@@ -992,17 +920,13 @@ namespace Turbo.Plugins.s7o
             ReleaseBossEntangleStandstill();
             ReleaseDhStrafePause();
             ReleaseDhStrafePrimarySuppression();
-            _diagnosticScheduler = DiagnosticSchedulerState.None;
-            _diagnosticMfdLiveReady = false;
-            _diagnosticMfdRecoveryRequired = false;
-            _diagnosticLastEvent = DiagnosticEvent.None;
-            _diagnosticEventSequence = 0;
-            _diagnosticEventTick = int.MinValue;
+            _manualDebuffMovementUntilTick = int.MinValue;
             _targets.Clear();
             _playerPositions.Clear();
             ResetOwnedGroundEffectState("new area");
             _lastSampleTick = int.MinValue;
             _lastCastFinishedTick = int.MinValue;
+            _lastManualDebuffCastFinishedTick = int.MinValue;
             _lastSupportKind = CastKind.None;
             _supportPrimaryGateBlocked = false;
             _lastEntangleMaintenanceTick = int.MinValue;
@@ -1021,6 +945,7 @@ namespace Turbo.Plugins.s7o
             ClearRejectedSentryPositions();
             _lastPauseReleasedTick = int.MinValue;
             ClearMfdImprovementCandidate();
+            ClearMfdEdgeImprovementCandidate();
             _packCandidateTick = int.MinValue;
             _packCandidateValid = false;
             ClearTrashFightLatch("new area");
@@ -1030,6 +955,8 @@ namespace Turbo.Plugins.s7o
             _cursorSafetyRestoreY = 0;
             _localTravelSampleTick = int.MinValue;
             _localTravelSpeed = 0;
+            if (newGame) ResetElectrifiedAlert();
+            _wasManualDebuffHold = false;
             _channelingPylonActive = false;
             _speedPylonActive = false;
             _advanceAnchorX = 0;
@@ -1084,6 +1011,7 @@ namespace Turbo.Plugins.s7o
             ResetSentryBurstEngagement();
             ResetSpeedCombatIntent(reason);
             ClearMfdImprovementCandidate();
+            ClearMfdEdgeImprovementCandidate();
             ClearSentryRetry();
             ClearSentryRelocationState();
             ClearRejectedSentryPositions();
@@ -1105,7 +1033,6 @@ namespace Turbo.Plugins.s7o
         {
             s7o_ZDH_HelperState.EnsureLoaded();
             int now = Environment.TickCount;
-            SetDiagnosticScheduler(DiagnosticSchedulerState.Planning);
             _runtime.ProtectedSentryCoverageMissing = false;
             PublishRejectedSentryPositions(now);
             PublishTrashFightLatch(now, _runtime.TrashFightLatched,
@@ -1131,6 +1058,7 @@ namespace Turbo.Plugins.s7o
                 ForceAbortSentryBurst("context", now);
                 CancelCast("context");
                 ReleaseBossEntangleStandstill();
+                _wasManualDebuffHold = false;
                 return;
             }
 
@@ -1151,6 +1079,7 @@ namespace Turbo.Plugins.s7o
                 ReleaseBossEntangleStandstill();
                 ReleaseDhStrafePause();
                 ReleaseDhStrafePrimarySuppression();
+                _wasManualDebuffHold = false;
                 return;
             }
 
@@ -1174,7 +1103,6 @@ namespace Turbo.Plugins.s7o
                 _hardMfdFailureStreak = 0;
                 ClearMfdRetryDebt();
                 ClearMfdImprovementCandidate();
-                PublishDiagnosticEvent(DiagnosticEvent.CombatOpeningReset, now, clearedValidations);
             }
             else if (!highFrequencyMode)
                 _combatModeEnteredTick = int.MinValue;
@@ -1184,6 +1112,14 @@ namespace Turbo.Plugins.s7o
             UpdateSentryChargeTelemetry(local == null || local.Sentry == null ? -1 : local.Sentry.Charges, now);
             if (local != null && local.Player != null)
                 UpdateLocalTravelState(local.Player, now);
+            UpdateElectrifiedAlert(local, now);
+            bool manualDebuffHold = highFrequencyMode
+                && s7o_DHStrafePrimaryPlugin.IsManualDebuffHoldActiveForZdh;
+            if (_wasManualDebuffHold && !manualDebuffHold)
+                HandleManualDebuffRelease(now);
+            else if (manualDebuffHold)
+                _manualDebuffMovementUntilTick = int.MinValue;
+            _wasManualDebuffHold = manualDebuffHold;
 
             IMonster bossSpawnAnchor = FindBossSpawnAnchor(local == null ? null : local.Player);
             bool bossPreSpawn = CanUseBossPreSpawn(local, bossSpawnAnchor, now);
@@ -1228,21 +1164,35 @@ namespace Turbo.Plugins.s7o
                 _combatModeEnteredTick = int.MinValue;
             }
 
+            // AdvanceCast above is allowed to finish/release any transaction already in flight.
+            // Starting new support requires an active Strafe macro, except for the intentional
+            // standalone RG paths. CTRL stationary support still qualifies because it pauses
+            // Strafe without turning the DHStrafe macro itself off.
             if (!s7o_ZDH_HelperState.Enabled
                 || (!strafeMacroRunning && !bossStandalone && !bossPreSpawn)
                 || _cursorSafetyBlocked
                 || _cast.Stage != CastStage.Idle
                 || !AutomationContextValid())
+                return;
+
+            // CTRL release is the user's explicit movement pulse. Once any already-committed
+            // support tail is finished, leave a short clean Strafe window before normal support
+            // or Momentum maintenance can claim input again. Re-pressing CTRL cancels this grace.
+            if (!manualDebuffHold && IsManualDebuffMovementRequested(now))
             {
-                if (_cast.Stage != CastStage.Idle)
-                    SetDiagnosticScheduler(DiagnosticSchedulerState.SupportTransactionActive);
+                if (_sentryBurst.Mode != SentryBurstMode.None)
+                    EndSentryBurst("manual movement", now);
+                else
+                {
+                    ReleaseDhStrafePause();
+                    ReleaseDhStrafePrimarySuppression();
+                }
                 return;
             }
 
             // A primary input already in flight is always atomic.
             if (s7o_DHStrafePrimaryPlugin.IsPrimaryTransactionPendingForZdh)
             {
-                SetDiagnosticScheduler(DiagnosticSchedulerState.PrimaryTransactionPending);
                 if (_sentryBurst.Mode != SentryBurstMode.None)
                     EndSentryBurst("momentum primary due", now);
                 else
@@ -1255,7 +1205,7 @@ namespace Turbo.Plugins.s7o
 
             int momentumTarget = Math.Max(1, s7o_DHStrafePrimaryPlugin.MomentumTargetStacksForZdh);
             int momentumStacks = s7o_DHStrafePrimaryPlugin.MomentumStacksForZdh;
-            bool combatMomentumLaneReserved = highFrequencyMode && !bossPreSpawn
+            bool combatMomentumLaneReserved = !manualDebuffHold && highFrequencyMode && !bossPreSpawn
                 && s7o_DHStrafePrimaryPlugin.IsCombatMomentumLaneReservedForZdh;
             bool combatMomentumRecoveryPriority = combatMomentumLaneReserved
                 && momentumStacks < momentumTarget;
@@ -1271,7 +1221,6 @@ namespace Turbo.Plugins.s7o
             // explicit Multishot -> MFD -> three-Sentry opening has been planned from live state.
             if (speedMomentumBuildPriority)
             {
-                SetDiagnosticScheduler(DiagnosticSchedulerState.SpeedMomentumRebuild);
                 if (_sentryBurst.Mode != SentryBurstMode.None)
                     EndSentryBurst("momentum primary due", now);
                 else
@@ -1323,6 +1272,8 @@ namespace Turbo.Plugins.s7o
                 if (IsTrashFightLatchActive(now)) ClearTrashFightLatch("cluster lost");
                 ClearPendingMultishotValidations();
                 PublishTrashFightLatch(now, false, 0);
+                if (manualDebuffHold && local.Odyssey && local.Entangle != null)
+                    TryStartManualDebuffEntangle(local, null, now);
                 return;
             }
 
@@ -1414,9 +1365,9 @@ namespace Turbo.Plugins.s7o
             bool missingMfdCoverage = s7o_ZDH_HelperState.AutoMarkedForDeath && local.Valley
                 && HasMissingPrimaryMfdCoverage(local.Player, now, out materialMfdUpgradeReady);
             if (_mfdRetryDebt && HasMfdRetryDebtRecoveryEvidence()) ClearMfdRetryDebt();
-            bool bossEntangleMissing = bossStandalone && s7o_ZDH_HelperState.AutoEntangle
+            bool bossEntangleDue = bossStandalone && s7o_ZDH_HelperState.AutoEntangle
                 && local.Odyssey && local.Entangle != null
-                && cluster.Elites.Any(m => IsDebuffBody(m) && !HasEntangle(m));
+                && IsBossEntangleRefreshDue(cluster, now);
             if (speedSentryPassThrough && !bossPreSpawn)
             {
                 ForceAbortSentryBurst("speed pass-through", now);
@@ -1562,9 +1513,6 @@ namespace Turbo.Plugins.s7o
             // coverage and cannot be suppressed by the historical opening-complete latch.
             bool liveMfdRecoveryRequired = mfdSetupRequired && missingMfdCoverage
                 && !materialMfdUpgradeReady;
-            _diagnosticMfdLiveReady = currentOpeningMfdCoverageReady;
-            _diagnosticMfdRecoveryRequired = liveMfdRecoveryRequired;
-
             // One bounded opening pipeline: one Multishot input -> real MFD effect -> core Sentries.
             // F2/new-pack entry intentionally sends one Multishot even if an incidental Strafe proc
             // has already applied Iceblink; normal maintenance resumes after that single input.
@@ -1578,7 +1526,6 @@ namespace Turbo.Plugins.s7o
             if (openingMultishotDeadlineExpired && !_openingMultishotAttemptedForEngagement)
             {
                 _openingMultishotAttemptedForEngagement = true;
-                PublishDiagnosticEvent(DiagnosticEvent.CombatOpeningMultishotTimeout, now);
             }
             bool openingMultishotRequired = highFrequencyMode
                 && activePrimaryElites.Any(IsDebuffBody)
@@ -1634,7 +1581,7 @@ namespace Turbo.Plugins.s7o
                 && freshMissingIceblinkElites == 0
                 && _lastSupportKind == CastKind.Multishot
                 && !effectiveTrashIceblinkQueueDue
-                && !bossEntangleMissing;
+                && !bossEntangleDue;
             bool yieldProactiveIceblinkToSentry = sentrySetupActive && sentryRetryReady
                 && missingIceblinkElites == 0 && actionableIceblinkElites > 0
                 && _lastSupportKind == CastKind.Multishot;
@@ -1651,7 +1598,7 @@ namespace Turbo.Plugins.s7o
                 && !hardIceblinkWork
                 && iceblinkAllowsSentryFill
                 && !effectiveTrashIceblinkQueueDue
-                && !bossEntangleMissing
+                && !bossEntangleDue
                 && !sentryIceblinkPreempt;
             bool protectedSentryWorkReady = protectedSentryCoverageMissing
                 && !speedSentryPassThrough
@@ -1694,9 +1641,6 @@ namespace Turbo.Plugins.s7o
             if ((combatMomentumRecoveryPriority || combatMomentumRefreshReserved)
                 && !combatOpeningPriorityActive && !combatMomentumRetryGapUrgentDebuff)
             {
-                SetDiagnosticScheduler(combatMomentumRecoveryPriority
-                    ? DiagnosticSchedulerState.CombatMomentumRebuild
-                    : DiagnosticSchedulerState.CombatMomentumRefresh);
                 if (_sentryBurst.Mode != SentryBurstMode.None)
                     EndSentryBurst("momentum primary due", now);
                 else
@@ -1707,14 +1651,8 @@ namespace Turbo.Plugins.s7o
                 return;
             }
             if (combatMomentumRetryGapUrgentDebuff)
-                SetDiagnosticScheduler(DiagnosticSchedulerState.MomentumRetryGapUrgentDebuff);
             if (combatOpeningPriorityActive)
             {
-                SetDiagnosticScheduler(combatMomentumRecoveryDeferredForOpening
-                    ? DiagnosticSchedulerState.CombatOpeningOverRebuild
-                    : combatMomentumRefreshDeferredForOpening
-                        ? DiagnosticSchedulerState.CombatOpeningOverRefresh
-                        : DiagnosticSchedulerState.CombatOpening);
                 SuppressDhStrafePrimary(150);
             }
 
@@ -1750,7 +1688,7 @@ namespace Turbo.Plugins.s7o
                     && sentryBurstHardMfdReady
                     && trashInitialMultishotReady
                     && !hardIceblinkWork
-                    && !bossEntangleMissing
+                    && !bossEntangleDue
                     && sentryBurstSoftIceblinkAllowed);
             bool sentryBurstStartDebuffsClear = openingCoreSetupPriority
                 || (!materialMfdUpgradeReady
@@ -1758,7 +1696,7 @@ namespace Turbo.Plugins.s7o
                     && trashInitialMultishotReady
                     && !hardIceblinkWork
                     && !effectiveTrashIceblinkQueueDue
-                    && !bossEntangleMissing
+                    && !bossEntangleDue
                     && !sentryIceblinkPreempt
                     && sentryBurstMfdStartReady
                     && sentryBurstStartIceblinkRunwayReady
@@ -1810,7 +1748,10 @@ namespace Turbo.Plugins.s7o
                 }
                 if (_lastCastFinishedTick != int.MinValue
                     && Elapsed(_lastCastFinishedTick, now) < Math.Max(100, InitialSetupBurstGapMs))
+                {
+                    if (manualDebuffHold) TryStartManualDebuffEntangle(local, cluster, now);
                     return;
+                }
                 if (TryStartMultishot(local, cluster, now, false,
                     false, false, false, true))
                     return;
@@ -1840,7 +1781,7 @@ namespace Turbo.Plugins.s7o
             bool materialMfdUpgradeTurn = materialMfdUpgradeReady
                 && !openingCoreSetupPriority
                 && !activeOpeningCoreBurst
-                && (!hardIceblinkWork || _lastSupportKind == CastKind.Multishot);
+                && !hardIceblinkWork;
             if (materialMfdUpgradeTurn
                 && s7o_ZDH_HelperState.AutoMarkedForDeath && local.Valley
                 && local.MarkedForDeath != null)
@@ -1849,7 +1790,10 @@ namespace Turbo.Plugins.s7o
                     : highFrequencyMode ? UrgentRetryGapMs : MovementUrgentRetryGapMs;
                 if (_lastCastFinishedTick != int.MinValue
                     && Elapsed(_lastCastFinishedTick, now) < Math.Max(100, materialMfdCastGap))
+                {
+                    if (manualDebuffHold) TryStartManualDebuffEntangle(local, cluster, now);
                     return;
+                }
                 if (TryStartMarkedForDeath(local, cluster, now, true, true)) return;
                 if (_supportPrimaryGateBlocked) return;
             }
@@ -1894,19 +1838,20 @@ namespace Turbo.Plugins.s7o
                 urgentRetryActive = false;
             }
 
-            int movementWindow = bossStandalone ? BossMovementWindowMs
-                : highFrequencyMode ? AttackMovementWindowMs : MovementModeMovementWindowMs;
-            if (combatOpeningPriorityActive || initialDebuffBurst || sentryFillReady || mfdRetryYieldToSentry
-                || combatTrashSetupChain)
+            int movementWindow = manualDebuffHold ? 0
+                : bossStandalone ? BossMovementWindowMs
+                    : highFrequencyMode ? AttackMovementWindowMs : MovementModeMovementWindowMs;
+            if (!manualDebuffHold && (combatOpeningPriorityActive || initialDebuffBurst || sentryFillReady || mfdRetryYieldToSentry
+                || combatTrashSetupChain))
             {
                 movementWindow = 0;
             }
-            else if (missingIceblinkElites > 0)
+            else if (!manualDebuffHold && missingIceblinkElites > 0)
             {
                 movementWindow = highFrequencyMode ? 0
                     : bossStandalone ? BossIceblinkMovementWindowMs : MovementIceblinkMovementWindowMs;
             }
-            else if (missingMfdCoverage)
+            else if (!manualDebuffHold && missingMfdCoverage)
             {
                 // A genuinely missing/insufficient live Valley in Combat is debuff recovery, not
                 // ordinary placement optimization. Do not add the normal 600 ms movement window
@@ -1916,17 +1861,17 @@ namespace Turbo.Plugins.s7o
                     : bossStandalone ? BossMfdMovementWindowMs
                         : highFrequencyMode ? AttackMfdMovementWindowMs : MovementMfdMovementWindowMs;
             }
-            else if (bossEntangleMissing)
+            else if (!manualDebuffHold && bossEntangleDue)
             {
                 movementWindow = BossMovementWindowMs;
             }
-            else if (actionableIceblinkElites > 0 || trashIceblinkQueueDue || sentryIceblinkPreempt)
+            else if (!manualDebuffHold && (actionableIceblinkElites > 0 || trashIceblinkQueueDue || sentryIceblinkPreempt))
             {
                 movementWindow = highFrequencyMode && actionableIceblinkElites > 0 ? 0
                     : bossStandalone ? BossIceblinkMovementWindowMs
                         : highFrequencyMode ? AttackIceblinkMovementWindowMs : MovementIceblinkMovementWindowMs;
             }
-            else if (sentryTimingWorkActive && protectedSentryCoverageMissing)
+            else if (!manualDebuffHold && sentryTimingWorkActive && protectedSentryCoverageMissing)
             {
                 movementWindow = bossStandalone ? BossMovementWindowMs
                     : highFrequencyMode ? AttackSentryMovementWindowMs : MovementSentryMovementWindowMs;
@@ -1947,13 +1892,17 @@ namespace Turbo.Plugins.s7o
                     || combatTrashSetupChain
                 ? Math.Max(100, InitialSetupBurstGapMs)
                 : missingIceblinkElites > 0 || urgentMfdBeforeSentry || materialMfdUpgradeReady
-                    || bossEntangleMissing || actionableIceblinkElites > 0
+                    || bossEntangleDue || actionableIceblinkElites > 0
                     || trashIceblinkQueueDue || sentryIceblinkPreempt
                     ? bossStandalone ? BossUrgentRetryGapMs
                         : highFrequencyMode ? UrgentRetryGapMs : MovementUrgentRetryGapMs
                     : sentryTimingWorkActive
                         ? SentryRecastMs : normalCastGap;
-            if (_lastCastFinishedTick != int.MinValue && Elapsed(_lastCastFinishedTick, now) < castGap) return;
+            if (_lastCastFinishedTick != int.MinValue && Elapsed(_lastCastFinishedTick, now) < castGap)
+            {
+                if (manualDebuffHold) TryStartManualDebuffEntangle(local, cluster, now);
+                return;
+            }
 
             if (trashFightActive && !_trashInitialMultishotDone && trashIceblinkDue > 0
                 && s7o_ZDH_HelperState.AutoMultishot && local.Iceblink && local.WindChill
@@ -2066,7 +2015,6 @@ namespace Turbo.Plugins.s7o
             // the next open Primary input window remains authoritative.
             if (combatMomentumRetryGapUrgentDebuff)
             {
-                SetDiagnosticScheduler(DiagnosticSchedulerState.MomentumRetryGapYieldPrimary);
                 return;
             }
 
@@ -2093,7 +2041,6 @@ namespace Turbo.Plugins.s7o
             // exception. If no opening action could start this pass, hand the queue back to Primary.
             if (combatMomentumRecoveryDeferredForOpening || combatMomentumRefreshDeferredForOpening)
             {
-                SetDiagnosticScheduler(DiagnosticSchedulerState.CombatOpeningWait);
                 SuppressDhStrafePrimary(150);
                 return;
             }
@@ -2185,6 +2132,10 @@ namespace Turbo.Plugins.s7o
             }
             if (_supportPrimaryGateBlocked) return;
 
+            if (manualDebuffHold && local.Odyssey && local.Entangle != null
+                && TryStartManualDebuffEntangle(local, cluster, now))
+                return;
+
             if (!bossStandalone && s7o_ZDH_HelperState.AutoEntangle && local.Odyssey && local.Entangle != null
                 && TryStartEntangle(local, cluster, now, true))
             {
@@ -2206,9 +2157,11 @@ namespace Turbo.Plugins.s7o
                     if (!IsStatusTarget(monster) || IsJuggernaut(monster) || monster.Invulnerable || !monster.Attackable) continue;
                     if (!monster.IsOnScreen || Distance(zdh.Player, monster) > Math.Min(VisualRange, ZdhParticipationRange)) continue;
                     if (!IsDisplayEligible(monster, zdh, now)) continue;
-                    DrawDebuffTokens(monster, HasIceblink(monster), HasEntangle(monster), monster.MarkedForDeath);
+                    DrawDebuffTokens(monster, HasIceblink(monster), HasEntangle(monster), monster.MarkedForDeath, IsElectrified(monster));
                 }
             }
+
+            DrawElectrifiedAlert(now);
 
             foreach (ZdhLoadout loadout in zdhPlayers)
                 DrawPortraitHint(loadout);
@@ -2575,6 +2528,7 @@ namespace Turbo.Plugins.s7o
             _cast.BaselineMfdActorCreatedTick = _lastValleyActorCreatedTick;
             _cast.BaselineMfdGameTick = Hud.Game.CurrentGameTick;
             ClearMfdImprovementCandidate();
+            ClearMfdEdgeImprovementCandidate();
             return true;
         }
 
@@ -2642,19 +2596,22 @@ namespace Turbo.Plugins.s7o
         private bool TryStartEntangle(ZdhLoadout local, CombatCluster cluster, int now, bool urgentOnly)
         {
             if (cluster == null || cluster.Bodies.Count == 0 || !SkillReady(local.Entangle)) return false;
-            bool bossCluster = cluster.Elites.Any(m => m != null && m.Rarity == ActorRarity.Boss);
+            IMonster boss = cluster.Elites.FirstOrDefault(m =>
+                m != null && m.Rarity == ActorRarity.Boss && IsDebuffBody(m));
+            bool bossRefreshDue = boss != null && IsBossEntangleRefreshDue(cluster, now);
             List<IMonster> missingElites = cluster.Elites
                 .Where(m => IsDebuffBody(m) && !HasEntangle(m)).ToList();
             if (cluster.SustainedSpecialFocus && cluster.FocusTarget != null && IsDebuffBody(cluster.FocusTarget)
                 && !HasEntangle(cluster.FocusTarget) && !missingElites.Any(m => SameMonster(m, cluster.FocusTarget)))
                 missingElites.Add(cluster.FocusTarget);
 
-            // Entangle is a recovery action, not periodic boss spam. If Odyssey is still
-            // present, manual player attacks are already doing the job and Helper stays out.
-            if (missingElites.Count == 0 || !urgentOnly) return false;
+            // Outside RG standalone, Entangle remains recovery-only. At the RG, proactively
+            // refresh the boss on the bounded maintenance cadence so the ~2s Odyssey effect
+            // does not have to drop before the scheduler can react.
+            if (!urgentOnly || (missingElites.Count == 0 && !bossRefreshDue)) return false;
 
-            IMonster target = bossCluster
-                ? FindBestEntangleTarget(cluster, true, now)
+            IMonster target = bossRefreshDue
+                ? boss
                 : missingElites.OrderByDescending(m => EntangleTargetScore(m, cluster.Bodies))
                     .ThenBy(m => Distance(local.Player, m))
                     .ThenBy(m => m.AcdId).FirstOrDefault();
@@ -2666,6 +2623,74 @@ namespace Turbo.Plugins.s7o
                 "Entangle Elite")) return false;
 
             state.LastEntangleAttempt = now;
+            _lastEntangleMaintenanceTick = now;
+            return true;
+        }
+
+        private bool IsBossEntangleRefreshDue(CombatCluster cluster, int now)
+        {
+            if (!_bossStandaloneActive || cluster == null) return false;
+            IMonster boss = cluster.Elites.FirstOrDefault(m =>
+                m != null && m.Rarity == ActorRarity.Boss && IsDebuffBody(m));
+            if (boss == null) return false;
+            if (!HasEntangle(boss)) return true;
+            return _lastEntangleMaintenanceTick == int.MinValue
+                || Elapsed(_lastEntangleMaintenanceTick, now) >= Math.Max(500, BossEntangleMaintenanceMs);
+        }
+
+        private void HandleManualDebuffRelease(int now)
+        {
+            _manualDebuffMovementUntilTick = unchecked(now
+                + Math.Max(0, ManualDebuffReleaseMovementMs));
+
+            if (_cast.Stage == CastStage.Idle) return;
+
+            // Releasing CTRL is the explicit movement handoff. Abort any cast that has not
+            // committed its skill input yet, and always abort the short manual Entangle filler.
+            // A committed support cast keeps only its existing bounded release/restore tail.
+            if (!_cast.InputSent || _cast.ManualDebuff)
+                CancelCast("manual hold released");
+        }
+
+        private bool TryStartManualDebuffEntangle(ZdhLoadout local, CombatCluster cluster, int now)
+        {
+            if (local == null || local.Player == null || local.Entangle == null || !SkillReady(local.Entangle))
+                return false;
+            if (_lastManualDebuffCastFinishedTick != int.MinValue
+                && Elapsed(_lastManualDebuffCastFinishedTick, now) < Math.Max(25, ManualDebuffCastGapMs))
+                return false;
+
+            List<IMonster> visible = Hud.Game.AliveMonsters
+                .Where(m => m != null && m.IsOnScreen && IsDebuffBody(m))
+                .ToList();
+            List<IMonster> elites = visible.Where(IsStatusTarget).ToList();
+            List<IMonster> eligible = elites.Count > 0 ? elites : visible;
+
+            if (eligible.Count > 0)
+            {
+                List<IMonster> missing = eligible.Where(m => !HasEntangle(m)).ToList();
+                IMonster target = (missing.Count > 0 ? missing : eligible)
+                    .OrderByDescending(m => missing.Count > 0 && m.Rarity == ActorRarity.Boss)
+                    .ThenBy(m => GetTargetState(m, now).LastEntangleAttempt)
+                    .ThenByDescending(m => EntangleTargetScore(m, visible))
+                    .ThenBy(m => Distance(local.Player, m))
+                    .ThenBy(m => m.AcdId).FirstOrDefault();
+                if (target == null) return false;
+
+                TargetState state = GetTargetState(target, now);
+                IScreenCoordinate aim = CreateSafeDirectionalAim(local.Player, target.ScreenCoordinate);
+                if (aim == null || !StartCast(CastKind.Entangle, local.Entangle, target.AcdId, aim, now,
+                    "Entangle CTRL", manualDebuff: true)) return false;
+
+                state.LastEntangleAttempt = now;
+                _lastEntangleMaintenanceTick = now;
+                return true;
+            }
+
+            IScreenCoordinate cursorAim = Hud.Window.CreateScreenCoordinate(Hud.Window.CursorX, Hud.Window.CursorY);
+            if (cursorAim == null || !StartCast(CastKind.Entangle, local.Entangle, 0, cursorAim, now,
+                "Entangle CTRL Aim", manualDebuff: true, useCurrentCursorAim: true)) return false;
+
             _lastEntangleMaintenanceTick = now;
             return true;
         }
@@ -3311,6 +3336,7 @@ namespace Turbo.Plugins.s7o
             int densityGain = best.CoveredBodies - currentBodies;
 
             var currentSupportAcds = GetEffectiveMfdEliteCoverage(current, primaryElites);
+            bool edgeReposition = false;
             bool urgent;
             if (hasPrimaryElite)
             {
@@ -3340,9 +3366,23 @@ namespace Turbo.Plugins.s7o
 
                 if (eliteGainOnly && !(eliteGain && gainStable)) return false;
                 if (urgentOnly && !urgent) return false;
-                // Once the current Valley covers the available elite set, leave it alone.
-                // Maintenance requires added coverage or a sustained uncovered boss/focus target.
-                if (!urgentOnly) return false;
+
+                if (!urgentOnly)
+                {
+                    // Routine reposition is deliberately weaker than every missing-debuff lane.
+                    // If a coverage/boss/focus improvement exists, let the normal urgent path own it.
+                    if (eliteGain || bossUnmarked || noEliteCovered)
+                    {
+                        ClearMfdEdgeImprovementCandidate();
+                        return false;
+                    }
+
+                    edgeReposition = IsMfdEdgeRepositionStable(
+                        current, best, currentSupportAcds, primaryElites, now);
+                    if (!edgeReposition) return false;
+                    if (Elapsed(_lastMfdCastTick, now) < Math.Max(0, MarkedForDeathRecastMs))
+                        return false;
+                }
 
                 if (urgent)
                 {
@@ -3357,6 +3397,7 @@ namespace Turbo.Plugins.s7o
             else
             {
                 ClearMfdImprovementCandidate();
+                ClearMfdEdgeImprovementCandidate();
                 int minimumDensityGain = Math.Max(MfdDensityMinimumGain,
                     (int)Math.Ceiling(Math.Max(1, currentBodies) * MfdDensityMinimumGainRatio));
 
@@ -3428,14 +3469,13 @@ namespace Turbo.Plugins.s7o
             string mfdLabel = !hasPrimaryElite && mfdOnlyTargets.Count > 0 ? "MFD Juggernaut"
                 : uncoveredBoss != null ? "MFD Boss"
                 : bossPlanned ? "MFD Boss Priority"
+                : edgeReposition ? "MFD Elite Reposition"
                 : hasPrimaryElite ? "MFD Elite Density" : "MFD Trash Density";
             if (!StartCast(CastKind.MarkedForDeath, local.MarkedForDeath, primary.AcdId, best.Screen, now,
                 mfdLabel, best.WorldX, best.WorldY, verifyTargets)) return false;
             _cast.ExpectedWorldZ = best.WorldZ;
 
             foreach (uint acd in best.CoveredEliteAcds) _cast.VerifyImportantAcds.Add(acd);
-            PublishDiagnosticEvent(DiagnosticEvent.MfdPlan, now, primaryElites.Count,
-                best.CoveredElites, primary.AcdId, best.WorldX, best.WorldY);
             _cast.BaselineImportantApplied = _cast.VerifyImportantAcds.Count(acd =>
             {
                 IMonster planned = FindMonster(acd);
@@ -3445,6 +3485,7 @@ namespace Turbo.Plugins.s7o
             _cast.BaselineMfdActorCreatedTick = _lastValleyActorCreatedTick;
             _cast.BaselineMfdGameTick = Hud.Game.CurrentGameTick;
             ClearMfdImprovementCandidate();
+            ClearMfdEdgeImprovementCandidate();
             return true;
         }
 
@@ -3477,6 +3518,83 @@ namespace Turbo.Plugins.s7o
         {
             _mfdImprovementSignature = string.Empty;
             _mfdImprovementTick = int.MinValue;
+        }
+
+        private bool IsMfdEdgeRepositionStable(Placement current, Placement best,
+            HashSet<uint> currentEliteAcds, IEnumerable<IMonster> primaryElites, int now)
+        {
+            if (current == null || best == null || currentEliteAcds == null
+                || currentEliteAcds.Count == 0 || primaryElites == null
+                || float.IsNaN(current.WorldX) || float.IsNaN(current.WorldY)
+                || float.IsNaN(best.WorldX) || float.IsNaN(best.WorldY))
+            {
+                ClearMfdEdgeImprovementCandidate();
+                return false;
+            }
+
+            // A centering move may never drop an elite that the current live Valley covers.
+            if (currentEliteAcds.Any(acd => !best.CoveredEliteAcds.Contains(acd)))
+            {
+                ClearMfdEdgeImprovementCandidate();
+                return false;
+            }
+
+            double currentMargin = MfdPhysicalCoverageMargin(current, primaryElites, currentEliteAcds);
+            double bestMargin = MfdPhysicalCoverageMargin(best, primaryElites, currentEliteAcds);
+            if (currentMargin == double.MinValue || bestMargin == double.MinValue
+                || currentMargin > Math.Max(0f, MfdEdgeSafetyMargin)
+                || bestMargin < currentMargin + Math.Max(0f, MfdEdgeMinimumImprovement))
+            {
+                ClearMfdEdgeImprovementCandidate();
+                return false;
+            }
+
+            string signature = string.Join(",", currentEliteAcds
+                .OrderBy(x => x)
+                .Select(x => x.ToString(CultureInfo.InvariantCulture))
+                .ToArray());
+            if (!string.Equals(signature, _mfdEdgeImprovementSignature, StringComparison.Ordinal))
+            {
+                _mfdEdgeImprovementSignature = signature;
+                _mfdEdgeImprovementTick = now;
+                return false;
+            }
+
+            if (_mfdEdgeImprovementTick == int.MinValue)
+            {
+                _mfdEdgeImprovementTick = now;
+                return false;
+            }
+
+            return Elapsed(_mfdEdgeImprovementTick, now) >= Math.Max(0, MfdEdgeStableMs);
+        }
+
+        private double MfdPhysicalCoverageMargin(Placement placement,
+            IEnumerable<IMonster> targets, HashSet<uint> requiredAcds)
+        {
+            if (placement == null || targets == null || requiredAcds == null
+                || requiredAcds.Count == 0 || float.IsNaN(placement.WorldX)
+                || float.IsNaN(placement.WorldY)) return double.MinValue;
+
+            double minimum = double.MaxValue;
+            bool found = false;
+            foreach (IMonster target in targets)
+            {
+                if (target == null || target.FloorCoordinate == null
+                    || !requiredAcds.Contains(target.AcdId)) continue;
+
+                double margin = ValleyRadius + GetMonsterRadiusBottom(target)
+                    - target.FloorCoordinate.XYDistanceTo(placement.WorldX, placement.WorldY);
+                minimum = Math.Min(minimum, margin);
+                found = true;
+            }
+            return found ? minimum : double.MinValue;
+        }
+
+        private void ClearMfdEdgeImprovementCandidate()
+        {
+            _mfdEdgeImprovementSignature = string.Empty;
+            _mfdEdgeImprovementTick = int.MinValue;
         }
 
         private Placement CreateTrashSnapshotPlacement(CombatCluster cluster,
@@ -3564,7 +3682,15 @@ namespace Turbo.Plugins.s7o
         {
             var covered = new HashSet<uint>(current == null
                 ? Enumerable.Empty<uint>() : current.CoveredEliteAcds);
-            if (primaryElites == null) return covered;
+
+            // When the native Valley actor is available, its physical 15-yard field is the
+            // placement authority. Monster.MarkedForDeath can linger briefly after an elite
+            // reaches the edge and must not hide a real geometry loss. Only use native monster
+            // flags as the existing fallback when the Valley actor itself is unavailable.
+            bool hasPhysicalValley = current != null
+                && !float.IsNaN(current.WorldX) && !float.IsNaN(current.WorldY);
+            if (hasPhysicalValley || primaryElites == null) return covered;
+
             foreach (IMonster elite in primaryElites)
                 if (elite != null && elite.MarkedForDeath)
                     covered.Add(elite.AcdId);
@@ -4668,7 +4794,6 @@ namespace Turbo.Plugins.s7o
                 return;
             }
             int duration = Elapsed(_sentryBurst.StartedTick, now);
-            PublishDiagnosticEvent(DiagnosticEvent.SentryBurstEnd, now, duration, (int)_sentryBurst.Mode);
             RecordCoreBurstEnd(reason, now);
             ReleaseActionInput();
             if (_cast.Stage != CastStage.Idle && _cast.SentryBurstChild && _cast.CursorOwned)
@@ -4734,7 +4859,7 @@ namespace Turbo.Plugins.s7o
 
         private bool StartCast(CastKind kind, IPlayerSkill skill, uint targetAcd, IScreenCoordinate aim, int now, string label,
             float expectedWorldX = float.NaN, float expectedWorldY = float.NaN, IEnumerable<uint> verifyTargetAcds = null,
-            bool sentryBurstChild = false)
+            bool sentryBurstChild = false, bool manualDebuff = false, bool useCurrentCursorAim = false)
         {
             if (_cast.Stage != CastStage.Idle || skill == null || aim == null || !PointInsideCastArea(aim.X, aim.Y)) return false;
             if (ActionIsDown(skill.Key)) return false;
@@ -4743,6 +4868,8 @@ namespace Turbo.Plugins.s7o
             _cast.Kind = kind;
             _cast.Stage = CastStage.Lease;
             _cast.SentryBurstChild = sentryBurstChild;
+            _cast.ManualDebuff = manualDebuff;
+            _cast.UseCurrentCursorAim = useCurrentCursorAim;
             _cast.Skill = skill;
             _cast.TargetAcd = targetAcd;
             _cast.StartedTick = now;
@@ -4795,14 +4922,10 @@ namespace Turbo.Plugins.s7o
                 _cast.Stage = CastStage.Aim;
                 _cast.DueTick = unchecked(now + _cast.AimSettleMs);
                 RequestDhStrafePause(Math.Max(80, RemainingSentryBurstMs(now) + 80));
-                SetDiagnosticScheduler(DiagnosticSchedulerState.SupportStart);
-                PublishDiagnosticEvent(DiagnosticEvent.CastStart, now, (int)kind, 1, targetAcd);
                 return true;
             }
 
             if (_cast.RequiresStrafePause) RequestDhStrafePause(GetPreInputHardLimitMs(kind) + 80);
-            SetDiagnosticScheduler(DiagnosticSchedulerState.SupportStart);
-            PublishDiagnosticEvent(DiagnosticEvent.CastStart, now, (int)kind, 0, targetAcd);
             return true;
         }
 
@@ -4909,13 +5032,21 @@ namespace Turbo.Plugins.s7o
                         RequestDhStrafePause(GetPreInputHardLimitMs(_cast.Kind) + 80);
                     return;
                 }
-                if (!RefreshCastAimFromCurrentView()) { CancelCast("aim refresh failed"); return; }
-
-                _cast.SavedCursorX = Hud.Window.CursorX;
-                _cast.SavedCursorY = Hud.Window.CursorY;
-                InitializeCursorIntent();
-                if (!SetCastCursor(_cast.AimX, _cast.AimY)) { CancelCast("aim failed"); return; }
-                _cast.CursorOwned = true;
+                if (!_cast.UseCurrentCursorAim)
+                {
+                    if (!RefreshCastAimFromCurrentView()) { CancelCast("aim refresh failed"); return; }
+                    _cast.SavedCursorX = Hud.Window.CursorX;
+                    _cast.SavedCursorY = Hud.Window.CursorY;
+                    InitializeCursorIntent();
+                    if (!SetCastCursor(_cast.AimX, _cast.AimY)) { CancelCast("aim failed"); return; }
+                    _cast.CursorOwned = true;
+                }
+                else
+                {
+                    _cast.SavedCursorX = Hud.Window.CursorX;
+                    _cast.SavedCursorY = Hud.Window.CursorY;
+                    _cast.CursorOwned = false;
+                }
                 _cast.Stage = CastStage.Aim;
                 _cast.DueTick = unchecked(now + _cast.AimSettleMs);
                 if (_cast.RequiresStrafePause) RequestDhStrafePause(GetPreInputHardLimitMs(_cast.Kind) + 80);
@@ -4947,7 +5078,9 @@ namespace Turbo.Plugins.s7o
                 if (ActionIsDown(_cast.Skill.Key)) { CancelCast("player skill input"); return; }
                 _cast.PreInputAnimationSno = Hud.Game.Me.Animation;
                 _cast.PreInputAnimationSnoValid = true;
-                _cast.ActionHeld = SetCastCursorAndActionDown(_cast.AimX, _cast.AimY, _cast.Skill.Key);
+                _cast.ActionHeld = _cast.UseCurrentCursorAim
+                    ? ActionDownAtSafeCurrentCursor(_cast.Skill.Key)
+                    : SetCastCursorAndActionDown(_cast.AimX, _cast.AimY, _cast.Skill.Key);
                 if (!_cast.ActionHeld)
                 {
                     if (Elapsed(_cast.StartedTick, now) + Math.Max(1, AimCorrectionRetryMs)
@@ -5117,9 +5250,8 @@ namespace Turbo.Plugins.s7o
         {
             bool sentryBurstChild = _cast.SentryBurstChild
                 && _sentryBurst.Mode != SentryBurstMode.None;
+            bool manualDebuffCast = _cast.ManualDebuff;
             CastKind finishedKind = _cast.Kind;
-            PublishDiagnosticEvent(DiagnosticEvent.CastFinish, now, (int)finishedKind,
-                string.Equals(result, "verified", StringComparison.OrdinalIgnoreCase) ? 1 : 0);
             ReleaseActionInput();
             if (!sentryBurstChild)
             {
@@ -5198,7 +5330,10 @@ namespace Turbo.Plugins.s7o
                 _urgentRetryTick = int.MinValue;
             }
 
-            _lastSupportKind = finishedKind;
+            if (manualDebuffCast)
+                _lastManualDebuffCastFinishedTick = now;
+            else
+                _lastSupportKind = finishedKind;
             if (sentryBurstChild)
             {
                 bool verified = string.Equals(result, "verified", StringComparison.OrdinalIgnoreCase);
@@ -5207,7 +5342,8 @@ namespace Turbo.Plugins.s7o
                 CompleteBossEntangleStandstillRelease();
                 return;
             }
-            _lastCastFinishedTick = now;
+            if (!manualDebuffCast)
+                _lastCastFinishedTick = now;
             ResetCast();
             CompleteBossEntangleStandstillRelease();
         }
@@ -5219,7 +5355,8 @@ namespace Turbo.Plugins.s7o
                 || string.Equals(reason, "dead", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(reason, "ghosted", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(reason, "strafe off", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(reason, "boss dead", StringComparison.OrdinalIgnoreCase);
+                || string.Equals(reason, "boss dead", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(reason, "manual hold released", StringComparison.OrdinalIgnoreCase);
         }
 
         private void CancelCast(string reason)
@@ -5253,19 +5390,19 @@ namespace Turbo.Plugins.s7o
         {
             bool sentryBurstChild = _cast.SentryBurstChild
                 && _sentryBurst.Mode != SentryBurstMode.None;
+            bool manualDebuffCast = _cast.ManualDebuff;
             CastKind cancelledKind = _cast.Kind;
             bool inputSent = _cast.InputSent;
-            PublishDiagnosticEvent(DiagnosticEvent.CastCancel, now, (int)cancelledKind,
-                (inputSent ? 1 : 0) | (restored ? 2 : 0));
 
             ReleaseActionInput();
             if (!sentryBurstChild) ReleaseStandstillInput();
             if (restored && !sentryBurstChild)
             {
-                _lastPauseReleasedTick = now;
-                if (inputSent)
+                if (!manualDebuffCast)
+                    _lastPauseReleasedTick = now;
+                if (inputSent && !manualDebuffCast)
                     s7o_DHStrafePrimaryPlugin.NotifySupportActionCompletedForZdh(now);
-                int primaryQuietMs = inputSent && _cast.RequiresStrafePause
+                int primaryQuietMs = inputSent && !manualDebuffCast && _cast.RequiresStrafePause
                     ? GetPostCastPrimaryQuietMs(cancelledKind) : 0;
                 if (primaryQuietMs > 0) SuppressDhStrafePrimary(primaryQuietMs);
                 ReleaseDhStrafePause();
@@ -5302,7 +5439,10 @@ namespace Turbo.Plugins.s7o
                     BackoffSentryMaintenance(now, "maintenance cancelled: " + reason);
             }
 
-            _lastSupportKind = cancelledKind;
+            if (manualDebuffCast)
+                _lastManualDebuffCastFinishedTick = now;
+            else
+                _lastSupportKind = cancelledKind;
             if (sentryBurstChild)
             {
                 ResetCast();
@@ -5311,7 +5451,8 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
-            _lastCastFinishedTick = now;
+            if (!manualDebuffCast)
+                _lastCastFinishedTick = now;
             ResetCast();
             CompleteBossEntangleStandstillRelease();
         }
@@ -5388,6 +5529,8 @@ namespace Turbo.Plugins.s7o
             _cast.SentryActualWorldY = float.NaN;
             _cast.SentryMaintenance = false;
             _cast.SentryBurstChild = false;
+            _cast.ManualDebuff = false;
+            _cast.UseCurrentCursorAim = false;
         }
 
         private void ReleaseActionInput()
@@ -5929,28 +6072,30 @@ namespace Turbo.Plugins.s7o
             return l;
         }
 
-        private void DrawDebuffTokens(IMonster monster, bool ib, bool dmg, bool mfd)
+        private void DrawDebuffTokens(IMonster monster, bool ib, bool dmg, bool mfd, bool electrified)
         {
             IScreenCoordinate sc = null;
             try { sc = monster.FloorCoordinate == null ? monster.ScreenCoordinate : monster.FloorCoordinate.ToScreenCoordinate(false, true); }
             catch { sc = monster.ScreenCoordinate; }
             if (sc == null) return;
-            string[] texts = { "IB", "DMG", "MFD" };
-            bool[] states = { ib, dmg, mfd };
-            float[] widths = new float[3];
+
+            int labelCount = electrified ? 4 : 3;
+            string[] texts = electrified ? new[] { "⚡", "IB", "DMG", "MFD" } : new[] { "IB", "DMG", "MFD" };
+            bool[] states = electrified ? new[] { true, ib, dmg, mfd } : new[] { ib, dmg, mfd };
+            float[] widths = new float[labelCount];
             float total = 0;
-            for (int i = 0; i < 3; i++)
+            for (int i = 0; i < labelCount; i++)
             {
-                IFont font = states[i] ? _greenFont : _redFont;
+                IFont font = electrified && i == 0 ? _purpleFont : states[i] ? _greenFont : _redFont;
                 widths[i] = font.GetTextLayout(texts[i]).Metrics.Width;
                 total += widths[i];
             }
-            total += 12f;
+            total += (labelCount - 1) * 6f;
             float x = sc.X - total * 0.5f;
             float y = sc.Y + 33f;
-            for (int i = 0; i < 3; i++)
+            for (int i = 0; i < labelCount; i++)
             {
-                IFont font = states[i] ? _greenFont : _redFont;
+                IFont font = electrified && i == 0 ? _purpleFont : states[i] ? _greenFont : _redFont;
                 font.DrawText(texts[i], x, y);
                 x += widths[i] + 6f;
             }
@@ -7746,6 +7891,193 @@ namespace Turbo.Plugins.s7o
             return desired.Where(placement => !unmatched.Contains(placement)).Sum(placement => placement.Priority);
         }
 
+        private void UpdateElectrifiedAlert(ZdhLoadout local, int now)
+        {
+            bool eligible = s7o_ZDH_HelperState.Enabled && local != null && local.QualifiesForDisplay
+                && local.Player != null && local.Player.HasValidActor && !local.Player.IsDead;
+            if (!eligible) return;
+
+            var electrified = Hud.Game.AliveMonsters
+                .Where(IsElectrifiedAlertActor)
+                .ToList();
+            var onScreen = electrified.Where(monster => monster.IsOnScreen).ToList();
+
+            if (onScreen.Count > 0)
+            {
+                float x = 0f;
+                float y = 0f;
+                int count = 0;
+                foreach (IMonster monster in onScreen)
+                {
+                    _electrifiedEncounterAcds.Add(monster.AcdId);
+                    if (monster.FloorCoordinate == null) continue;
+                    x += monster.FloorCoordinate.X;
+                    y += monster.FloorCoordinate.Y;
+                    count++;
+                }
+                if (count > 0)
+                {
+                    _electrifiedLastSeenX = x / count;
+                    _electrifiedLastSeenY = y / count;
+                    _electrifiedLastSeenValid = true;
+                }
+
+                if (!_electrifiedPresenceActive)
+                {
+                    _electrifiedPresenceActive = true;
+                    _electrifiedAlertTick = now;
+                    _electrifiedAlertText = GetElectrifiedLocalizedName(onScreen[0]);
+                }
+                _electrifiedAbsentSinceTick = int.MinValue;
+                return;
+            }
+
+            if (!_electrifiedPresenceActive) return;
+
+            // IsOnScreen is not a reliable departure signal for burrowing/phase-shifting elites:
+            // FreeHUD can report the same nearby pack off-screen while it is underground. Rearm
+            // only after the player actually leaves the encounter area, then sees Electrified again.
+            bool playerMovedAway = _electrifiedLastSeenValid && local.Player.FloorCoordinate != null
+                && Distance2D(local.Player.FloorCoordinate.X, local.Player.FloorCoordinate.Y,
+                    _electrifiedLastSeenX, _electrifiedLastSeenY)
+                    >= Math.Max(30f, ElectrifiedAlertRearmDistance);
+
+            if (!playerMovedAway)
+            {
+                _electrifiedAbsentSinceTick = int.MinValue;
+                return;
+            }
+
+            if (_electrifiedAbsentSinceTick == int.MinValue) _electrifiedAbsentSinceTick = now;
+            if (Elapsed(_electrifiedAbsentSinceTick, now) >= Math.Max(0, ElectrifiedAlertRearmMs))
+                ResetElectrifiedAlert();
+        }
+
+        private bool IsElectrifiedAlertActor(IMonster monster)
+        {
+            if (monster == null || !monster.IsAlive || monster.FloorCoordinate == null
+                || monster.Illusion || IsJuggernaut(monster))
+                return false;
+            if (monster.Rarity != ActorRarity.Champion && monster.Rarity != ActorRarity.Rare
+                && monster.Rarity != ActorRarity.Unique && monster.Rarity != ActorRarity.Boss)
+                return false;
+            return IsElectrified(monster);
+        }
+
+        private void ResetElectrifiedAlert()
+        {
+            _electrifiedAbsentSinceTick = int.MinValue;
+            _electrifiedAlertTick = int.MinValue;
+            _electrifiedPresenceActive = false;
+            _electrifiedAlertText = string.Empty;
+            _electrifiedLastSeenX = 0f;
+            _electrifiedLastSeenY = 0f;
+            _electrifiedLastSeenValid = false;
+            _electrifiedEncounterAcds.Clear();
+        }
+
+        private string GetElectrifiedLocalizedName(IMonster monster)
+        {
+            try
+            {
+                var affix = monster == null || monster.AffixSnoList == null ? null
+                    : monster.AffixSnoList.FirstOrDefault(a => a != null && a.Affix == MonsterAffix.Electrified);
+                return affix == null ? string.Empty : (affix.NameLocalized ?? string.Empty);
+            }
+            catch { return string.Empty; }
+        }
+
+        private IFont[] CreateAlertPopFonts(int r, int g, int b, float size)
+        {
+            const int count = 21;
+            var fonts = new IFont[count];
+            float min = Math.Max(6.0f, size * 0.92f);
+            float max = Math.Max(min, size * 1.12f);
+            for (int i = 0; i < count; i++)
+                fonts[i] = Hud.Render.CreateFont("tahoma", min + ((max - min) * i / (count - 1)),
+                    255, r, g, b, true, false, false);
+            return fonts;
+        }
+
+        private IFont[] CreateAlertFadeFonts(int r, int g, int b, float size)
+        {
+            var fonts = new IFont[11];
+            float fontSize = Math.Max(6.0f, size);
+            for (int i = 0; i < fonts.Length; i++)
+                fonts[i] = Hud.Render.CreateFont("tahoma", fontSize,
+                    (int)Math.Round(255.0d * i / 10.0d), r, g, b, true, false, false);
+            return fonts;
+        }
+
+        private void DrawElectrifiedAlert(int now)
+        {
+            if (_electrifiedAlertTick == int.MinValue || string.IsNullOrEmpty(_electrifiedAlertText)
+                || Hud.Game == null || Hud.Game.Me == null || Hud.Game.Me.FloorCoordinate == null) return;
+
+            int elapsed = Elapsed(_electrifiedAlertTick, now);
+            int popMs = Math.Max(0, ElectrifiedAlertPopMs);
+            int holdMs = Math.Max(0, ElectrifiedAlertHoldMs);
+            int fadeMs = Math.Max(0, ElectrifiedAlertFadeMs);
+            if (elapsed > holdMs + fadeMs) return;
+
+            IFont font;
+            IFont outline;
+            if (elapsed <= holdMs && _electrifiedPopFonts != null && _electrifiedPopFonts.Length > 0)
+            {
+                int index = GetAlertPulseIndex(elapsed, ElectrifiedAlertPulsePeriodMs,
+                    _electrifiedPopFonts.Length);
+                font = _electrifiedPopFonts[index];
+                outline = _electrifiedOutlinePopFonts == null ? null : _electrifiedOutlinePopFonts[index];
+            }
+            else
+            {
+                if (fadeMs <= 0) return;
+                int fadeElapsed = elapsed - holdMs;
+                if (fadeElapsed >= fadeMs) return;
+                int bucket = Math.Max(1, Math.Min(10,
+                    (int)Math.Ceiling((1.0d - ((double)fadeElapsed / fadeMs)) * 10.0d)));
+                font = _electrifiedFadeFonts == null ? null : _electrifiedFadeFonts[bucket];
+                outline = _electrifiedOutlineFadeFonts == null ? null : _electrifiedOutlineFadeFonts[bucket];
+            }
+            if (font == null) return;
+
+            IScreenCoordinate sc = Hud.Game.Me.FloorCoordinate.ToScreenCoordinate(true, true);
+            if (sc == null) return;
+            string text = _electrifiedAlertText;
+            float travel = popMs <= 0 ? 1.0f : SmoothAlert(Math.Min(1.0f, (float)elapsed / popMs));
+            float y = sc.Y + (-115f + ((-205f + 115f) * travel));
+            float x = sc.X - font.GetTextLayout(text).Metrics.Width * 0.5f;
+            DrawAlertOutlinedText(text, x, y, font, outline);
+        }
+
+        private static int GetAlertPulseIndex(int elapsed, int periodMs, int count)
+        {
+            if (count <= 1 || periodMs <= 0) return count / 2;
+            float phase = (elapsed % periodMs) / (float)periodMs;
+            float wave = phase < 0.5f ? phase * 2f : (1f - phase) * 2f;
+            return Math.Max(0, Math.Min(count - 1,
+                (int)Math.Round(SmoothAlert(wave) * (count - 1))));
+        }
+
+        private static float SmoothAlert(float t)
+        {
+            t = Math.Max(0f, Math.Min(1f, t));
+            return t * t * (3.0f - 2.0f * t);
+        }
+
+        private static void DrawAlertOutlinedText(string text, float x, float y, IFont font, IFont outline)
+        {
+            if (outline != null)
+            {
+                const int radius = 4;
+                for (int dx = -radius; dx <= radius; dx++)
+                    for (int dy = -radius; dy <= radius; dy++)
+                        if ((dx != 0 || dy != 0) && dx * dx + dy * dy <= radius * radius + 2)
+                            outline.DrawText(text, x + dx, y + dy, false);
+            }
+            font.DrawText(text, x, y, false);
+        }
+
         private void UpdatePlayerPositionStates(int now)
         {
             var seen = new HashSet<uint>();
@@ -8358,6 +8690,13 @@ namespace Turbo.Plugins.s7o
             catch { return false; }
         }
 
+        private bool IsElectrified(IMonster monster)
+        {
+            try { return monster != null && monster.AffixSnoList != null
+                && monster.AffixSnoList.Any(a => a != null && a.Affix == MonsterAffix.Electrified); }
+            catch { return false; }
+        }
+
         private bool IsLocalGhosted()
         {
             try
@@ -8845,7 +9184,7 @@ namespace Turbo.Plugins.s7o
                     + (Hud.Window.CursorY - origin.Y) * dy;
                 distance = Math.Max(minimumDistance, Math.Min(maximumDistance, cursorProjection));
             }
-            return Hud.Window.CreateScreenCoordinate(origin.X + dx * distance, origin.Y + dy * distance);
+            return CreateUiSafeRayAim(origin, dx, dy, distance, minimumDistance, maximumDistance);
         }
 
         private IScreenCoordinate CreateSafeDirectionalAim(IPlayer player, IScreenCoordinate target)
@@ -8865,19 +9204,47 @@ namespace Turbo.Plugins.s7o
             float bottom = Math.Min(size.Height - 140f, size.Height * bottomRatio);
             float dx = target.X - origin.X;
             float dy = target.Y - origin.Y;
-            if (Math.Abs(dx) < 1f && Math.Abs(dy) < 1f) return SafeFallbackAim(fallback);
+            float length = (float)Math.Sqrt(dx * dx + dy * dy);
+            if (length < 1f) return SafeFallbackAim(fallback);
+            dx /= length;
+            dy /= length;
 
-            float t = 1f;
-            if (dx > 0) t = Math.Min(t, (right - origin.X) / dx);
-            else if (dx < 0) t = Math.Min(t, (left - origin.X) / dx);
-            if (dy > 0) t = Math.Min(t, (bottom - origin.Y) / dy);
-            else if (dy < 0) t = Math.Min(t, (top - origin.Y) / dy);
-            t = Math.Max(0.12f, Math.Min(1f, t));
-            float x = Math.Max(left, Math.Min(right, origin.X + dx * t));
-            float y = Math.Max(top, Math.Min(bottom, origin.Y + dy * t));
-            double distance = Math.Sqrt((x - origin.X) * (x - origin.X) + (y - origin.Y) * (y - origin.Y));
-            if (distance < minimumDistance) return SafeFallbackAim(fallback);
-            return Hud.Window.CreateScreenCoordinate(x, y);
+            float maximumDistance = float.MaxValue;
+            if (dx > 0) maximumDistance = Math.Min(maximumDistance, (right - origin.X) / dx);
+            else if (dx < 0) maximumDistance = Math.Min(maximumDistance, (left - origin.X) / dx);
+            if (dy > 0) maximumDistance = Math.Min(maximumDistance, (bottom - origin.Y) / dy);
+            else if (dy < 0) maximumDistance = Math.Min(maximumDistance, (top - origin.Y) / dy);
+            if (maximumDistance < minimumDistance) return SafeFallbackAim(fallback);
+
+            float preferredDistance = Math.Min(length, maximumDistance);
+            IScreenCoordinate safe = CreateUiSafeRayAim(origin, dx, dy, preferredDistance, minimumDistance, maximumDistance);
+            return safe ?? SafeFallbackAim(fallback);
+        }
+
+        private IScreenCoordinate CreateUiSafeRayAim(IScreenCoordinate origin, float dx, float dy,
+            float preferredDistance, float minimumDistance, float maximumDistance)
+        {
+            if (origin == null || maximumDistance < minimumDistance) return null;
+            float preferred = Math.Max(minimumDistance, Math.Min(maximumDistance, preferredDistance));
+            float step = Math.Max(8f, ClickGuardRayProbeStepPixels);
+
+            for (float distance = preferred; distance >= minimumDistance; distance -= step)
+            {
+                float x = origin.X + dx * distance;
+                float y = origin.Y + dy * distance;
+                if (PointInsideCastArea(x, y))
+                    return Hud.Window.CreateScreenCoordinate(x, y);
+            }
+
+            for (float distance = preferred + step; distance <= maximumDistance; distance += step)
+            {
+                float x = origin.X + dx * distance;
+                float y = origin.Y + dy * distance;
+                if (PointInsideCastArea(x, y))
+                    return Hud.Window.CreateScreenCoordinate(x, y);
+            }
+
+            return null;
         }
 
         private IScreenCoordinate SafeFallbackAim(IScreenCoordinate fallback)
@@ -8888,7 +9255,9 @@ namespace Turbo.Plugins.s7o
             float right = Math.Min(size.Width - 32f, size.Width * (1f - MultishotSafeSideRatio));
             float top = Math.Max(36f, size.Height * MultishotSafeTopRatio);
             float bottom = Math.Min(size.Height - 180f, size.Height * MultishotSafeBottomRatio);
-            return Hud.Window.CreateScreenCoordinate(Math.Max(left, Math.Min(right, fallback.X)), Math.Max(top, Math.Min(bottom, fallback.Y)));
+            float x = Math.Max(left, Math.Min(right, fallback.X));
+            float y = Math.Max(top, Math.Min(bottom, fallback.Y));
+            return PointInsideCastArea(x, y) ? Hud.Window.CreateScreenCoordinate(x, y) : null;
         }
 
         private int GetAimSettleMs(CastKind kind)
@@ -8999,8 +9368,6 @@ namespace Turbo.Plugins.s7o
             _cast.ExpectedWorldX = fresh.WorldX;
             _cast.ExpectedWorldY = fresh.WorldY;
             _cast.ExpectedWorldZ = fresh.WorldZ;
-            PublishDiagnosticEvent(DiagnosticEvent.MfdReaim, now, liveTargets.Count,
-                fresh.CoveredElites, 0, fresh.WorldX, fresh.WorldY);
         }
 
         private bool RefreshCastAimFromCurrentView()
@@ -9224,7 +9591,7 @@ namespace Turbo.Plugins.s7o
 
         private bool SetCastCursorAndActionDown(int x, int y, ActionKey key)
         {
-            if (!PointInsideWindow(x, y) || Hud == null || Hud.Window == null || !Hud.Window.IsForeground)
+            if (Hud == null || Hud.Window == null || !Hud.Window.IsForeground || !PointInsideCastArea(x, y))
                 return false;
 
             int screenX;
@@ -9255,6 +9622,25 @@ namespace Turbo.Plugins.s7o
                 _cast.CursorReferenceValid = true;
             }
             return sent;
+        }
+
+        private bool ActionDownAtSafeCurrentCursor(ActionKey key)
+        {
+            if (Hud == null || Hud.Window == null || !Hud.Window.IsForeground
+                || !PointInsideCastArea(Hud.Window.CursorX, Hud.Window.CursorY))
+                return false;
+            return ActionDown(key);
+        }
+
+        private bool ActionDown(ActionKey key)
+        {
+            if (key == ActionKey.LeftSkill) return ZdhInput.MouseDownLeft();
+            if (key == ActionKey.RightSkill) return ZdhInput.MouseDownRight();
+            if (key == ActionKey.Skill1) return ZdhInput.KeyDown(Skill1VirtualKey);
+            if (key == ActionKey.Skill2) return ZdhInput.KeyDown(Skill2VirtualKey);
+            if (key == ActionKey.Skill3) return ZdhInput.KeyDown(Skill3VirtualKey);
+            if (key == ActionKey.Skill4) return ZdhInput.KeyDown(Skill4VirtualKey);
+            return false;
         }
 
         private bool ActionUp(ActionKey key)
@@ -9439,11 +9825,13 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
-            RecordCombatActionCompleted(now);
+            if (!_cast.ManualDebuff)
+                RecordCombatActionCompleted(now);
             int verifyUntilTick = _cast.InputDownTick == int.MinValue
                 ? unchecked(now + Math.Max(1, _cast.VerifyMs))
                 : unchecked(_cast.InputDownTick + Math.Max(1, _cast.VerifyMs));
-            int primaryQuietMs = _cast.RequiresStrafePause ? GetPostCastPrimaryQuietMs(_cast.Kind) : 0;
+            int primaryQuietMs = !_cast.ManualDebuff && _cast.RequiresStrafePause
+                ? GetPostCastPrimaryQuietMs(_cast.Kind) : 0;
             if (_cast.Kind == CastKind.MarkedForDeath && _cast.InputSent)
             {
                 // Keep only Primary suppressed until Valley verification finishes. Strafe/movement
@@ -9601,11 +9989,79 @@ namespace Turbo.Plugins.s7o
             return true;
         }
 
+        private bool IsClickDangerUi(float x, float y)
+        {
+            // Deliberately mirrors the proven HUD Menu AutoSnap safety model.
+            // Do not cache broad/root IUiElement rectangles here: some FreeHUD roots
+            // can expose layout-sized rectangles that are not actual click targets.
+            return IsInsideExplicitClickGuard(x, y) || IsInsidePlayerPortraitFace(x, y);
+        }
+
+        private bool IsInsideExplicitClickGuard(float x, float y)
+        {
+            try
+            {
+                Size size = Hud.Window.Size;
+                if (size.Width <= 0 || size.Height <= 0) return false;
+                for (int i = 0; i < ClickGuardRects1920x1080.Length; i++)
+                {
+                    RectangleF r = ScaleClickGuardRect(ClickGuardRects1920x1080[i], size);
+                    if (x >= r.Left && x <= r.Right && y >= r.Top && y <= r.Bottom)
+                        return true;
+                }
+            }
+            catch { return false; }
+            return false;
+        }
+
+        private static RectangleF ScaleClickGuardRect(RectangleF source, Size size)
+        {
+            float scale = Math.Min(size.Width / ClickGuardReferenceWidth, size.Height / ClickGuardReferenceHeight);
+            if (scale <= 0f) return RectangleF.Empty;
+
+            float extraX = size.Width - ClickGuardReferenceWidth * scale;
+            float extraY = size.Height - ClickGuardReferenceHeight * scale;
+            float centerX = source.Left + source.Width * 0.5f;
+            float centerY = source.Top + source.Height * 0.5f;
+            float offsetX = centerX < ClickGuardReferenceWidth / 3f ? 0f
+                : centerX > ClickGuardReferenceWidth * 2f / 3f ? extraX : extraX * 0.5f;
+            float offsetY = centerY < ClickGuardReferenceHeight / 3f ? 0f
+                : centerY > ClickGuardReferenceHeight * 2f / 3f ? extraY : extraY * 0.5f;
+
+            return new RectangleF(source.Left * scale + offsetX, source.Top * scale + offsetY,
+                source.Width * scale, source.Height * scale);
+        }
+
+        private bool IsInsidePlayerPortraitFace(float x, float y)
+        {
+            try
+            {
+                if (Hud == null || Hud.Game == null || Hud.Game.Players == null) return false;
+                foreach (IPlayer player in Hud.Game.Players)
+                {
+                    try
+                    {
+                        if (player == null || !player.IsInGame || player.PortraitUiElement == null
+                            || !player.PortraitUiElement.Visible) continue;
+                        RectangleF rect = player.PortraitUiElement.Rectangle;
+                        if (rect.Width <= 0f || rect.Height <= 0f) continue;
+                        if (x >= rect.Left && x <= rect.Right && y >= rect.Top && y <= rect.Bottom)
+                            return true;
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+            return false;
+        }
+
         private bool PointInsideCastArea(float x, float y)
         {
+            if (Hud == null || Hud.Window == null) return false;
             Size size = Hud.Window.Size;
             float bottom = Math.Min(size.Height - 140f, size.Height * GroundCastSafeBottomRatio);
-            return x >= 24f && y >= 24f && x < size.Width - 24f && y < bottom;
+            return x >= 24f && y >= 24f && x < size.Width - 24f && y < bottom
+                && !IsClickDangerUi(x, y);
         }
 
         private bool PointInsideWindow(float x, float y)
