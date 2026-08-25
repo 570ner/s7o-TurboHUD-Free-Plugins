@@ -178,6 +178,7 @@ namespace Turbo.Plugins.s7o
         public int BossSupportPrimaryQuietMs = 80;
         public int PrimaryPreemptLeaseMs = 350;
         public float PylonInteractionPauseRange = 15f;
+        public float PortalInteractionPauseRange = 15f;
         public int FailedCastRetryMs = 450;
         public int GlobalCastGapMs = 450;
         public int ManualDebuffCastGapMs = 50;
@@ -745,6 +746,7 @@ namespace Turbo.Plugins.s7o
         private int _lastCompletionBurstAttemptTick = int.MinValue;
         private bool _channelingPylonActive;
         private bool _speedPylonActive;
+        private bool _interactionPauseActive;
         private int _lastSampleTick = int.MinValue;
         private bool _hasTrackedUptimeHero;
         private uint _trackedUptimeHeroId;
@@ -959,6 +961,7 @@ namespace Turbo.Plugins.s7o
             _wasManualDebuffHold = false;
             _channelingPylonActive = false;
             _speedPylonActive = false;
+            _interactionPauseActive = false;
             _advanceAnchorX = 0;
             _advanceAnchorY = 0;
             _advanceDistance = 0;
@@ -1047,6 +1050,7 @@ namespace Turbo.Plugins.s7o
             }
             if (!ContextAvailable())
             {
+                _interactionPauseActive = false;
                 _wasHighFrequencyMode = false;
                 _combatModeEnteredTick = int.MinValue;
                 _lastUnverifiedMfdTick = int.MinValue;
@@ -1065,6 +1069,7 @@ namespace Turbo.Plugins.s7o
             bool ghosted = IsLocalGhosted();
             if (dead || ghosted)
             {
+                _interactionPauseActive = false;
                 _wasHighFrequencyMode = false;
                 _combatModeEnteredTick = int.MinValue;
                 _lastUnverifiedMfdTick = int.MinValue;
@@ -1113,6 +1118,24 @@ namespace Turbo.Plugins.s7o
             if (local != null && local.Player != null)
                 UpdateLocalTravelState(local.Player, now);
             UpdateElectrifiedAlert(local, now);
+
+            // A nearby pylon or portal is an authoritative user-interaction zone. Portal
+            // detection is distance-first so it does not depend on reaching the hover hotspot.
+            // Abort Helper ownership before DHStrafe runs later this frame so neither autosnap
+            // nor synthetic Shift can steal the cursor or prevent the game interaction.
+            _interactionPauseActive = IsInteractionPauseNearby();
+            if (_interactionPauseActive)
+            {
+                ForceAbortSentryBurst("interaction", now);
+                CancelCast("interaction");
+                ReleaseBossEntangleStandstill();
+                ReleaseDhStrafePause();
+                ReleaseDhStrafePrimarySuppression();
+                _manualDebuffMovementUntilTick = int.MinValue;
+                _wasManualDebuffHold = false;
+                return;
+            }
+
             bool manualDebuffHold = highFrequencyMode
                 && s7o_DHStrafePrimaryPlugin.IsManualDebuffHoldActiveForZdh;
             if (_wasManualDebuffHold && !manualDebuffHold)
@@ -5356,7 +5379,8 @@ namespace Turbo.Plugins.s7o
                 || string.Equals(reason, "ghosted", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(reason, "strafe off", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(reason, "boss dead", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(reason, "manual hold released", StringComparison.OrdinalIgnoreCase);
+                || string.Equals(reason, "manual hold released", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(reason, "interaction", StringComparison.OrdinalIgnoreCase);
         }
 
         private void CancelCast(string reason)
@@ -5428,7 +5452,8 @@ namespace Turbo.Plugins.s7o
             else if (cancelledKind == CastKind.Sentry
                 && !string.Equals(reason, "context", StringComparison.OrdinalIgnoreCase)
                 && !string.Equals(reason, "new area", StringComparison.OrdinalIgnoreCase)
-                && !string.Equals(reason, "strafe off", StringComparison.OrdinalIgnoreCase))
+                && !string.Equals(reason, "strafe off", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(reason, "interaction", StringComparison.OrdinalIgnoreCase))
             {
                 if (inputSent && _cast.SentryCoverageAcds.Count > 0)
                     RecordEliteSentryCoverageAttempt(_cast.SentryCoverageAcds, now);
@@ -8720,7 +8745,7 @@ namespace Turbo.Plugins.s7o
                 && !ZdhInput.IsVirtualKeyDown(0x5B) && !ZdhInput.IsVirtualKeyDown(0x5C)
                 && PointInsideWindow(Hud.Window.CursorX, Hud.Window.CursorY)
                 && !InventoryOpen() && !UiVisible(_chatEditLine) && !UiVisible(Hud.Render.WorldMapUiElement)
-                && !IsUnoperatedPylonNearby(PylonInteractionPauseRange)
+                && !_interactionPauseActive
                 && Hud.Game.Me.AnimationState != AcdAnimationState.CastingPortal;
         }
 
@@ -8731,7 +8756,7 @@ namespace Turbo.Plugins.s7o
                 && !ZdhInput.IsVirtualKeyDown(0x5B) && !ZdhInput.IsVirtualKeyDown(0x5C)
                 && PointInsideWindow(Hud.Window.CursorX, Hud.Window.CursorY)
                 && !InventoryOpen() && !UiVisible(_chatEditLine) && !UiVisible(Hud.Render.WorldMapUiElement)
-                && !IsUnoperatedPylonNearby(PylonInteractionPauseRange)
+                && !_interactionPauseActive
                 && Hud.Game.Me.AnimationState != AcdAnimationState.CastingPortal && Hud.Game.Me.AnimationState != AcdAnimationState.Transform;
         }
 
@@ -8746,6 +8771,30 @@ namespace Turbo.Plugins.s7o
                     && Hud.Game.Me.FloorCoordinate.XYDistanceTo(shrine.FloorCoordinate) <= limit);
             }
             catch { return false; }
+        }
+
+        private bool IsPortalInteractionNearby(float range)
+        {
+            try
+            {
+                if (!ContextAvailable() || Hud.Game.Me.FloorCoordinate == null || Hud.Game.Portals == null)
+                    return false;
+
+                float limit = Math.Max(0, range);
+                // Do not require ActorAvailable/IsClickable here. Those interaction flags can
+                // become true only when the cursor reaches a narrow portal hotspot; autosnap may
+                // steal the cursor before that can happen. World-distance to Hud.Game.Portals is
+                // independent of hover state and therefore owns the interaction pause.
+                return Hud.Game.Portals.Any(portal => portal != null && portal.FloorCoordinate != null
+                    && Hud.Game.Me.FloorCoordinate.XYDistanceTo(portal.FloorCoordinate) <= limit);
+            }
+            catch { return false; }
+        }
+
+        private bool IsInteractionPauseNearby()
+        {
+            return IsUnoperatedPylonNearby(PylonInteractionPauseRange)
+                || IsPortalInteractionNearby(PortalInteractionPauseRange);
         }
 
         private static bool UiVisible(IUiElement element)
