@@ -16,12 +16,15 @@ namespace Turbo.Plugins.s7o
     // elite purple-orb progression. Stricken is an estimator based on proc edges;
     // it is not a native exact per-monster stack read.
 
-    public class s7o_RiftInfo : BasePlugin, IInGameTopPainter, IInGameWorldPainter, IAfterCollectHandler, ICustomizer
+    public class s7o_RiftInfo : BasePlugin, IInGameTopPainter, IInGameWorldPainter, IAfterCollectHandler, INewAreaHandler, ICustomizer
     {
         // ── Display ──────────────────────────────────────────────────────
         public bool ShowNearbyRP { get; set; } = true;
         public bool ShowBossTimer { get; set; } = true;
         public bool ShowElapsedRiftTimer { get; set; } = true;
+
+        // Mirror FreeHUD's lower-right Blood Shard label with a native Greater Rift Keystone count.
+        public bool ShowGreaterRiftKeys { get; set; } = true;
 
         // Disable the default FreeHUD GR percent text because the native grey game percent is already shown.
         public bool DisableDefaultGreaterRiftPercentText { get; set; } = true;
@@ -222,6 +225,17 @@ namespace Turbo.Plugins.s7o
         private IFont PylonMissingFont;
         private IFont PylonStatusOutlineFont;
 
+        private TopLabelDecorator GreaterRiftKeyDecorator;
+        private ISnoItem GreaterRiftKeyItem;
+
+        // FreeHUD BloodShardPlugin paints at 0.664 with width 0.038. Place the
+        // matching key label immediately to its right using the same bottom-HUD coordinate space.
+        private const float GreaterRiftKeyLabelX = 0.702f;
+        private const float GreaterRiftKeyLabelY = 0.88f;
+        private const float GreaterRiftKeyLabelWidth = 0.038f;
+        private const float GreaterRiftKeyLabelHeight = 0.12f;
+        private const uint GreaterRiftKeyItemSno = 2835237830u;
+
         // ── Private state ────────────────────────────────────────────────
         private bool _bossActive = false;
         private int _bossStartTick = 0;
@@ -247,6 +261,7 @@ namespace Turbo.Plugins.s7o
 
         private int _lastDebugTick = 0;
         private int _lastSeenGameTick = 0;
+        private uint _lastLocalHeroId = 0;
         private bool _strickenDebugStarted = false;
 
         private IMonster _lastValidStrickenTarget = null;
@@ -371,6 +386,29 @@ namespace Turbo.Plugins.s7o
         {
             base.Load(hud);
 
+            GreaterRiftKeyItem = Hud.Inventory.GetSnoItem(GreaterRiftKeyItemSno);
+            GreaterRiftKeyDecorator = new TopLabelDecorator(Hud)
+            {
+                // Match FreeHUD BloodShardPlugin's normal/green label styling.
+                TextFont = Hud.Render.CreateFont("tahoma", 7, 255, 100, 130, 100, false, false, false),
+                BackgroundTexture1 = Hud.Texture.ButtonTextureGray,
+                BackgroundTexture2 = Hud.Texture.BackgroundTextureOrange,
+                BackgroundTextureOpacity1 = 1.0f,
+                BackgroundTextureOpacity2 = 1.0f,
+                TextFunc = () => Hud.Game.Me.Materials.GreaterRiftKeystone.ToString("D", CultureInfo.InvariantCulture),
+                HintFunc = () => GreaterRiftKeyItem == null ? string.Empty : GreaterRiftKeyItem.NameLocalized,
+            };
+
+            try
+            {
+                if (Hud.Game != null && Hud.Game.Me != null)
+                    _lastLocalHeroId = Hud.Game.Me.HeroId;
+            }
+            catch
+            {
+                _lastLocalHeroId = 0;
+            }
+
             RpFont = Hud.Render.CreateFont("tahoma", 9.0f, 255, 220, 230, 220, true, false, 165, 0, 0, 0, true);
             // Use the same orange theme for both rift timers.
             TimeFont = Hud.Render.CreateFont("tahoma", 7.5f, 255, 255, 160, 60, true, false, 160, 0, 0, 0, true);
@@ -448,6 +486,33 @@ namespace Turbo.Plugins.s7o
                 true);
         }
 
+        public void OnNewArea(bool newGame, ISnoArea area)
+        {
+            if (!newGame)
+                return;
+
+            ResetGameSessionState();
+
+            try
+            {
+                _lastLocalHeroId = Hud.Game != null && Hud.Game.Me != null ? Hud.Game.Me.HeroId : 0u;
+            }
+            catch
+            {
+                _lastLocalHeroId = 0u;
+            }
+        }
+
+        private void ResetGameSessionState()
+        {
+            // A new game/hero is an authoritative boundary. This prevents an abandoned GR or
+            // frozen boss summary from surviving character changes or a leave-game/rejoin cycle.
+            ResetVolatileState(true);
+            _lastSeenGameTick = 0;
+            _lastDebugTick = 0;
+            _lastLocalAttackRejectDebugTick = 0;
+        }
+
         // ── AfterCollect ─────────────────────────────────────────────────
         public void AfterCollect()
         {
@@ -460,6 +525,15 @@ namespace Turbo.Plugins.s7o
                 ResetVolatileState(false);
                 return;
             }
+
+            uint localHeroId = 0u;
+            try { localHeroId = Hud.Game.Me.HeroId; } catch { }
+
+            if (_lastLocalHeroId != 0u && localHeroId != 0u && localHeroId != _lastLocalHeroId)
+                ResetGameSessionState();
+
+            if (localHeroId != 0u)
+                _lastLocalHeroId = localHeroId;
 
             if (EnableStrickenDebug && !_strickenDebugStarted)
             {
@@ -474,9 +548,17 @@ namespace Turbo.Plugins.s7o
 
             if (_lastSeenGameTick > 0 && tick < _lastSeenGameTick)
             {
-                // Do not destroy an active/completed GR timer state during boss-death,
-                // town, or loading transitions where FreeHUD tick reporting can briefly roll back.
-                if (!_riftSessionActive && !_riftSummaryActive)
+                // A leave-game/rejoin can reset the game tick while an abandoned GR session is
+                // still latched. Clear only when the new context is unmistakably a fresh town
+                // session; preserve completed summaries and normal GR/town transition flicker.
+                bool abandonedSession =
+                    _riftSessionActive && !_riftSummaryActive &&
+                    Hud.Game.IsInTown && Hud.Game.RiftPercentage < 1.0d &&
+                    ReadNativeGreaterRiftStartTick() <= 0;
+
+                if (abandonedSession)
+                    ResetGameSessionState();
+                else if (!_riftSessionActive && !_riftSummaryActive)
                     ResetVolatileState(false);
             }
 
@@ -1493,6 +1575,9 @@ namespace Turbo.Plugins.s7o
             if (clipState != ClipState.BeforeClip) return;
             if (Hud.Game == null || !Hud.Game.IsInGame || Hud.Game.Me == null) return;
 
+            if (ShowGreaterRiftKeys)
+                DrawGreaterRiftKeyLabel();
+
             bool inGR = Hud.Game.Me.InGreaterRift;
             bool inNR = !inGR && Hud.Game.RiftPercentage > 0 && !Hud.Game.IsInTown;
             bool showCompletedGrSummary = _riftSummaryActive && _riftStartTick > 0;
@@ -1544,6 +1629,40 @@ namespace Turbo.Plugins.s7o
             // Fallback for users who explicitly disable AfterClip drawing.
             if (PylonPartyStatusDrawOnTopLayer && !PylonPartyStatusUseAfterClipTopLayer)
                 PaintPylonPartyFloorStatusLayer();
+        }
+
+        private void DrawGreaterRiftKeyLabel()
+        {
+            if (GreaterRiftKeyDecorator == null || Hud.Render.UiHidden)
+                return;
+
+            if (Hud.Game.MapMode == MapMode.WaypointMap ||
+                Hud.Game.MapMode == MapMode.ActMap ||
+                Hud.Game.MapMode == MapMode.Map)
+                return;
+
+            try
+            {
+                var bottomHud = Hud.Render.InGameBottomHudUiElement;
+                if (bottomHud == null)
+                    return;
+
+                RectangleF uiRect = bottomHud.Rectangle;
+                if (uiRect.Width <= 0.0f || uiRect.Height <= 0.0f)
+                    return;
+
+                float x = uiRect.Left + uiRect.Width * GreaterRiftKeyLabelX;
+                float y = uiRect.Top + uiRect.Height * GreaterRiftKeyLabelY;
+                float w = uiRect.Width * GreaterRiftKeyLabelWidth;
+                float h = uiRect.Height * GreaterRiftKeyLabelHeight;
+
+                // Match the Blood Shard label itself: keep the full rectangle available to
+                // the numeric count so large (3-4 digit) key totals never compete with an icon.
+                GreaterRiftKeyDecorator.Paint(x, y, w, h, HorizontalAlign.Center);
+            }
+            catch
+            {
+            }
         }
 
         // ── Nearby RP panel ──────────────────────────────────────────────
