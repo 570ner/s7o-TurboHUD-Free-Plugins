@@ -223,6 +223,8 @@ namespace Turbo.Plugins.s7o
         public int AutoLootPauseMs = 300;
         public bool PauseNearUnoperatedPylon = true;
         public float PylonPauseRange = 15f;
+        public bool PauseNearPortal = true;
+        public float PortalPauseRange = 15f;
         // Use a slightly wider Strafe pause than primary suppression so nearby
         // interactables remain comfortable to click while the macro is armed.
         public float StrafeClickableActorBlockDistance = 8.0f;
@@ -278,6 +280,7 @@ namespace Turbo.Plugins.s7o
         private bool _highFrequencyMode;
         private bool _lastAreaWasRift;
         private bool _temporarilyPaused;
+        private bool _zdhPortalPauseActive;
         private int _autoLootPauseUntilTick;
         private int _pendingStartUntilTick;
         private string _lastStartBlockedReason = string.Empty;
@@ -401,6 +404,7 @@ namespace Turbo.Plugins.s7o
             _nextBuildRefreshTick = 0;
             _autoLootPauseUntilTick = 0;
             _zdhPylonPauseActive = false;
+            _zdhPortalPauseActive = false;
 
             // A fresh Rift/Greater Rift always begins in Speed mode so Momentum can be rebuilt
             // immediately. Ordinary floor transitions inside the same rift preserve F2 mode.
@@ -520,6 +524,7 @@ namespace Turbo.Plugins.s7o
             RefreshMomentumStateForZdh(now);
             TrackRecentlyVisibleMaps(now);
             _zdhPylonPauseActive = PauseNearUnoperatedPylon && IsUnoperatedPylonNearby(PylonPauseRange);
+            _zdhPortalPauseActive = PauseNearPortal && IsPortalInteractionNearby(PortalPauseRange);
 
             ProcessPendingStartRequest(now);
 
@@ -547,6 +552,19 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
+            // Interaction zones are authoritative over both manual CTRL support and Helper
+            // cast leases. Release every DHStrafe-owned input before the user clicks a pylon
+            // or portal so synthetic Shift/Primary/Strafe cannot block the interaction.
+            if (_zdhPylonPauseActive || _zdhPortalPauseActive)
+            {
+                FinishPendingPrimaryPress(now, true);
+                StopStrafeHold();
+                ReleaseManualStandstill();
+                _temporarilyPaused = true;
+                _lastStatus = _zdhPylonPauseActive ? "paused: pylon nearby" : "paused";
+                return;
+            }
+
             bool manualDebuffHold = IsManualDebuffHoldActiveForZdh;
             bool helperPauseRequested = s7o_ZDH_Helper.IsDhStrafePauseRequested(now);
             if (manualDebuffHold)
@@ -567,15 +585,6 @@ namespace Turbo.Plugins.s7o
                 s7o_ZDH_Helper.ConfirmDhStrafePaused(now);
                 _temporarilyPaused = true;
                 _lastStatus = "paused: ZDH cast";
-                return;
-            }
-
-            if (_zdhPylonPauseActive)
-            {
-                FinishPendingPrimaryPress(now, true);
-                StopStrafeHold();
-                _temporarilyPaused = true;
-                _lastStatus = "paused: pylon nearby";
                 return;
             }
 
@@ -982,6 +991,7 @@ namespace Turbo.Plugins.s7o
             _actMapRecentlyVisibleUntilTick = 0;
             _worldMapRecentlyVisibleUntilTick = 0;
             _zdhPylonPauseActive = false;
+            _zdhPortalPauseActive = false;
             _lastStatus = string.IsNullOrEmpty(reason) ? "stopped" : reason;
 
         }
@@ -1869,6 +1879,24 @@ namespace Turbo.Plugins.s7o
                 return Hud.Game.Shrines.Any(shrine => shrine != null && shrine.IsPylon
                     && !shrine.IsDisabled && !shrine.IsOperated && shrine.FloorCoordinate != null
                     && Hud.Game.Me.FloorCoordinate.XYDistanceTo(shrine.FloorCoordinate) <= limit);
+            }
+            catch { return false; }
+        }
+
+        private bool IsPortalInteractionNearby(float range)
+        {
+            try
+            {
+                if (Hud == null || Hud.Game == null || Hud.Game.Me == null
+                    || Hud.Game.Me.FloorCoordinate == null || Hud.Game.Portals == null) return false;
+
+                float limit = Math.Max(0, range);
+                // Portal interaction safety is distance-first. ActorAvailable/IsClickable can
+                // depend on the cursor already being over a narrow interaction hotspot, which is
+                // precisely what autosnap can prevent. Hud.Game.Portals already identifies portal
+                // actors, so proximity to their world coordinate is the reliable pause authority.
+                return Hud.Game.Portals.Any(portal => portal != null && portal.FloorCoordinate != null
+                    && Hud.Game.Me.FloorCoordinate.XYDistanceTo(portal.FloorCoordinate) <= limit);
             }
             catch { return false; }
         }
