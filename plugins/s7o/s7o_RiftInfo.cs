@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Globalization;
 using System.Linq;
+using System.Text;
 using Turbo.Plugins.Default;
 
 namespace Turbo.Plugins.s7o
@@ -25,6 +26,12 @@ namespace Turbo.Plugins.s7o
 
         // Mirror FreeHUD's lower-right Blood Shard label with a native Greater Rift Keystone count.
         public bool ShowGreaterRiftKeys { get; set; } = true;
+
+        // Greater Rift-only map identity label. Scene identity is mapped through the existing
+        // RiftFishing names, then localized by s7o_Localization.Display().
+        public bool ShowGreaterRiftMapName { get; set; } = true;
+        public float GreaterRiftMapNameOffsetX { get; set; } = 6.0f;
+        public float GreaterRiftMapNameOffsetY { get; set; } = 6.0f;
 
         // Disable the default FreeHUD GR percent text because the native grey game percent is already shown.
         public bool DisableDefaultGreaterRiftPercentText { get; set; } = true;
@@ -227,14 +234,83 @@ namespace Turbo.Plugins.s7o
 
         private TopLabelDecorator GreaterRiftKeyDecorator;
         private ISnoItem GreaterRiftKeyItem;
+        private IFont GreaterRiftMapNameFont;
+        private IFont GreaterRiftMapNameOutlineFont;
+        private IUiElement _nativeAreaNameUi;
 
-        // FreeHUD BloodShardPlugin paints at 0.664 with width 0.038. Place the
-        // matching key label immediately to its right using the same bottom-HUD coordinate space.
-        private const float GreaterRiftKeyLabelX = 0.702f;
+        // Extend the key label left to align with the town-portal button while keeping its
+        // right edge fixed at FreeHUD's inventory-space label (0.645).
+        private const float GreaterRiftKeyLabelX = 0.595f;
         private const float GreaterRiftKeyLabelY = 0.88f;
-        private const float GreaterRiftKeyLabelWidth = 0.038f;
+        private const float GreaterRiftKeyLabelWidth = 0.050f;
         private const float GreaterRiftKeyLabelHeight = 0.12f;
         private const uint GreaterRiftKeyItemSno = 2835237830u;
+
+        // Keep these scene identities synchronized with s7o_RiftFishing.BuildMaps().
+        // Matching is prefix-based, with an optional suffix for same-family variants.
+        private sealed class GreaterRiftMapIdentity
+        {
+            public readonly string Name;
+            public readonly string ScenePrefix;
+            public readonly string SceneSuffix;
+
+            public GreaterRiftMapIdentity(string name, string scenePrefix, string sceneSuffix = "")
+            {
+                Name = name;
+                ScenePrefix = scenePrefix;
+                SceneSuffix = sceneSuffix ?? string.Empty;
+            }
+
+            public bool Match(string sceneCode)
+            {
+                if (string.IsNullOrEmpty(sceneCode) || string.IsNullOrEmpty(ScenePrefix))
+                    return false;
+
+                if (!sceneCode.StartsWith(ScenePrefix, StringComparison.OrdinalIgnoreCase))
+                    return false;
+
+                return string.IsNullOrEmpty(SceneSuffix)
+                    || sceneCode.EndsWith(SceneSuffix, StringComparison.OrdinalIgnoreCase);
+            }
+        }
+
+        private static readonly GreaterRiftMapIdentity[] GreaterRiftMapIdentities =
+        {
+            new GreaterRiftMapIdentity("Halls of Agony",           "a1dun_leor"),
+            new GreaterRiftMapIdentity("Desolate Sands",           "caout_boneyard_"),
+            new GreaterRiftMapIdentity("Flooded Cave",             "a2dun_cave_flooded"),
+            new GreaterRiftMapIdentity("Cave of the Betrayer",     "a2dun_cave"),
+            new GreaterRiftMapIdentity("Tidal Cave",               "px_cave_a"),
+            new GreaterRiftMapIdentity("Cave",                     "trdun_cave"),
+            new GreaterRiftMapIdentity("Winding Cave",             "x1_bogcave"),
+            new GreaterRiftMapIdentity("Caverns of Araneae",       "a2dun_spider"),
+            new GreaterRiftMapIdentity("Fields of Misery",         "px_tristramfields_"),
+            new GreaterRiftMapIdentity("Vault of the Assassin",    "a2dun_zolt_random"),
+            new GreaterRiftMapIdentity("Archives of Zultun Kulle", "a2dun_zolt"),
+            new GreaterRiftMapIdentity("Hell Rift",                "a4dun_hellportal"),
+            new GreaterRiftMapIdentity("Hell Rift",                "a3dun_crater_e_dead_end"),
+            new GreaterRiftMapIdentity("Hell Rift",                "a3dun_crater_s_dead_end"),
+            new GreaterRiftMapIdentity("Arreat Crater",            "a3dun_crater"),
+            new GreaterRiftMapIdentity("Icefall Cave",             "a3dun_icecaves"),
+            new GreaterRiftMapIdentity("The Keep Depths",          "a3dun_keep"),
+            new GreaterRiftMapIdentity("The Silver Spire",         "a4dun_spire_corrupt"),
+            new GreaterRiftMapIdentity("Greyhollow Island",        "p4_forest_coast_border"),
+            new GreaterRiftMapIdentity("Eternal Woods",            "p4_forest_snow_border"),
+            new GreaterRiftMapIdentity("Temple of the Firstborn",  "p6_church"),
+            new GreaterRiftMapIdentity("Shrouded Moors",           "p6_moor"),
+            new GreaterRiftMapIdentity("Desert",                   "px_desert_120_border"),
+            new GreaterRiftMapIdentity("The Festering Woods",      "px_festeringwoods"),
+            new GreaterRiftMapIdentity("Cathedral",                "trdun_cath"),
+            new GreaterRiftMapIdentity("Crypt",                    "trdun_crypt"),
+            new GreaterRiftMapIdentity("Plague Tunnels",           "x1_abattoir"),
+            new GreaterRiftMapIdentity("Ruins of Corvus",          "x1_catacombs"),
+            new GreaterRiftMapIdentity("Pandemonium Fortress",     "x1_fortress"),
+            new GreaterRiftMapIdentity("Battlefields of Eternity", "x1_pand_ext_120_edge"),
+            new GreaterRiftMapIdentity("Realm of the Banished",    "x1_pand_hexmaze"),
+            new GreaterRiftMapIdentity("Briarthorn Cemetery",      "x1_westm_graveyard_"),
+            new GreaterRiftMapIdentity("Westmarch Heights",        "x1_westm", "fire"),
+            new GreaterRiftMapIdentity("Westmarch Commons",        "x1_westm"),
+        };
 
         // ── Private state ────────────────────────────────────────────────
         private bool _bossActive = false;
@@ -398,6 +474,33 @@ namespace Turbo.Plugins.s7o
                 TextFunc = () => Hud.Game.Me.Materials.GreaterRiftKeystone.ToString("D", CultureInfo.InvariantCulture),
                 HintFunc = () => GreaterRiftKeyItem == null ? string.Empty : GreaterRiftKeyItem.NameLocalized,
             };
+
+            GreaterRiftMapNameFont = Hud.Render.CreateFont(
+                "tahoma",
+                8.5f,
+                255, 255, 220, 50,
+                true, false,
+                255, 0, 0, 0,
+                true);
+
+            GreaterRiftMapNameOutlineFont = Hud.Render.CreateFont(
+                "tahoma",
+                8.5f,
+                255, 0, 0, 0,
+                true, false,
+                false);
+
+            try
+            {
+                _nativeAreaNameUi = Hud.Render.RegisterUiElement(
+                    "Root.NormalLayer.minimap_dialog_backgroundScreen.minimap_dialog_pve.area_name",
+                    null,
+                    null);
+            }
+            catch
+            {
+                _nativeAreaNameUi = null;
+            }
 
             try
             {
@@ -1594,6 +1697,9 @@ namespace Turbo.Plugins.s7o
             {
                 if (inGR || showCompletedGrSummary)
                 {
+                    if (ShowGreaterRiftMapName && ShouldDrawGreaterRiftMapName())
+                        DrawGreaterRiftMapName();
+
                     var bar = Hud.Render.GreaterRiftBarUiElement;
 
                     if (bar != null && bar.Visible && inGR && !_riftSummaryActive)
@@ -1629,6 +1735,143 @@ namespace Turbo.Plugins.s7o
             // Fallback for users who explicitly disable AfterClip drawing.
             if (PylonPartyStatusDrawOnTopLayer && !PylonPartyStatusUseAfterClipTopLayer)
                 PaintPylonPartyFloorStatusLayer();
+        }
+
+        private bool ShouldDrawGreaterRiftMapName()
+        {
+            try
+            {
+                if (Hud.Game == null
+                    || !Hud.Game.IsInGame
+                    || Hud.Game.Me == null
+                    || Hud.Game.IsInTown)
+                    return false;
+
+                // Keep the label through the completed-GR reward phase, but only while the
+                // player is physically standing on a generated Rift floor.
+                if (!_riftSessionActive && !_riftSummaryActive)
+                    return false;
+
+                ISnoArea area = Hud.Game.Me.SnoArea;
+                for (int depth = 0; area != null && depth < 3; depth++)
+                {
+                    string code = area.Code;
+                    if (!string.IsNullOrEmpty(code)
+                        && code.StartsWith("X1_LR_Level_", StringComparison.OrdinalIgnoreCase))
+                        return true;
+
+                    area = area.HostSnoArea;
+                }
+            }
+            catch
+            {
+            }
+
+            return false;
+        }
+
+        private string GetCurrentAreaDisplayName()
+        {
+            string orekDream = GetOrekDreamDisplayName();
+            if (!string.IsNullOrEmpty(orekDream))
+                return orekDream;
+
+            string sceneCode;
+            try
+            {
+                sceneCode = Hud.Game != null && Hud.Game.Me != null
+                    && Hud.Game.Me.Scene != null && Hud.Game.Me.Scene.SnoScene != null
+                    ? Hud.Game.Me.Scene.SnoScene.Code
+                    : string.Empty;
+            }
+            catch
+            {
+                sceneCode = string.Empty;
+            }
+
+            if (string.IsNullOrEmpty(sceneCode))
+                return string.Empty;
+
+            for (int i = 0; i < GreaterRiftMapIdentities.Length; i++)
+            {
+                GreaterRiftMapIdentity map = GreaterRiftMapIdentities[i];
+                if (map != null && map.Match(sceneCode))
+                    return s7o_Localization.Display(map.Name);
+            }
+
+            return string.Empty;
+        }
+
+        private string GetOrekDreamDisplayName()
+        {
+            try
+            {
+                if (_nativeAreaNameUi == null)
+                    return string.Empty;
+
+                _nativeAreaNameUi.Refresh();
+                if (!_nativeAreaNameUi.Visible)
+                    return string.Empty;
+
+                string nativeName = _nativeAreaNameUi.ReadText(Encoding.UTF8, true);
+                string localizedOrek = s7o_Localization.Get(
+                    "overlay.rift_fishing.orek_dream",
+                    "Orek's Dream");
+
+                if (string.IsNullOrWhiteSpace(nativeName) || string.IsNullOrWhiteSpace(localizedOrek))
+                    return string.Empty;
+
+                nativeName = nativeName.Trim();
+                localizedOrek = localizedOrek.Trim();
+
+                return nativeName.StartsWith(localizedOrek, StringComparison.OrdinalIgnoreCase)
+                    ? localizedOrek
+                    : string.Empty;
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+
+        private void DrawGreaterRiftMapName()
+        {
+            if (!ShowGreaterRiftMapName || !ShouldDrawGreaterRiftMapName()
+                || GreaterRiftMapNameFont == null)
+                return;
+
+            try
+            {
+                if (Hud.Render.UiHidden)
+                    return;
+
+                var minimap = Hud.Render.MinimapUiElement;
+                if (minimap == null || !minimap.Visible)
+                    return;
+
+                RectangleF rect = minimap.Rectangle;
+                if (rect.Width <= 0.0f || rect.Height <= 0.0f)
+                    return;
+
+                string text = GetCurrentAreaDisplayName();
+                if (string.IsNullOrWhiteSpace(text))
+                    return;
+
+                var layout = GreaterRiftMapNameFont.GetTextLayout(text);
+                float x = rect.Left + GreaterRiftMapNameOffsetX;
+                float y = rect.Top + GreaterRiftMapNameOffsetY;
+
+                DrawOutlinedCenteredText(
+                    text,
+                    GreaterRiftMapNameFont,
+                    GreaterRiftMapNameOutlineFont,
+                    x + layout.Metrics.Width * 0.5f,
+                    y,
+                    1);
+            }
+            catch
+            {
+            }
         }
 
         private void DrawGreaterRiftKeyLabel()
