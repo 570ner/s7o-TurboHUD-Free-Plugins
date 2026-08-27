@@ -248,6 +248,7 @@ namespace Turbo.Plugins.s7o
         private IUiElement _chatEdit;
         private IUiElement _urshiConversationMain;
         private IUiElement _urshiGemPane;
+        private readonly List<IUiElement> _textInputBlockers = new List<IUiElement>();
 
         private bool _hotkeyDownLatched;
         private bool _castingNow;
@@ -403,6 +404,9 @@ namespace Turbo.Plugins.s7o
             _chatEdit = Hud.Render.GetUiElement("Root.NormalLayer.chatentry_dialog_backgroundScreen.chatentry_content.chat_editline");
             _urshiConversationMain = Hud.Render.RegisterUiElement("Root.NormalLayer.conversation_dialog_main", null, null);
             _urshiGemPane = Hud.Render.RegisterUiElement("Root.NormalLayer.vendor_dialog_mainPage.riftReward_dialog.LayoutRoot.gemUpgradePane", null, null);
+            RegisterTextInputBlocker("Root.NormalLayer.equipmentManager_mainPage");
+            RegisterTextInputBlocker("Root.TopLayer.confirmation.subdlg");
+            RegisterTextInputBlocker("Root.TopLayer.BattleNetSocialDialogs_main.LayoutRoot.DialogWriteNote.DialogWriteNoteTitle");
             ResolveSpearKey();
 
             _circleGreen = new GroundCircleDecorator(Hud)
@@ -3844,14 +3848,34 @@ namespace Turbo.Plugins.s7o
             catch { return false; }
         }
 
+        private void RegisterTextInputBlocker(string path)
+        {
+            try
+            {
+                IUiElement element = Hud.Render.RegisterUiElement(path, null, null);
+                if (element != null) _textInputBlockers.Add(element);
+            }
+            catch { }
+        }
+
+        private bool IsTextInputContextOpen()
+        {
+            if (IsUiVisible(_chatEdit)) return true;
+            for (int i = 0; i < _textInputBlockers.Count; i++)
+                if (IsUiVisible(_textInputBlockers[i])) return true;
+            return false;
+        }
+
         private bool CanRun()
         {
             if (!Hud.Window.IsForeground) return false;
             if (!Hud.Game.IsInGame || Hud.Game.IsLoading) return false;
             if (Hud.Game.Me == null || Hud.Game.Me.IsDead) return false;
-            if (IsUiVisible(_chatEdit)) return false;
+            if (IsTextInputContextOpen()) return false;
             if (IsUiVisible(_urshiConversationMain) || IsUiVisible(_urshiGemPane)) return false;
             if (Hud.Inventory != null && Hud.Inventory.InventoryMainUiElement != null && Hud.Inventory.InventoryMainUiElement.Visible) return false;
+            if (Hud.Render.WorldMapUiElement != null && IsUiVisible(Hud.Render.WorldMapUiElement)) return false;
+            if (Hud.Render.ActMapUiElement != null && IsUiVisible(Hud.Render.ActMapUiElement)) return false;
             return true;
         }
 
