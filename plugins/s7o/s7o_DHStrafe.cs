@@ -21,6 +21,9 @@ namespace Turbo.Plugins.s7o
         private static int _zdhLastMomentumRefreshTick = int.MinValue;
         private static double _zdhLastObservedMomentumTimeLeft = -1.0;
         private static bool _zdhPylonPauseActive;
+        private static bool _zdhPortalInteractionPauseActive;
+        private static bool _zdhPortalEscapeActive;
+        private static s7o_DHStrafePrimaryPlugin _activeInstance;
         private static int _zdhMomentumStacks;
         private static int _zdhMomentumTargetStacks = 20;
         private static bool _zdhMomentumBuildActive;
@@ -35,6 +38,17 @@ namespace Turbo.Plugins.s7o
         // the count cannot increase. Keep the threshold above frame jitter and below that rise.
         private const double MomentumRefreshDetectRiseSeconds = 0.50;
         public static bool IsMacroRunningForZdh { get { return _zdhMacroRunning; } }
+        public static bool IsPortalInteractionPauseActiveForZdh { get { return _zdhPortalInteractionPauseActive; } }
+        public static bool IsPortalEscapeActiveForZdh { get { return _zdhPortalEscapeActive; } }
+        public static void RefreshPortalInteractionForZdh(int now)
+        {
+            try
+            {
+                if (_activeInstance != null)
+                    _activeInstance.UpdatePortalInteractionState(now);
+            }
+            catch { }
+        }
         public static bool IsHighFrequencyModeForZdh { get { return _zdhHighFrequencyMode; } }
         public static bool IsManualDebuffHoldActiveForZdh
         {
@@ -225,6 +239,9 @@ namespace Turbo.Plugins.s7o
         public float PylonPauseRange = 15f;
         public bool PauseNearPortal = true;
         public float PortalPauseRange = 15f;
+        // Arrival portals stay movement-only for a short minimum window so an early
+        // overshoot/turnaround cannot immediately re-arm the same portal and stop Strafe.
+        public int PortalArrivalEscapeMinMs = 2000;
         // Use a slightly wider Strafe pause than primary suppression so nearby
         // interactables remain comfortable to click while the macro is armed.
         public float StrafeClickableActorBlockDistance = 8.0f;
@@ -279,8 +296,28 @@ namespace Turbo.Plugins.s7o
         private bool _running;
         private bool _highFrequencyMode;
         private bool _lastAreaWasRift;
+        private bool _currentAreaIsTown;
+        private bool _leavingTownTransition;
+        // Town departure is provisional until FreeHUD's transition snapshot persists.
+        // Build/Armory refreshes can briefly publish IsInGame=false without an area change.
+        private int _townDepartureSignalSinceTick = int.MinValue;
+        private int _townDepartureSettledTownSinceTick = int.MinValue;
+        private bool _pendingTownDepartureStart;
+        private const int TownDepartureSignalConfirmMs = 150;
+        private const int TownDepartureSettledRecoveryMs = 1500;
         private bool _temporarilyPaused;
         private bool _zdhPortalPauseActive;
+        private uint _trackedPortalWorldId;
+        private uint _trackedPortalAnnId;
+        private uint _trackedPortalAcdId;
+        private float _trackedPortalX;
+        private float _trackedPortalY;
+        private int _trackedPortalLastSeenTick = int.MinValue;
+        private int _trackedPortalArrivalTick = int.MinValue;
+        private bool _trackedPortalClearedRange;
+        private bool _trackedPortalArmed;
+        private int _lastPortalStateUpdateTick = int.MinValue;
+        private const int PortalIdentityRetentionMs = 750;
         private int _autoLootPauseUntilTick;
         private int _pendingStartUntilTick;
         private string _lastStartBlockedReason = string.Empty;
@@ -357,6 +394,8 @@ namespace Turbo.Plugins.s7o
         public override void Load(IController hud)
         {
             base.Load(hud);
+            _activeInstance = this;
+            ResetPortalApproachState();
 
             EnsureKeyEventsCurrent();
 
@@ -367,8 +406,13 @@ namespace Turbo.Plugins.s7o
             _statusFont = Hud.Render.CreateFont("tahoma", 8, 255, 220, 190, 80, true, false, 255, 0, 0, 0, true);
             _runningFont = Hud.Render.CreateFont("tahoma", 8, 255, 80, 255, 120, true, false, 255, 0, 0, 0, true);
             _highFont = Hud.Render.CreateFont("tahoma", 8, 255, 255, 80, 80, true, false, 255, 0, 0, 0, true);
-            _lastAreaWasRift = IsRiftArea(Hud.Game != null && Hud.Game.Me != null ? Hud.Game.Me.SnoArea : null)
-                || IsCurrentRiftArea();
+            ISnoArea currentArea = Hud.Game != null && Hud.Game.Me != null ? Hud.Game.Me.SnoArea : null;
+            _lastAreaWasRift = IsRiftArea(currentArea) || IsCurrentRiftArea();
+            _currentAreaIsTown = currentArea != null && currentArea.IsTown;
+            _leavingTownTransition = false;
+            _townDepartureSignalSinceTick = int.MinValue;
+            _townDepartureSettledTownSinceTick = int.MinValue;
+            _pendingTownDepartureStart = false;
         }
 
         public void OnNewArea(bool newGame, ISnoArea area)
@@ -378,8 +422,17 @@ namespace Turbo.Plugins.s7o
             // area while leaving a Rift). The SNO area code is delivered with OnNewArea itself,
             // so use the native generated-Rift area identity for the entry edge.
             bool currentAreaIsRift = IsRiftArea(area);
+            bool currentAreaIsTown = area != null && area.IsTown;
             bool enteringRift = currentAreaIsRift && !_lastAreaWasRift;
             _lastAreaWasRift = currentAreaIsRift;
+            _currentAreaIsTown = currentAreaIsTown;
+            if (currentAreaIsTown)
+            {
+                _leavingTownTransition = false;
+                _townDepartureSignalSinceTick = int.MinValue;
+                _townDepartureSettledTownSinceTick = int.MinValue;
+                _pendingTownDepartureStart = false;
+            }
 
             FinishPendingPrimaryPress(now, true);
             CancelTownPortalSequence(now, "new area");
@@ -405,6 +458,7 @@ namespace Turbo.Plugins.s7o
             _autoLootPauseUntilTick = 0;
             _zdhPylonPauseActive = false;
             _zdhPortalPauseActive = false;
+            ResetPortalApproachState();
 
             // A fresh Rift/Greater Rift always begins in Speed mode so Momentum can be rebuilt
             // immediately. Ordinary floor transitions inside the same rift preserve F2 mode.
@@ -414,8 +468,11 @@ namespace Turbo.Plugins.s7o
                 _zdhHighFrequencyMode = false;
             }
 
-            if (newGame)
+            if (newGame || currentAreaIsTown)
             {
+                _townDepartureSignalSinceTick = int.MinValue;
+                _townDepartureSettledTownSinceTick = int.MinValue;
+                _pendingTownDepartureStart = false;
                 _running = false;
                 _zdhMacroRunning = false;
                 _temporarilyPaused = false;
@@ -427,7 +484,7 @@ namespace Turbo.Plugins.s7o
                 _cachedPrimaryActionKey = ActionKey.Unknown;
                 _cachedPrimarySno = 0;
                 _cachedSetItemCount = 0;
-                _lastStatus = "new game";
+                _lastStatus = newGame ? "new game" : "town";
             }
             else
             {
@@ -476,10 +533,27 @@ namespace Turbo.Plugins.s7o
 
             if (_toggleKeyEvent != null && _toggleKeyEvent.Matches(keyEvent))
             {
+                UpdateTownDepartureState();
+                // Town/NPC plugins own F3 while town is stable. A new F3 press after the
+                // departure edge is accepted immediately without waiting for destination identity.
+                if (IsStableTownContext()) return;
+
                 if (_running)
                 {
                     _pendingStartUntilTick = 0;
                     StopMacro("manual stop");
+                }
+                else if (_leavingTownTransition)
+                {
+                    if (IsTownDepartureStartReady(now))
+                    {
+                        if (TryStartMacroDuringTownDeparture(now))
+                            _pendingTownDepartureStart = false;
+                    }
+                    else
+                    {
+                        QueueTownDepartureStart(now);
+                    }
                 }
                 else
                 {
@@ -511,6 +585,7 @@ namespace Turbo.Plugins.s7o
         public void AfterCollect()
         {
             int now = Environment.TickCount;
+            UpdateTownDepartureState();
             // Returning to town definitively ends the current rift-entry context. Re-entering
             // any Rift/Greater Rift afterward must rebuild Momentum from Speed mode.
             if (Hud != null && Hud.Game != null && Hud.Game.IsInTown)
@@ -524,7 +599,8 @@ namespace Turbo.Plugins.s7o
             RefreshMomentumStateForZdh(now);
             TrackRecentlyVisibleMaps(now);
             _zdhPylonPauseActive = PauseNearUnoperatedPylon && IsUnoperatedPylonNearby(PylonPauseRange);
-            _zdhPortalPauseActive = PauseNearPortal && IsPortalInteractionNearby(PortalPauseRange);
+            UpdatePortalInteractionState(now);
+            _zdhPortalPauseActive = _zdhPortalInteractionPauseActive;
 
             ProcessPendingStartRequest(now);
 
@@ -552,6 +628,29 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
+            // Town departure is the only runtime exception. It may hold/retry Strafe through
+            // stale loading/town snapshots, but it never runs Primary or Helper work. Once the
+            // destination snapshot settles, the original v1.4.4 ownership hierarchy resumes.
+            if (_leavingTownTransition)
+            {
+                FinishPendingPrimaryPress(now, true);
+                ReleaseManualStandstill();
+                string transitionReason;
+                if (CanMaintainTownDepartureStrafe(out transitionReason))
+                {
+                    MaintainStrafe(now);
+                    _temporarilyPaused = false;
+                    _lastStatus = "running movement";
+                }
+                else
+                {
+                    StopStrafeHold();
+                    _temporarilyPaused = true;
+                    _lastStatus = "paused: " + transitionReason;
+                }
+                return;
+            }
+
             // Interaction zones are authoritative over both manual CTRL support and Helper
             // cast leases. Release every DHStrafe-owned input before the user clicks a pylon
             // or portal so synthetic Shift/Primary/Strafe cannot block the interaction.
@@ -561,11 +660,27 @@ namespace Turbo.Plugins.s7o
                 StopStrafeHold();
                 ReleaseManualStandstill();
                 _temporarilyPaused = true;
-                _lastStatus = _zdhPylonPauseActive ? "paused: pylon nearby" : "paused";
+                _lastStatus = _zdhPylonPauseActive ? "paused: pylon nearby" : "paused: portal nearby";
                 return;
             }
 
             bool manualDebuffHold = IsManualDebuffHoldActiveForZdh;
+
+            // A portal first observed with the player already inside the interaction radius is
+            // an arrival/start-inside case, not an approach. Keep this window movement-only until
+            // that exact portal has been cleared once; then it arms for normal return interaction.
+            // Physical/manual CTRL retains direct movement authority and reaches the existing
+            // StopStrafeHold() path below instead of being masked by arrival escape.
+            if (_zdhPortalEscapeActive && !manualDebuffHold)
+            {
+                FinishPendingPrimaryPress(now, true);
+                ReleaseManualStandstill();
+                MaintainStrafe(now);
+                _temporarilyPaused = false;
+                _lastStatus = "running movement";
+                return;
+            }
+
             bool helperPauseRequested = s7o_ZDH_Helper.IsDhStrafePauseRequested(now);
             if (manualDebuffHold)
             {
@@ -740,7 +855,7 @@ namespace Turbo.Plugins.s7o
             if (!Hud.Game.IsInGame || Hud.Game.IsLoading || Hud.Game.IsPaused)
                 return;
 
-            if (DisableInTown && Hud.Game.IsInTown)
+            if (IsStableTownContext())
                 return;
 
             RefreshBuildStateIfNeeded(Environment.TickCount, false);
@@ -830,6 +945,170 @@ namespace Turbo.Plugins.s7o
             }
         }
 
+        private void UpdateTownDepartureState()
+        {
+            if (Hud == null || Hud.Game == null) return;
+
+            int now = Environment.TickCount;
+            bool settledSameTown = _currentAreaIsTown
+                && Hud.Game.IsInGame
+                && !Hud.Game.IsLoading
+                && Hud.Game.IsInTown;
+
+            // Keep the early departure detector, but treat it as provisional. Transient HUD
+            // telemetry must not become durable permission to synthesize Strafe in town.
+            if (_currentAreaIsTown && !_leavingTownTransition
+                && (!Hud.Game.IsInGame || Hud.Game.IsLoading))
+            {
+                _leavingTownTransition = true;
+                _townDepartureSignalSinceTick = now;
+                _townDepartureSettledTownSinceTick = int.MinValue;
+                return;
+            }
+
+            if (!_leavingTownTransition)
+            {
+                _townDepartureSignalSinceTick = int.MinValue;
+                _townDepartureSettledTownSinceTick = int.MinValue;
+                return;
+            }
+
+            // Native area identity has settled outside town; normal non-town startup resumes.
+            if (!_currentAreaIsTown
+                && Hud.Game.IsInGame
+                && !Hud.Game.IsLoading
+                && !Hud.Game.IsInTown)
+            {
+                _leavingTownTransition = false;
+                _townDepartureSignalSinceTick = int.MinValue;
+                _townDepartureSettledTownSinceTick = int.MinValue;
+                return;
+            }
+
+            if (settledSameTown)
+            {
+                // A normal town snapshot breaks continuity of the departure signal. Genuine
+                // transitions may bounce here briefly, so recover only after a sustained settle.
+                _townDepartureSignalSinceTick = int.MinValue;
+                if (_townDepartureSettledTownSinceTick == int.MinValue)
+                    _townDepartureSettledTownSinceTick = now;
+
+                if (Elapsed(_townDepartureSettledTownSinceTick, now)
+                    >= TownDepartureSettledRecoveryMs)
+                {
+                    _leavingTownTransition = false;
+                    _townDepartureSettledTownSinceTick = int.MinValue;
+                    if (_pendingTownDepartureStart)
+                    {
+                        _pendingTownDepartureStart = false;
+                        _pendingStartUntilTick = 0;
+                        _lastStartBlockedReason = string.Empty;
+                    }
+                    _lastStatus = "town";
+                }
+                return;
+            }
+
+            // A transition-like snapshot is currently continuous. A later ordinary town
+            // snapshot resets this timer, so an old telemetry blip cannot authorize a new exit.
+            _townDepartureSettledTownSinceTick = int.MinValue;
+            if (_townDepartureSignalSinceTick == int.MinValue)
+                _townDepartureSignalSinceTick = now;
+        }
+
+        private bool IsTownDepartureStartReady(int now)
+        {
+            if (!_leavingTownTransition) return false;
+            if (!_currentAreaIsTown) return true;
+            if (_townDepartureSignalSinceTick == int.MinValue) return false;
+            return Elapsed(_townDepartureSignalSinceTick, now) >= TownDepartureSignalConfirmMs;
+        }
+
+        private void QueueTownDepartureStart(int now)
+        {
+            _pendingTownDepartureStart = true;
+            _pendingStartUntilTick = unchecked(now + Math.Max(250, StartRequestAfterTransitionMs));
+            _lastStartBlockedReason = "town departure pending";
+            _lastStatus = "waiting for area";
+        }
+
+        private bool IsStableTownContext()
+        {
+            return !_leavingTownTransition
+                && (_currentAreaIsTown || (Hud != null && Hud.Game != null && Hud.Game.IsInTown));
+        }
+
+        private bool CanMaintainTownDepartureStrafe(out string reason)
+        {
+            reason = null;
+            if (!Enabled) { reason = "plugin disabled"; return false; }
+            if (Hud == null || Hud.Game == null || Hud.Window == null)
+            {
+                reason = "hud unavailable";
+                return false;
+            }
+            if (Hud.Game.IsPaused) { reason = "paused"; return false; }
+            if (!Hud.Window.IsForeground) { reason = "not foreground"; return false; }
+            if (PauseWhileWindowsKeyHeld && IsWindowsKeyDown()) { reason = "windows key"; return false; }
+            if (Hud.Game.Me == null) { reason = "player unavailable"; return false; }
+            if (Hud.Game.Me.IsDead) { reason = "dead"; return false; }
+            if (RequireDemonHunter && Hud.Game.Me.HeroClassDefinition != null
+                && Hud.Game.Me.HeroClassDefinition.HeroClass != HeroClass.DemonHunter)
+            {
+                reason = "not Demon Hunter";
+                return false;
+            }
+            if (RequireStrafeEquipped && GetStrafeActionKey() == ActionKey.Unknown)
+            {
+                reason = "Strafe not equipped";
+                return false;
+            }
+            return true;
+        }
+
+        private bool TryStartMacroDuringTownDeparture(int now)
+        {
+            string reason;
+            if (!CanMaintainTownDepartureStrafe(out reason))
+            {
+                _lastStatus = reason ?? "transition";
+                return false;
+            }
+
+            _pendingStartUntilTick = 0;
+            _pendingTownDepartureStart = false;
+            _lastStartBlockedReason = string.Empty;
+            FinishPendingPrimaryPress(now, true);
+            StopStrafeHold();
+            ReleaseManualStandstill();
+            BeginMacro(now);
+            return true;
+        }
+
+        private void BeginMacro(int now)
+        {
+            _running = true;
+            _zdhMacroRunning = true;
+            _zdhHighFrequencyMode = _highFrequencyMode;
+            _temporarilyPaused = false;
+            _autoLootPauseUntilTick = 0;
+            _nextStrafeCheckTick = 0;
+            _nextPrimaryFireTick = 0;
+            _lastPrimaryFireTick = 0;
+            _zdhLastPrimaryFireTick = int.MinValue;
+            _zdhLastMomentumRefreshTick = int.MinValue;
+            _zdhLastCombatActionTick = now;
+            _zdhMomentumDeadlineAnchorTick = now;
+            _zdhLastObservedMomentumTimeLeft = -1.0;
+            _zdhCombatPrimaryMaintenanceDue = false;
+            _zdhCombatMomentumRefreshDue = false;
+            _zdhCombatMomentumRefreshInputDue = false;
+            ResetZdhPrimaryTransactionState();
+            _lastStatus = GetEffectiveSetItemCount() >= 4
+                ? (_highFrequencyMode ? "running fast attack" : "running movement")
+                : "running strafe only";
+        }
+
         private bool TryStartMacro()
         {
             int now = Environment.TickCount;
@@ -860,32 +1139,13 @@ namespace Turbo.Plugins.s7o
             FinishPendingPrimaryPress(now, true);
             StopStrafeHold();
 
-            _running = true;
-            _zdhMacroRunning = true;
-            _zdhHighFrequencyMode = _highFrequencyMode;
-            _temporarilyPaused = false;
-            _autoLootPauseUntilTick = 0;
-            _nextStrafeCheckTick = 0;
-            _nextPrimaryFireTick = 0;
-            _lastPrimaryFireTick = 0;
-            _zdhLastPrimaryFireTick = int.MinValue;
-            _zdhLastMomentumRefreshTick = int.MinValue;
-            _zdhLastCombatActionTick = now;
-            _zdhMomentumDeadlineAnchorTick = now;
-            _zdhLastObservedMomentumTimeLeft = -1.0;
-            _zdhCombatPrimaryMaintenanceDue = false;
-            _zdhCombatMomentumRefreshDue = false;
-            _zdhCombatMomentumRefreshInputDue = false;
-            ResetZdhPrimaryTransactionState();
-            _lastStatus = GetEffectiveSetItemCount() >= 4
-                ? (_highFrequencyMode ? "running fast attack" : "running movement")
-                : "running strafe only";
-
+            BeginMacro(now);
             return true;
         }
 
         private void RequestStartMacro(int now)
         {
+            _pendingTownDepartureStart = false;
             _pendingStartUntilTick = 0;
 
             if (TryStartMacro())
@@ -907,7 +1167,8 @@ namespace Turbo.Plugins.s7o
             if (TickReached(now, _pendingStartUntilTick))
             {
                 _pendingStartUntilTick = 0;
-                _lastStatus = "ready";
+                _pendingTownDepartureStart = false;
+                _lastStatus = IsStableTownContext() ? "town" : "ready";
                 return;
             }
 
@@ -918,13 +1179,38 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
+            if (_pendingTownDepartureStart)
+            {
+                if (_leavingTownTransition)
+                {
+                    // Remember F3 during a provisional same-town snapshot, but send no input.
+                    if (!IsTownDepartureStartReady(now))
+                    {
+                        _lastStatus = "waiting for area";
+                        return;
+                    }
+
+                    if (TryStartMacroDuringTownDeparture(now))
+                    {
+                        _pendingTownDepartureStart = false;
+                        return;
+                    }
+
+                    // Keep this bounded request alive while the transition resolves. Never
+                    // convert its provenance into an ordinary in-town startup request.
+                    return;
+                }
+
+                // Native non-town settlement ended the departure latch. The normal path below
+                // can now use the existing fast-transition window safely.
+                _pendingTownDepartureStart = false;
+            }
+
             if (TryStartMacro())
                 return;
 
             if (!CanQueueStartAfterTransition(_lastStartBlockedReason))
-            {
                 _pendingStartUntilTick = 0;
-            }
         }
 
         private bool CanQueueStartAfterTransition(string reason)
@@ -973,6 +1259,7 @@ namespace Turbo.Plugins.s7o
             _temporarilyPaused = false;
             _autoLootPauseUntilTick = 0;
             _pendingStartUntilTick = 0;
+            _pendingTownDepartureStart = false;
             _lastStartBlockedReason = string.Empty;
             _nextStrafeCheckTick = 0;
             _nextPrimaryFireTick = 0;
@@ -992,6 +1279,7 @@ namespace Turbo.Plugins.s7o
             _worldMapRecentlyVisibleUntilTick = 0;
             _zdhPylonPauseActive = false;
             _zdhPortalPauseActive = false;
+            ResetPortalApproachState();
             _lastStatus = string.IsNullOrEmpty(reason) ? "stopped" : reason;
 
         }
@@ -1883,22 +2171,117 @@ namespace Turbo.Plugins.s7o
             catch { return false; }
         }
 
-        private bool IsPortalInteractionNearby(float range)
+        private void UpdatePortalInteractionState(int now)
         {
+            if (_lastPortalStateUpdateTick == now) return;
+            _lastPortalStateUpdateTick = now;
+            _zdhPortalInteractionPauseActive = false;
+            _zdhPortalEscapeActive = false;
+
             try
             {
                 if (Hud == null || Hud.Game == null || Hud.Game.Me == null
-                    || Hud.Game.Me.FloorCoordinate == null || Hud.Game.Portals == null) return false;
+                    || Hud.Game.Me.FloorCoordinate == null || Hud.Game.Portals == null)
+                    return;
 
-                float limit = Math.Max(0, range);
-                // Portal interaction safety is distance-first. ActorAvailable/IsClickable can
-                // depend on the cursor already being over a narrow interaction hotspot, which is
-                // precisely what autosnap can prevent. Hud.Game.Portals already identifies portal
-                // actors, so proximity to their world coordinate is the reliable pause authority.
-                return Hud.Game.Portals.Any(portal => portal != null && portal.FloorCoordinate != null
-                    && Hud.Game.Me.FloorCoordinate.XYDistanceTo(portal.FloorCoordinate) <= limit);
+                if (!Hud.Game.IsInGame || Hud.Game.IsInTown)
+                {
+                    ResetPortalApproachState();
+                    return;
+                }
+
+                // Portal interaction pausing belongs only to generated Nephalem/Greater Rift
+                // floors. Vision, Vault, goblin and ordinary-world portals must never stop Strafe.
+                if (!IsRiftArea(Hud.Game.Me.SnoArea) && !IsCurrentRiftArea())
+                {
+                    ResetPortalApproachState();
+                    return;
+                }
+
+                IPortal nearest = Hud.Game.Portals
+                    .Where(portal => portal != null && portal.FloorCoordinate != null)
+                    .OrderBy(portal => Hud.Game.Me.FloorCoordinate.XYDistanceTo(portal.FloorCoordinate))
+                    .FirstOrDefault();
+
+                if (nearest == null)
+                {
+                    // Once an armed/approached portal disappears, immediately hand ownership
+                    // back to movement while briefly retaining identity. A one-frame actor flicker
+                    // can then restore the original pause if the same portal comes back.
+                    if (_trackedPortalLastSeenTick != int.MinValue
+                        && Elapsed(_trackedPortalLastSeenTick, now) < PortalIdentityRetentionMs)
+                    {
+                        _zdhPortalEscapeActive = PauseNearPortal && _trackedPortalArmed;
+                        return;
+                    }
+
+                    ResetPortalApproachState();
+                    return;
+                }
+
+                float distance = Hud.Game.Me.FloorCoordinate.XYDistanceTo(nearest.FloorCoordinate);
+                float pauseRange = Math.Max(0, PortalPauseRange);
+
+                if (!MatchesTrackedPortal(nearest))
+                {
+                    _trackedPortalWorldId = nearest.WorldId;
+                    _trackedPortalAnnId = nearest.AnnId;
+                    _trackedPortalAcdId = nearest.AcdId;
+                    _trackedPortalX = nearest.FloorCoordinate.X;
+                    _trackedPortalY = nearest.FloorCoordinate.Y;
+                    _trackedPortalArmed = distance > pauseRange;
+                    _trackedPortalArrivalTick = _trackedPortalArmed ? int.MinValue : now;
+                    _trackedPortalClearedRange = _trackedPortalArmed;
+                }
+                else if (!_trackedPortalArmed)
+                {
+                    if (distance > pauseRange) _trackedPortalClearedRange = true;
+                    if (_trackedPortalClearedRange
+                        && (_trackedPortalArrivalTick == int.MinValue
+                            || Elapsed(_trackedPortalArrivalTick, now) >= Math.Max(0, PortalArrivalEscapeMinMs)))
+                        _trackedPortalArmed = true;
+                }
+
+                _trackedPortalLastSeenTick = now;
+                bool insideRange = distance <= pauseRange;
+                _zdhPortalInteractionPauseActive = PauseNearPortal
+                    && _trackedPortalArmed && insideRange;
+                _zdhPortalEscapeActive = PauseNearPortal
+                    && !_trackedPortalArmed && insideRange;
             }
-            catch { return false; }
+            catch
+            {
+                _zdhPortalInteractionPauseActive = false;
+            }
+        }
+
+        private bool MatchesTrackedPortal(IPortal portal)
+        {
+            if (portal == null || portal.WorldId != _trackedPortalWorldId) return false;
+            if (_trackedPortalAnnId != 0 && portal.AnnId != 0 && portal.AnnId == _trackedPortalAnnId)
+                return true;
+            if (_trackedPortalAcdId != 0 && portal.AcdId != 0 && portal.AcdId == _trackedPortalAcdId)
+                return true;
+            if (portal.FloorCoordinate == null) return false;
+            float dx = portal.FloorCoordinate.X - _trackedPortalX;
+            float dy = portal.FloorCoordinate.Y - _trackedPortalY;
+            return dx * dx + dy * dy <= 4.0f;
+        }
+
+        private void ResetPortalApproachState()
+        {
+            _trackedPortalWorldId = 0;
+            _trackedPortalAnnId = 0;
+            _trackedPortalAcdId = 0;
+            _trackedPortalX = 0;
+            _trackedPortalY = 0;
+            _trackedPortalLastSeenTick = int.MinValue;
+            _trackedPortalArrivalTick = int.MinValue;
+            _trackedPortalClearedRange = false;
+            _trackedPortalArmed = false;
+            _lastPortalStateUpdateTick = int.MinValue;
+            _zdhPortalInteractionPauseActive = false;
+            _zdhPortalEscapeActive = false;
         }
 
         private bool IsHoverValidActor(float distance)
