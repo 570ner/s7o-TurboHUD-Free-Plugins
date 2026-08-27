@@ -178,7 +178,6 @@ namespace Turbo.Plugins.s7o
         public int BossSupportPrimaryQuietMs = 80;
         public int PrimaryPreemptLeaseMs = 350;
         public float PylonInteractionPauseRange = 15f;
-        public float PortalInteractionPauseRange = 15f;
         public int FailedCastRetryMs = 450;
         public int GlobalCastGapMs = 450;
         public int ManualDebuffCastGapMs = 50;
@@ -212,12 +211,16 @@ namespace Turbo.Plugins.s7o
         // One rescue write is allowed only when the first restore clearly remained near the
         // synthetic aim instead of returning toward the user restore target.
         public int CursorRestoreRescueDistancePixels = 240;
-        public int CursorIntentMaxRestorePixels = 96;
-        // Keep ownership for one collection/input frame after skill-up so Diablo consumes
-        // the synthetic aim before the single final cursor restore is injected.
+        // Cursor restore preserves trusted physical steering at full magnitude. Synthetic absolute
+        // cursor writes are filtered before they can enter UserCursorDelta, then only the actual
+        // game-window boundary clamps the reconstructed endpoint.
+        public int CursorSyntheticEchoTolerancePixels = 14;
+        // Fallback only: if Diablo has not yet exposed animation evidence that the support input
+        // was consumed, keep the previous one-frame post-input settle before restoring the cursor.
         public int CursorPostInputSettleMs = 24;
         public int CursorSafetyRecoveryMs = 350;
         private const int MultishotNativeAnimationCorrelationMs = 350;
+        private const int EliteSentryUrgentAttemptLimit = 2;
         public int AimCorrectionRetryMs = 16;
         public int MovementModeCastGapMs = 650;
         public int BossStandaloneCastGapMs = 350;
@@ -226,6 +229,9 @@ namespace Turbo.Plugins.s7o
         public int BossUrgentRetryGapMs = 200;
         public int UrgentRetryLifetimeMs = 1800;
         public int AttackMovementWindowMs = 1000;
+        // Combat-mode idle filler uses a shorter movement slot than ordinary maintenance so
+        // movement speed stays predictable without accelerating real debuff/Sentry priorities.
+        public int CombatCadenceMovementWindowMs = 800;
         public int MovementModeMovementWindowMs = 1000;
         public int BossMovementWindowMs = 500;
         public int AttackIceblinkMovementWindowMs = 500;
@@ -275,13 +281,8 @@ namespace Turbo.Plugins.s7o
         // After repeated real failures, permit one standalone Sentry turn before MFD retries.
         public int MfdSentryFailureYieldAttempts = 2;
         public int SentryRecastMs = 300;
-        // Post-setup reposition only; initial/core Sentry deployment remains aggressive.
-        public int SentryMaintenanceRepositionMs = 1800;
         public float SentrySevereOverlapDistance = 8f;
         public int SentrySevereOverlapPairThreshold = 3;
-        public int SentryMaintenanceRelocationBackoffMs = 1800;
-        public int SentryMaintenanceHardBackoffMs = 4500;
-        public int SentryMaintenanceMaxFailures = 2;
         public float SentryRelocationSinkRadius = 5f;
         public int SentryRelocationSinkHoldMs = 8000;
         public int SentryRelocationSinkRepeatThreshold = 2;
@@ -307,12 +308,13 @@ namespace Turbo.Plugins.s7o
         public int SentryBurstAcquireMaxMs = 260;
         public int SentryBurstMovementSettleMaxMs = 300;
         public int SentryCoreBurstMaxAttemptsPerEngagement = 3;
-        public int SentryCoreLossRearmMs = 120;
         public int SentryRelevanceDeficitStabilityMs = 180;
         // Once a five-Sentry field has been established, require a sustained relevance loss
         // before replacing it so transient orbiting/elite movement cannot flood the support queue.
         public int SentryFullFieldRelevanceStabilityMs = 1000;
-        public int SentryFullFieldRecastMs = 2500;
+        public int SentryFullFieldRecastMs = 4000;
+        public int SentryRollingRefreshLeadMs = 15000;
+        public int SentryRollingRefreshEmergencyLeadMs = 9000;
         public int EliteSentryCoverageInitialMs = 300;
         public int EliteSentryCoverageStepMs = 500;
         public int EliteSentryCoverageMaxMs = 2000;
@@ -335,6 +337,10 @@ namespace Turbo.Plugins.s7o
         public int SentryPackStableMs = 300;
         public int SentryDpsStableMs = 900;
         public int SentryDpsEmergencyStableMs = 450;
+        public float SentryBonusCircleRadius = 10f;
+        // A bonus circle is an area, not a point target. Require the entire circle to fit
+        // inside Guardian coverage; the 0.5-yard margin avoids edge-only nominal coverage.
+        public float SentryBonusCircleCoverageSafetyMargin = 0.5f;
         public float SentryEliteComfortRadius = 13f;
         public float LocalSentryProtectionHealthPct = 50f;
         public int LocalSentryProtectionStationaryMs = 900;
@@ -347,6 +353,10 @@ namespace Turbo.Plugins.s7o
         public float SentryMinSeparation = 22f;
         public float MultishotAimDistance = 80f;
         public float MultishotAimMinimumScreenDistance = 110f;
+        // LightningMod's Multishot cone geometry uses the Demon Hunter chest plane (~6.2 world Z)
+        // as the skill origin. Keep XY targeting on actor floor cores, but project direct rays
+        // through that native skill-origin plane so point-blank cursor direction matches the cast.
+        public float MultishotAimOriginZOffset = 6.2f;
         public float MultishotCloseRangeDirectAimDistance = 5f;
         public float MultishotCloseRangeAimPastTargetPixels = 48f;
         public float MultishotSafeTopRatio = 0.08f;
@@ -397,6 +407,10 @@ namespace Turbo.Plugins.s7o
         public float MfdNearPlayerPriorityRange = 30f;
         public float MfdNearPlayerPriorityBonus = 1.5f;
         public float GuardianRadius = 16f;
+        // Native Sentry placement is limited to about 60 yards. Keep the exact tested value as
+        // the direct-cast authority and combine it with Guardian coverage radius only when
+        // rejecting targets that are geometrically impossible to satisfy from any legal cast.
+        private const float NativeSentryPlacementMaxRangeYards = 60f;
         public int MfdNativeDropoutGraceMs = 350;
         public int MfdDensityMinimumGain = 3;
         public float MfdDensityMinimumGainRatio = 0.20f;
@@ -501,6 +515,8 @@ namespace Turbo.Plugins.s7o
         private const uint MarkedForDeathSno = 130738;
         private const uint SentrySno = 129217;
         private const uint IceblinkSno = 428354;
+        private const uint OculusRingSno = 402461;
+        private const uint TriuneProxySno = 488071;
         private const uint LegacyBombardiersRucksackSno = 318804;
         private const ActorSnoEnum GuardianSentryActor = ActorSnoEnum._dh_sentry_addsshield;
         private static readonly uint[] IdentityAttributeModifiers = { 0u, 0xFFFFFu, 0xFFFFFFFFu, 2147483647u };
@@ -587,10 +603,41 @@ namespace Turbo.Plugins.s7o
             public float SentryAnchorX;
             public float SentryAnchorY;
             public int SentryPlacementDeficit;
+            public int SentryCapacity;
+            public int SentryOwned;
+            public int SentryRelevant;
+            public int SentryLocalCoreRelevant;
+            public int SentryDistinctCoreRelevant;
+            public int SentryDistinctCoreDeficit;
+            public int SentryHardDeficit;
+            public int SentryOldestAgeMs = -1;
+            public int SentryCharges;
+            public bool SentryPlanValid;
+            public bool OpeningSentryBurstsClosed;
+            public int CoreBurstAttempts;
+            public int CoreBurstAttemptLimit;
+            public bool SentryRelocationBackoff;
+            public int SentryRelocationSinkCount;
+            public bool SentryRollingRefreshDue;
+            public bool SentryRollingRefreshReady;
+            public bool SentryFairnessDemand;
+            public int SentryFairnessTurns;
+            public int SentryFairnessBudget;
+            public bool SentryFairnessDue;
             public bool TrashFightLatched;
             public int TrashFightLatchBodies;
             public bool ProtectedSentryCoverageMissing;
+            public bool EliteSentryCoverageMissing;
+            public int EliteSentryUncoveredCount;
+            public int EliteSentryReadyCount;
+            public uint EliteSentryPriorityAcd;
+            public int EliteSentryPriorityAgeMs = -1;
+            public int EliteSentryPriorityDelayMs = -1;
+            public int EliteSentryPriorityAttempts;
+            public bool EliteSentryUrgent;
             public bool PlayerSentryProtectionMissing;
+            public bool BonusCircleSentryCoverageMissing;
+            public bool UrgentBonusCircleSentryCoverageMissing;
         }
 
         private sealed class PendingCast
@@ -615,6 +662,12 @@ namespace Turbo.Plugins.s7o
             public bool CursorReferenceValid;
             public int UserCursorDeltaX;
             public int UserCursorDeltaY;
+            public bool CursorSyntheticWritePending;
+            public int CursorSyntheticFromX;
+            public int CursorSyntheticFromY;
+            public int CursorSyntheticTargetX;
+            public int CursorSyntheticTargetY;
+            public int CursorSyntheticEchoRejectCount;
             public int AimX;
             public int AimY;
             public bool StandstillHeld;
@@ -661,9 +714,9 @@ namespace Turbo.Plugins.s7o
             public int LastAppliedCount;
             public int SentrySlot;
             public bool SentryRelocated;
+            public float SentryRequiredMatchRadius;
             public float SentryActualWorldX;
             public float SentryActualWorldY;
-            public bool SentryMaintenance;
             public bool SentryBurstChild;
             public bool ManualDebuff;
             public bool UseCurrentCursorAim;
@@ -725,9 +778,11 @@ namespace Turbo.Plugins.s7o
         private bool _coreBurstAttemptedForEngagement;
         private int _coreBurstAttemptsThisEngagement;
         private int _coreBurstRetryAfterTick = int.MinValue;
-        private int _coreBurstBelowTargetSinceTick = int.MinValue;
         private int _sentryRelevanceDeficitSinceTick = int.MinValue;
-        private bool _fullSentryFieldEstablishedForEngagement;
+        private bool _openingSentryBurstsClosedForEngagement;
+        private bool _sentryPlacedThisEngagement;
+        private int _sentryFairnessMultishotTurns;
+        private bool _sentryFairnessDemandActive;
         private bool _sentryFullFieldHold;
         private bool _initialMfdSetupSatisfiedForEngagement;
         private bool _openingMultishotAttemptedForEngagement;
@@ -757,7 +812,6 @@ namespace Turbo.Plugins.s7o
         private int _lastEntangleMaintenanceTick = int.MinValue;
         private int _lastMultishotMaintenanceTick = int.MinValue;
         private int _lastMfdCastTick = int.MinValue;
-        private int _lastMfdSetupHandoffTick = int.MinValue;
         private int _lastUnverifiedMfdTick = int.MinValue;
         private int _mfdUnavailableSinceTick = int.MinValue;
         private int _hardMfdFailureStreak;
@@ -770,9 +824,6 @@ namespace Turbo.Plugins.s7o
         private int _sentryRetryTick = int.MinValue;
         private int _sentryRetryDelayMs;
         private string _sentryRetryReason = string.Empty;
-        private int _sentryMaintenanceFailureCount;
-        private int _sentryMaintenanceBackoffTick = int.MinValue;
-        private int _sentryMaintenanceBackoffDelayMs;
         private float _sentryRelocationSinkX;
         private float _sentryRelocationSinkY;
         private int _sentryRelocationSinkTick = int.MinValue;
@@ -783,7 +834,6 @@ namespace Turbo.Plugins.s7o
         private float _sentryRelocationAnchorX;
         private float _sentryRelocationAnchorY;
         private bool _sentryRelocationContextValid;
-        private bool _sentryMaintenanceTerrainBackoff;
         private readonly List<RejectedSentryPosition> _rejectedSentryPositions = new List<RejectedSentryPosition>();
         private float _lastValleyX;
         private float _lastValleyY;
@@ -934,7 +984,6 @@ namespace Turbo.Plugins.s7o
             _lastEntangleMaintenanceTick = int.MinValue;
             _lastMultishotMaintenanceTick = int.MinValue;
             _lastMfdCastTick = int.MinValue;
-            _lastMfdSetupHandoffTick = int.MinValue;
             _lastUnverifiedMfdTick = int.MinValue;
             _mfdUnavailableSinceTick = int.MinValue;
             _hardMfdFailureStreak = 0;
@@ -1003,7 +1052,6 @@ namespace Turbo.Plugins.s7o
             _recentGroundY = 0;
             _recentGroundTick = int.MinValue;
             _lastMfdCastTick = int.MinValue;
-            _lastMfdSetupHandoffTick = int.MinValue;
             _lastUnverifiedMfdTick = int.MinValue;
             _mfdUnavailableSinceTick = int.MinValue;
             _hardMfdFailureStreak = 0;
@@ -1037,6 +1085,17 @@ namespace Turbo.Plugins.s7o
             s7o_ZDH_HelperState.EnsureLoaded();
             int now = Environment.TickCount;
             _runtime.ProtectedSentryCoverageMissing = false;
+            _runtime.EliteSentryCoverageMissing = false;
+            _runtime.EliteSentryUncoveredCount = 0;
+            _runtime.EliteSentryReadyCount = 0;
+            _runtime.EliteSentryPriorityAcd = 0;
+            _runtime.EliteSentryPriorityAgeMs = -1;
+            _runtime.EliteSentryPriorityDelayMs = -1;
+            _runtime.EliteSentryPriorityAttempts = 0;
+            _runtime.EliteSentryUrgent = false;
+            _runtime.PlayerSentryProtectionMissing = false;
+            _runtime.BonusCircleSentryCoverageMissing = false;
+            _runtime.UrgentBonusCircleSentryCoverageMissing = false;
             PublishRejectedSentryPositions(now);
             PublishTrashFightLatch(now, _runtime.TrashFightLatched,
                 _runtime.TrashFightLatchBodies);
@@ -1099,7 +1158,6 @@ namespace Turbo.Plugins.s7o
                 // disturb owned actors, target history, or the established field itself.
                 _openingMultishotAttemptedForEngagement = false;
                 _initialMfdSetupSatisfiedForEngagement = false;
-                int clearedValidations = _pendingMultishots.Count;
                 ClearPendingMultishotValidations();
                 _urgentRetryKind = CastKind.None;
                 _urgentRetryTick = int.MinValue;
@@ -1119,10 +1177,24 @@ namespace Turbo.Plugins.s7o
                 UpdateLocalTravelState(local.Player, now);
             UpdateElectrifiedAlert(local, now);
 
-            // A nearby pylon or portal is an authoritative user-interaction zone. Portal
-            // detection is distance-first so it does not depend on reaching the hover hotspot.
-            // Abort Helper ownership before DHStrafe runs later this frame so neither autosnap
-            // nor synthetic Shift can steal the cursor or prevent the game interaction.
+            // DHStrafe owns the portal approach/arrival distinction. Refresh it here because
+            // Helper collects first, then consume the same state so both plugins agree this frame.
+            // Pylons remain an immediate local interaction authority.
+            s7o_DHStrafePrimaryPlugin.RefreshPortalInteractionForZdh(now);
+
+            if (s7o_DHStrafePrimaryPlugin.IsPortalEscapeActiveForZdh)
+            {
+                _interactionPauseActive = false;
+                ForceAbortSentryBurst("portal escape", now);
+                CancelCast("portal escape");
+                ReleaseBossEntangleStandstill();
+                ReleaseDhStrafePause();
+                ReleaseDhStrafePrimarySuppression();
+                _manualDebuffMovementUntilTick = int.MinValue;
+                _wasManualDebuffHold = false;
+                return;
+            }
+
             _interactionPauseActive = IsInteractionPauseNearby();
             if (_interactionPauseActive)
             {
@@ -1350,7 +1422,6 @@ namespace Turbo.Plugins.s7o
             if (trashFightLatched) _trashFightLatchState = "retained";
             PublishTrashFightLatch(now, trashFightLatched || combatIntentTrashFight,
                 trashFightActive ? cluster.Bodies.Count : 0);
-            int immediateEliteEncounters = activePrimaryElites.Count(m => IsImmediatePrimaryEliteEncounter(m, local.Player));
             int iceblinkRefreshAgeMs = GetIceblinkRefreshAgeMs();
             int trashMultishotMaintenanceAge = _lastMultishotMaintenanceTick == int.MinValue
                 ? int.MaxValue : Elapsed(_lastMultishotMaintenanceTick, now);
@@ -1373,20 +1444,15 @@ namespace Turbo.Plugins.s7o
                 ? activePrimaryElites.Count(m => IsDebuffBody(m) && !HasIceblink(m)
                     && !HasPendingMultishotValidation(m.AcdId, now)
                     && HasUnattemptedCurrentIceblinkLoss(m, now)) : 0;
-            int expiringIceblinkElites = s7o_ZDH_HelperState.AutoMultishot && local.Iceblink && local.WindChill
-                ? activePrimaryElites.Count(m => IsDebuffBody(m) && HasIceblink(m)
-                    && IsIceblinkDue(m, now) && !HasPendingMultishotValidation(m.AcdId, now)) : 0;
-            int dueIceblinkElites = missingIceblinkElites + expiringIceblinkElites;
-            int pendingIceblinkElites = s7o_ZDH_HelperState.AutoMultishot && local.Iceblink && local.WindChill
-                ? activePrimaryElites.Count(m => HasPendingIceblinkValidation(m, now)
-                    || HasPendingMultishotValidation(m.AcdId, now)) : 0;
             int actionableIceblinkElites = s7o_ZDH_HelperState.AutoMultishot && local.Iceblink && local.WindChill
                 ? activePrimaryElites.Count(m => IsIceblinkActionable(m, now)) : 0;
             int preemptIceblinkElites = s7o_ZDH_HelperState.AutoMultishot && local.Iceblink && local.WindChill
                 ? activePrimaryElites.Count(m => IsIceblinkPrimaryPreemptDue(m, now)) : 0;
             bool materialMfdUpgradeReady = false;
+            bool majorMfdUpgradeReady = false;
             bool missingMfdCoverage = s7o_ZDH_HelperState.AutoMarkedForDeath && local.Valley
-                && HasMissingPrimaryMfdCoverage(local.Player, now, out materialMfdUpgradeReady);
+                && HasMissingPrimaryMfdCoverage(local.Player, now, out materialMfdUpgradeReady,
+                    out majorMfdUpgradeReady);
             if (_mfdRetryDebt && HasMfdRetryDebtRecoveryEvidence()) ClearMfdRetryDebt();
             bool bossEntangleDue = bossStandalone && s7o_ZDH_HelperState.AutoEntangle
                 && local.Odyssey && local.Entangle != null
@@ -1398,49 +1464,76 @@ namespace Turbo.Plugins.s7o
                 ReleaseDhStrafePrimarySuppression();
                 return;
             }
-            List<IActor> allOwnedSentries = s7o_ZDH_HelperState.AutoSentry && local.Guardian
-                ? GetOwnedSentries() : new List<IActor>();
-            List<IActor> ownedSentries = allOwnedSentries.Where(a => a != null && a.IsOnScreen).ToList();
-            if (s7o_ZDH_HelperState.AutoSentry && local.Guardian)
-                UpdateEliteSentryCoverageStates(groundSupportElites, allOwnedSentries, now);
-            int sentryCapacity = s7o_ZDH_HelperState.AutoSentry && local.Guardian
-                ? GetDesiredSentryCount(local) : 0;
-            int sentryEffectiveOwned = 0;
-            int sentryPlacementDeficit = s7o_ZDH_HelperState.AutoSentry && local.Guardian
-                ? GetSentryPlacementDeficit(local, cluster, now, allOwnedSentries, out sentryEffectiveOwned) : 0;
-            int sentryTargetCount = Math.Min(sentryCapacity, _runtime.SentryDesired);
-            int currentFightRelevantSentries = Math.Min(sentryTargetCount, sentryEffectiveOwned);
-            int sentryCoreTarget = Math.Min(Math.Max(1, InitialSentryFieldCount), sentryTargetCount);
-            int sentryCoreDeficit = Math.Max(0, sentryCoreTarget
-                - Math.Min(sentryCoreTarget, currentFightRelevantSentries));
-            bool sentryPlanReady = sentryTargetCount > 0;
             bool sentryEngagementActive = bossPreSpawn || bossStandalone
                 || groundSupportPrimaryElites.Count > 0
                 || activeMfdOnlyTargets.Count > 0 || trashFightActive;
-            UpdateSentryBurstEngagement(cluster, sentryEngagementActive,
-                currentFightRelevantSentries, sentryCoreTarget, now);
-            if (sentryEngagementActive && sentryTargetCount > 0
-                && currentFightRelevantSentries >= sentryTargetCount)
-                _fullSentryFieldEstablishedForEngagement = true;
-            _sentryFullFieldHold = _fullSentryFieldEstablishedForEngagement
-                && sentryTargetCount > 0
-                && allOwnedSentries.Count >= sentryTargetCount
-                && sentryPlacementDeficit <= 0;
+            UpdateSentryBurstEngagement(cluster, sentryEngagementActive, now);
 
-            bool sentryCorePending = !_fullSentryFieldEstablishedForEngagement
-                && sentryEngagementActive && sentryCoreTarget > 0
-                && sentryCoreDeficit > 0 && sentryPlacementDeficit > 0;
+            List<IActor> allOwnedSentries = s7o_ZDH_HelperState.AutoSentry && local.Guardian
+                ? GetOwnedSentries() : new List<IActor>();
+            if (s7o_ZDH_HelperState.AutoSentry && local.Guardian)
+                UpdateEliteSentryCoverageStates(groundSupportElites, allOwnedSentries, now);
+
+            int sentryCapacity = s7o_ZDH_HelperState.AutoSentry && local.Guardian
+                ? GetDesiredSentryCount(local) : 0;
+            int sentryEffectiveOwned = 0;
+            int sentryDistinctRelevant = 0;
+            bool sentryPlanValid = false;
+            int sentryPlacementDeficit = s7o_ZDH_HelperState.AutoSentry && local.Guardian
+                ? GetSentryPlacementDeficit(local, cluster, now, allOwnedSentries,
+                    out sentryEffectiveOwned, out sentryDistinctRelevant, out sentryPlanValid) : 0;
+
+            // Physical population, functional local coverage, and ideal spread are separate.
+            // Geometry may describe fewer slots transiently; it must never redefine capacity.
+            int sentryPlacementTarget = Math.Min(sentryCapacity, _runtime.SentryDesired);
+            int sentryOwnedCount = Math.Min(sentryCapacity, allOwnedSentries.Count);
+            int currentFightRelevantSentries = sentryPlanValid
+                ? Math.Min(sentryPlacementTarget, sentryEffectiveOwned) : 0;
+            int sentryCoreTarget = Math.Min(Math.Max(1, InitialSentryFieldCount), sentryCapacity);
+            int sentryLocalCoreRelevant = sentryPlanValid
+                ? Math.Min(sentryCoreTarget, currentFightRelevantSentries) : 0;
+            int sentryLocalCoreDeficit = sentryPlanValid
+                ? Math.Max(0, sentryCoreTarget - sentryLocalCoreRelevant) : 0;
+            int sentryDistinctCoreRelevant = sentryPlanValid
+                ? Math.Min(sentryCoreTarget, sentryDistinctRelevant) : 0;
+            int sentryDistinctCoreDeficit = sentryPlanValid
+                ? Math.Max(0, sentryCoreTarget - sentryDistinctCoreRelevant) : 0;
+            int sentryHardDeficit = Math.Max(0, sentryCapacity - sentryOwnedCount);
+            bool sentryPopulationFull = sentryCapacity > 0 && sentryHardDeficit == 0;
+            bool sentryHardRefillPending = sentryEngagementActive && sentryHardDeficit > 0;
+
+            int maxCoreBurstAttempts = Math.Max(1, SentryCoreBurstMaxAttemptsPerEngagement);
+            bool openingCoreAttemptBudgetExhausted = _coreBurstAttemptsThisEngagement >= maxCoreBurstAttempts;
+            bool localOpeningCoreEstablished = sentryPlanValid && sentryCoreTarget > 0
+                && sentryLocalCoreRelevant >= sentryCoreTarget;
+            bool carriedFieldFullyRelevant = sentryPlanValid && sentryPlacementTarget >= sentryCapacity
+                && currentFightRelevantSentries >= sentryCapacity;
+            if (!_openingSentryBurstsClosedForEngagement
+                && sentryEngagementActive && sentryPopulationFull
+                && ((localOpeningCoreEstablished && (_sentryPlacedThisEngagement || carriedFieldFullyRelevant))
+                    || openingCoreAttemptBudgetExhausted))
+            {
+                _openingSentryBurstsClosedForEngagement = true;
+            }
+
+            _sentryFullFieldHold = _openingSentryBurstsClosedForEngagement
+                && sentryPopulationFull && sentryPlacementDeficit <= 0;
+
+            bool sentryCorePending = !_openingSentryBurstsClosedForEngagement
+                && sentryEngagementActive && sentryPlanValid && sentryCoreTarget > 0
+                && sentryLocalCoreDeficit > 0 && sentryPlacementDeficit > 0
+                && !_coreBurstAttemptedForEngagement
+                && !openingCoreAttemptBudgetExhausted
+                && CoreBurstRetryReady(now);
+
             bool mfdOnlyCorePriority = activeMfdOnlyTargets.Count > 0 && sentryCorePending;
             bool effectiveTrashIceblinkQueueDue = trashIceblinkQueueDue && !mfdOnlyCorePriority;
-            bool currentFightSentryFillPending = sentryEngagementActive && sentryTargetCount > 0
-                && sentryPlacementDeficit > 0 && !_sentryFullFieldHold;
-            bool currentFightSentryFillComplete = sentryEngagementActive && sentryTargetCount > 0
-                && sentryPlacementDeficit <= 0;
+            bool currentFightSentryFillPending = sentryEngagementActive && sentryCapacity > 0
+                && (sentryHardRefillPending
+                    || (sentryPlacementDeficit > 0 && !_sentryFullFieldHold));
 
-            bool sentryRelevanceOnlyDeficit = sentryEngagementActive
-                && sentryTargetCount > 0
-                && allOwnedSentries.Count >= sentryTargetCount
-                && currentFightRelevantSentries < sentryTargetCount;
+            bool sentryRelevanceOnlyDeficit = sentryEngagementActive && sentryPopulationFull
+                && sentryPlanValid && currentFightRelevantSentries < sentryPlacementTarget;
             if (sentryRelevanceOnlyDeficit)
             {
                 if (_sentryRelevanceDeficitSinceTick == int.MinValue)
@@ -1452,9 +1545,10 @@ namespace Turbo.Plugins.s7o
             }
             int sentryRelevanceDeficitAgeMs = _sentryRelevanceDeficitSinceTick == int.MinValue
                 ? 0 : Elapsed(_sentryRelevanceDeficitSinceTick, now);
-            int sentryRelevanceStabilityMs = _fullSentryFieldEstablishedForEngagement
+            int sentryRelevanceStabilityMs = _openingSentryBurstsClosedForEngagement
                 ? Math.Max(SentryRelevanceDeficitStabilityMs, SentryFullFieldRelevanceStabilityMs)
                 : SentryRelevanceDeficitStabilityMs;
+
             bool freshEliteSentryNeed = HasFreshReadyEliteSentryNeed(groundSupportElites, now);
             bool protectedSentryCoverageMissing = sentryPlacementDeficit > 0
                 && _runtime.ProtectedSentryCoverageMissing;
@@ -1462,30 +1556,78 @@ namespace Turbo.Plugins.s7o
                 && _runtime.PlayerSentryProtectionMissing;
             bool bossProtectedSentryNeed = protectedSentryCoverageMissing
                 && cluster.Elites.Any(m => m != null && m.Rarity == ActorRarity.Boss);
-            bool sentryRelevanceDeficitStable = !sentryRelevanceOnlyDeficit
+            bool sentryRelevanceDeficitStable = sentryHardRefillPending || sentryCorePending
+                || !sentryRelevanceOnlyDeficit
                 || freshEliteSentryNeed
+                || _runtime.EliteSentryCoverageMissing
                 || bossProtectedSentryNeed
+                || _runtime.UrgentBonusCircleSentryCoverageMissing
                 || sentryRelevanceDeficitAgeMs >= Math.Max(0, sentryRelevanceStabilityMs);
-            bool postFullFieldSentryReady = !_fullSentryFieldEstablishedForEngagement
+            bool postFullFieldSentryReady = sentryHardRefillPending
+                || !_openingSentryBurstsClosedForEngagement
                 || freshEliteSentryNeed
+                || _runtime.EliteSentryCoverageMissing
                 || bossProtectedSentryNeed
                 || playerSentryProtectionMissing
+                || _runtime.BonusCircleSentryCoverageMissing
                 || _lastSentryCastTick == int.MinValue
                 || Elapsed(_lastSentryCastTick, now) >= Math.Max(0, SentryFullFieldRecastMs);
-            bool sentrySetupActive = sentryPlanReady && sentryPlacementDeficit > 0
-                && sentryEngagementActive && sentryRelevanceDeficitStable
-                && (!_sentryFullFieldHold || protectedSentryCoverageMissing)
-                && SentryAvailable(local.Sentry);
-            if (sentryPlacementDeficit <= 0) ClearSentryRetry();
-            bool sentryRetryPending = sentrySetupActive && IsSentryRetryPending();
-            int sentryRetryAgeMs = sentryRetryPending ? Elapsed(_sentryRetryTick, now) : 0;
-            bool sentryRetryReady = !sentryRetryPending || sentryRetryAgeMs >= Math.Max(0, _sentryRetryDelayMs);
-            int backupIceblinkElites = s7o_ZDH_HelperState.AutoMultishot && local.Iceblink && local.WindChill
-                ? activePrimaryElites.Count(m => IsIceblinkBackupActionable(m, now)) : 0;
-            _runtime.SentryPlacementDeficit = sentryPlacementDeficit;
 
-            int mfdSetupHandoffAgeMs = _lastMfdSetupHandoffTick == int.MinValue
-                ? -1 : Elapsed(_lastMfdSetupHandoffTick, now);
+            int oldestSentryAgeMs = GetOldestOwnedSentryAgeMs(allOwnedSentries);
+            int sentryLifetimeMs = GetExpectedSentryLifetimeMs(local);
+            int rollingEarlyAgeMs = Math.Max(0, sentryLifetimeMs - Math.Max(0, SentryRollingRefreshLeadMs));
+            int rollingEmergencyAgeMs = Math.Max(rollingEarlyAgeMs,
+                sentryLifetimeMs - Math.Max(0, SentryRollingRefreshEmergencyLeadMs));
+            int sentryCharges = local.Sentry == null ? 0 : Math.Max(0, local.Sentry.Charges);
+            bool rollingFieldHealthy = _openingSentryBurstsClosedForEngagement
+                && sentryEngagementActive && sentryPopulationFull && sentryPlanValid
+                && sentryLocalCoreRelevant >= sentryCoreTarget;
+            bool sentryRollingRefreshPending = rollingFieldHealthy && oldestSentryAgeMs >= 0
+                && (oldestSentryAgeMs >= rollingEmergencyAgeMs
+                    || (oldestSentryAgeMs >= rollingEarlyAgeMs && sentryCharges >= 2));
+            bool sentryRollingRefreshReady = sentryRollingRefreshPending
+                && SentryAvailable(local.Sentry)
+                && (oldestSentryAgeMs >= rollingEmergencyAgeMs ? sentryCharges >= 1 : sentryCharges >= 2)
+                && (_lastSentryCastTick == int.MinValue
+                    || Elapsed(_lastSentryCastTick, now) >= Math.Max(SentryRecastMs, SentryFullFieldRecastMs));
+
+            bool populationFillContextReady = sentryPlanValid || bossPreSpawn || bossStandalone
+                || cluster.TrashLatched || cluster.Stable;
+            bool sentryPlanReady = sentryCapacity > 0
+                && (sentryPlanValid || (sentryHardRefillPending && populationFillContextReady));
+            bool sentrySetupDemand = sentryHardRefillPending
+                || sentryPlacementDeficit > 0 || sentryRollingRefreshPending;
+            bool sentrySetupActive = sentryPlanReady && sentrySetupDemand
+                && (!speedMode || speedLocalCombat)
+                && sentryEngagementActive && sentryRelevanceDeficitStable
+                && (!_sentryFullFieldHold || protectedSentryCoverageMissing || sentryRollingRefreshPending)
+                && SentryAvailable(local.Sentry);
+
+            if (!sentrySetupDemand) ClearSentryRetry();
+            bool sentryRetryPending = IsSentryRetryPending();
+            int sentryRetryAgeMs = sentryRetryPending ? Elapsed(_sentryRetryTick, now) : 0;
+            bool sentryRetryReady = !sentryRetryPending
+                || sentryRetryAgeMs >= Math.Max(0, _sentryRetryDelayMs);
+
+            _runtime.SentryPlacementDeficit = sentryPlacementDeficit;
+            _runtime.SentryCapacity = sentryCapacity;
+            _runtime.SentryOwned = sentryOwnedCount;
+            _runtime.SentryRelevant = currentFightRelevantSentries;
+            _runtime.SentryLocalCoreRelevant = sentryLocalCoreRelevant;
+            _runtime.SentryDistinctCoreRelevant = sentryDistinctCoreRelevant;
+            _runtime.SentryDistinctCoreDeficit = sentryDistinctCoreDeficit;
+            _runtime.SentryHardDeficit = sentryHardDeficit;
+            _runtime.SentryOldestAgeMs = oldestSentryAgeMs;
+            _runtime.SentryCharges = sentryCharges;
+            _runtime.SentryPlanValid = sentryPlanValid;
+            _runtime.OpeningSentryBurstsClosed = _openingSentryBurstsClosedForEngagement;
+            _runtime.CoreBurstAttempts = _coreBurstAttemptsThisEngagement;
+            _runtime.CoreBurstAttemptLimit = maxCoreBurstAttempts;
+            _runtime.SentryRelocationBackoff = !SentryRelocationBackoffReady(now);
+            _runtime.SentryRelocationSinkCount = _sentryRelocationSinkCount;
+            _runtime.SentryRollingRefreshDue = sentryRollingRefreshPending;
+            _runtime.SentryRollingRefreshReady = sentryRollingRefreshReady;
+
             bool blockedMfdYieldReady = sentryCorePending
                 && _mfdUnavailableSinceTick != int.MinValue
                 && Elapsed(_mfdUnavailableSinceTick, now) >= Math.Max(500, MfdSentryBlockedYieldMs);
@@ -1495,16 +1637,8 @@ namespace Turbo.Plugins.s7o
             bool bossPreSpawnMfdReady = !bossPreSpawn
                 || !s7o_ZDH_HelperState.AutoMarkedForDeath || !local.Valley
                 || HasAuthoritativeValleyAtPoint(cluster.CenterX, cluster.CenterY, now);
-            bool failedIceblinkRecoveryPending = _urgentRetryKind == CastKind.Multishot
-                && _urgentRetryTick != int.MinValue
-                && Elapsed(_urgentRetryTick, now) <= Math.Max(500, UrgentRetryLifetimeMs);
-            bool repeatedMissingIceblinkYield = sentryCorePending
-                && missingIceblinkElites > 0 && freshMissingIceblinkElites == 0
-                && _lastSupportKind == CastKind.Multishot
-                && !failedIceblinkRecoveryPending;
-            bool hardIceblinkWork = missingIceblinkElites > 0 && actionableIceblinkElites > 0
-                && !repeatedMissingIceblinkYield;
-            bool sentryBaseReady = currentFightSentryFillPending
+            bool hardIceblinkWork = missingIceblinkElites > 0 && actionableIceblinkElites > 0;
+            bool sentryBaseReady = (currentFightSentryFillPending || sentryRollingRefreshPending)
                 && (!speedMode || speedLocalCombat)
                 && sentryRelevanceDeficitStable
                 && postFullFieldSentryReady
@@ -1599,15 +1733,58 @@ namespace Turbo.Plugins.s7o
                 && hasMultishotFillTargets
                 && fillInterleaveMultishotAge >= Math.Max(0,
                     iceblinkRefreshAgeMs - Math.Max(0, EfficientMultishotLeadMs));
-            bool yieldIceblinkRetryToSentry = sentryFillReady
-                && missingIceblinkElites > 0
-                && freshMissingIceblinkElites == 0
-                && _lastSupportKind == CastKind.Multishot
-                && !effectiveTrashIceblinkQueueDue
-                && !bossEntangleDue;
+            bool eliteCoveragePending = sentryEngagementActive && sentryPlanValid
+                && _runtime.EliteSentryCoverageMissing;
+            bool urgentEliteCoveragePending = eliteCoveragePending
+                && HasUrgentReadyEliteSentryNeed(groundSupportElites, now);
+            bool urgentBonusCoveragePending = sentryEngagementActive && sentryPlanValid
+                && _runtime.UrgentBonusCircleSentryCoverageMissing;
+            bool eligibleBonusCoveragePending = sentryEngagementActive && sentryPlanValid
+                && _runtime.BonusCircleSentryCoverageMissing;
+            bool sentryFairnessDemand = sentryHardRefillPending
+                || eliteCoveragePending
+                || urgentBonusCoveragePending || eligibleBonusCoveragePending
+                || sentryRollingRefreshPending;
+            if (!sentryFairnessDemand) _sentryFairnessMultishotTurns = 0;
+            _sentryFairnessDemandActive = sentryFairnessDemand;
+
+            int sentryFairnessBudget = (urgentBonusCoveragePending || urgentEliteCoveragePending) ? 1
+                : sentryFairnessDemand ? 2 : 0;
+            bool sentryFairnessDue = sentryFairnessBudget > 0
+                && _sentryFairnessMultishotTurns >= sentryFairnessBudget;
+
+            bool hardSentryRecoveryReady = sentryHardRefillPending
+                && populationFillContextReady
+                && sentryEngagementActive && (!speedMode || speedLocalCombat)
+                && sentryRetryReady
+                && s7o_ZDH_HelperState.AutoSentry && local.Guardian
+                && local.Sentry != null && SentryAvailable(local.Sentry);
+            bool bonusSentryFairnessReady = (urgentBonusCoveragePending || eligibleBonusCoveragePending)
+                && sentryEngagementActive && (!speedMode || speedLocalCombat)
+                && sentryRelevanceDeficitStable && postFullFieldSentryReady && sentryRetryReady
+                && local.Sentry != null && SentryAvailable(local.Sentry);
+            bool rollingSentryFairnessReady = sentryRollingRefreshReady && sentryRetryReady;
+            bool protectedSentryWorkReady = protectedSentryCoverageMissing
+                && !speedSentryPassThrough
+                && sentryRelevanceDeficitStable && postFullFieldSentryReady && sentryRetryReady
+                && SentryAvailable(local.Sentry);
+            bool eliteSentryFairnessReady = eliteCoveragePending
+                && protectedSentryWorkReady && SentryRelocationBackoffReady(now);
+            bool sentryFairnessReady = hardSentryRecoveryReady || eliteSentryFairnessReady
+                || bonusSentryFairnessReady || rollingSentryFairnessReady;
+
+            _runtime.SentryFairnessDemand = sentryFairnessDemand;
+            _runtime.SentryFairnessTurns = _sentryFairnessMultishotTurns;
+            _runtime.SentryFairnessBudget = sentryFairnessBudget;
+            _runtime.SentryFairnessDue = sentryFairnessDue;
+
+            // Fresh Iceblink keeps first claim. During an unresolved Sentry contention episode,
+            // repeated Multishot turns are bounded so Waller/density misses cannot monopolize support.
+            bool yieldIceblinkRetryToSentry = sentryFairnessDue && sentryFairnessReady
+                && missingIceblinkElites > 0 && !bossEntangleDue;
             bool yieldProactiveIceblinkToSentry = sentrySetupActive && sentryRetryReady
                 && missingIceblinkElites == 0 && actionableIceblinkElites > 0
-                && _lastSupportKind == CastKind.Multishot;
+                && (sentryFairnessDue || _lastSupportKind == CastKind.Multishot);
             bool iceblinkAllowsSentryFill = missingIceblinkElites == 0 || yieldIceblinkRetryToSentry;
             int sentryRefreshLeadMs = Math.Max(0, IceblinkPrimaryPreemptLeadMs);
             bool eliteSentryRefreshPreempt = sentryFillReady && preemptIceblinkElites > 0;
@@ -1623,10 +1800,6 @@ namespace Turbo.Plugins.s7o
                 && !effectiveTrashIceblinkQueueDue
                 && !bossEntangleDue
                 && !sentryIceblinkPreempt;
-            bool protectedSentryWorkReady = protectedSentryCoverageMissing
-                && !speedSentryPassThrough
-                && sentryRelevanceDeficitStable && postFullFieldSentryReady && sentryRetryReady
-                && SentryAvailable(local.Sentry);
             bool sentryTimingWorkActive = sentryFillReady || mfdRetryYieldToSentry || protectedSentryWorkReady;
             bool initialDebuffBurst = openingMfdMissing
                 && _openingMultishotAttemptedForEngagement;
@@ -1673,12 +1846,6 @@ namespace Turbo.Plugins.s7o
                 }
                 return;
             }
-            if (combatMomentumRetryGapUrgentDebuff)
-            if (combatOpeningPriorityActive)
-            {
-                SuppressDhStrafePrimary(150);
-            }
-
             bool sentryBurstHardMfdReady = bossPreSpawn
                 ? bossPreSpawnMfdReady
                 : !strictMfdSentryGate;
@@ -1748,6 +1915,21 @@ namespace Turbo.Plugins.s7o
                 if (_sentryBurst.Mode != SentryBurstMode.None)
                     EndSentryBurst("boss iceblink priority", now);
 
+                // The RG keeps the same bounded Multishot/Sentry fairness contract as elite combat.
+                // A newly missing Iceblink still gets the first shot; repeated retries cannot hold a
+                // physically/core-deficient Guardian field below capacity indefinitely.
+                bool bossYieldToSentry = sentryFairnessDue && sentryFairnessReady
+                    && !combatMomentumRetryGapUrgentDebuff;
+                if (bossYieldToSentry
+                    && TryStartFairnessSentry(local, cluster, now,
+                        sentryHardRefillPending, eliteCoveragePending,
+                        urgentBonusCoveragePending, eligibleBonusCoveragePending,
+                        sentryRollingRefreshPending))
+                {
+                    return;
+                }
+                if (_supportPrimaryGateBlocked) return;
+
                 int bossIceblinkGap = Math.Max(100, BossUrgentRetryGapMs);
                 if (_lastCastFinishedTick == int.MinValue
                     || Elapsed(_lastCastFinishedTick, now) >= bossIceblinkGap)
@@ -1790,21 +1972,21 @@ namespace Turbo.Plugins.s7o
 
             if (_sentryBurst.Mode != SentryBurstMode.None)
             {
-                AdvanceSentryBurst(local, cluster, now, currentFightRelevantSentries,
-                    sentryTargetCount, sentryCoreTarget, sentryPlacementDeficit, sentryRetryReady,
+                AdvanceSentryBurst(local, cluster, now, sentryLocalCoreRelevant, sentryOwnedCount,
+                    sentryCapacity, sentryLocalCoreDeficit, sentryHardDeficit, sentryRetryReady,
                     sentryBurstContinuationDebuffsClear, _channelingPylonActive);
                 return;
             }
 
             // Initial MFD setup and MFD field quality are separate concerns. Once a real Valley
             // exists, a stable placement that covers additional elites remains actionable instead
-            // of being suppressed merely because opening setup is already satisfied. Missing
-            // Iceblink retains first claim; otherwise block new Sentry work until this upgrade gets
-            // its normal urgent cast opportunity.
+            // of being suppressed merely because opening setup is already satisfied. A newly lost
+            // Iceblink still gets first recovery attempt, but a major stable Valley upgrade may then
+            // preempt repeated Iceblink retries so completion/+2/focus gains cannot starve indefinitely.
             bool materialMfdUpgradeTurn = materialMfdUpgradeReady
                 && !openingCoreSetupPriority
                 && !activeOpeningCoreBurst
-                && !hardIceblinkWork;
+                && (!hardIceblinkWork || (majorMfdUpgradeReady && freshMissingIceblinkElites == 0));
             if (materialMfdUpgradeTurn
                 && s7o_ZDH_HelperState.AutoMarkedForDeath && local.Valley
                 && local.MarkedForDeath != null)
@@ -1821,21 +2003,21 @@ namespace Turbo.Plugins.s7o
                 if (_supportPrimaryGateBlocked) return;
             }
 
-            if (!_fullSentryFieldEstablishedForEngagement
+            if (!_openingSentryBurstsClosedForEngagement
                 && TryBeginCoreSentryBurst(local, cluster, now,
-                sentryBurstStartAllowed && sentryPlacementDeficit > 0 && postFullFieldSentryReady,
-                sentryEngagementActive, sentryRetryReady, sentryBurstStartDebuffsClear,
-                sentryRelevanceDeficitStable,
-                currentFightRelevantSentries, sentryCoreTarget, sentryTargetCount, _channelingPylonActive))
-                return;
-
-            if (!_sentryFullFieldHold
-                && TryBeginCompletionSentryBurst(local, cluster, now,
-                    sentryBurstStartAllowed && sentryPlacementDeficit > 0 && postFullFieldSentryReady,
+                    sentryBurstStartAllowed && sentryCorePending && postFullFieldSentryReady,
                     sentryEngagementActive, sentryRetryReady, sentryBurstStartDebuffsClear,
                     sentryRelevanceDeficitStable,
-                    currentFightRelevantSentries, sentryCoreTarget, sentryTargetCount,
-                    sentryPlacementDeficit, _channelingPylonActive))
+                    sentryLocalCoreRelevant, sentryCoreTarget, sentryCapacity, _channelingPylonActive))
+                return;
+
+            if (!_openingSentryBurstsClosedForEngagement && sentryHardDeficit > 0
+                && TryBeginCompletionSentryBurst(local, cluster, now,
+                    sentryBurstStartAllowed && postFullFieldSentryReady,
+                    sentryEngagementActive, sentryRetryReady, sentryBurstStartDebuffsClear,
+                    sentryRelevanceDeficitStable,
+                    sentryOwnedCount, sentryLocalCoreRelevant, sentryCoreTarget, sentryCapacity,
+                    sentryHardDeficit, _channelingPylonActive))
                 return;
 
             if (bossPreSpawn && currentFightSentryFillPending && sentryRetryReady
@@ -1861,6 +2043,9 @@ namespace Turbo.Plugins.s7o
                 urgentRetryActive = false;
             }
 
+            bool combatCadenceEntangleAvailable = highFrequencyMode && !manualDebuffHold
+                && s7o_ZDH_HelperState.AutoEntangle && local.Odyssey
+                && local.Entangle != null && SkillReady(local.Entangle);
             int movementWindow = manualDebuffHold ? 0
                 : bossStandalone ? BossMovementWindowMs
                     : highFrequencyMode ? AttackMovementWindowMs : MovementModeMovementWindowMs;
@@ -1894,11 +2079,18 @@ namespace Turbo.Plugins.s7o
                     : bossStandalone ? BossIceblinkMovementWindowMs
                         : highFrequencyMode ? AttackIceblinkMovementWindowMs : MovementIceblinkMovementWindowMs;
             }
+            else if (!manualDebuffHold && _runtime.UrgentBonusCircleSentryCoverageMissing)
+            {
+                movementWindow = 0;
+            }
             else if (!manualDebuffHold && sentryTimingWorkActive && protectedSentryCoverageMissing)
             {
                 movementWindow = bossStandalone ? BossMovementWindowMs
                     : highFrequencyMode ? AttackSentryMovementWindowMs : MovementSentryMovementWindowMs;
             }
+
+            if (combatCadenceEntangleAvailable && movementWindow > 0)
+                movementWindow = Math.Min(movementWindow, Math.Max(250, CombatCadenceMovementWindowMs));
 
             // In Combat, a direct primary pulse and a completed Helper transaction consume the
             // same movement slot. Urgent branches above may still shorten the window explicitly.
@@ -1928,6 +2120,7 @@ namespace Turbo.Plugins.s7o
             }
 
             if (trashFightActive && !_trashInitialMultishotDone && trashIceblinkDue > 0
+                && !(sentryFairnessDue && sentryFairnessReady)
                 && s7o_ZDH_HelperState.AutoMultishot && local.Iceblink && local.WindChill
                 && local.Multishot != null && TryStartMultishot(local, cluster, now, false, true))
             {
@@ -1956,6 +2149,21 @@ namespace Turbo.Plugins.s7o
                 {
                     return;
                 }
+                if (_supportPrimaryGateBlocked) return;
+            }
+
+            // A DPS must be able to stand on the elite under Guardian coverage. After the
+            // existing per-elite validation delay, the first two actionable re-cover attempts
+            // receive one narrow post-opening handoff so repeated MFD/Multishot traffic cannot
+            // leave an elite uncovered for seconds. Fresh Iceblink and Momentum retry ownership
+            // retain their existing first claim.
+            bool urgentEliteProtectionTurn = _openingSentryBurstsClosedForEngagement
+                && urgentEliteCoveragePending && eliteSentryFairnessReady
+                && freshMissingIceblinkElites == 0
+                && !combatMomentumRetryGapUrgentDebuff;
+            if (urgentEliteProtectionTurn)
+            {
+                if (TryStartSentry(local, cluster, now, true, false)) return;
                 if (_supportPrimaryGateBlocked) return;
             }
 
@@ -1996,6 +2204,16 @@ namespace Turbo.Plugins.s7o
 
                 }
 
+                if (yieldIceblinkRetryToSentry && !combatMomentumRetryGapUrgentDebuff
+                    && TryStartFairnessSentry(local, cluster, now,
+                        sentryHardRefillPending, eliteCoveragePending,
+                        urgentBonusCoveragePending, eligibleBonusCoveragePending,
+                        sentryRollingRefreshPending))
+                {
+                    return;
+                }
+                if (_supportPrimaryGateBlocked) return;
+
                 if (s7o_ZDH_HelperState.AutoMultishot && local.Iceblink && local.WindChill && local.Multishot != null
                     && TryStartMultishot(local, cluster, now, true))
                 {
@@ -2010,14 +2228,6 @@ namespace Turbo.Plugins.s7o
                 if (urgentMfdBeforeSentry
                     && s7o_ZDH_HelperState.AutoMarkedForDeath && local.Valley
                     && local.MarkedForDeath != null && TryStartMarkedForDeathFair(local, cluster, now, true, false))
-                {
-                    return;
-                }
-                if (_supportPrimaryGateBlocked) return;
-
-                if (yieldIceblinkRetryToSentry
-                    && s7o_ZDH_HelperState.AutoSentry && local.Guardian && local.Sentry != null
-                    && TryStartSentry(local, cluster, now, false, true))
                 {
                     return;
                 }
@@ -2041,6 +2251,17 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
+            bool prioritySentryRepair = sentryFairnessDue && sentryFairnessReady;
+            if (prioritySentryRepair
+                && TryStartFairnessSentry(local, cluster, now,
+                    sentryHardRefillPending, eliteCoveragePending,
+                    urgentBonusCoveragePending, eligibleBonusCoveragePending,
+                    sentryRollingRefreshPending))
+            {
+                return;
+            }
+            if (_supportPrimaryGateBlocked) return;
+
             if (fillInterleaveMultishotTurn
                 && s7o_ZDH_HelperState.AutoMultishot && local.Iceblink && local.WindChill
                 && local.Multishot != null
@@ -2053,7 +2274,9 @@ namespace Turbo.Plugins.s7o
             if (fillSentryTurn
                 && s7o_ZDH_HelperState.AutoSentry && local.Guardian && local.Sentry != null)
             {
-                if (TryStartSentry(local, cluster, now, false, true))
+                if (TryStartSentry(local, cluster, now, false,
+                    countSetup: !_openingSentryBurstsClosedForEngagement,
+                    forcePopulationFill: sentryHardRefillPending))
                 {
                     return;
                 }
@@ -2092,7 +2315,7 @@ namespace Turbo.Plugins.s7o
             if (_supportPrimaryGateBlocked) return;
 
             bool sentryPlannerTried = false;
-            if ((bossStandalone || currentFightSentryFillComplete) && protectedSentryWorkReady
+            if ((bossStandalone || sentryPopulationFull) && protectedSentryWorkReady
                 && s7o_ZDH_HelperState.AutoSentry && local.Guardian && local.Sentry != null)
             {
                 sentryPlannerTried = true;
@@ -2134,17 +2357,6 @@ namespace Turbo.Plugins.s7o
             }
             if (_supportPrimaryGateBlocked) return;
 
-            bool sentryMaintenanceReady = !bossStandalone && currentFightSentryFillComplete
-                && sentryPlacementDeficit > 0 && sentryRetryReady && postFullFieldSentryReady
-                && SentryMaintenanceBackoffReady(now)
-                && Elapsed(_lastSentryCastTick, now) >= Math.Max(SentryRecastMs, SentryMaintenanceRepositionMs)
-                && s7o_ZDH_HelperState.AutoSentry && local.Guardian && local.Sentry != null
-                && SentryAvailable(local.Sentry);
-            if (sentryMaintenanceReady
-                && TryStartSentry(local, cluster, now, false, false, maintenance: true))
-                return;
-            if (_supportPrimaryGateBlocked) return;
-
             if (bossStandalone
                 && sentrySetupActive
                 && sentryRetryReady
@@ -2164,6 +2376,12 @@ namespace Turbo.Plugins.s7o
             {
                 return;
             }
+
+            // Stable Combat fallback: use the user's live cursor rather than autosnapping. This
+            // fills otherwise-empty movement slots with a short Entangle pulse, giving predictable
+            // stop/go steering while every real Multishot/MFD/Sentry/Momentum priority above wins.
+            if (combatCadenceEntangleAvailable && TryStartCombatCadenceEntangle(local, now))
+                return;
 
         }
 
@@ -2396,8 +2614,6 @@ namespace Turbo.Plugins.s7o
                 }
             }
 
-            int exitAge = _speedCombatLeavingTick == int.MinValue
-                ? 0 : Elapsed(_speedCombatLeavingTick, now);
             return _speedCombatEngaged;
         }
 
@@ -2718,6 +2934,17 @@ namespace Turbo.Plugins.s7o
             return true;
         }
 
+        private bool TryStartCombatCadenceEntangle(ZdhLoadout local, int now)
+        {
+            if (local == null || local.Entangle == null || !SkillReady(local.Entangle)
+                || Hud == null || Hud.Window == null) return false;
+
+            IScreenCoordinate cursorAim = Hud.Window.CreateScreenCoordinate(Hud.Window.CursorX, Hud.Window.CursorY);
+            return cursorAim != null && PointInsideCastArea(cursorAim.X, cursorAim.Y)
+                && StartCast(CastKind.Entangle, local.Entangle, 0, cursorAim, now,
+                    "Entangle Cadence", useCurrentCursorAim: true);
+        }
+
         private int GetIceblinkRefreshAgeMs()
         {
             return _bossStandaloneActive ? BossMultishotMaintenanceMs
@@ -2769,16 +2996,11 @@ namespace Turbo.Plugins.s7o
                     < Math.Max(1000, IceblinkExpectedDurationMs + IceblinkValidationSlackMs);
         }
 
-        private bool IsIceblinkBackupActionable(IMonster monster, int now)
-        {
-            return false;
-        }
-
         private bool IsIceblinkActionable(IMonster monster, int now)
         {
             if (monster == null || HasPendingMultishotValidation(monster.AcdId, now)) return false;
             if (!IsIceblinkDue(monster, now)) return false;
-            if (HasPendingIceblinkValidation(monster, now)) return IsIceblinkBackupActionable(monster, now);
+            if (HasPendingIceblinkValidation(monster, now)) return false;
             TargetState state = GetTargetState(monster, now);
             int retryMs = HasIceblink(monster)
                 ? MultishotRefreshRetryMs
@@ -2936,10 +3158,16 @@ namespace Turbo.Plugins.s7o
             bool singleImportantDue = !densityTimer && actionableDueAcds.Count == 1
                 && primaryElites.Any(m => m != null
                     && actionableDueAcds.Contains(m.AcdId) && IsImportantDebuffTarget(m));
-            IMonster closeRangeDirectTarget = densityTimer ? null : primaryElites
-                .Where(m => m != null && actionableDueAcds.Contains(m.AcdId)
+            // At point-blank range, aim directly through a due elite's world-space core.
+            // Never let a nearby elite that is already covered steal the ray from the elites
+            // that actually made Multishot due; otherwise the scheduler can retry forever in
+            // the wrong direction while the missing targets remain unchanged.
+            IMonster closeRangeDirectTarget = densityTimer || recoveryFocus != null ? null : primaryElites
+                .Where(m => m != null && plannedDueAcds.Contains(m.AcdId)
                     && IsCloseRangeMultishotDirectTarget(local.Player, m))
                 .OrderByDescending(m => TargetPriority(m, true))
+                .ThenBy(m => Distance(local.Player, m))
+                .ThenBy(m => m.AcdId)
                 .FirstOrDefault();
             MultishotPlan plan = closeRangeDirectTarget == null ? null
                 : BuildDirectMultishotFallbackPlan(local.Player, closeRangeDirectTarget, plannedDueAcds);
@@ -2976,7 +3204,7 @@ namespace Turbo.Plugins.s7o
             if (primaryElites.Count == 0 && dueAcds.Count > 0)
                 minimumSettledCoverage = minimumTrashCoverage;
             bool efficientCast = efficientWindow && !maintenance;
-            if (efficientCast)
+            if (efficientCast && !closeRangeDirect)
             {
                 int coverageFloor = primaryElites.Count > 0 ? 1 : 3;
                 int requiredCoverage = Math.Max(coverageFloor, (int)Math.Ceiling(
@@ -2985,7 +3213,7 @@ namespace Turbo.Plugins.s7o
                 minimumSettledCoverage = Math.Max(minimumSettledCoverage, requiredCoverage);
             }
 
-            if (!densityTimer && !maintenance && !efficientCast
+            if (!densityTimer && !maintenance && !efficientCast && !closeRangeDirect
                 && !IsIceblinkActionable(plan.Primary, now)) return false;
             if (!EnsureSupportPrimaryReady(CastKind.Multishot, false, now)) return false;
             if (!StartCast(CastKind.Multishot, local.Multishot, plan.Primary.AcdId, plan.Aim, now,
@@ -3136,7 +3364,6 @@ namespace Turbo.Plugins.s7o
                             GetTargetState(appliedElite, now).ConsecutiveMultishotMisses = 0;
                     }
                     CommitPendingIceblinkRefresh(pending, now);
-                    int effectMs = Elapsed(pending.InputTick, now);
                     _pendingMultishots.Remove(pending);
                     if (_urgentRetryKind == CastKind.Multishot)
                     {
@@ -3276,6 +3503,8 @@ namespace Turbo.Plugins.s7o
                 _urgentRetryKind = CastKind.Multishot;
                 _urgentRetryTick = now;
             }
+            if (_sentryFairnessDemandActive)
+                _sentryFairnessMultishotTurns = Math.Min(8, _sentryFairnessMultishotTurns + 1);
             _lastSupportKind = CastKind.Multishot;
             _lastCastFinishedTick = now;
             ResetCast();
@@ -3635,9 +3864,11 @@ namespace Turbo.Plugins.s7o
             return placement;
         }
 
-        private bool HasMissingPrimaryMfdCoverage(IPlayer zdh, int now, out bool materialUpgradeReady)
+        private bool HasMissingPrimaryMfdCoverage(IPlayer zdh, int now, out bool materialUpgradeReady,
+            out bool majorUpgradeReady)
         {
             materialUpgradeReady = false;
+            majorUpgradeReady = false;
             List<IMonster> targets = GetActiveMfdSupportTargets(zdh, now);
             if (targets.Count == 0)
             {
@@ -3688,6 +3919,8 @@ namespace Turbo.Plugins.s7o
                         ? Math.Max(MfdEliteGainRecastMs, MfdSingleEliteGainRecastMs)
                         : MfdEliteGainRecastMs;
                 materialUpgradeReady = gainStable && Elapsed(_lastMfdCastTick, now) >= recast;
+                majorUpgradeReady = materialUpgradeReady
+                    && (eliteGainCount >= 2 || completesEliteCoverage || priorityGain);
             }
             else
             {
@@ -3774,6 +4007,18 @@ namespace Turbo.Plugins.s7o
                 && IsFreshSupportElite(elite, now) && EliteSentryCoverageReady(elite, now));
         }
 
+        private bool HasUrgentReadyEliteSentryNeed(IEnumerable<IMonster> elites, int now)
+        {
+            foreach (IMonster elite in elites ?? Enumerable.Empty<IMonster>())
+            {
+                if (elite == null || !EliteSentryCoverageReady(elite, now)) continue;
+                TargetState state;
+                if (!_targets.TryGetValue(elite.AcdId, out state)) continue;
+                if (state.SentryCoverageAttempts < EliteSentryUrgentAttemptLimit) return true;
+            }
+            return false;
+        }
+
         private bool HasCurrentInitialMfdSetupCoverage(CombatCluster cluster,
             bool trashFightActive, int now)
         {
@@ -3844,33 +4089,6 @@ namespace Turbo.Plugins.s7o
             _sentryRetryReason = string.Empty;
         }
 
-        private bool SentryMaintenanceBackoffReady(int now)
-        {
-            return _sentryMaintenanceBackoffTick == int.MinValue
-                || Elapsed(_sentryMaintenanceBackoffTick, now) >= Math.Max(0, _sentryMaintenanceBackoffDelayMs);
-        }
-
-        private void ClearSentryMaintenanceBackoff()
-        {
-            _sentryMaintenanceTerrainBackoff = false;
-            _sentryMaintenanceFailureCount = 0;
-            _sentryMaintenanceBackoffTick = int.MinValue;
-            _sentryMaintenanceBackoffDelayMs = 0;
-        }
-
-        private void BackoffSentryMaintenance(int now, string reason)
-        {
-            _sentryMaintenanceFailureCount = Math.Min(
-                Math.Max(1, SentryMaintenanceMaxFailures),
-                _sentryMaintenanceFailureCount + 1);
-            _sentryMaintenanceBackoffTick = now;
-            _sentryMaintenanceBackoffDelayMs = _sentryMaintenanceFailureCount >= Math.Max(1, SentryMaintenanceMaxFailures)
-                ? Math.Max(SentryMaintenanceRelocationBackoffMs, SentryMaintenanceHardBackoffMs)
-                : Math.Max(600, SentryMaintenanceRelocationBackoffMs);
-            _sentryMaintenanceTerrainBackoff = !string.IsNullOrEmpty(reason)
-                && reason.IndexOf("relocat", StringComparison.OrdinalIgnoreCase) >= 0;
-        }
-
         private bool SentryRelocationBackoffReady(int now)
         {
             return _sentryRelocationBackoffTick == int.MinValue
@@ -3897,7 +4115,6 @@ namespace Turbo.Plugins.s7o
             _sentryRelocationAnchorY = 0;
             _sentryRelocationContextValid = false;
             if (IsTerrainSentryRetry()) ClearSentryRetry();
-            if (_sentryMaintenanceTerrainBackoff) ClearSentryMaintenanceBackoff();
         }
 
         private void UpdateSentryRelocationContext(IPlayer player, CombatCluster cluster)
@@ -4142,109 +4359,154 @@ namespace Turbo.Plugins.s7o
         }
 
         private int GetSentryPlacementDeficit(ZdhLoadout local, CombatCluster cluster, int now,
-            List<IActor> sentries, out int effectiveOwned)
+            List<IActor> sentries, out int effectiveOwned, out int distinctRelevant, out bool planValid)
         {
             effectiveOwned = 0;
+            distinctRelevant = 0;
+            planValid = false;
             _runtime.ProtectedSentryCoverageMissing = false;
+            _runtime.EliteSentryCoverageMissing = false;
             _runtime.PlayerSentryProtectionMissing = false;
+            _runtime.BonusCircleSentryCoverageMissing = false;
+            _runtime.UrgentBonusCircleSentryCoverageMissing = false;
             _runtime.SentryDesired = 0;
             if (local == null || cluster == null || !local.Guardian || local.Sentry == null) return 0;
 
             List<Placement> desired = BuildDesiredSentryPlacements(local, cluster, now, false);
             if (desired.Count == 0) return 0;
 
+            planValid = true;
             sentries = sentries ?? new List<IActor>();
             int targetCount = Math.Min(GetDesiredSentryCount(local), desired.Count);
-            int coreDesired = Math.Min(Math.Max(1, InitialSentryFieldCount), targetCount);
             effectiveOwned = Math.Min(targetCount, CountRelevantSentries(desired, sentries));
-            int distinctOwned = Math.Min(targetCount, CountDistinctRelevantSentries(desired, sentries));
-            int severeStackPairs = CountSeverelyStackedSentries(desired, sentries);
-            bool severeStacking = severeStackPairs >= Math.Max(1, SentrySevereOverlapPairThreshold);
+            distinctRelevant = Math.Min(targetCount, CountDistinctRelevantSentries(desired, sentries));
 
             bool playerProtectionMissing = desired
-                .Where(placement => placement != null && placement.Label != null
-                    && (placement.Label.StartsWith("Sentry DPS", StringComparison.Ordinal)
-                        || placement.Label.StartsWith("Sentry ZDH", StringComparison.Ordinal)))
+                .Where(IsPlayerProtectionPlacement)
                 .Any(placement => !IsSentryNear(sentries, placement.WorldX, placement.WorldY, GuardianRadius));
+            float bonusCircleCoverageRadius = BonusCircleFullCoverageCenterRadius();
+            bool bonusCircleCoverageMissing = desired
+                .Where(IsBonusCircleSentryPlacement)
+                .Any(placement => !IsSentryNear(sentries, placement.WorldX, placement.WorldY, bonusCircleCoverageRadius));
+            bool urgentBonusCircleCoverageMissing = desired
+                .Where(IsUrgentBonusCircleSentryPlacement)
+                .Any(placement => !IsSentryNear(sentries, placement.WorldX, placement.WorldY, bonusCircleCoverageRadius));
 
-            int eliteCoverageSlots = Math.Min(Math.Max(0, EliteSentryCoverageMaxPlacements), targetCount);
-            bool eliteCoverageMissing = BuildEliteSentryCoveragePlacements(
-                    local, cluster, now, eliteCoverageSlots)
-                .Any(placement => !IsSentryNear(sentries,
-                    placement.WorldX, placement.WorldY,
-                    Math.Min(GuardianRadius, SentryEliteComfortRadius)));
+            float eliteComfort = Math.Min(GuardianRadius, SentryEliteComfortRadius);
+            bool eliteCoverageMissing = desired
+                .Where(IsEliteSentryCoveragePlacement)
+                .Any(placement => placement.CoveredEliteAcds.Any(acd =>
+                    {
+                        IMonster elite = FindMonster(acd);
+                        return elite != null && EliteSentryCoverageReady(elite, now);
+                    })
+                    && !IsSentryNear(sentries, placement.WorldX, placement.WorldY, eliteComfort));
 
+            _runtime.EliteSentryCoverageMissing = eliteCoverageMissing;
             _runtime.PlayerSentryProtectionMissing = playerProtectionMissing;
-            _runtime.ProtectedSentryCoverageMissing = playerProtectionMissing || eliteCoverageMissing;
+            _runtime.BonusCircleSentryCoverageMissing = bonusCircleCoverageMissing;
+            _runtime.UrgentBonusCircleSentryCoverageMissing = urgentBonusCircleCoverageMissing;
+            _runtime.ProtectedSentryCoverageMissing = playerProtectionMissing || bonusCircleCoverageMissing || eliteCoverageMissing;
             _runtime.SentryDesired = targetCount;
 
             int countDeficit = Math.Max(0, targetCount - effectiveOwned);
             if (countDeficit > 0) return countDeficit;
 
-            // Before the first complete field, require distinct core placements.
-            // Afterward, ordinary maintenance may refill a field whose relevant coverage moved.
-            // The scheduler still prevents the initial three-Sentry core from re-arming after 5/5.
-            if (!_fullSentryFieldEstablishedForEngagement)
-            {
-                int distinctCoreDeficit = Math.Max(0, coreDesired - distinctOwned);
-                if (distinctCoreDeficit > 0) return distinctCoreDeficit;
-            }
-
-            return playerProtectionMissing || eliteCoverageMissing || severeStacking ? 1 : 0;
+            // Spread/stacking is diagnostic and replacement quality, not an independent reason
+            // to cast. Concrete player/bonus/elite coverage remains functional placement demand.
+            return playerProtectionMissing || bonusCircleCoverageMissing || eliteCoverageMissing ? 1 : 0;
         }
 
         private bool TryStartSentry(ZdhLoadout local, CombatCluster cluster, int now, bool emergencyOnly,
             bool countSetup = false, bool sentryBurstChild = false, bool bypassBurstRecast = false,
-            bool maintenance = false)
+            bool forcePopulationFill = false, bool rollingRefresh = false)
         {
             if (!SentryRelocationBackoffReady(now)) return false;
-            int desiredCount = local == null ? 0 : GetDesiredSentryCount(local);
+            if (local == null || cluster == null || local.Sentry == null || !local.Guardian
+                || !SentryAvailable(local.Sentry))
+                return false;
+
+            int desiredCount = GetDesiredSentryCount(local);
             _runtime.SentryDesired = 0;
             if (countSetup && _sentryFullFieldHold) return false;
-            int recastMs = countSetup
-                ? Math.Max(100, InitialSetupBurstGapMs) : SentryRecastMs;
-            if (cluster == null || !SentryAvailable(local.Sentry)) return false;
+
+            int recastMs = countSetup ? Math.Max(100, InitialSetupBurstGapMs) : SentryRecastMs;
             if (!bypassBurstRecast && Elapsed(_lastSentryCastTick, now) < recastMs) return false;
 
             List<IActor> allSentries = GetOwnedSentries();
-            List<IActor> sentries = allSentries.Where(a => a != null && a.IsOnScreen).ToList();
             List<Placement> desired = BuildDesiredSentryPlacements(local, cluster, now, emergencyOnly);
-            if (desired.Count == 0) return false;
-
             int targetCount = Math.Min(desiredCount, desired.Count);
-            int effectiveOwned = CountRelevantSentries(desired, allSentries);
-            bool eliteTriangleCore = desired.Count >= 3
-                && desired.Take(3).All(x => x != null
-                    && string.Equals(x.Label, "Sentry Field Elite Coverage Triangle", StringComparison.Ordinal));
-            Placement missing = countSetup && effectiveOwned == 0 && !eliteTriangleCore
-                ? CreateRecentMfdSentryAnchor(cluster, allSentries, now) : null;
-            if (missing != null && IsRejectedSentryPlacement(missing, now))
-                missing = null;
-            if (missing == null)
-                missing = FindMissingDesiredSentryPlacement(desired, allSentries, targetCount, emergencyOnly, now);
+            int effectiveOwned = targetCount > 0 ? CountRelevantSentries(desired, allSentries) : 0;
+
+            Placement missing = null;
+            if (rollingRefresh)
+            {
+                missing = FindRollingSentryRefreshPlacement(
+                    cluster, desired, allSentries, desiredCount, now);
+            }
+            else if (targetCount > 0)
+            {
+                bool eliteTriangleCore = desired.Count >= 3
+                    && desired.Take(3).All(x => x != null
+                        && string.Equals(x.Label, "Sentry Field Elite Coverage Triangle", StringComparison.Ordinal));
+                missing = countSetup && effectiveOwned == 0 && !eliteTriangleCore
+                    ? CreateRecentMfdSentryAnchor(cluster, allSentries, now) : null;
+                if (missing != null && IsRejectedSentryPlacement(missing, now))
+                    missing = null;
+                if (missing == null)
+                    missing = FindMissingDesiredSentryPlacement(
+                        desired, allSentries, targetCount, emergencyOnly, now);
+            }
+
+            if (missing == null && forcePopulationFill && allSentries.Count < desiredCount)
+            {
+                missing = FindSafePopulationFillPlacement(
+                    cluster, desired, allSentries, Math.Min(desiredCount, allSentries.Count + 1), now);
+            }
+
             _runtime.SentryDesired = targetCount;
-            int coreDesired = Math.Min(Math.Max(1, InitialSentryFieldCount), targetCount);
             _runtime.SentryPlacementDeficit = Math.Max(0, targetCount - effectiveOwned);
             if (missing == null) return false;
 
             string sentryLabel = string.IsNullOrEmpty(missing.Label) ? "Sentry Field" : missing.Label;
             if (countSetup) sentryLabel = "Sentry Count Setup";
-            if (!sentryBurstChild && !EnsureSupportPrimaryReady(CastKind.Sentry, countSetup, now)) return false;
+            else if (rollingRefresh) sentryLabel = "Sentry Rolling Refresh";
+            else if (forcePopulationFill && allSentries.Count < desiredCount)
+                sentryLabel = "Sentry Population Fill";
+
+            if (!sentryBurstChild && !EnsureSupportPrimaryReady(CastKind.Sentry, countSetup, now))
+                return false;
             if (!StartCast(CastKind.Sentry, local.Sentry, missing.TargetAcd, missing.Screen, now,
-                sentryLabel,
-                missing.WorldX, missing.WorldY, null, sentryBurstChild)) return false;
+                sentryLabel, missing.WorldX, missing.WorldY, null, sentryBurstChild))
+                return false;
+
             _cast.ExpectedWorldZ = missing.WorldZ;
+            _cast.SentryRequiredMatchRadius = Math.Max(1f, DesiredSentryMatchRadius(missing));
             foreach (uint acd in missing.CoveredEliteAcds)
                 if (acd != 0) _cast.SentryCoverageAcds.Add(acd);
             _cast.SentrySlot = missing.SentrySlot;
-            _cast.SentryMaintenance = maintenance;
             return true;
+        }
+
+        private bool TryStartFairnessSentry(ZdhLoadout local, CombatCluster cluster, int now,
+            bool hardPopulation, bool eliteCoverage, bool urgentBonus,
+            bool eligibleBonus, bool rollingRefresh)
+        {
+            if (hardPopulation && TryStartSentry(
+                local, cluster, now, false, forcePopulationFill: true))
+                return true;
+            if ((eliteCoverage || urgentBonus || eligibleBonus)
+                && TryStartSentry(local, cluster, now, true))
+                return true;
+            return rollingRefresh && TryStartSentry(
+                local, cluster, now, false, rollingRefresh: true);
         }
 
         private bool TryStartSentryDuringMfdRetry(ZdhLoadout local, CombatCluster cluster, int now, bool allowed)
         {
             if (!allowed || local == null || local.Sentry == null || !local.Guardian) return false;
-            if (!TryStartSentry(local, cluster, now, false, true)) return false;
+            if (!TryStartSentry(local, cluster, now, false,
+                countSetup: !_openingSentryBurstsClosedForEngagement)) return false;
             return true;
         }
 
@@ -4279,7 +4541,6 @@ namespace Turbo.Plugins.s7o
             _engagementStartedTick = int.MinValue;
             _lastSupportKind = CastKind.None;
             _lastMfdCastTick = int.MinValue;
-            _lastMfdSetupHandoffTick = int.MinValue;
             _lastUnverifiedMfdTick = int.MinValue;
             _mfdUnavailableSinceTick = int.MinValue;
             _hardMfdFailureStreak = 0;
@@ -4295,14 +4556,47 @@ namespace Turbo.Plugins.s7o
             _runtime.SentryAnchorX = 0;
             _runtime.SentryAnchorY = 0;
             _runtime.SentryPlacementDeficit = 0;
+            _runtime.SentryCapacity = 0;
+            _runtime.SentryOwned = 0;
+            _runtime.SentryRelevant = 0;
+            _runtime.SentryLocalCoreRelevant = 0;
+            _runtime.SentryDistinctCoreRelevant = 0;
+            _runtime.SentryDistinctCoreDeficit = 0;
+            _runtime.SentryHardDeficit = 0;
+            _runtime.SentryOldestAgeMs = -1;
+            _runtime.SentryCharges = 0;
+            _runtime.SentryPlanValid = false;
+            _runtime.OpeningSentryBurstsClosed = false;
+            _runtime.CoreBurstAttempts = 0;
+            _runtime.CoreBurstAttemptLimit = Math.Max(1, SentryCoreBurstMaxAttemptsPerEngagement);
+            _runtime.SentryRelocationBackoff = false;
+            _runtime.SentryRelocationSinkCount = 0;
+            _runtime.SentryRollingRefreshDue = false;
+            _runtime.SentryRollingRefreshReady = false;
+            _runtime.SentryFairnessDemand = false;
+            _runtime.SentryFairnessTurns = 0;
+            _runtime.SentryFairnessBudget = 0;
+            _runtime.SentryFairnessDue = false;
             _runtime.ProtectedSentryCoverageMissing = false;
+            _runtime.EliteSentryCoverageMissing = false;
+            _runtime.EliteSentryUncoveredCount = 0;
+            _runtime.EliteSentryReadyCount = 0;
+            _runtime.EliteSentryPriorityAcd = 0;
+            _runtime.EliteSentryPriorityAgeMs = -1;
+            _runtime.EliteSentryPriorityDelayMs = -1;
+            _runtime.EliteSentryPriorityAttempts = 0;
+            _runtime.EliteSentryUrgent = false;
             _runtime.PlayerSentryProtectionMissing = false;
+            _runtime.BonusCircleSentryCoverageMissing = false;
+            _runtime.UrgentBonusCircleSentryCoverageMissing = false;
             _coreBurstAttemptedForEngagement = false;
             _coreBurstAttemptsThisEngagement = 0;
             _coreBurstRetryAfterTick = int.MinValue;
-            _coreBurstBelowTargetSinceTick = int.MinValue;
             _sentryRelevanceDeficitSinceTick = int.MinValue;
-            _fullSentryFieldEstablishedForEngagement = false;
+            _openingSentryBurstsClosedForEngagement = false;
+            _sentryPlacedThisEngagement = false;
+            _sentryFairnessMultishotTurns = 0;
+            _sentryFairnessDemandActive = false;
             _sentryFullFieldHold = false;
             _initialMfdSetupSatisfiedForEngagement = false;
             ResetEngagementSupportState();
@@ -4317,12 +4611,10 @@ namespace Turbo.Plugins.s7o
             _lastCompletionBurstAttemptAnchorValid = false;
             _lastCompletionBurstAttemptTick = int.MinValue;
             ClearSentryRetry();
-            ClearSentryMaintenanceBackoff();
             ClearSentryRelocationState();
         }
 
-        private void UpdateSentryBurstEngagement(CombatCluster cluster, bool sentryEngagementActive,
-            int currentRelevant, int coreTarget, int now)
+        private void UpdateSentryBurstEngagement(CombatCluster cluster, bool sentryEngagementActive, int now)
         {
             if (!sentryEngagementActive || cluster == null)
             {
@@ -4339,14 +4631,16 @@ namespace Turbo.Plugins.s7o
                 _coreBurstAttemptedForEngagement = false;
                 _coreBurstAttemptsThisEngagement = 0;
                 _coreBurstRetryAfterTick = int.MinValue;
-                _coreBurstBelowTargetSinceTick = int.MinValue;
-                _fullSentryFieldEstablishedForEngagement = false;
+                _sentryRelevanceDeficitSinceTick = int.MinValue;
+                _openingSentryBurstsClosedForEngagement = false;
+                _sentryPlacedThisEngagement = false;
+                _sentryFairnessMultishotTurns = 0;
+                _sentryFairnessDemandActive = false;
                 _sentryFullFieldHold = false;
                 _initialMfdSetupSatisfiedForEngagement = false;
                 ResetEngagementSupportState();
                 _engagementStartedTick = now;
                 ClearSentryRetry();
-                ClearSentryMaintenanceBackoff();
                 ClearSentryRelocationState();
                 _coreBurstAnchorValid = true;
                 _coreBurstAnchorX = cluster.CenterX;
@@ -4356,37 +4650,6 @@ namespace Turbo.Plugins.s7o
                 _lastCompletionBurstAttemptRelevant = -1;
                 _lastCompletionBurstAttemptAnchorValid = false;
                 _lastCompletionBurstAttemptTick = int.MinValue;
-            }
-
-            bool coreBelowTarget = coreTarget > 0 && currentRelevant < coreTarget;
-            if (coreBelowTarget)
-            {
-                if (_coreBurstBelowTargetSinceTick == int.MinValue)
-                    _coreBurstBelowTargetSinceTick = now;
-
-                int lossAge = Elapsed(_coreBurstBelowTargetSinceTick, now);
-                if (!_fullSentryFieldEstablishedForEngagement
-                    && _coreBurstAttemptedForEngagement
-                    && _sentryBurst.Mode == SentryBurstMode.None
-                    && lossAge >= Math.Max(0, SentryCoreLossRearmMs))
-                {
-                    _coreBurstAttemptedForEngagement = false;
-                    _coreBurstAttemptsThisEngagement = 0;
-                    _coreBurstRetryAfterTick = int.MinValue;
-                    _coreBurstAnchorValid = true;
-                    _coreBurstAnchorX = cluster.CenterX;
-                    _coreBurstAnchorY = cluster.CenterY;
-
-                    _lastCompletionBurstAttemptCharges = -1;
-                    _lastCompletionBurstAttemptRelevant = -1;
-                    _lastCompletionBurstAttemptAnchorValid = false;
-
-                    _coreBurstBelowTargetSinceTick = int.MinValue;
-                }
-            }
-            else
-            {
-                _coreBurstBelowTargetSinceTick = int.MinValue;
             }
 
             _wasSentryEngagementActive = true;
@@ -4475,11 +4738,6 @@ namespace Turbo.Plugins.s7o
                 && Reached(now, _sentryBurst.AbsoluteDeadlineTick);
         }
 
-        private void PublishSentryBurstState(int now, int currentRelevant = -1, int currentCharges = -1)
-        {
-            bool active = _sentryBurst.Mode != SentryBurstMode.None;
-        }
-
         private bool BeginSentryBurst(SentryBurstMode mode, ZdhLoadout local, CombatCluster cluster,
             int now, int plannedSentries, int currentRelevant, int targetCount)
         {
@@ -4524,8 +4782,6 @@ namespace Turbo.Plugins.s7o
                 _lastCompletionBurstAttemptTick = now;
             }
 
-            PublishSentryBurstState(now, currentRelevant, local.Sentry.Charges);
-
             SuppressDhStrafePrimary(Math.Max(SentrySetupPreemptLeaseMs, SentryBurstAcquireMaxMs + 120));
             RequestDhStrafePause(Math.Max(120, maxMs + 120));
             return true;
@@ -4541,9 +4797,10 @@ namespace Turbo.Plugins.s7o
         private bool TryBeginCoreSentryBurst(ZdhLoadout local, CombatCluster cluster, int now,
             bool burstAutomationActive, bool sentryEngagementActive,
             bool sentryRetryReady, bool debuffsClear, bool fieldDeficitStable,
-            int currentRelevant, int coreTarget, int targetCount, bool channelingPylonActive)
+            int currentCoreRelevant, int coreTarget, int targetCount, bool channelingPylonActive)
         {
-            if (!IsSentryBurstPrimaryQuietReady(now)
+            if (_openingSentryBurstsClosedForEngagement
+                || !IsSentryBurstPrimaryQuietReady(now)
                 || _coreBurstAttemptedForEngagement
                 || _coreBurstAttemptsThisEngagement >= Math.Max(1, SentryCoreBurstMaxAttemptsPerEngagement)
                 || !CoreBurstRetryReady(now)
@@ -4555,25 +4812,24 @@ namespace Turbo.Plugins.s7o
                 || local.Sentry == null || !SentryAvailable(local.Sentry))
                 return false;
 
-            int deficit = Math.Max(0, (channelingPylonActive ? targetCount : coreTarget) - currentRelevant);
+            int deficit = Math.Max(0, coreTarget - currentCoreRelevant);
             int charges = Math.Max(0, local.Sentry.Charges);
             int planned = channelingPylonActive ? deficit : Math.Min(deficit, charges);
             if (planned < 1) return false;
             if (!BeginSentryBurst(SentryBurstMode.Core, local, cluster, now,
-                planned, currentRelevant, targetCount)) return false;
+                planned, currentCoreRelevant, targetCount)) return false;
             return true;
         }
 
         private bool TryBeginCompletionSentryBurst(ZdhLoadout local, CombatCluster cluster, int now,
             bool burstAutomationActive, bool sentryEngagementActive,
             bool sentryRetryReady, bool debuffsClear, bool fieldDeficitStable,
-            int currentRelevant, int coreTarget, int targetCount, int placementDeficit,
+            int currentOwned, int currentCoreRelevant, int coreTarget, int targetCount, int hardDeficit,
             bool channelingPylonActive)
         {
-
-            bool coreReady = _fullSentryFieldEstablishedForEngagement
-                || currentRelevant >= coreTarget;
-            if (!IsSentryBurstPrimaryQuietReady(now)
+            bool coreReady = currentCoreRelevant >= coreTarget;
+            if (_openingSentryBurstsClosedForEngagement
+                || !IsSentryBurstPrimaryQuietReady(now)
                 || !SentryBurstFirstChildGapReady(now)
                 || !burstAutomationActive || !sentryEngagementActive || !sentryRetryReady
                 || !debuffsClear || !fieldDeficitStable || !coreReady
@@ -4581,11 +4837,11 @@ namespace Turbo.Plugins.s7o
                 || local.Sentry == null || !SentryAvailable(local.Sentry))
                 return false;
 
-            int deficit = Math.Max(0, placementDeficit);
+            int deficit = Math.Max(0, hardDeficit);
             int charges = Math.Max(0, local.Sentry.Charges);
             int planned = channelingPylonActive
                 ? Math.Min(2, deficit) : Math.Min(2, Math.Min(deficit, charges));
-            if (planned <= 0 || !IsNewCompletionBurstOpportunity(cluster, currentRelevant, charges, now))
+            if (planned <= 0 || !IsNewCompletionBurstOpportunity(cluster, currentOwned, charges, now))
                 return false;
 
             if (!channelingPylonActive && planned == 1 && deficit > 1)
@@ -4602,18 +4858,19 @@ namespace Turbo.Plugins.s7o
             }
 
             if (!BeginSentryBurst(SentryBurstMode.Completion, local, cluster, now,
-                planned, currentRelevant, targetCount)) return false;
+                planned, currentOwned, targetCount)) return false;
             return true;
         }
 
         private void AdvanceSentryBurst(ZdhLoadout local, CombatCluster cluster, int now,
-            int relevant, int targetCount, int coreTarget, int placementDeficit,
+            int currentCoreRelevant, int currentOwned, int targetCount, int coreDeficit, int hardDeficit,
             bool sentryRetryReady, bool debuffsClear, bool channelingPylonActive)
         {
             if (_sentryBurst.Mode == SentryBurstMode.None) return;
             int charges = local == null || local.Sentry == null ? 0 : local.Sentry.Charges;
-            _sentryBurst.CurrentRelevant = relevant;
-            PublishSentryBurstState(now, relevant, charges);
+            int currentBurstRelevant = _sentryBurst.Mode == SentryBurstMode.Core
+                ? currentCoreRelevant : currentOwned;
+            _sentryBurst.CurrentRelevant = currentBurstRelevant;
 
             if (SentryBurstDeadlineExpired(now))
             {
@@ -4672,7 +4929,6 @@ namespace Turbo.Plugins.s7o
 
                 _sentryBurst.Stage = SentryBurstStage.Settle;
                 _sentryBurst.SettleDeadlineTick = unchecked(now + Math.Max(1, SentryBurstMovementSettleMaxMs));
-                PublishSentryBurstState(now, relevant, charges);
                 return;
             }
 
@@ -4681,7 +4937,6 @@ namespace Turbo.Plugins.s7o
                 if (Hud.Game.Me.AnimationState != AcdAnimationState.Running)
                 {
                     _sentryBurst.Stage = SentryBurstStage.Ready;
-                    PublishSentryBurstState(now, relevant, charges);
                     return;
                 }
                 if (Reached(now, _sentryBurst.SettleDeadlineTick))
@@ -4711,7 +4966,8 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
-            int deficit = Math.Max(0, placementDeficit);
+            int deficit = _sentryBurst.Mode == SentryBurstMode.Core
+                ? Math.Max(0, coreDeficit) : Math.Max(0, hardDeficit);
             if (deficit <= 0)
             {
                 EndSentryBurst("field satisfied", now);
@@ -4744,7 +5000,6 @@ namespace Turbo.Plugins.s7o
                 {
                     _sentryBurst.PlannedSentries++;
                     _sentryBurst.TailSentries++;
-                    PublishSentryBurstState(now, relevant, charges);
                 }
                 else
                 {
@@ -4769,7 +5024,8 @@ namespace Turbo.Plugins.s7o
             }
 
             bool bypassRecast = _sentryBurst.VerifiedSentries > 0;
-            if (!TryStartSentry(local, cluster, now, false, true, true, bypassRecast))
+            if (!TryStartSentry(local, cluster, now, false, true, true, bypassRecast,
+                forcePopulationFill: _sentryBurst.Mode == SentryBurstMode.Completion))
             {
                 EndSentryBurst("no Sentry start", now);
                 return;
@@ -4793,12 +5049,12 @@ namespace Turbo.Plugins.s7o
             }
             if (_sentryBurst.Mode == SentryBurstMode.Core)
             {
-                _coreBurstAttemptsThisEngagement = 0;
+                // A verified child is progress within this burst, not a new engagement.
+                // Preserve the bounded Core-attempt budget until the engagement actually resets.
                 _coreBurstRetryAfterTick = int.MinValue;
             }
             _sentryBurst.Stage = SentryBurstStage.Ready;
             _sentryBurst.ChildJustFinished = true;
-            PublishSentryBurstState(now);
         }
 
         private void ReleaseSentryBurstStandstill()
@@ -4816,7 +5072,6 @@ namespace Turbo.Plugins.s7o
                 ForceAbortSentryBurst(reason, now);
                 return;
             }
-            int duration = Elapsed(_sentryBurst.StartedTick, now);
             RecordCoreBurstEnd(reason, now);
             ReleaseActionInput();
             if (_cast.Stage != CastStage.Idle && _cast.SentryBurstChild && _cast.CursorOwned)
@@ -4936,7 +5191,7 @@ namespace Turbo.Plugins.s7o
                 _cast.SavedCursorY = Hud.Window.CursorY;
                 InitializeCursorIntent();
                 _cast.StandstillHeld = false;
-                if (!SetCastCursor(_cast.AimX, _cast.AimY))
+                if (!SetCastAimCursor(_cast.AimX, _cast.AimY))
                 {
                     ResetCast();
                     return false;
@@ -5061,7 +5316,7 @@ namespace Turbo.Plugins.s7o
                     _cast.SavedCursorX = Hud.Window.CursorX;
                     _cast.SavedCursorY = Hud.Window.CursorY;
                     InitializeCursorIntent();
-                    if (!SetCastCursor(_cast.AimX, _cast.AimY)) { CancelCast("aim failed"); return; }
+                    if (!SetCastAimCursor(_cast.AimX, _cast.AimY)) { CancelCast("aim failed"); return; }
                     _cast.CursorOwned = true;
                 }
                 else
@@ -5136,6 +5391,11 @@ namespace Turbo.Plugins.s7o
             if (_cast.Stage == CastStage.PostInputSettle)
             {
                 CaptureUserCursorIntent();
+                if (CanHandBackCursorAfterAcceptedInput())
+                {
+                    BeginCursorRestore(now);
+                    return;
+                }
                 if (!Reached(now, _cast.DueTick))
                 {
                     if (_cast.RequiresStrafePause)
@@ -5239,11 +5499,9 @@ namespace Turbo.Plugins.s7o
                 int currentOwned = GetOnScreenOwnedSentries().Count;
                 IActor spawned = FindNewNativeOwnedSentryActor();
 
-                if (_cast.BaselineCharges >= 0 && currentCharges >= 0 && currentCharges < _cast.BaselineCharges)
-                {
-                    _cast.LastAppliedCount = 1;
-                    return true;
-                }
+                // Prefer actor evidence whenever available. The native landing position is
+                // required for corridor/wall relocation backoff and is more informative than
+                // a charge drop by itself.
                 if (spawned != null)
                 {
                     if (spawned.FloorCoordinate != null
@@ -5251,11 +5509,19 @@ namespace Turbo.Plugins.s7o
                     {
                         float spawnError = Distance2D(spawned.FloorCoordinate.X, spawned.FloorCoordinate.Y,
                             _cast.ExpectedWorldX, _cast.ExpectedWorldY);
-                        float relocationTolerance = Math.Max(6f, SentryRejectedPositionRadius);
+                        float relocationTolerance = _cast.SentryRequiredMatchRadius > 0f
+                            ? _cast.SentryRequiredMatchRadius
+                            : Math.Max(6f, SentryRejectedPositionRadius);
                         _cast.SentryRelocated = spawnError > relocationTolerance;
                         _cast.SentryActualWorldX = spawned.FloorCoordinate.X;
                         _cast.SentryActualWorldY = spawned.FloorCoordinate.Y;
                     }
+                    _cast.LastAppliedCount = 1;
+                    return true;
+                }
+
+                if (_cast.BaselineCharges >= 0 && currentCharges >= 0 && currentCharges < _cast.BaselineCharges)
+                {
                     _cast.LastAppliedCount = 1;
                     return true;
                 }
@@ -5287,7 +5553,6 @@ namespace Turbo.Plugins.s7o
                 if (mfdAccepted)
                 {
                     _lastMfdCastTick = now;
-                    _lastMfdSetupHandoffTick = now;
                     _lastUnverifiedMfdTick = int.MinValue;
                     _hardMfdFailureStreak = 0;
                     ClearMfdRetryDebt();
@@ -5309,29 +5574,33 @@ namespace Turbo.Plugins.s7o
                 if (sentryAccepted)
                 {
                     _lastSentryCastTick = now;
+                    _sentryPlacedThisEngagement = _wasSentryEngagementActive;
+                    _sentryFairnessMultishotTurns = 0;
                     if (_cast.SentryCoverageAcds.Count > 0)
                         RecordEliteSentryCoverageAttempt(_cast.SentryCoverageAcds, now);
                     ClearSentryRetry();
 
-                    // Placement/relocation is effect state, not activation state. Only mutate
-                    // terrain/relocation guards when a real Sentry actor was actually observed.
-                    if (actorObserved && _cast.SentryRelocated)
+                    // Placement/relocation is effect state, not activation state. Always
+                    // inspect the observed native landing so repeated wall/corridor sinks and
+                    // local stacking can trip the existing relocation backoff.
+                    if (actorObserved)
                     {
-                        MarkRejectedSentryPosition(now, "native relocated");
-                        RecordSentryRelocation(now);
-                        if (_cast.SentryMaintenance)
-                            BackoffSentryMaintenance(now, "maintenance relocated");
-                    }
-                    else if (actorObserved)
-                    {
-                        ClearRejectedSentryPositionNear(_cast.ExpectedWorldX, _cast.ExpectedWorldY);
-                        ClearSentryRelocationState();
-                        if (_cast.SentryMaintenance)
-                            ClearSentryMaintenanceBackoff();
+                        if (_cast.SentryRelocated)
+                            MarkRejectedSentryPosition(now, "native relocated");
+
+                        bool constrainedPlacement = RecordSentryRelocation(now);
+                        if (!constrainedPlacement && !_cast.SentryRelocated)
+                        {
+                            ClearRejectedSentryPositionNear(_cast.ExpectedWorldX, _cast.ExpectedWorldY);
+                            ClearSentryRelocationState();
+                        }
                     }
                 }
                 else if (_cast.InputSent)
                 {
+                    if (_cast.SentryCoverageAcds.Count > 0)
+                        RecordEliteSentryCoverageAttempt(_cast.SentryCoverageAcds, now);
+
                     // A no-effect ground cast may be input rejection or invalid terrain. Reject
                     // this exact point briefly so the next attempt uses the existing occupied-
                     // ground fallback instead of repeating blind triangle geometry.
@@ -5380,7 +5649,8 @@ namespace Turbo.Plugins.s7o
                 || string.Equals(reason, "strafe off", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(reason, "boss dead", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(reason, "manual hold released", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(reason, "interaction", StringComparison.OrdinalIgnoreCase);
+                || string.Equals(reason, "interaction", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(reason, "portal escape", StringComparison.OrdinalIgnoreCase);
         }
 
         private void CancelCast(string reason)
@@ -5453,15 +5723,14 @@ namespace Turbo.Plugins.s7o
                 && !string.Equals(reason, "context", StringComparison.OrdinalIgnoreCase)
                 && !string.Equals(reason, "new area", StringComparison.OrdinalIgnoreCase)
                 && !string.Equals(reason, "strafe off", StringComparison.OrdinalIgnoreCase)
-                && !string.Equals(reason, "interaction", StringComparison.OrdinalIgnoreCase))
+                && !string.Equals(reason, "interaction", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(reason, "portal escape", StringComparison.OrdinalIgnoreCase))
             {
                 if (inputSent && _cast.SentryCoverageAcds.Count > 0)
                     RecordEliteSentryCoverageAttempt(_cast.SentryCoverageAcds, now);
                 if (inputSent)
                     MarkRejectedSentryPosition(now, reason);
                 SetSentryRetry(now, SentryFailedRetryMs, reason);
-                if (_cast.SentryMaintenance)
-                    BackoffSentryMaintenance(now, "maintenance cancelled: " + reason);
             }
 
             if (manualDebuffCast)
@@ -5503,6 +5772,12 @@ namespace Turbo.Plugins.s7o
             _cast.CursorReferenceValid = false;
             _cast.UserCursorDeltaX = 0;
             _cast.UserCursorDeltaY = 0;
+            _cast.CursorSyntheticWritePending = false;
+            _cast.CursorSyntheticFromX = 0;
+            _cast.CursorSyntheticFromY = 0;
+            _cast.CursorSyntheticTargetX = 0;
+            _cast.CursorSyntheticTargetY = 0;
+            _cast.CursorSyntheticEchoRejectCount = 0;
             _cast.RestoreX = 0;
             _cast.RestoreY = 0;
             _cast.RestoreWriteSent = false;
@@ -5550,9 +5825,9 @@ namespace Turbo.Plugins.s7o
             _cast.LastAppliedCount = 0;
             _cast.SentrySlot = 0;
             _cast.SentryRelocated = false;
+            _cast.SentryRequiredMatchRadius = 0f;
             _cast.SentryActualWorldX = float.NaN;
             _cast.SentryActualWorldY = float.NaN;
-            _cast.SentryMaintenance = false;
             _cast.SentryBurstChild = false;
             _cast.ManualDebuff = false;
             _cast.UseCurrentCursorAim = false;
@@ -6268,20 +6543,6 @@ namespace Turbo.Plugins.s7o
             public float Y;
         }
 
-        private IMonster FindBestEntangleTarget(CombatCluster cluster, bool missingElitePriority, int now)
-        {
-            if (cluster == null) return null;
-            List<IMonster> candidates = missingElitePriority
-                ? cluster.Bodies.Where(m => IsDebuffBody(m) && !HasEntangle(m) && IsImportantDebuffTarget(m)).ToList()
-                : cluster.Bodies.Where(m => IsDebuffBody(m) && !HasEntangle(m)).ToList();
-            if (candidates.Count == 0) candidates = cluster.Bodies.Where(IsDebuffBody).ToList();
-
-            return candidates.OrderByDescending(m => EntangleTargetScore(m, cluster.Bodies))
-                .ThenBy(m => Distance(Hud.Game.Me, m))
-                .ThenBy(m => m.AcdId)
-                .FirstOrDefault();
-        }
-
         private double EntangleTargetScore(IMonster target, List<IMonster> bodies)
         {
             if (target == null || target.FloorCoordinate == null) return double.MinValue;
@@ -6588,6 +6849,26 @@ namespace Turbo.Plugins.s7o
             return GetOwnedSentries().Where(a => a != null && a.IsOnScreen).ToList();
         }
 
+        private int GetExpectedSentryLifetimeMs(ZdhLoadout local)
+        {
+            return local != null && local.CustomEngineering ? 60000 : 30000;
+        }
+
+        private int GetOldestOwnedSentryAgeMs(List<IActor> sentries)
+        {
+            if (Hud == null || Hud.Game == null || sentries == null || sentries.Count == 0)
+                return -1;
+
+            IActor oldest = sentries.Where(a => a != null)
+                .OrderBy(a => a.CreatedAtInGameTick)
+                .FirstOrDefault();
+            if (oldest == null) return -1;
+
+            int ageTicks = unchecked(Hud.Game.CurrentGameTick - oldest.CreatedAtInGameTick);
+            if (ageTicks < 0) return -1;
+            return (int)Math.Round(ageTicks * 1000.0 / 60.0);
+        }
+
         private List<Placement> BuildDesiredSentryPlacements(ZdhLoadout local, CombatCluster cluster, int now, bool emergencyOnly)
         {
             var result = new List<Placement>();
@@ -6599,8 +6880,9 @@ namespace Turbo.Plugins.s7o
             if (emergencyOnly)
             {
                 int emergencyDesiredCount = GetDesiredSentryCount(local);
-                List<Placement> emergency = BuildDpsProtectionPlacements(
-                    local.Player, fieldCluster, new List<Placement>(), now, false);
+                List<Placement> emergency = BuildBonusCircleSentryPlacements(local.Player);
+                emergency.AddRange(BuildDpsProtectionPlacements(
+                    local.Player, fieldCluster, emergency, now, false));
                 emergency.AddRange(BuildEliteSentryCoveragePlacements(
                     local, cluster, now, Math.Min(
                         Math.Max(0, EliteSentryCoverageMaxPlacements), emergencyDesiredCount)));
@@ -6629,6 +6911,9 @@ namespace Turbo.Plugins.s7o
                 TryUseEliteCoverageTriangleCore(local, fieldCluster, field, desiredCount, now);
             }
 
+            List<Placement> bonusCircles = BuildBonusCircleSentryPlacements(local.Player);
+            MergeBonusCircleSentryProtection(field, bonusCircles, desiredCount);
+
             List<Placement> dps = BuildDpsProtectionPlacements(local.Player, fieldCluster, field, now, false);
             MergePlayerSentryProtection(field, dps, desiredCount);
 
@@ -6643,6 +6928,187 @@ namespace Turbo.Plugins.s7o
             }
 
             return field.Take(desiredCount).ToList();
+        }
+
+        private List<Placement> BuildBonusCircleSentryPlacements(IPlayer zdh)
+        {
+            var oculus = new List<Placement>();
+            var damage = new List<Placement>();
+            var cooldown = new List<Placement>();
+            if (Hud == null || Hud.Game == null || zdh == null || Hud.Game.Actors == null) return oculus;
+
+            List<IPlayer> dps = GetDpsPlayers(zdh, true)
+                .Concat(GetSentryDpsPlayers(zdh).Where(player => player != null && !player.IsOnScreen))
+                .GroupBy(player => player.AcdId)
+                .Select(group => group.First())
+                .ToList();
+            List<IActor> sentries = GetOwnedSentries();
+            float bonusCircleCoverageRadius = BonusCircleFullCoverageCenterRadius();
+
+            foreach (IActor actor in Hud.Game.Actors)
+            {
+                if (!IsPotentialBonusCircleActor(actor)) continue;
+
+                IWorldCoordinate coord = actor.FloorCoordinate != null && actor.FloorCoordinate.IsValid
+                    ? actor.FloorCoordinate
+                    : actor.CollisionCoordinate != null && actor.CollisionCoordinate.IsValid
+                        ? actor.CollisionCoordinate : null;
+                if (coord == null) continue;
+
+                double circleDistance = DistanceToPoint(zdh, coord.X, coord.Y);
+                bool alreadyFullyCovered = IsSentryNear(
+                    sentries, coord.X, coord.Y, bonusCircleCoverageRadius);
+
+                // A legal Sentry cannot get close enough to fully contain a farther circle.
+                // Apply this regardless of visibility so a visible but impossible target cannot
+                // keep requesting native casts that clamp short and remain permanently incomplete.
+                if (!alreadyFullyCovered
+                    && circleDistance > NativeSentryPlacementMaxRangeYards + bonusCircleCoverageRadius)
+                    continue;
+
+                // Newly admitted off-screen circles remain deliberately stricter: their requested
+                // center itself must be inside native Sentry cast range.
+                if (!actor.IsOnScreen && !alreadyFullyCovered
+                    && circleDistance > NativeSentryPlacementMaxRangeYards)
+                    continue;
+
+                // Only relevant generic proxies reach visual-effect classification. This keeps
+                // off-screen actor scanning bounded before the more expensive projection check.
+                string kind = null;
+                if (IsOculusCircleActor(actor)) kind = "Oculus";
+                else if (IsDamageTriuneCircleActor(actor)) kind = "Triune Damage";
+                else if (IsCooldownTriuneCircleActor(actor)) kind = "Triune CDR";
+                if (kind == null) continue;
+
+                if (!actor.IsOnScreen && !alreadyFullyCovered
+                    && !IsProjectableEdgeSentryPoint(zdh, coord))
+                    continue;
+
+                Placement placement = CreatePlacement(coord.X, coord.Y, coord.Z);
+                if (placement == null) continue;
+
+                IPlayer occupant = dps.Where(player => player != null && player.FloorCoordinate != null
+                        && DistanceToPoint(player, coord.X, coord.Y) <= Math.Max(4f, SentryBonusCircleRadius))
+                    .OrderByDescending(player => PlayerDpsScore(player)).FirstOrDefault();
+                bool occupiedByDps = occupant != null;
+                placement.TargetAcd = occupiedByDps ? occupant.AcdId : actor.AcdId;
+                placement.Priority = kind == "Oculus"
+                    ? (occupiedByDps ? 330 : 245)
+                    : kind == "Triune Damage" ? (occupiedByDps ? 315 : 220)
+                    : (occupiedByDps ? 300 : 195);
+                placement.Label = "Sentry Bonus Circle " + kind + (occupiedByDps ? " Urgent" : string.Empty);
+
+                if (kind == "Oculus") oculus.Add(placement);
+                else if (kind == "Triune Damage") damage.Add(placement);
+                else cooldown.Add(placement);
+            }
+
+            // Keep already-covered higher-tier circles in the desired field so maintenance does
+            // not immediately move their Sentry away. The next tier is admitted only after every
+            // higher-tier circle is already covered by a live Sentry.
+            bool uncoveredOculus = oculus.Any(x => !IsSentryNear(sentries, x.WorldX, x.WorldY, bonusCircleCoverageRadius));
+            bool uncoveredDamage = damage.Any(x => !IsSentryNear(sentries, x.WorldX, x.WorldY, bonusCircleCoverageRadius));
+
+            var chosen = new List<Placement>();
+            chosen.AddRange(oculus);
+            if (!uncoveredOculus)
+            {
+                chosen.AddRange(damage);
+                if (!uncoveredDamage) chosen.AddRange(cooldown);
+            }
+
+            return chosen.OrderByDescending(x => x.Priority)
+                .ThenBy(x => DistanceToPoint(zdh, x.WorldX, x.WorldY)).ToList();
+        }
+
+        private void MergeBonusCircleSentryProtection(List<Placement> field,
+            IEnumerable<Placement> protections, int desiredCount)
+        {
+            if (field == null || protections == null || desiredCount <= 0) return;
+            int maximumBonusSlots = Math.Max(0, desiredCount);
+            int bonusSlots = field.Count(IsBonusCircleSentryPlacement);
+
+            foreach (Placement protection in protections.Where(x => x != null)
+                .OrderByDescending(x => x.Priority))
+            {
+                if (bonusSlots >= maximumBonusSlots) break;
+
+                Placement overlapping = field.Where(x => x != null
+                        && Distance2D(x.WorldX, x.WorldY, protection.WorldX, protection.WorldY)
+                            <= SentryPatternMatchRadius)
+                    .OrderBy(x => Distance2D(x.WorldX, x.WorldY, protection.WorldX, protection.WorldY))
+                    .FirstOrDefault();
+                if (overlapping != null)
+                {
+                    // Use the actual circle coordinate rather than merely relabeling a nearby
+                    // elite/player placement. That keeps coverage accounting honest and ensures
+                    // the Sentry is visibly centered on the bonus circle as intended.
+                    bool wasBonus = IsBonusCircleSentryPlacement(overlapping);
+                    int index = field.IndexOf(overlapping);
+                    if (index >= 0) field[index] = protection;
+                    if (!wasBonus) bonusSlots++;
+                    continue;
+                }
+
+                if (field.Count >= desiredCount)
+                {
+                    Placement replacement = field.Where(x => x != null
+                            && !IsBonusCircleSentryPlacement(x)
+                            && !IsPlayerProtectionPlacement(x))
+                        .OrderBy(x => x.Priority).FirstOrDefault();
+                    if (replacement == null) continue;
+                    field.Remove(replacement);
+                }
+
+                field.Add(protection);
+                bonusSlots++;
+            }
+        }
+
+        private bool IsPotentialBonusCircleActor(IActor actor)
+        {
+            if (actor == null || actor.SnoActor == null) return false;
+            ActorSnoEnum sno = actor.SnoActor.Sno;
+            return sno == ActorSnoEnum._generic_proxy
+                || sno == ActorSnoEnum._p2_itempassive_unique_ring_017_dome_purple
+                || sno == ActorSnoEnum._p75_itempassive_unique_ring_017_dome_purple_red
+                || sno == ActorSnoEnum._p2_itempassive_unique_ring_017_dome_blue;
+        }
+
+        private bool IsOculusCircleActor(IActor actor)
+        {
+            if (actor == null || actor.SnoActor == null
+                || actor.SnoActor.Sno != ActorSnoEnum._generic_proxy) return false;
+            return ActorHasVisualEffect(actor, Hud.Sno.Attributes.Power_Buff_1_Visual_Effect_None,
+                Hud.Sno.SnoPowers.OculusRing == null ? OculusRingSno : Hud.Sno.SnoPowers.OculusRing.Sno);
+        }
+
+        private bool IsDamageTriuneCircleActor(IActor actor)
+        {
+            if (actor == null || actor.SnoActor == null) return false;
+            ActorSnoEnum sno = actor.SnoActor.Sno;
+            if (sno == ActorSnoEnum._p2_itempassive_unique_ring_017_dome_purple
+                || sno == ActorSnoEnum._p75_itempassive_unique_ring_017_dome_purple_red)
+                return true;
+            return sno == ActorSnoEnum._generic_proxy
+                && ActorHasVisualEffect(actor, Hud.Sno.Attributes.Power_Buff_1_Visual_Effect_None, TriuneProxySno);
+        }
+
+        private bool IsCooldownTriuneCircleActor(IActor actor)
+        {
+            if (actor == null || actor.SnoActor == null) return false;
+            ActorSnoEnum sno = actor.SnoActor.Sno;
+            if (sno == ActorSnoEnum._p2_itempassive_unique_ring_017_dome_blue)
+                return true;
+            return sno == ActorSnoEnum._generic_proxy
+                && ActorHasVisualEffect(actor, Hud.Sno.Attributes.Power_Buff_7_Visual_Effect_None, TriuneProxySno);
+        }
+
+        private bool ActorHasVisualEffect(IActor actor, IAttribute attribute, uint powerSno)
+        {
+            if (actor == null || attribute == null || powerSno == 0) return false;
+            try { return actor.GetAttributeValueAsInt(attribute, powerSno, 0) == 1; }
+            catch { return false; }
         }
 
         private void MergePlayerSentryProtection(List<Placement> field,
@@ -6664,8 +7130,18 @@ namespace Turbo.Plugins.s7o
                 if (field.Count >= desiredCount)
                 {
                     Placement replacement = field.Where(x => x != null
-                            && !IsPlayerProtectionPlacement(x))
+                            && !IsPlayerProtectionPlacement(x)
+                            && !IsBonusCircleSentryPlacement(x))
                         .OrderBy(x => x.Priority).FirstOrDefault();
+
+                    // If every slot is already reserved for bonus circles, a genuinely higher
+                    // priority far/low-health DPS protection may replace the lowest unoccupied
+                    // circle. Occupied circles remain urgent and are never displaced here.
+                    if (replacement == null)
+                        replacement = field.Where(x => IsBonusCircleSentryPlacement(x)
+                                && !IsUrgentBonusCircleSentryPlacement(x))
+                            .OrderBy(x => x.Priority).FirstOrDefault();
+
                     if (replacement == null || protection.Priority <= replacement.Priority + 0.5)
                         continue;
                     field.Remove(replacement);
@@ -7039,6 +7515,7 @@ namespace Turbo.Plugins.s7o
             int ready = 0;
             IMonster bestTracked = null;
             bool bestTrackedReady = false;
+            bool bestTrackedUrgent = false;
             int bestAge = 0;
             int bestDelay = 0;
             int bestAttempts = 0;
@@ -7072,15 +7549,19 @@ namespace Turbo.Plugins.s7o
                 int age = Elapsed(state.SentryUncoveredSinceTick, now);
                 int delay = EliteSentryCoverageDelayMs(state.SentryCoverageAttempts);
                 bool isReady = age >= delay;
+                bool isUrgent = isReady
+                    && state.SentryCoverageAttempts < EliteSentryUrgentAttemptLimit;
                 if (isReady) ready++;
 
                 if (bestTracked == null
                     || (isReady && !bestTrackedReady)
-                    || (isReady == bestTrackedReady
+                    || (isReady == bestTrackedReady && isUrgent && !bestTrackedUrgent)
+                    || (isReady == bestTrackedReady && isUrgent == bestTrackedUrgent
                         && MfdTargetWeight(elite, now) > MfdTargetWeight(bestTracked, now)))
                 {
                     bestTracked = elite;
                     bestTrackedReady = isReady;
+                    bestTrackedUrgent = isUrgent;
                     bestAge = age;
                     bestDelay = delay;
                     bestAttempts = state.SentryCoverageAttempts;
@@ -7099,6 +7580,13 @@ namespace Turbo.Plugins.s7o
                 state.SentryCoverageAttempts = 0;
             }
 
+            _runtime.EliteSentryUncoveredCount = uncovered;
+            _runtime.EliteSentryReadyCount = ready;
+            _runtime.EliteSentryPriorityAcd = bestTracked == null ? 0 : bestTracked.AcdId;
+            _runtime.EliteSentryPriorityAgeMs = bestTracked == null ? -1 : bestAge;
+            _runtime.EliteSentryPriorityDelayMs = bestTracked == null ? -1 : bestDelay;
+            _runtime.EliteSentryPriorityAttempts = bestTracked == null ? 0 : bestAttempts;
+            _runtime.EliteSentryUrgent = bestTracked != null && bestTrackedUrgent;
         }
 
         private int EliteSentryCoverageDelayMs(int attempts)
@@ -7242,16 +7730,25 @@ namespace Turbo.Plugins.s7o
 
             bool bossField = cluster != null
                 && cluster.Elites.Any(m => m != null && m.Rarity == ActorRarity.Boss);
-            List<IPlayer> dps = GetDpsPlayers(zdh, bossField).Take(2).ToList();
+            List<IPlayer> dps = GetSentryDpsPlayers(zdh)
+                .OrderByDescending(player => IsLowHealth(player))
+                .ThenByDescending(player => cluster == null ? 0
+                    : DistanceToPoint(player, cluster.CenterX, cluster.CenterY))
+                .Take(2).ToList();
             var needed = new List<IPlayer>();
 
             foreach (IPlayer player in dps)
             {
                 bool low = IsLowHealth(player);
-                bool inPack = player.InCombat
-                    && DistanceToPoint(player, cluster.CenterX, cluster.CenterY) <= SentryDpsPackRange;
-                bool eligible = bossField ? player.IsOnScreen : inPack;
-                int stableMs = bossField
+                double fieldDistance = cluster == null ? 0
+                    : DistanceToPoint(player, cluster.CenterX, cluster.CenterY);
+                bool farFromField = fieldDistance > SentryDpsPackRange;
+                IActor covering = FindCoveringOwnedSentry(player);
+                bool edgeProjectable = !player.IsOnScreen
+                    && IsProjectableEdgeSentryPoint(zdh, player.FloorCoordinate);
+                bool spatiallyEligible = player.IsOnScreen || covering != null || edgeProjectable;
+                bool eligible = spatiallyEligible && (bossField || farFromField || player.InCombat);
+                int stableMs = (bossField || farFromField)
                     ? Math.Min(SentryDpsStableMs, SentryDpsEmergencyStableMs)
                     : SentryDpsStableMs;
                 bool stable = eligible && IsPlayerPositionStable(player, now, stableMs);
@@ -7259,8 +7756,6 @@ namespace Turbo.Plugins.s7o
                     && IsPlayerPositionStable(player, now, SentryDpsEmergencyStableMs);
                 if (low ? !emergencyStable : (lowHealthOnly || !stable)) continue;
                 if (CoveredByPlacements(field, player)) continue;
-
-                IActor covering = FindCoveringOwnedSentry(player);
                 if (covering != null)
                 {
                     if (!lowHealthOnly && (low ? emergencyStable : stable))
@@ -7269,8 +7764,9 @@ namespace Turbo.Plugins.s7o
                         if (retained != null)
                         {
                             retained.TargetAcd = player.AcdId;
-                            retained.Priority = low ? 255 : 116;
-                            retained.Label = low ? "Sentry DPS Emergency Retain" : "Sentry DPS Retain";
+                            retained.Priority = low ? 285 : farFromField ? 260 : 116;
+                            retained.Label = low ? "Sentry DPS Emergency Retain"
+                                : farFromField ? "Sentry DPS Far Retain" : "Sentry DPS Retain";
                             result.Add(retained);
                         }
                     }
@@ -7285,13 +7781,20 @@ namespace Turbo.Plugins.s7o
                 float x = (needed[0].FloorCoordinate.X + needed[1].FloorCoordinate.X) * 0.5f;
                 float y = (needed[0].FloorCoordinate.Y + needed[1].FloorCoordinate.Y) * 0.5f;
                 float z = (needed[0].FloorCoordinate.Z + needed[1].FloorCoordinate.Z) * 0.5f;
-                Placement pair = CreatePlacement(x, y, z);
+                bool edgePair = (needed[0] != null && !needed[0].IsOnScreen)
+                    || (needed[1] != null && !needed[1].IsOnScreen);
+                Placement pair = edgePair
+                    && DistanceToPoint(zdh, x, y) > NativeSentryPlacementMaxRangeYards
+                    ? null : CreatePlacement(x, y, z);
                 if (pair != null)
                 {
                     pair.TargetAcd = needed[0].AcdId;
-                    pair.Priority = IsLowHealth(needed[0]) || IsLowHealth(needed[1]) ? 260
-                        : bossField ? 162 : 118;
-                    pair.Label = "Sentry DPS Pair";
+                    bool farPair = cluster != null && (
+                        DistanceToPoint(needed[0], cluster.CenterX, cluster.CenterY) > SentryDpsPackRange
+                        || DistanceToPoint(needed[1], cluster.CenterX, cluster.CenterY) > SentryDpsPackRange);
+                    pair.Priority = IsLowHealth(needed[0]) || IsLowHealth(needed[1]) ? 290
+                        : farPair ? 265 : bossField ? 162 : 118;
+                    pair.Label = farPair ? "Sentry DPS Far Pair" : "Sentry DPS Pair";
                     result.Add(pair);
                     return result;
                 }
@@ -7303,8 +7806,11 @@ namespace Turbo.Plugins.s7o
                 if (placement == null) continue;
                 bool low = IsLowHealth(player);
                 placement.TargetAcd = player.AcdId;
-                placement.Priority = low ? 250 : bossField ? 160 : 115;
-                placement.Label = low ? "Sentry DPS Emergency" : "Sentry DPS";
+                bool farFromField = cluster != null
+                    && DistanceToPoint(player, cluster.CenterX, cluster.CenterY) > SentryDpsPackRange;
+                placement.Priority = low ? 280 : farFromField ? 260 : bossField ? 160 : 115;
+                placement.Label = low ? "Sentry DPS Emergency"
+                    : farFromField ? "Sentry DPS Far" : "Sentry DPS";
                 result.Add(placement);
             }
             return result;
@@ -7331,7 +7837,7 @@ namespace Turbo.Plugins.s7o
         private IActor FindCoveringOwnedSentry(IPlayer player)
         {
             if (player == null || player.FloorCoordinate == null) return null;
-            return GetOnScreenOwnedSentries()
+            return GetOwnedSentries()
                 .Where(a => a != null && a.FloorCoordinate != null
                     && a.FloorCoordinate.XYDistanceTo(player.FloorCoordinate) <= GuardianRadius)
                 .OrderBy(a => a.FloorCoordinate.XYDistanceTo(player.FloorCoordinate))
@@ -7461,7 +7967,8 @@ namespace Turbo.Plugins.s7o
                     && placement.Label.IndexOf("Emergency", StringComparison.OrdinalIgnoreCase) >= 0);
                 bool protectedPlacement = IsProtectedSentryPlacement(placement);
                 bool stackCorrection = currentStackedPairs >= Math.Max(1, SentrySevereOverlapPairThreshold);
-                if (emergency || protectedPlacement || stackCorrection || futureScore > currentScore + 0.5)
+                if (emergency || protectedPlacement || stackCorrection
+                    || futureScore > currentScore + 0.5)
                     return placement;
             }
 
@@ -7483,10 +7990,73 @@ namespace Turbo.Plugins.s7o
             return null;
         }
 
+        private Placement FindSafePopulationFillPlacement(CombatCluster cluster,
+            List<Placement> desired, List<IActor> sentries, int slot, int now)
+        {
+            if (cluster == null) return null;
+            if ((desired == null || desired.Count == 0)
+                && !cluster.Stable && !cluster.TrashLatched && !_bossStandaloneActive)
+                return null;
+
+            var searchDesired = desired == null
+                ? new List<Placement>()
+                : desired.Where(x => x != null).ToList();
+
+            Placement center = searchDesired.FirstOrDefault(x => x.SentrySlot == 1);
+            if (center == null)
+            {
+                center = CreatePlacement(cluster.CenterX, cluster.CenterY, cluster.CenterZ);
+                if (center == null) return null;
+                center.Label = "Sentry Field Center";
+                center.SentrySlot = 1;
+                center.Priority = 120;
+                searchDesired.Insert(0, center);
+            }
+
+            Placement template = CreatePlacement(center.WorldX, center.WorldY, center.WorldZ);
+            if (template == null) return null;
+            template.Label = "Sentry Field Extension";
+            template.SentrySlot = Math.Max(1, slot);
+            template.Priority = 110;
+
+            return CreateOpenSentryFillFallback(
+                new List<Placement> { template }, searchDesired, sentries ?? new List<IActor>(), now);
+        }
+
+        private Placement FindRollingSentryRefreshPlacement(CombatCluster cluster,
+            List<Placement> desired, List<IActor> sentries, int capacity, int now)
+        {
+            if (cluster == null || sentries == null || sentries.Count == 0 || capacity <= 0)
+                return null;
+
+            IActor oldest = sentries.Where(a => a != null)
+                .OrderBy(a => a.CreatedAtInGameTick)
+                .FirstOrDefault();
+            if (oldest == null) return null;
+
+            List<IActor> survivors = sentries
+                .Where(a => a != null && a.AcdId != oldest.AcdId)
+                .ToList();
+            int geometryTarget = Math.Min(capacity, desired == null ? 0 : desired.Count);
+            Placement replacement = geometryTarget > 0
+                ? FindMissingDesiredSentryPlacement(desired, survivors, geometryTarget, false, now)
+                : null;
+            if (replacement == null)
+            {
+                replacement = FindSafePopulationFillPlacement(
+                    cluster, desired, survivors, Math.Min(capacity, survivors.Count + 1), now);
+            }
+            return replacement;
+        }
+
         private Placement CreateOccupiedSentryFillFallback(Placement template,
             List<IActor> sentries, int now)
         {
             if (template == null || Hud == null || Hud.Game == null) return null;
+            // A monster/player fallback can protect a point target, but it cannot stand in for
+            // a bonus circle unless it is explicitly validated inside that circle's containment
+            // zone. Rejected bonus cores use the bounded geometric fallback below instead.
+            if (IsBonusCircleSentryPlacement(template)) return null;
 
             sentries = sentries ?? new List<IActor>();
             IPlayer local = Hud.Game.Me;
@@ -7583,7 +8153,7 @@ namespace Turbo.Plugins.s7o
             Placement center = desired.FirstOrDefault(x => x != null && x.SentrySlot == 1)
                 ?? desired.FirstOrDefault(IsProtectedSentryPlacement)
                 ?? desired.FirstOrDefault();
-            Placement template = missing.Where(x => x != null)
+            Placement template = missing.Where(x => x != null && !IsBonusCircleSentryPlacement(x))
                 .OrderByDescending(x => x.Priority).FirstOrDefault();
             if (center == null || template == null) return null;
 
@@ -7637,6 +8207,7 @@ namespace Turbo.Plugins.s7o
         {
             if (rejected == null || desired == null || desired.Count == 0) return null;
             bool protectedPlacement = IsProtectedSentryPlacement(rejected);
+            bool bonusCirclePlacement = IsBonusCircleSentryPlacement(rejected);
             float baseX;
             float baseY;
             float vx;
@@ -7657,9 +8228,18 @@ namespace Turbo.Plugins.s7o
                     vx = 1f;
                     vy = 0f;
                 }
-                float maximumCoverageRadius = Math.Max(6f, GuardianRadius - 1f);
-                radius = Math.Min(maximumCoverageRadius,
-                    Math.Max(11f, SentryRejectedPositionRadius + 2f));
+                if (bonusCirclePlacement)
+                {
+                    // Exact core is preferred. If terrain rejects it, remain strictly inside
+                    // the full-containment zone instead of falling back to partial coverage.
+                    radius = BonusCircleFullCoverageCenterRadius();
+                }
+                else
+                {
+                    float maximumCoverageRadius = Math.Max(6f, GuardianRadius - 1f);
+                    radius = Math.Min(maximumCoverageRadius,
+                        Math.Max(11f, SentryRejectedPositionRadius + 2f));
+                }
             }
             else
             {
@@ -7694,9 +8274,11 @@ namespace Turbo.Plugins.s7o
                 : protectedPlacement
                     ? new[] { 0f, 45f, -45f, 90f, -90f, 135f, -135f, 180f }
                     : new[] { 30f, -30f, 60f, -60f, 90f, -90f, 120f, -120f, 180f };
-            float[] scales = protectedPlacement
-                ? new[] { 1f, 0.8f, 0.6f }
-                : new[] { 1f, 0.9f, 0.8f };
+            float[] scales = bonusCirclePlacement
+                ? new[] { 0.5f, 0.75f, 1f }
+                : protectedPlacement
+                    ? new[] { 1f, 0.8f, 0.6f }
+                    : new[] { 1f, 0.9f, 0.8f };
 
             foreach (float scale in scales)
             {
@@ -7710,6 +8292,9 @@ namespace Turbo.Plugins.s7o
                         baseY + ry * radius * scale,
                         rejected.WorldZ);
                     if (candidate == null || IsRejectedSentryPlacement(candidate, now)) continue;
+                    if (bonusCirclePlacement && Distance2D(candidate.WorldX, candidate.WorldY,
+                            rejected.WorldX, rejected.WorldY) > BonusCircleFullCoverageCenterRadius() + 0.01f)
+                        continue;
 
                     candidate.SentryScale = protectedPlacement
                         ? 1f : Math.Max(0.75f, rejected.SentryScale * scale);
@@ -7761,8 +8346,41 @@ namespace Turbo.Plugins.s7o
             if (placement == null || string.IsNullOrEmpty(placement.Label)) return false;
             return string.Equals(placement.Label, "Sentry Field Center", StringComparison.Ordinal)
                 || string.Equals(placement.Label, "Sentry MFD Anchor", StringComparison.Ordinal)
-                || placement.Label.StartsWith("Sentry Field Elite Coverage", StringComparison.Ordinal)
-                || IsPlayerProtectionPlacement(placement);
+                || IsEliteSentryCoveragePlacement(placement)
+                || IsPlayerProtectionPlacement(placement)
+                || IsBonusCircleSentryPlacement(placement);
+        }
+
+        private bool IsEliteSentryCoveragePlacement(Placement placement)
+        {
+            return placement != null && !string.IsNullOrEmpty(placement.Label)
+                && (placement.Label.StartsWith("Sentry Field Elite Coverage", StringComparison.Ordinal)
+                    || string.Equals(placement.Label, "Sentry Boss Coverage", StringComparison.Ordinal));
+        }
+
+        private bool IsBonusCircleSentryPlacement(Placement placement)
+        {
+            return placement != null && !string.IsNullOrEmpty(placement.Label)
+                && placement.Label.StartsWith("Sentry Bonus Circle", StringComparison.Ordinal);
+        }
+
+        private bool IsUrgentBonusCircleSentryPlacement(Placement placement)
+        {
+            return IsBonusCircleSentryPlacement(placement)
+                && placement.Label.EndsWith(" Urgent", StringComparison.Ordinal);
+        }
+
+        private float BonusCircleFullCoverageCenterRadius()
+        {
+            return Math.Max(0.5f, GuardianRadius - Math.Max(0f, SentryBonusCircleRadius)
+                - Math.Max(0f, SentryBonusCircleCoverageSafetyMargin));
+        }
+
+        private float DesiredSentryMatchRadius(Placement placement)
+        {
+            return IsBonusCircleSentryPlacement(placement)
+                ? BonusCircleFullCoverageCenterRadius()
+                : SentryPatternMatchRadius;
         }
 
         private bool IsPlayerProtectionPlacement(Placement placement)
@@ -7774,6 +8392,11 @@ namespace Turbo.Plugins.s7o
 
         private float RequiredSentrySeparation(Placement placement)
         {
+            // A partially covering Sentry must not block a core placement that is needed to
+            // fully contain an Oculus/Triune circle. If it were already this close, the bonus
+            // placement would have matched and would not be missing.
+            if (IsBonusCircleSentryPlacement(placement))
+                return BonusCircleFullCoverageCenterRadius();
             if (IsProtectedSentryPlacement(placement))
                 return Math.Max(SentryStackedDistance,
                     Math.Min(SentryMinSeparation, SentryProtectedMinSeparation));
@@ -7879,8 +8502,9 @@ namespace Turbo.Plugins.s7o
             foreach (Placement placement in (desired ?? new List<Placement>())
                 .Where(x => x != null).OrderByDescending(x => x.Priority))
             {
+                float matchRadius = DesiredSentryMatchRadius(placement);
                 IActor match = available
-                    .Where(actor => DistanceToPoint(actor, placement.WorldX, placement.WorldY) <= SentryPatternMatchRadius)
+                    .Where(actor => DistanceToPoint(actor, placement.WorldX, placement.WorldY) <= matchRadius)
                     .OrderBy(actor => DistanceToPoint(actor, placement.WorldX, placement.WorldY))
                     .FirstOrDefault();
                 if (match == null) missing.Add(placement);
@@ -8166,6 +8790,14 @@ namespace Turbo.Plugins.s7o
                 : null;
         }
 
+        private bool IsProjectableEdgeSentryPoint(IPlayer zdh, IWorldCoordinate point)
+        {
+            if (zdh == null || zdh.FloorCoordinate == null || point == null) return false;
+            if (DistanceToPoint(zdh, point.X, point.Y) > NativeSentryPlacementMaxRangeYards)
+                return false;
+            return CreatePlacement(point.X, point.Y, point.Z) != null;
+        }
+
         private double DistanceToPoint(IPlayer player, float x, float y)
         {
             try { return player.FloorCoordinate.XYDistanceTo(x, y); }
@@ -8293,6 +8925,23 @@ namespace Turbo.Plugins.s7o
                 && ((a.AcdId != 0 && a.AcdId == b.AcdId) || (a.AnnId != 0 && a.AnnId == b.AnnId));
         }
 
+        private IEnumerable<IPlayer> GetSentryDpsPlayers(IPlayer zdh)
+        {
+            List<IActor> ownedSentries = GetOwnedSentries();
+            List<IPlayer> candidates = Hud.Game.Players.Where(p => p != null
+                    && p.HasValidActor && !p.IsDead && !SamePlayer(p, zdh)
+                    && p.CoordinateKnown && p.FloorCoordinate != null
+                    && (p.IsOnScreen
+                        || IsSentryNear(ownedSentries, p.FloorCoordinate.X,
+                            p.FloorCoordinate.Y, GuardianRadius)
+                        || IsProjectableEdgeSentryPoint(zdh, p.FloorCoordinate)))
+                .ToList();
+
+            double maxDps = candidates.Count == 0 ? 0 : candidates.Max(p => PlayerDpsScore(p));
+            return candidates.Where(p => !IsLikelySupport(p, maxDps))
+                .OrderByDescending(p => PlayerRoleScore(p, maxDps));
+        }
+
         private IEnumerable<IPlayer> GetDpsPlayers(IPlayer zdh, bool anyOnScreenRange = false)
         {
             List<IPlayer> candidates = Hud.Game.Players.Where(p => p != null && p.HasValidActor && !p.IsDead
@@ -8395,11 +9044,7 @@ namespace Turbo.Plugins.s7o
         {
             IEnumerable<IActor> actors = Hud.Game.Actors ?? Enumerable.Empty<IActor>();
             var alive = new HashSet<uint>();
-            var rawValleys = new List<IActor>();
-            var ignoredValleys = new List<IActor>();
             IActor newestValley = null;
-            int guardianNativeOwned = 0;
-            int guardianAdoptedOwned = 0;
 
             foreach (IActor actor in actors)
             {
@@ -8411,12 +9056,10 @@ namespace Turbo.Plugins.s7o
 
                 if (isValley)
                 {
-                    rawValleys.Add(actor);
                     if (!IsMfdActorOwnedCandidate(actor, now)
                         || IsGenerationOlder(actor.CreatedAtInGameTick, actor.AcdId,
                             _lastValleyActorCreatedTick, _lastValleyActorAcd))
                     {
-                        ignoredValleys.Add(actor);
                         continue;
                     }
 
@@ -8445,8 +9088,6 @@ namespace Turbo.Plugins.s7o
                 if (owned)
                 {
                     _ownedActorAcds.Add(actor.AcdId);
-                    if (nativeOwned) guardianNativeOwned++;
-                    else guardianAdoptedOwned++;
                 }
             }
 
@@ -8472,9 +9113,6 @@ namespace Turbo.Plugins.s7o
                 }
             }
 
-            IActor authoritative = FindAuthoritativeValleyActor();
-            int dropoutMs = _lastValleyActorSeenTick == int.MinValue
-                ? int.MaxValue : Elapsed(_lastValleyActorSeenTick, now);
         }
 
         private void RememberGroundCastInput(int now)
@@ -8773,28 +9411,10 @@ namespace Turbo.Plugins.s7o
             catch { return false; }
         }
 
-        private bool IsPortalInteractionNearby(float range)
-        {
-            try
-            {
-                if (!ContextAvailable() || Hud.Game.Me.FloorCoordinate == null || Hud.Game.Portals == null)
-                    return false;
-
-                float limit = Math.Max(0, range);
-                // Do not require ActorAvailable/IsClickable here. Those interaction flags can
-                // become true only when the cursor reaches a narrow portal hotspot; autosnap may
-                // steal the cursor before that can happen. World-distance to Hud.Game.Portals is
-                // independent of hover state and therefore owns the interaction pause.
-                return Hud.Game.Portals.Any(portal => portal != null && portal.FloorCoordinate != null
-                    && Hud.Game.Me.FloorCoordinate.XYDistanceTo(portal.FloorCoordinate) <= limit);
-            }
-            catch { return false; }
-        }
-
         private bool IsInteractionPauseNearby()
         {
             return IsUnoperatedPylonNearby(PylonInteractionPauseRange)
-                || IsPortalInteractionNearby(PortalInteractionPauseRange);
+                || s7o_DHStrafePrimaryPlugin.IsPortalInteractionPauseActiveForZdh;
         }
 
         private static bool UiVisible(IUiElement element)
@@ -8903,7 +9523,6 @@ namespace Turbo.Plugins.s7o
         {
             return player != null && target != null && player.FloorCoordinate != null
                 && target.FloorCoordinate != null && IsImportantDebuffTarget(target)
-                && !HasIceblink(target)
                 && Distance(player, target) <= Math.Max(1f, MultishotCloseRangeDirectAimDistance);
         }
 
@@ -9176,18 +9795,29 @@ namespace Turbo.Plugins.s7o
 
         private IScreenCoordinate CreateMultishotCoreAim(IPlayer player, IMonster target)
         {
-            if (player == null || target == null || player.ScreenCoordinate == null
+            if (player == null || target == null || player.FloorCoordinate == null
                 || target.FloorCoordinate == null) return null;
 
-            IScreenCoordinate targetCore = Hud.Window.WorldToScreenCoordinate(
-                target.FloorCoordinate.X, target.FloorCoordinate.Y, target.FloorCoordinate.Z,
-                false, true);
-            if (targetCore == null) return null;
+            // FloorCoordinate defines the actor's ground/core XY and RadiusBottom its footprint.
+            // Multishot itself originates above the floor, so project the same XY ray through the
+            // Demon Hunter skill-origin plane instead of deriving screen direction from the feet.
+            float directionX = target.FloorCoordinate.X - player.FloorCoordinate.X;
+            float directionY = target.FloorCoordinate.Y - player.FloorCoordinate.Y;
+            if (!NormalizeDirection(ref directionX, ref directionY)) return null;
 
-            float dx = targetCore.X - player.ScreenCoordinate.X;
-            float dy = targetCore.Y - player.ScreenCoordinate.Y;
+            float rayZ = player.FloorCoordinate.Z + Math.Max(0f, MultishotAimOriginZOffset);
+            IScreenCoordinate origin = Hud.Window.WorldToScreenCoordinate(
+                player.FloorCoordinate.X, player.FloorCoordinate.Y, rayZ, false, true);
+            IScreenCoordinate targetOnRay = Hud.Window.WorldToScreenCoordinate(
+                target.FloorCoordinate.X, target.FloorCoordinate.Y, rayZ, false, true);
+            if (origin == null || targetOnRay == null) return null;
+
+            float dx = targetOnRay.X - origin.X;
+            float dy = targetOnRay.Y - origin.Y;
             float targetDistance = (float)Math.Sqrt(dx * dx + dy * dy);
-            return CreateMultishotScreenRayAim(player.ScreenCoordinate, targetCore,
+            if (targetDistance < 1f) return null;
+
+            return CreateMultishotScreenRayAim(origin, targetOnRay,
                 targetDistance + Math.Max(0f, MultishotCloseRangeAimPastTargetPixels));
         }
 
@@ -9648,6 +10278,16 @@ namespace Turbo.Plugins.s7o
             if (!TryClientToScreen(x, y, out screenX, out screenY))
                 return false;
 
+            int beforeX = _cast.CursorReferenceValid ? _cast.CursorReferenceX : x;
+            int beforeY = _cast.CursorReferenceValid ? _cast.CursorReferenceY : y;
+            int cursorX;
+            int cursorY;
+            if (TryGetCursorClient(out cursorX, out cursorY))
+            {
+                beforeX = cursorX;
+                beforeY = cursorY;
+            }
+
             bool sent;
             if (key == ActionKey.LeftSkill)
                 sent = ZdhInput.MoveCursorAbsoluteAndMouseDown(screenX, screenY, true);
@@ -9665,11 +10305,7 @@ namespace Turbo.Plugins.s7o
                 return false;
 
             if (sent)
-            {
-                _cast.CursorReferenceX = x;
-                _cast.CursorReferenceY = y;
-                _cast.CursorReferenceValid = true;
-            }
+                ArmSyntheticCursorWrite(beforeX, beforeY, x, y);
             return sent;
         }
 
@@ -9727,6 +10363,12 @@ namespace Turbo.Plugins.s7o
         private void BeginPostInputCursorSettle(int now)
         {
             CaptureUserCursorIntent();
+            if (CanHandBackCursorAfterAcceptedInput())
+            {
+                BeginCursorRestore(now);
+                return;
+            }
+
             int settleMs = Math.Max(0, CursorPostInputSettleMs);
             if (settleMs <= 0)
             {
@@ -9738,6 +10380,19 @@ namespace Turbo.Plugins.s7o
             _cast.DueTick = unchecked(now + settleMs);
             if (_cast.RequiresStrafePause)
                 RequestDhStrafePause(settleMs + 160);
+        }
+
+        private bool CanHandBackCursorAfterAcceptedInput()
+        {
+            if (!_cast.CursorOwned || !_cast.InputSent)
+                return false;
+
+            if (_cast.Kind == CastKind.Multishot && _cast.SawNativeMultishotAnimation)
+                return true;
+            if (_cast.Kind == CastKind.MarkedForDeath && _cast.SawNativeMfdAnimation)
+                return true;
+
+            return _cast.SawCastAnimation;
         }
 
         private void BeginCursorRestore(int now)
@@ -9784,9 +10439,7 @@ namespace Turbo.Plugins.s7o
             }
 
             // Normally a non-ack can simply be real user movement. Retry only the pathological
-            // If the first restore write leaves the native cursor near the synthetic aim,
-            // allow one bounded rescue write toward the restore target.
-            // This is one rescue frame only; it is not a correction loop and never recomputes intent.
+            // case where the first restore write leaves the native cursor near the synthetic aim.
             int cursorX;
             int cursorY;
             bool haveCursor = TryGetCursorClient(out cursorX, out cursorY);
@@ -9922,6 +10575,30 @@ namespace Turbo.Plugins.s7o
             _cast.CursorReferenceValid = true;
             _cast.UserCursorDeltaX = 0;
             _cast.UserCursorDeltaY = 0;
+            _cast.CursorSyntheticWritePending = false;
+            _cast.CursorSyntheticFromX = _cast.SavedCursorX;
+            _cast.CursorSyntheticFromY = _cast.SavedCursorY;
+            _cast.CursorSyntheticTargetX = _cast.SavedCursorX;
+            _cast.CursorSyntheticTargetY = _cast.SavedCursorY;
+            _cast.CursorSyntheticEchoRejectCount = 0;
+        }
+
+        private bool SetCastAimCursor(int x, int y)
+        {
+            int beforeX = _cast.CursorReferenceValid ? _cast.CursorReferenceX : x;
+            int beforeY = _cast.CursorReferenceValid ? _cast.CursorReferenceY : y;
+            int cursorX;
+            int cursorY;
+            if (TryGetCursorClient(out cursorX, out cursorY))
+            {
+                beforeX = cursorX;
+                beforeY = cursorY;
+            }
+
+            bool sent = SetCursorClient(x, y);
+            if (sent)
+                ArmSyntheticCursorWrite(beforeX, beforeY, x, y);
+            return sent;
         }
 
         private bool SetCastCursor(int x, int y)
@@ -9932,8 +10609,30 @@ namespace Turbo.Plugins.s7o
                 _cast.CursorReferenceX = x;
                 _cast.CursorReferenceY = y;
                 _cast.CursorReferenceValid = true;
+                _cast.CursorSyntheticWritePending = false;
             }
             return sent;
+        }
+
+        private void ArmSyntheticCursorWrite(int fromX, int fromY, int targetX, int targetY)
+        {
+            _cast.CursorSyntheticWritePending = true;
+            _cast.CursorSyntheticFromX = fromX;
+            _cast.CursorSyntheticFromY = fromY;
+            _cast.CursorSyntheticTargetX = targetX;
+            _cast.CursorSyntheticTargetY = targetY;
+            _cast.CursorReferenceX = targetX;
+            _cast.CursorReferenceY = targetY;
+            _cast.CursorReferenceValid = true;
+        }
+
+        private void AddTrustedCursorDelta(int dx, int dy)
+        {
+            if (dx == 0 && dy == 0) return;
+            long totalX = (long)_cast.UserCursorDeltaX + dx;
+            long totalY = (long)_cast.UserCursorDeltaY + dy;
+            _cast.UserCursorDeltaX = (int)Math.Max(int.MinValue, Math.Min(int.MaxValue, totalX));
+            _cast.UserCursorDeltaY = (int)Math.Max(int.MinValue, Math.Min(int.MaxValue, totalY));
         }
 
         private void CaptureUserCursorIntent()
@@ -9942,15 +10641,60 @@ namespace Turbo.Plugins.s7o
             int cursorX;
             int cursorY;
             if (!TryGetCursorClient(out cursorX, out cursorY)) return;
+
+            if (_cast.CursorSyntheticWritePending)
+            {
+                int tolerance = Math.Max(4, CursorSyntheticEchoTolerancePixels);
+                int targetDistance = CursorDistance(cursorX, cursorY,
+                    _cast.CursorSyntheticTargetX, _cast.CursorSyntheticTargetY);
+                int fromDistance = CursorDistance(cursorX, cursorY,
+                    _cast.CursorSyntheticFromX, _cast.CursorSyntheticFromY);
+
+                if (targetDistance <= tolerance)
+                {
+                    // The absolute synthetic warp is now observable. Establish a clean physical
+                    // reference at that point; the warp itself is never user steering.
+                    _cast.CursorSyntheticWritePending = false;
+                    _cast.CursorReferenceX = cursorX;
+                    _cast.CursorReferenceY = cursorY;
+                    return;
+                }
+
+                if (fromDistance <= tolerance)
+                {
+                    // FREEHUD/Windows can expose the pre-warp cursor for one collection frame.
+                    // Reject that echo and wait for either the synthetic target or real movement.
+                    _cast.CursorSyntheticEchoRejectCount++;
+                    return;
+                }
+
+                // If the observed point is materially closer to the synthetic target, the warp
+                // landed and the remaining displacement is genuine user steering after it.
+                if (targetDistance + tolerance < fromDistance)
+                {
+                    AddTrustedCursorDelta(
+                        cursorX - _cast.CursorSyntheticTargetX,
+                        cursorY - _cast.CursorSyntheticTargetY);
+                    _cast.CursorSyntheticWritePending = false;
+                    _cast.CursorReferenceX = cursorX;
+                    _cast.CursorReferenceY = cursorY;
+                    return;
+                }
+
+                // Otherwise the user moved while the pre-warp cursor was still being observed.
+                // Preserve that physical movement, but keep waiting so the later synthetic warp
+                // cannot be mistaken for another user gesture.
+                AddTrustedCursorDelta(
+                    cursorX - _cast.CursorSyntheticFromX,
+                    cursorY - _cast.CursorSyntheticFromY);
+                _cast.CursorSyntheticFromX = cursorX;
+                _cast.CursorSyntheticFromY = cursorY;
+                return;
+            }
+
             int dx = cursorX - _cast.CursorReferenceX;
             int dy = cursorY - _cast.CursorReferenceY;
-            if (dx != 0 || dy != 0)
-            {
-                long totalX = (long)_cast.UserCursorDeltaX + dx;
-                long totalY = (long)_cast.UserCursorDeltaY + dy;
-                _cast.UserCursorDeltaX = (int)Math.Max(int.MinValue, Math.Min(int.MaxValue, totalX));
-                _cast.UserCursorDeltaY = (int)Math.Max(int.MinValue, Math.Min(int.MaxValue, totalY));
-            }
+            AddTrustedCursorDelta(dx, dy);
             _cast.CursorReferenceX = cursorX;
             _cast.CursorReferenceY = cursorY;
         }
@@ -9958,62 +10702,15 @@ namespace Turbo.Plugins.s7o
         private void PrepareIntentRestoreTarget()
         {
             Size size = Hud.Window.Size;
-            double rawDx = _cast.UserCursorDeltaX;
-            double rawDy = _cast.UserCursorDeltaY;
-            double dx = rawDx;
-            double dy = rawDy;
-            double magnitude = Math.Sqrt(dx * dx + dy * dy);
-            double maximumIntent = Math.Max(0, CursorIntentMaxRestorePixels);
-            bool magnitudeClamped = maximumIntent > 0 && magnitude > maximumIntent;
-            if (magnitudeClamped)
-            {
-                double scale = maximumIntent / magnitude;
-                dx *= scale;
-                dy *= scale;
-            }
+            long targetX = (long)_cast.SavedCursorX + _cast.UserCursorDeltaX;
+            long targetY = (long)_cast.SavedCursorY + _cast.UserCursorDeltaY;
 
-            long targetX = (long)_cast.SavedCursorX + (long)Math.Round(dx);
-            long targetY = (long)_cast.SavedCursorY + (long)Math.Round(dy);
-            // The 96 px bound protects against reconstructed-input explosions, but it must not
-            // invert an unambiguous user direction change across the hero. In that one case keep
-            // the same bounded radius and preserve only the raw steering direction; never restore
-            // the full uncapped distance and never add a second correction write.
-            int heroX;
-            int heroY;
-            if (magnitudeClamped && maximumIntent > 0 && TryGetHeroScreen(out heroX, out heroY))
-            {
-                double rawTargetX = _cast.SavedCursorX + rawDx;
-                double rawTargetY = _cast.SavedCursorY + rawDy;
-                double rawVectorX = rawTargetX - heroX;
-                double rawVectorY = rawTargetY - heroY;
-                double cappedVectorX = targetX - heroX;
-                double cappedVectorY = targetY - heroY;
-                double rawVectorLength = Math.Sqrt(rawVectorX * rawVectorX + rawVectorY * rawVectorY);
-                double cappedVectorLength = Math.Sqrt(cappedVectorX * cappedVectorX + cappedVectorY * cappedVectorY);
-                double dot = rawVectorX * cappedVectorX + rawVectorY * cappedVectorY;
-                if (rawVectorLength >= Math.Max(48.0, maximumIntent * 0.5)
-                    && cappedVectorLength >= 24.0 && dot < 0)
-                {
-                    targetX = heroX + (long)Math.Round(rawVectorX / rawVectorLength * maximumIntent);
-                    targetY = heroY + (long)Math.Round(rawVectorY / rawVectorLength * maximumIntent);
-                }
-            }
-
+            // Trusted physical steering is restored at full magnitude. Only the actual window
+            // boundary clamps the endpoint; there is no fixed-radius or ratio-based damping.
             int maximumX = Math.Max(0, size.Width - 1);
             int maximumY = Math.Max(0, size.Height - 1);
             _cast.RestoreX = (int)Math.Max(0, Math.Min(maximumX, targetX));
             _cast.RestoreY = (int)Math.Max(0, Math.Min(maximumY, targetY));
-        }
-
-        private bool TryGetHeroScreen(out int x, out int y)
-        {
-            x = 0;
-            y = 0;
-            if (Hud == null || Hud.Game == null || Hud.Game.Me == null
-                || Hud.Game.Me.ScreenCoordinate == null) return false;
-            x = (int)Math.Round(Hud.Game.Me.ScreenCoordinate.X);
-            y = (int)Math.Round(Hud.Game.Me.ScreenCoordinate.Y);
-            return true;
         }
 
         private bool SetCursorClient(int x, int y)
