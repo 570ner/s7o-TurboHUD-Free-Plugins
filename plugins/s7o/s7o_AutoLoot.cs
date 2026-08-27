@@ -512,11 +512,13 @@ namespace Turbo.Plugins.s7o
             PurgeRetryState(now);
             PurgeCleanupStuckIgnores(now);
 
+            // Drop stale risky-click recovery state before interpreting a user-opened Urshi pane.
+            // A successfully picked/vanished item must not make the next manual pane look accidental.
+            PurgeResolvedUrshiArmedState(now);
+
             // Urshi recovery must run before inventory/vendor UI early returns because Urshi opens UI layers.
             if (HandleAutoLootUrshiRecovery(now))
                 return;
-
-            PurgeResolvedUrshiArmedState(now);
 
             // Recovery above intentionally owns Urshi conversation/gem UI. Outside that
             // lifecycle, never synthesize world clicks while a normal blocking UI is open.
@@ -3093,6 +3095,17 @@ namespace Turbo.Plugins.s7o
 
             if (gemPaneVisible && _autoUrshiRewardGateStartedMs != 0 && !intentionalAutoTalk)
             {
+                // A real user-opened pane is authoritative when no eligible loot or known
+                // synthetic pickup recovery remains. The fixed auto-handoff settle timer alone
+                // must never make AutoLoot close Urshi on the player.
+                if (!HasPendingArmedUrshiLoot(now)
+                    && !HasPendingGenericUrshiPickupRecovery(now)
+                    && !HasVisibleEligibleLootBlockingUrshiTalk())
+                {
+                    CompleteAutoUrshiGemHandoff();
+                    return true;
+                }
+
                 if (ShouldRecoverUnsafeAutoUrshiGemHandoff(now))
                     return BeginUnsafeAutoUrshiHandoffRecovery(now);
 
