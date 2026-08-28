@@ -427,7 +427,7 @@ namespace Turbo.Plugins.s7o
         private bool _townAreaExpected;
         private bool _townVisitActive;
         private long _townSnapshotReadyMs;
-        private string _resourceSignature;
+        private int _resourceSignatureHash = int.MinValue;
         private RotatingTriangleShapePainter _trianglePainter;
         private StandardPingRadiusTransformator _mapPulse;
         private GroundTimerDecorator _valleyOfDeathTimer;
@@ -623,8 +623,6 @@ namespace Turbo.Plugins.s7o
             if (!IsGameReady() || !VisualHelpersEnabled)
                 return;
 
-            RebuildResources(false);
-
             if (layer == WorldLayer.Ground)
             {
                 PaintPickupDots();
@@ -646,8 +644,6 @@ namespace Turbo.Plugins.s7o
 
             if (clipState != ClipState.BeforeClip && clipState != ClipState.AfterClip)
                 return;
-
-            RebuildResources(false);
 
             if (IsFullMapOpen())
             {
@@ -710,11 +706,11 @@ namespace Turbo.Plugins.s7o
 
         private void RebuildResources(bool force)
         {
-            var sig = BuildResourceSignature();
-            if (!force && sig == _resourceSignature)
+            int signatureHash = BuildResourceSignatureHash();
+            if (!force && signatureHash == _resourceSignatureHash)
                 return;
 
-            _resourceSignature = sig;
+            _resourceSignatureHash = signatureHash;
             HealthGlobeBrush = Hud.Render.CreateBrush(235, C(HealthGlobeColorR), C(HealthGlobeColorG), C(HealthGlobeColorB), 0);
             RiftOrbBrush = Hud.Render.CreateBrush(235, C(RiftOrbColorR), C(RiftOrbColorG), C(RiftOrbColorB), 0);
             AncientRingBrush = Hud.Render.CreateBrush(C(ItemGroundCircleAlpha), C(AncientColorR), C(AncientColorG), C(AncientColorB), ItemGroundCircleStrokeWidth);
@@ -778,22 +774,37 @@ namespace Turbo.Plugins.s7o
             _mapPulse = new StandardPingRadiusTransformator(Hud, 333);
         }
 
-        private string BuildResourceSignature()
+        private int BuildResourceSignatureHash()
         {
-            return string.Join("|", new[]
+            unchecked
             {
-                HealthGlobeColorR, HealthGlobeColorG, HealthGlobeColorB, RiftOrbColorR, RiftOrbColorG, RiftOrbColorB,
-                AncientColorR, AncientColorG, AncientColorB, PrimalColorR, PrimalColorG, PrimalColorB,
-                AncientTextColorR, AncientTextColorG, AncientTextColorB, PrimalTextColorR, PrimalTextColorG, PrimalTextColorB,
-                ValleyOfDeathColorR, ValleyOfDeathColorG, ValleyOfDeathColorB, C((int)(ValleyOfDeathLineThickness * 10)), ValleyOfDeathAlpha, ValleyOfDeathOutlineAlpha,
-                Player1ColorR, Player1ColorG, Player1ColorB, Player2ColorR, Player2ColorG, Player2ColorB,
-                Player3ColorR, Player3ColorG, Player3ColorB, Player4ColorR, Player4ColorG, Player4ColorB,
-                PlayerCircleFillAlpha, PlayerCircleOutlineAlpha, PlayerCircleBlackOutlineAlpha, C((int)(PlayerCircleOutlineWidth * 10)), C((int)(PlayerCircleBlackOutlineWidth * 10)),
-                ItemGroundCircleAlpha, ItemGroundCircleOutlineAlpha, C((int)(ItemGroundCircleStrokeWidth * 10)), C((int)(ItemGroundCircleOutlineWidth * 10)),
-                ItemAlertArrowAlpha, ItemAlertArrowHighlightAlpha, ItemAlertArrowHighlightBoost,
-                C((int)(AncientAlertTextSize * 10)), C((int)(PrimalAlertTextSize * 10)), C((int)(ItemAlertMinimapTextSize * 10)),
-                AncientAlertTextHoldMs, PrimalAlertTextHoldMs
-            }.Select(x => x.ToString()).ToArray());
+                int hash = 17;
+                hash = HashResourceValue(hash, HealthGlobeColorR); hash = HashResourceValue(hash, HealthGlobeColorG); hash = HashResourceValue(hash, HealthGlobeColorB);
+                hash = HashResourceValue(hash, RiftOrbColorR); hash = HashResourceValue(hash, RiftOrbColorG); hash = HashResourceValue(hash, RiftOrbColorB);
+                hash = HashResourceValue(hash, AncientColorR); hash = HashResourceValue(hash, AncientColorG); hash = HashResourceValue(hash, AncientColorB);
+                hash = HashResourceValue(hash, PrimalColorR); hash = HashResourceValue(hash, PrimalColorG); hash = HashResourceValue(hash, PrimalColorB);
+                hash = HashResourceValue(hash, AncientTextColorR); hash = HashResourceValue(hash, AncientTextColorG); hash = HashResourceValue(hash, AncientTextColorB);
+                hash = HashResourceValue(hash, PrimalTextColorR); hash = HashResourceValue(hash, PrimalTextColorG); hash = HashResourceValue(hash, PrimalTextColorB);
+                hash = HashResourceValue(hash, ValleyOfDeathColorR); hash = HashResourceValue(hash, ValleyOfDeathColorG); hash = HashResourceValue(hash, ValleyOfDeathColorB);
+                hash = HashResourceValue(hash, ValleyOfDeathLineThickness.GetHashCode()); hash = HashResourceValue(hash, ValleyOfDeathAlpha); hash = HashResourceValue(hash, ValleyOfDeathOutlineAlpha);
+                hash = HashResourceValue(hash, Player1ColorR); hash = HashResourceValue(hash, Player1ColorG); hash = HashResourceValue(hash, Player1ColorB);
+                hash = HashResourceValue(hash, Player2ColorR); hash = HashResourceValue(hash, Player2ColorG); hash = HashResourceValue(hash, Player2ColorB);
+                hash = HashResourceValue(hash, Player3ColorR); hash = HashResourceValue(hash, Player3ColorG); hash = HashResourceValue(hash, Player3ColorB);
+                hash = HashResourceValue(hash, Player4ColorR); hash = HashResourceValue(hash, Player4ColorG); hash = HashResourceValue(hash, Player4ColorB);
+                hash = HashResourceValue(hash, PlayerCircleFillAlpha); hash = HashResourceValue(hash, PlayerCircleOutlineAlpha); hash = HashResourceValue(hash, PlayerCircleBlackOutlineAlpha);
+                hash = HashResourceValue(hash, PlayerCircleOutlineWidth.GetHashCode()); hash = HashResourceValue(hash, PlayerCircleBlackOutlineWidth.GetHashCode());
+                hash = HashResourceValue(hash, ItemGroundCircleAlpha); hash = HashResourceValue(hash, ItemGroundCircleOutlineAlpha);
+                hash = HashResourceValue(hash, ItemGroundCircleStrokeWidth.GetHashCode()); hash = HashResourceValue(hash, ItemGroundCircleOutlineWidth.GetHashCode());
+                hash = HashResourceValue(hash, ItemAlertArrowAlpha); hash = HashResourceValue(hash, ItemAlertArrowHighlightAlpha); hash = HashResourceValue(hash, ItemAlertArrowHighlightBoost);
+                hash = HashResourceValue(hash, AncientAlertTextSize.GetHashCode()); hash = HashResourceValue(hash, PrimalAlertTextSize.GetHashCode()); hash = HashResourceValue(hash, ItemAlertMinimapTextSize.GetHashCode());
+                hash = HashResourceValue(hash, AncientAlertTextHoldMs); hash = HashResourceValue(hash, PrimalAlertTextHoldMs);
+                return hash;
+            }
+        }
+
+        private static int HashResourceValue(int hash, int value)
+        {
+            unchecked { return (hash * 31) + value; }
         }
 
         private IBrush[] CreatePlayerBrushes(int alpha, float strokeWidth)
