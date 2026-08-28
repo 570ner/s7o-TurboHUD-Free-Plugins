@@ -28,7 +28,7 @@ namespace Turbo.Plugins.s7o
     //   including male Monk, male Crusader, and future class additions.
     //   Both paths are distinguished internally so DebugLog = true will show which triggered.
 
-    public class s7o_BannerSoundPlugin : BasePlugin, INewAreaHandler, IBeforeRenderHandler, IAfterCollectHandler, IInGameTopPainter
+    public class s7o_BannerSoundPlugin : BasePlugin, INewAreaHandler, IAfterCollectHandler, IInGameTopPainter
     {
         // -----------------------------------------------------------------------
         // Settings
@@ -101,8 +101,8 @@ namespace Turbo.Plugins.s7o
         public bool BannerArrowUseLastKnownPlayerCoordinate { get; set; }
         public int BannerLastKnownCoordinateMaxAgeMs { get; set; }
 
-        // How often BeforeRender polls player animations (milliseconds).
-        // Lower = faster response; 80–120 ms is safe and responsive.
+        // How often AfterCollect checks player banner-drop animations (milliseconds).
+        // 33 ms keeps the fast path effectively immediate without polling every HUD frame.
         public int ScanIntervalMs { get; set; }
 
         // When true, the local player is included in the scan.
@@ -129,7 +129,7 @@ namespace Turbo.Plugins.s7o
         // Known banner-drop animation enums (fast O(1) HashSet lookup).
         private readonly HashSet<AnimSnoEnum> KnownBannerDropAnims = new HashSet<AnimSnoEnum>();
 
-        private class PlayerCoordinateSnapshot
+        private struct PlayerCoordinateSnapshot
         {
             public float X;
             public float Y;
@@ -149,6 +149,8 @@ namespace Turbo.Plugins.s7o
         }
 
         private readonly Dictionary<int, PlayerCoordinateSnapshot> LastKnownPlayerCoordinates = new Dictionary<int, PlayerCoordinateSnapshot>();
+        private readonly Dictionary<AnimSnoEnum, string> AnimationNameCache = new Dictionary<AnimSnoEnum, string>();
+        private readonly Dictionary<AnimSnoEnum, bool> AnimationBannerDropFallbackCache = new Dictionary<AnimSnoEnum, bool>();
         private readonly HashSet<string> KnownNativeBannerKeys = new HashSet<string>();
         private readonly Dictionary<string, long> AlertedNativeBannerKeysMs = new Dictionary<string, long>();
 
@@ -225,9 +227,9 @@ namespace Turbo.Plugins.s7o
             BannerArrowUseLastKnownPlayerCoordinate = true;
             BannerLastKnownCoordinateMaxAgeMs = 20000;
 
-            // Scan every render frame. Only four players are inspected, so this is cheap
-            // and removes the extra 50 ms polling delay from the fast animation path.
-            ScanIntervalMs      = 0;
+            // Check banner-drop animations about every two 60-FPS frames.
+            // Coordinates are still refreshed every AfterCollect for arrow reliability.
+            ScanIntervalMs      = 33;
 
             // Include self so you hear the alert when you drop your own banner.
             // Set false if you only want alerts for other players.
@@ -327,11 +329,20 @@ namespace Turbo.Plugins.s7o
                 return;
 
             long nowMs = Hud.Game.CurrentRealTimeMilliseconds;
-
             UpdateAllKnownPlayerCoordinates(nowMs);
 
+            // Preserve the established fallback ordering: coordinate snapshot first,
+            // native banner detection second, animation fast-path last. The animation
+            // path is simply throttled now instead of running on every render frame.
             if (UseNativeBannerFallback)
                 ScanNativeBanners(nowMs);
+
+            int intervalMs = Math.Max(0, ScanIntervalMs);
+            if (intervalMs == 0 || nowMs - _lastScanMs >= intervalMs)
+            {
+                _lastScanMs = nowMs;
+                ScanPlayerAnimations(nowMs);
+            }
         }
 
         public void PaintTopInGame(ClipState clipState)
@@ -343,28 +354,10 @@ namespace Turbo.Plugins.s7o
         }
 
         // -----------------------------------------------------------------------
-        // Animation scan (throttled)
+        // Player animation scan (throttled)
         // -----------------------------------------------------------------------
 
-        public void BeforeRender()
-        {
-            if (!Hud.Game.IsInGame)
-                return;
-
-            long nowMs = Hud.Game.CurrentRealTimeMilliseconds;
-
-            if (nowMs - _lastScanMs < ScanIntervalMs)
-                return;
-
-            _lastScanMs = nowMs;
-            ScanPlayers(nowMs);
-        }
-
-        // -----------------------------------------------------------------------
-        // Player animation scan
-        // -----------------------------------------------------------------------
-
-        private void ScanPlayers(long nowMs)
+        private void ScanPlayerAnimations(long nowMs)
         {
             var players = Hud.Game.Players;
             if (players == null)
@@ -381,10 +374,8 @@ namespace Turbo.Plugins.s7o
                     continue;
                 }
 
-                // Cache coordinates when FreeHUD exposes them, but do not require a
-                // valid actor/coordinate before checking animation. Remote banner-drop
-                // animation may still be available when the player is far away.
-                UpdateKnownPlayerCoordinate(player, nowMs);
+                // Do not require a valid actor/coordinate before checking animation.
+                // Remote banner-drop animation may still be available when the player is far away.
 
                 // Self: only include during debug testing.
                 if (player.IsMe && !IncludeSelfForDebug)
@@ -395,15 +386,24 @@ namespace Turbo.Plugins.s7o
 
                 bool shouldLog = DebugLog && (!DebugLogOnlySelf || player.IsMe);
 
-                // Read animation name once, safely.
-                string animName = "";
-                try { animName = player.Animation.ToString(); }
-                catch { animName = ""; }
+                AnimSnoEnum animation;
+                try { animation = player.Animation; }
+                catch
+                {
+                    ActiveBannerAnimPlayers.Remove(player.Index);
+                    continue;
+                }
 
-                // Detect via enum first, then string fallback.
-                bool detectedByEnum   = false;
+                bool detectedByEnum = KnownBannerDropAnims.Contains(animation);
+                string animName = string.Empty;
                 bool detectedByString = false;
-                DetectBannerDrop(player, animName, out detectedByEnum, out detectedByString);
+
+                if (!detectedByEnum || shouldLog)
+                    animName = GetCachedAnimationName(animation);
+
+                if (!detectedByEnum)
+                    detectedByString = IsCachedBannerDropAnimationName(animation, animName);
+
                 bool isBannerDrop = detectedByEnum || detectedByString;
 
                 // Candidate log: fires when the animation name even mentions banner or drop.
@@ -478,29 +478,31 @@ namespace Turbo.Plugins.s7o
         // Detection
         // -----------------------------------------------------------------------
 
-        private void DetectBannerDrop(
-            IPlayer player,
-            string animName,
-            out bool byEnum,
-            out bool byString)
+        private string GetCachedAnimationName(AnimSnoEnum animation)
         {
-            byEnum   = false;
-            byString = false;
+            string name;
+            if (AnimationNameCache.TryGetValue(animation, out name))
+                return name;
 
-            // Fast enum path.
-            try { byEnum = KnownBannerDropAnims.Contains(player.Animation); }
-            catch { byEnum = false; }
+            try { name = animation.ToString(); }
+            catch { name = string.Empty; }
 
-            if (byEnum)
-                return;
+            AnimationNameCache[animation] = name ?? string.Empty;
+            return name ?? string.Empty;
+        }
 
-            // String fallback — catches any variant not in the enum list
-            // (confirmed to catch _wizard_male_1hs_orb_banner_drop and others).
-            if (string.IsNullOrEmpty(animName))
-                return;
+        private bool IsCachedBannerDropAnimationName(AnimSnoEnum animation, string animName)
+        {
+            bool isBannerDrop;
+            if (AnimationBannerDropFallbackCache.TryGetValue(animation, out isBannerDrop))
+                return isBannerDrop;
 
-            string lower = animName.ToLowerInvariant();
-            byString = lower.Contains("banner") && lower.Contains("drop");
+            isBannerDrop = !string.IsNullOrEmpty(animName)
+                && animName.IndexOf("banner", StringComparison.OrdinalIgnoreCase) >= 0
+                && animName.IndexOf("drop", StringComparison.OrdinalIgnoreCase) >= 0;
+
+            AnimationBannerDropFallbackCache[animation] = isBannerDrop;
+            return isBannerDrop;
         }
 
         private bool CanAlertForPlayer(int playerIndex, long nowMs)
@@ -624,7 +626,9 @@ namespace Turbo.Plugins.s7o
                     UpdateKnownPlayerCoordinate(player, nowMs);
                 }
             }
-            catch { }
+            catch
+            {
+            }
         }
 
         private void UpdateKnownPlayerCoordinate(IPlayer player, long nowMs)
@@ -684,7 +688,7 @@ namespace Turbo.Plugins.s7o
             try
             {
                 PlayerCoordinateSnapshot snapshot;
-                if (!LastKnownPlayerCoordinates.TryGetValue(player.Index, out snapshot) || snapshot == null)
+                if (!LastKnownPlayerCoordinates.TryGetValue(player.Index, out snapshot))
                     return false;
 
                 if (nowMs - snapshot.TimeMs > BannerLastKnownCoordinateMaxAgeMs)
