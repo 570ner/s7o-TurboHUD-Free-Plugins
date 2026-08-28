@@ -1,11 +1,12 @@
 using System;
-using System.Linq;
+using System.Collections.Generic;
 using Turbo.Plugins.Default;
 
 namespace Turbo.Plugins.s7o
 {
-    // REV06 preserves REV05 and keeps low-health Morlu recovery states targetable and normally colored.
-    public class s7o_EliteHealthBars : BasePlugin, IInGameWorldPainter, IInGameTopPainter
+    // Caches per-frame elite classification and pack state while preserving
+    // low-health Morlu recovery as targetable and normally colored.
+    public class s7o_EliteHealthBars : BasePlugin, IBeforeRenderHandler, IInGameWorldPainter, IInGameTopPainter
     {
         private const double MorluRecoveryHealthThreshold = 0.12d;
 
@@ -41,7 +42,103 @@ namespace Turbo.Plugins.s7o
         private WorldDecoratorCollection _mapOverlayRareDecorator;
         private WorldDecoratorCollection _mapOverlayUniqueDecorator;
 
-        private System.Collections.Generic.Dictionary<string, int> _championFallbackAliveCounts;
+        private enum EliteVisualKind
+        {
+            Rare,
+            Champion,
+            FinalChampion,
+            RareMinion,
+            Juggernaut,
+            Unique,
+            Goblin,
+            RiftGuardian,
+        }
+
+        private struct EliteRenderState
+        {
+            public EliteVisualKind Kind;
+            public bool IsUnavailable;
+            public bool IsJuggernaut;
+            public bool IsFinalChampion;
+        }
+
+        private struct ChampionFamilyKey : IEquatable<ChampionFamilyKey>
+        {
+            private readonly byte _kind;
+            private readonly uint _sno;
+            private readonly string _text;
+
+            private ChampionFamilyKey(byte kind, uint sno, string text)
+            {
+                _kind = kind;
+                _sno = sno;
+                _text = text;
+            }
+
+            public bool IsEmpty { get { return _kind == 0; } }
+
+            public static ChampionFamilyKey FromActor(uint sno)
+            {
+                return new ChampionFamilyKey(1, sno, null);
+            }
+
+            public static ChampionFamilyKey FromCode(string code)
+            {
+                return string.IsNullOrEmpty(code) ? default(ChampionFamilyKey) : new ChampionFamilyKey(2, 0, code);
+            }
+
+            public static ChampionFamilyKey FromName(string name)
+            {
+                // The previous string key always produced at least "name:", even when
+                // no readable monster name existed, so preserve that grouping behavior.
+                return new ChampionFamilyKey(3, 0, name ?? string.Empty);
+            }
+
+            public bool Equals(ChampionFamilyKey other)
+            {
+                return _kind == other._kind
+                    && _sno == other._sno
+                    && string.Equals(_text, other._text, StringComparison.Ordinal);
+            }
+
+            public override bool Equals(object obj)
+            {
+                return obj is ChampionFamilyKey && Equals((ChampionFamilyKey)obj);
+            }
+
+            public override int GetHashCode()
+            {
+                unchecked
+                {
+                    int hash = _kind;
+                    hash = (hash * 397) ^ (int)_sno;
+                    hash = (hash * 397) ^ (_text == null ? 0 : _text.GetHashCode());
+                    return hash;
+                }
+            }
+        }
+
+        private readonly Dictionary<ChampionFamilyKey, int> _championFamilyAliveCounts = new Dictionary<ChampionFamilyKey, int>();
+        private readonly Dictionary<IMonsterPack, int> _championPackAliveCounts = new Dictionary<IMonsterPack, int>();
+        private readonly Dictionary<IMonster, EliteRenderState> _renderStateByMonster = new Dictionary<IMonster, EliteRenderState>();
+
+        private readonly List<IMonster> _barMonsters = new List<IMonster>();
+        private readonly List<IMonster> _offscreenMonsters = new List<IMonster>();
+        private readonly List<IMonster> _topLeftCandidates = new List<IMonster>();
+        private readonly List<IMonster> _mapUnavailable = new List<IMonster>();
+        private readonly List<IMonster> _mapMinions = new List<IMonster>();
+        private readonly List<IMonster> _mapJuggernauts = new List<IMonster>();
+        private readonly List<IMonster> _mapChampions = new List<IMonster>();
+        private readonly List<IMonster> _mapRares = new List<IMonster>();
+        private readonly List<IMonster> _mapUniques = new List<IMonster>();
+
+        private readonly List<ElitePackListEntry> _topLeftPacks = new List<ElitePackListEntry>();
+        private readonly Stack<ElitePackListEntry> _topLeftPackPool = new Stack<ElitePackListEntry>();
+        private readonly Dictionary<IMonsterPack, ElitePackListEntry> _topLeftChampionPacks = new Dictionary<IMonsterPack, ElitePackListEntry>();
+        private readonly Dictionary<ChampionFamilyKey, ElitePackListEntry> _topLeftFallbackChampionGroups = new Dictionary<ChampionFamilyKey, ElitePackListEntry>();
+
+        private readonly string[] _hpPercentText = new string[101];
+        private int _preparedGameTick = int.MinValue;
 
         public bool ShowChampionBars { get; set; }
         public bool ShowRareBars { get; set; }
@@ -368,6 +465,9 @@ namespace Turbo.Plugins.s7o
 
             TextFont = Hud.Render.CreateFont("tahoma", 8.0f, 245, 255, 255, 255, true, false, 230, 0, 0, 0, true);
 
+            for (int i = 0; i < _hpPercentText.Length; i++)
+                _hpPercentText[i] = i.ToString() + "%";
+
             _eliteMinimapCircleOutlineBrush = Hud.Render.CreateBrush(
                 EliteMinimapCircleOutlineAlpha,
                 0, 0, 0,
@@ -551,73 +651,29 @@ namespace Turbo.Plugins.s7o
             if (!Hud.Game.IsInGame || Hud.Game.IsLoading)
                 return;
 
-            var monsters = Hud.Game.AliveMonsters;
-            if (monsters == null)
+            EnsureFramePrepared();
+
+            // Draw order is behavior-sensitive: lower priority first, higher priority last.
+            PaintMapOverlayList(_mapOverlayUnavailableDecorator, layer, _mapUnavailable, false);
+            PaintMapOverlayList(_mapOverlayMinionDecorator, layer, _mapMinions, false);
+            PaintMapOverlayList(_mapOverlayJuggernautDecorator, layer, _mapJuggernauts, true);
+            PaintMapOverlayList(_mapOverlayChampionDecorator, layer, _mapChampions, false);
+            PaintMapOverlayList(_mapOverlayRareDecorator, layer, _mapRares, false);
+            PaintMapOverlayList(_mapOverlayUniqueDecorator, layer, _mapUniques, false);
+        }
+
+        private void PaintMapOverlayList(WorldDecoratorCollection decorator, WorldLayer layer, List<IMonster> monsters, bool juggernaut)
+        {
+            if (decorator == null || monsters == null)
                 return;
 
-            var eligible = monsters
-                .Where(m => m != null)
-                .Where(m => IsEliteLikeForVisibility(m))
-                .Where(m => !IsExcludedFromEliteMinimapOverlay(m))
-                .ToList();
-
-            // Draw order: lower priority first, higher priority last.
-            // This ensures minions/green/trash cannot cover champions or rares
-            // because this plugin draws late at Order = 999999.
-
-            foreach (var m in eligible)
+            for (int i = 0; i < monsters.Count; i++)
             {
-                if (IsEliteTemporarilyUnavailable(m))
-                    PaintMapOverlayCircle(_mapOverlayUnavailableDecorator, layer, m);
-            }
-
-            foreach (var m in eligible)
-            {
-                if (!IsEliteTemporarilyUnavailable(m) &&
-                    m.Rarity == ActorRarity.RareMinion)
-                {
-                    PaintMapOverlayCircle(_mapOverlayMinionDecorator, layer, m);
-                }
-            }
-
-            foreach (var m in eligible)
-            {
-                if (!IsEliteTemporarilyUnavailable(m) &&
-                    IsJuggernaut(m))
-                {
-                    PaintJuggernautMapOverlayCircle(layer, m);
-                }
-            }
-
-
-            foreach (var m in eligible)
-            {
-                if (!IsEliteTemporarilyUnavailable(m) &&
-                    !IsJuggernaut(m) &&
-                    m.Rarity == ActorRarity.Champion)
-                {
-                    PaintMapOverlayCircle(_mapOverlayChampionDecorator, layer, m);
-                }
-            }
-
-            foreach (var m in eligible)
-            {
-                if (!IsEliteTemporarilyUnavailable(m) &&
-                    !IsJuggernaut(m) &&
-                    m.Rarity == ActorRarity.Rare)
-                {
-                    PaintMapOverlayCircle(_mapOverlayRareDecorator, layer, m);
-                }
-            }
-
-            foreach (var m in eligible)
-            {
-                if (!IsEliteTemporarilyUnavailable(m) &&
-                    !IsJuggernaut(m) &&
-                    m.Rarity == ActorRarity.Unique)
-                {
-                    PaintMapOverlayCircle(_mapOverlayUniqueDecorator, layer, m);
-                }
+                var monster = monsters[i];
+                if (juggernaut)
+                    PaintJuggernautMapOverlayCircle(layer, monster);
+                else
+                    PaintMapOverlayCircle(decorator, layer, monster);
             }
         }
 
@@ -685,37 +741,25 @@ namespace Turbo.Plugins.s7o
             if (!_defaultEliteMinimapCirclesAdjusted)
                 AdjustDefaultEliteMinimapCircles();
 
-            var monsters = Hud.Game.AliveMonsters;
-            if (monsters == null) return;
-
-            BuildChampionFallbackAliveCounts(monsters);
-
-            if (ShowEliteGroundCircles)
-                EnsureEliteGroundCircleBrushes();
-
             if (!ShowEliteGroundCircles && !ShowOffscreenEliteLines)
                 return;
 
-            int offscreenLinesDrawn = 0;
+            EnsureFramePrepared();
 
-            foreach (var monster in monsters)
+            if (ShowEliteGroundCircles)
             {
-                bool drawBar = ShouldDrawMonster(monster);
-                if (drawBar)
-                {
-                    if (ShowEliteGroundCircles)
-                        DrawEliteGroundCircle(monster);
-                    continue;
-                }
-
-                if (ShowOffscreenEliteLines &&
-                    offscreenLinesDrawn < MaxOffscreenLines &&
-                    ShouldDrawOffscreenLine(monster))
-                {
-                    DrawOffscreenLine(monster);
-                    offscreenLinesDrawn++;
-                }
+                EnsureEliteGroundCircleBrushes();
+                for (int i = 0; i < _barMonsters.Count; i++)
+                    DrawEliteGroundCircle(_barMonsters[i]);
             }
+
+            if (!ShowOffscreenEliteLines)
+                return;
+
+            int maxLines = Math.Max(0, MaxOffscreenLines);
+            int count = Math.Min(maxLines, _offscreenMonsters.Count);
+            for (int i = 0; i < count; i++)
+                DrawOffscreenLine(_offscreenMonsters[i]);
         }
 
         private void EnsureEliteGroundCircleBrushes()
@@ -792,19 +836,132 @@ namespace Turbo.Plugins.s7o
             if (!Hud.Game.IsInGame || Hud.Game.IsLoading) return;
             if (!ShowEliteHealthBars) return;
 
-            var monsters = Hud.Game.AliveMonsters;
-            if (monsters == null) return;
+            EnsureFramePrepared();
 
-            BuildChampionFallbackAliveCounts(monsters);
+            for (int i = 0; i < _barMonsters.Count; i++)
+                DrawMonsterBar(_barMonsters[i]);
+
+            DrawTopLeftEliteList();
+        }
+
+        public void BeforeRender()
+        {
+            PrepareFrameData();
+        }
+
+        private void EnsureFramePrepared()
+        {
+            int gameTick;
+            try { gameTick = Hud.Game.CurrentGameTick; }
+            catch { gameTick = int.MinValue; }
+
+            if (_preparedGameTick != gameTick)
+                PrepareFrameData();
+        }
+
+        private void PrepareFrameData()
+        {
+            int gameTick;
+            try { gameTick = Hud != null && Hud.Game != null ? Hud.Game.CurrentGameTick : int.MinValue; }
+            catch { gameTick = int.MinValue; }
+
+            if (_preparedGameTick == gameTick)
+                return;
+
+            _preparedGameTick = gameTick;
+            ClearPreparedFrameData();
+
+            if (!Enabled || Hud == null || Hud.Game == null || Hud.Game.Me == null)
+                return;
+            if (!Hud.Game.IsInGame || Hud.Game.IsLoading)
+                return;
+
+            var monsters = Hud.Game.AliveMonsters;
+            if (monsters == null)
+                return;
+
+            BuildChampionAliveCounts(monsters);
+
+            bool needMap = ShowLayeredEliteMinimapOverlay;
+            bool needBars = ShowEliteHealthBars || ShowEliteGroundCircles;
+            bool needOffscreen = ShowOffscreenEliteLines;
+            bool needTopLeft = ShowEliteHealthBars && ShowTopLeftEliteList;
 
             foreach (var monster in monsters)
             {
-                if (!ShouldDrawMonster(monster)) continue;
+                if (monster == null)
+                    continue;
 
-                DrawMonsterBar(monster);
+                bool eliteLikeForVisibility = IsEliteLikeForVisibility(monster);
+                bool showBar = needBars && ShouldDrawMonster(monster, eliteLikeForVisibility);
+                bool showOffscreen = needOffscreen && !showBar && ShouldDrawOffscreenLine(monster, eliteLikeForVisibility);
+                bool showTopLeft = needTopLeft && ShouldShowInTopLeftList(monster);
+                bool mapEligible = needMap
+                    && eliteLikeForVisibility
+                    && !IsExcludedFromEliteMinimapOverlay(monster);
+
+                if (!showBar && !showOffscreen && !showTopLeft && !mapEligible)
+                    continue;
+
+                EliteRenderState state = BuildRenderState(monster, eliteLikeForVisibility);
+                _renderStateByMonster[monster] = state;
+
+                if (showBar)
+                    _barMonsters.Add(monster);
+                if (showOffscreen)
+                    _offscreenMonsters.Add(monster);
+                if (showTopLeft)
+                    _topLeftCandidates.Add(monster);
+
+                if (!mapEligible)
+                    continue;
+
+                if (state.IsUnavailable)
+                {
+                    _mapUnavailable.Add(monster);
+                    continue;
+                }
+
+                if (monster.Rarity == ActorRarity.RareMinion)
+                    _mapMinions.Add(monster);
+
+                if (state.IsJuggernaut)
+                {
+                    _mapJuggernauts.Add(monster);
+                    continue;
+                }
+
+                switch (monster.Rarity)
+                {
+                    case ActorRarity.Champion:
+                        _mapChampions.Add(monster);
+                        break;
+                    case ActorRarity.Rare:
+                        _mapRares.Add(monster);
+                        break;
+                    case ActorRarity.Unique:
+                        _mapUniques.Add(monster);
+                        break;
+                }
             }
 
-            DrawTopLeftEliteList(monsters);
+            if (needTopLeft)
+                BuildTopLeftElitePacks();
+        }
+
+        private void ClearPreparedFrameData()
+        {
+            _renderStateByMonster.Clear();
+            _barMonsters.Clear();
+            _offscreenMonsters.Clear();
+            _topLeftCandidates.Clear();
+            _mapUnavailable.Clear();
+            _mapMinions.Clear();
+            _mapJuggernauts.Clear();
+            _mapChampions.Clear();
+            _mapRares.Clear();
+            _mapUniques.Clear();
+            ResetTopLeftPackBuffers();
         }
 
         private bool IsEliteLikeForVisibility(IMonster monster)
@@ -846,11 +1003,11 @@ namespace Turbo.Plugins.s7o
             catch { return false; }
         }
 
-        private bool IsEliteTemporarilyUnavailable(IMonster monster)
+        private bool IsEliteTemporarilyUnavailable(IMonster monster, bool eliteLikeForVisibility)
         {
             if (!GreyOutUnavailableElites) return false;
             if (monster == null) return false;
-            if (!IsEliteLikeForVisibility(monster)) return false;
+            if (!eliteLikeForVisibility) return false;
             if (IsMorluRecoveryState(monster)) return false;
 
             if (GreyOutBurrowedElites && monster.Burrowed)
@@ -885,14 +1042,12 @@ namespace Turbo.Plugins.s7o
             return false;
         }
 
-        private bool ShouldDrawMonster(IMonster monster)
+        private bool ShouldDrawMonster(IMonster monster, bool eliteLikeForVisibility)
         {
             if (monster == null) return false;
             if (!monster.IsAlive) return false;
             if (!monster.IsOnScreen) return false;
             if (monster.MaxHealth <= 0) return false;
-
-            bool eliteLikeForVisibility = IsEliteLikeForVisibility(monster);
 
             if (!ShowInvisible && !eliteLikeForVisibility)
             {
@@ -965,15 +1120,13 @@ namespace Turbo.Plugins.s7o
             }
         }
 
-        private bool ShouldDrawOffscreenLine(IMonster monster)
+        private bool ShouldDrawOffscreenLine(IMonster monster, bool eliteLikeForVisibility)
         {
             if (!ShowOffscreenEliteLines) return false;
             if (monster == null) return false;
             if (!monster.IsAlive) return false;
             if (monster.IsOnScreen) return false;
             if (monster.MaxHealth <= 0) return false;
-
-            bool eliteLikeForVisibility = IsEliteLikeForVisibility(monster);
 
             if (!ShowInvisible && !eliteLikeForVisibility)
             {
@@ -1092,113 +1245,69 @@ namespace Turbo.Plugins.s7o
             return HasAnyEliteAffix(monster);
         }
 
-        private void BuildChampionFallbackAliveCounts(System.Collections.Generic.IEnumerable<IMonster> monsters)
+        private void BuildChampionAliveCounts(IEnumerable<IMonster> monsters)
         {
-            _championFallbackAliveCounts = null;
+            _championFamilyAliveCounts.Clear();
+            _championPackAliveCounts.Clear();
 
-            if (!HighlightFinalChampion)
+            if (!HighlightFinalChampion || monsters == null)
                 return;
-
-            if (monsters == null)
-                return;
-
-            var counts = new System.Collections.Generic.Dictionary<string, int>();
 
             try
             {
-                foreach (var m in monsters)
+                foreach (var monster in monsters)
                 {
-                    if (m == null)
+                    if (monster == null || !monster.IsAlive)
+                        continue;
+                    if (HideIllusions && monster.Illusion)
+                        continue;
+                    if (monster.Rarity != ActorRarity.Champion)
                         continue;
 
-                    if (!m.IsAlive)
-                        continue;
+                    ChampionFamilyKey familyKey = GetChampionFamilyKey(monster);
+                    if (!familyKey.IsEmpty)
+                    {
+                        int familyCount;
+                        _championFamilyAliveCounts.TryGetValue(familyKey, out familyCount);
+                        _championFamilyAliveCounts[familyKey] = familyCount + 1;
+                    }
 
-                    if (HideIllusions && m.Illusion)
-                        continue;
-
-                    if (m.Rarity != ActorRarity.Champion)
-                        continue;
-
-                    string key = GetChampionFallbackGroupKey(m);
-                    if (string.IsNullOrEmpty(key))
-                        continue;
-
-                    int currentCount;
-                    counts.TryGetValue(key, out currentCount);
-                    counts[key] = currentCount + 1;
+                    var pack = monster.Pack;
+                    if (pack != null)
+                    {
+                        int packCount;
+                        _championPackAliveCounts.TryGetValue(pack, out packCount);
+                        _championPackAliveCounts[pack] = packCount + 1;
+                    }
                 }
             }
             catch
             {
-                _championFallbackAliveCounts = null;
-                return;
+                _championFamilyAliveCounts.Clear();
+                _championPackAliveCounts.Clear();
             }
-
-            _championFallbackAliveCounts = counts;
         }
 
         private bool IsFinalAliveChampion(IMonster monster)
         {
-            if (!HighlightFinalChampion)
-                return false;
-
-            if (monster == null)
-                return false;
-
-            if (monster.Rarity != ActorRarity.Champion)
-                return false;
-
-            if (!monster.IsAlive)
+            if (!HighlightFinalChampion || monster == null || !monster.IsAlive || monster.Rarity != ActorRarity.Champion)
                 return false;
 
             var pack = monster.Pack;
             if (pack == null)
                 return false;
 
-            int aliveChampions = 0;
-
-            try
-            {
-                var alive = pack.MonstersAlive;
-                if (alive == null)
-                    return false;
-
-                foreach (var m in alive)
-                {
-                    if (m == null)
-                        continue;
-
-                    if (!m.IsAlive)
-                        continue;
-
-                    if (HideIllusions && m.Illusion)
-                        continue;
-
-                    if (m.Rarity == ActorRarity.Champion)
-                        aliveChampions++;
-                }
-            }
-            catch
-            {
-                return false;
-            }
-
-            if (aliveChampions != 1)
+            int packAliveChampions;
+            if (!_championPackAliveCounts.TryGetValue(pack, out packAliveChampions) || packAliveChampions != 1)
                 return false;
 
-            string groupKey = GetChampionFallbackGroupKey(monster);
-            if (string.IsNullOrEmpty(groupKey))
-                return false;
-
-            if (_championFallbackAliveCounts == null)
+            ChampionFamilyKey familyKey = GetChampionFamilyKey(monster);
+            if (familyKey.IsEmpty)
                 return false;
 
             int sameFamilyAliveChampions;
-            if (!_championFallbackAliveCounts.TryGetValue(groupKey, out sameFamilyAliveChampions))
-                return false;
-
-            return sameFamilyAliveChampions == 1;
+            return _championFamilyAliveCounts.TryGetValue(familyKey, out sameFamilyAliveChampions)
+                && sameFamilyAliveChampions == 1;
         }
 
         private bool IsJuggernaut(IMonster monster)
@@ -1206,212 +1315,136 @@ namespace Turbo.Plugins.s7o
             return HasAffix(monster, MonsterAffix.Juggernaut);
         }
 
-        private IBrush GetHealthBrush(IMonster monster)
+        private EliteRenderState GetRenderState(IMonster monster)
         {
-            if (monster == null)
-                return RareBrush;
+            EliteRenderState state;
+            if (monster != null && _renderStateByMonster.TryGetValue(monster, out state))
+                return state;
 
-            if (IsEliteTemporarilyUnavailable(monster))
-                return UnavailableEliteBrush;
+            return BuildRenderState(monster);
+        }
+
+        private EliteRenderState BuildRenderState(IMonster monster)
+        {
+            return BuildRenderState(monster, IsEliteLikeForVisibility(monster));
+        }
+
+        private EliteRenderState BuildRenderState(IMonster monster, bool eliteLikeForVisibility)
+        {
+            var state = new EliteRenderState
+            {
+                Kind = EliteVisualKind.Rare,
+                IsUnavailable = monster != null && IsEliteTemporarilyUnavailable(monster, eliteLikeForVisibility),
+                IsJuggernaut = monster != null && IsJuggernaut(monster),
+                IsFinalChampion = monster != null && IsFinalAliveChampion(monster),
+            };
+
+            if (monster == null)
+                return state;
 
             switch (monster.Rarity)
             {
                 case ActorRarity.Champion:
-                    if (IsJuggernaut(monster)) return JuggernautBrush;
-                    if (IsFinalAliveChampion(monster)) return FinalChampionBrush;
-                    return ChampionBrush;
+                    state.Kind = state.IsJuggernaut
+                        ? EliteVisualKind.Juggernaut
+                        : (state.IsFinalChampion ? EliteVisualKind.FinalChampion : EliteVisualKind.Champion);
+                    return state;
 
                 case ActorRarity.Rare:
-                    if (IsJuggernaut(monster)) return JuggernautBrush;
-                    return RareBrush;
+                    state.Kind = state.IsJuggernaut ? EliteVisualKind.Juggernaut : EliteVisualKind.Rare;
+                    return state;
 
                 case ActorRarity.RareMinion:
-                    if (IsJuggernaut(monster)) return JuggernautBrush;
-                    return RareMinionBrush;
+                    state.Kind = state.IsJuggernaut ? EliteVisualKind.Juggernaut : EliteVisualKind.RareMinion;
+                    return state;
             }
 
             if (ShowRiftGuardianBars && IsRiftGuardian(monster))
-                return RiftGuardianBrush;
+                state.Kind = EliteVisualKind.RiftGuardian;
+            else if (state.IsJuggernaut)
+                state.Kind = EliteVisualKind.Juggernaut;
+            else if (ShowKeywardenBars && IsKeywarden(monster))
+                state.Kind = EliteVisualKind.Unique;
+            else if (ShowBossBars && IsBossLikeMonster(monster))
+                state.Kind = EliteVisualKind.Unique;
+            else if (ShowGoblinBars && IsGoblin(monster))
+                state.Kind = EliteVisualKind.Goblin;
+            else if (ShowUniqueBars && IsUniqueMonster(monster))
+                state.Kind = EliteVisualKind.Unique;
+            else if (monster.Rarity == ActorRarity.Unique || monster.Rarity == ActorRarity.Boss)
+                state.Kind = EliteVisualKind.Unique;
 
-            if (IsJuggernaut(monster))
-                return JuggernautBrush;
+            return state;
+        }
 
-            if (ShowKeywardenBars && IsKeywarden(monster))
-                return UniqueBrush;
+        private IBrush GetHealthBrush(IMonster monster)
+        {
+            EliteRenderState state = GetRenderState(monster);
+            if (state.IsUnavailable) return UnavailableEliteBrush;
 
-            if (ShowBossBars && IsBossLikeMonster(monster))
-                return UniqueBrush;
-
-            if (ShowGoblinBars && IsGoblin(monster))
-                return GoblinBrush;
-
-            if (ShowUniqueBars && IsUniqueMonster(monster))
-                return UniqueBrush;
-
-            switch (monster.Rarity)
+            switch (state.Kind)
             {
-                case ActorRarity.Unique:
-                case ActorRarity.Boss:
-                    return UniqueBrush;
-
-                default:
-                    return RareBrush;
+                case EliteVisualKind.Champion: return ChampionBrush;
+                case EliteVisualKind.FinalChampion: return FinalChampionBrush;
+                case EliteVisualKind.RareMinion: return RareMinionBrush;
+                case EliteVisualKind.Juggernaut: return JuggernautBrush;
+                case EliteVisualKind.Unique: return UniqueBrush;
+                case EliteVisualKind.Goblin: return GoblinBrush;
+                case EliteVisualKind.RiftGuardian: return RiftGuardianBrush;
+                default: return RareBrush;
             }
         }
 
         private IBrush GetHealthLightBrush(IMonster monster)
         {
-            if (monster == null)
-                return RareLightBrush;
+            EliteRenderState state = GetRenderState(monster);
+            if (state.IsUnavailable) return UnavailableEliteLightBrush;
 
-            if (IsEliteTemporarilyUnavailable(monster))
-                return UnavailableEliteLightBrush;
-
-            switch (monster.Rarity)
+            switch (state.Kind)
             {
-                case ActorRarity.Champion:
-                    if (IsJuggernaut(monster)) return JuggernautLightBrush;
-                    if (IsFinalAliveChampion(monster)) return FinalChampionLightBrush;
-                    return ChampionLightBrush;
-
-                case ActorRarity.Rare:
-                    if (IsJuggernaut(monster)) return JuggernautLightBrush;
-                    return RareLightBrush;
-
-                case ActorRarity.RareMinion:
-                    if (IsJuggernaut(monster)) return JuggernautLightBrush;
-                    return RareMinionLightBrush;
-            }
-
-            if (ShowRiftGuardianBars && IsRiftGuardian(monster))
-                return RiftGuardianLightBrush;
-
-            if (IsJuggernaut(monster))
-                return JuggernautLightBrush;
-
-            if (ShowKeywardenBars && IsKeywarden(monster))
-                return UniqueLightBrush;
-
-            if (ShowBossBars && IsBossLikeMonster(monster))
-                return UniqueLightBrush;
-
-            if (ShowGoblinBars && IsGoblin(monster))
-                return GoblinLightBrush;
-
-            if (ShowUniqueBars && IsUniqueMonster(monster))
-                return UniqueLightBrush;
-
-            switch (monster.Rarity)
-            {
-                case ActorRarity.Unique:
-                case ActorRarity.Boss:
-                    return UniqueLightBrush;
-
-                default:
-                    return RareLightBrush;
+                case EliteVisualKind.Champion: return ChampionLightBrush;
+                case EliteVisualKind.FinalChampion: return FinalChampionLightBrush;
+                case EliteVisualKind.RareMinion: return RareMinionLightBrush;
+                case EliteVisualKind.Juggernaut: return JuggernautLightBrush;
+                case EliteVisualKind.Unique: return UniqueLightBrush;
+                case EliteVisualKind.Goblin: return GoblinLightBrush;
+                case EliteVisualKind.RiftGuardian: return RiftGuardianLightBrush;
+                default: return RareLightBrush;
             }
         }
 
         private IBrush GetHealthShadowBrush(IMonster monster)
         {
-            if (monster == null)
-                return RareShadowBrush;
+            EliteRenderState state = GetRenderState(monster);
+            if (state.IsUnavailable) return UnavailableEliteShadowBrush;
 
-            if (IsEliteTemporarilyUnavailable(monster))
-                return UnavailableEliteShadowBrush;
-
-            switch (monster.Rarity)
+            switch (state.Kind)
             {
-                case ActorRarity.Champion:
-                    if (IsJuggernaut(monster)) return JuggernautShadowBrush;
-                    if (IsFinalAliveChampion(monster)) return FinalChampionShadowBrush;
-                    return ChampionShadowBrush;
-
-                case ActorRarity.Rare:
-                    if (IsJuggernaut(monster)) return JuggernautShadowBrush;
-                    return RareShadowBrush;
-
-                case ActorRarity.RareMinion:
-                    if (IsJuggernaut(monster)) return JuggernautShadowBrush;
-                    return RareMinionShadowBrush;
-            }
-
-            if (ShowRiftGuardianBars && IsRiftGuardian(monster))
-                return RiftGuardianShadowBrush;
-
-            if (IsJuggernaut(monster))
-                return JuggernautShadowBrush;
-
-            if (ShowKeywardenBars && IsKeywarden(monster))
-                return UniqueShadowBrush;
-
-            if (ShowBossBars && IsBossLikeMonster(monster))
-                return UniqueShadowBrush;
-
-            if (ShowGoblinBars && IsGoblin(monster))
-                return GoblinShadowBrush;
-
-            if (ShowUniqueBars && IsUniqueMonster(monster))
-                return UniqueShadowBrush;
-
-            switch (monster.Rarity)
-            {
-                case ActorRarity.Unique:
-                case ActorRarity.Boss:
-                    return UniqueShadowBrush;
-
-                default:
-                    return RareShadowBrush;
+                case EliteVisualKind.Champion: return ChampionShadowBrush;
+                case EliteVisualKind.FinalChampion: return FinalChampionShadowBrush;
+                case EliteVisualKind.RareMinion: return RareMinionShadowBrush;
+                case EliteVisualKind.Juggernaut: return JuggernautShadowBrush;
+                case EliteVisualKind.Unique: return UniqueShadowBrush;
+                case EliteVisualKind.Goblin: return GoblinShadowBrush;
+                case EliteVisualKind.RiftGuardian: return RiftGuardianShadowBrush;
+                default: return RareShadowBrush;
             }
         }
 
         private IBrush GetStrokeBrush(IMonster monster)
         {
-            if (monster == null)
-                return RareStrokeBrush;
+            EliteRenderState state = GetRenderState(monster);
 
-            switch (monster.Rarity)
+            switch (state.Kind)
             {
-                case ActorRarity.Champion:
-                    if (IsJuggernaut(monster)) return JuggernautStrokeBrush;
-                    if (IsFinalAliveChampion(monster)) return FinalChampionStrokeBrush;
-                    return ChampionStrokeBrush;
-
-                case ActorRarity.Rare:
-                    if (IsJuggernaut(monster)) return JuggernautStrokeBrush;
-                    return RareStrokeBrush;
-
-                case ActorRarity.RareMinion:
-                    if (IsJuggernaut(monster)) return JuggernautStrokeBrush;
-                    return RareMinionStrokeBrush;
-            }
-
-            if (ShowRiftGuardianBars && IsRiftGuardian(monster))
-                return RiftGuardianStrokeBrush;
-
-            if (IsJuggernaut(monster))
-                return JuggernautStrokeBrush;
-
-            if (ShowKeywardenBars && IsKeywarden(monster))
-                return UniqueStrokeBrush;
-
-            if (ShowBossBars && IsBossLikeMonster(monster))
-                return UniqueStrokeBrush;
-
-            if (ShowGoblinBars && IsGoblin(monster))
-                return GoblinStrokeBrush;
-
-            if (ShowUniqueBars && IsUniqueMonster(monster))
-                return UniqueStrokeBrush;
-
-            switch (monster.Rarity)
-            {
-                case ActorRarity.Unique:
-                case ActorRarity.Boss:
-                    return UniqueStrokeBrush;
-
-                default:
-                    return RareStrokeBrush;
+                case EliteVisualKind.Champion: return ChampionStrokeBrush;
+                case EliteVisualKind.FinalChampion: return FinalChampionStrokeBrush;
+                case EliteVisualKind.RareMinion: return RareMinionStrokeBrush;
+                case EliteVisualKind.Juggernaut: return JuggernautStrokeBrush;
+                case EliteVisualKind.Unique: return UniqueStrokeBrush;
+                case EliteVisualKind.Goblin: return GoblinStrokeBrush;
+                case EliteVisualKind.RiftGuardian: return RiftGuardianStrokeBrush;
+                default: return RareStrokeBrush;
             }
         }
 
@@ -1455,7 +1488,8 @@ namespace Turbo.Plugins.s7o
             float w = BarWidth;
             float h = BarHeight;
 
-            if (EmphasizeJuggernautBars && IsJuggernaut(monster))
+            EliteRenderState renderState = GetRenderState(monster);
+            if (EmphasizeJuggernautBars && renderState.IsJuggernaut)
             {
                 w += Math.Max(0.0f, JuggernautBarWidthBonus);
                 h += Math.Max(0.0f, JuggernautBarHeightBonus);
@@ -1774,7 +1808,7 @@ namespace Turbo.Plugins.s7o
             if (pct < 0) pct = 0;
             if (pct > 100) pct = 100;
 
-            string text = pct.ToString() + "%";
+            string text = _hpPercentText[pct];
             var layout = TextFont.GetTextLayout(text);
 
             TextFont.DrawText(
@@ -1789,15 +1823,47 @@ namespace Turbo.Plugins.s7o
         {
             public IMonster Representative;
             public string Name;
-            public System.Collections.Generic.List<IMonster> Monsters;
+            public readonly List<IMonster> Monsters = new List<IMonster>();
+
+            public void Reset()
+            {
+                Representative = null;
+                Name = string.Empty;
+                Monsters.Clear();
+            }
         }
 
-        private void DrawTopLeftEliteList(System.Collections.Generic.IEnumerable<IMonster> monsters)
+        private ElitePackListEntry RentTopLeftPack(IMonster representative)
         {
-            if (!ShowTopLeftEliteList || monsters == null) return;
+            ElitePackListEntry pack = _topLeftPackPool.Count > 0
+                ? _topLeftPackPool.Pop()
+                : new ElitePackListEntry();
 
-            var packs = BuildTopLeftElitePacks(monsters);
-            if (packs == null || packs.Count == 0) return;
+            pack.Representative = representative;
+            pack.Name = GetShortMonsterName(representative);
+            return pack;
+        }
+
+        private void ResetTopLeftPackBuffers()
+        {
+            for (int i = 0; i < _topLeftPacks.Count; i++)
+            {
+                var pack = _topLeftPacks[i];
+                if (pack == null)
+                    continue;
+
+                pack.Reset();
+                _topLeftPackPool.Push(pack);
+            }
+
+            _topLeftPacks.Clear();
+            _topLeftChampionPacks.Clear();
+            _topLeftFallbackChampionGroups.Clear();
+        }
+
+        private void DrawTopLeftEliteList()
+        {
+            if (!ShowTopLeftEliteList || _topLeftPacks.Count == 0) return;
 
             float x = Hud.Window.Size.Width * TopLeftEliteListXFraction;
             float y = Hud.Window.Size.Height * TopLeftEliteListYFraction;
@@ -1807,9 +1873,10 @@ namespace Turbo.Plugins.s7o
             float packGap = TopLeftEliteListGap;
             int drawnPacks = 0;
 
-            foreach (var pack in packs)
+            for (int p = 0; p < _topLeftPacks.Count; p++)
             {
-                if (pack == null || pack.Monsters == null || pack.Monsters.Count == 0)
+                var pack = _topLeftPacks[p];
+                if (pack == null || pack.Monsters.Count == 0)
                     continue;
 
                 if (drawnPacks >= TopLeftEliteListMaxRows)
@@ -1822,9 +1889,9 @@ namespace Turbo.Plugins.s7o
                     y += nameLayout.Metrics.Height + TopLeftEliteListLabelGap;
                 }
 
-                foreach (var monster in pack.Monsters)
+                for (int i = 0; i < pack.Monsters.Count; i++)
                 {
-                    DrawTopLeftSmallEliteBar(monster, x, y, w, barH);
+                    DrawTopLeftSmallEliteBar(pack.Monsters[i], x, y, w, barH);
                     y += barH + rowGap;
                 }
 
@@ -1833,124 +1900,109 @@ namespace Turbo.Plugins.s7o
             }
         }
 
-        private System.Collections.Generic.List<ElitePackListEntry> BuildTopLeftElitePacks(System.Collections.Generic.IEnumerable<IMonster> monsters)
+        private void BuildTopLeftElitePacks()
         {
-            var result = new System.Collections.Generic.List<ElitePackListEntry>();
-            var championPacks = new System.Collections.Generic.Dictionary<int, ElitePackListEntry>();
-            var fallbackChampionGroups = new System.Collections.Generic.Dictionary<string, ElitePackListEntry>();
+            ResetTopLeftPackBuffers();
 
-            foreach (var m in monsters)
+            if (!ShowTopLeftEliteList)
+                return;
+
+            for (int i = 0; i < _topLeftCandidates.Count; i++)
             {
-                if (!ShouldShowInTopLeftList(m))
+                var monster = _topLeftCandidates[i];
+                if (monster == null)
                     continue;
 
-                if (m.Rarity == ActorRarity.Champion)
+                if (monster.Rarity == ActorRarity.Champion)
                 {
                     ElitePackListEntry pack;
+                    var monsterPack = monster.Pack;
 
-                    if (m.Pack != null)
+                    if (monsterPack != null)
                     {
-                        int key = m.Pack.GetHashCode();
-
-                        if (!championPacks.TryGetValue(key, out pack))
+                        if (!_topLeftChampionPacks.TryGetValue(monsterPack, out pack))
                         {
-                            pack = new ElitePackListEntry
-                            {
-                                Representative = m,
-                                Name = GetShortMonsterName(m),
-                                Monsters = new System.Collections.Generic.List<IMonster>()
-                            };
-
-                            championPacks[key] = pack;
-                            result.Add(pack);
+                            pack = RentTopLeftPack(monster);
+                            _topLeftChampionPacks[monsterPack] = pack;
+                            _topLeftPacks.Add(pack);
                         }
-
-                        pack.Monsters.Add(m);
                     }
                     else
                     {
-                        string key = GetChampionFallbackGroupKey(m);
-
-                        if (!fallbackChampionGroups.TryGetValue(key, out pack))
+                        ChampionFamilyKey key = GetChampionFamilyKey(monster);
+                        if (key.IsEmpty || !_topLeftFallbackChampionGroups.TryGetValue(key, out pack))
                         {
-                            pack = new ElitePackListEntry
-                            {
-                                Representative = m,
-                                Name = GetShortMonsterName(m),
-                                Monsters = new System.Collections.Generic.List<IMonster>()
-                            };
-
-                            fallbackChampionGroups[key] = pack;
-                            result.Add(pack);
+                            pack = RentTopLeftPack(monster);
+                            if (!key.IsEmpty)
+                                _topLeftFallbackChampionGroups[key] = pack;
+                            _topLeftPacks.Add(pack);
                         }
-
-                        pack.Monsters.Add(m);
                     }
 
+                    pack.Monsters.Add(monster);
                     continue;
                 }
 
-                if (m.Rarity == ActorRarity.Rare)
+                if (monster.Rarity != ActorRarity.Rare)
+                    continue;
+
+                var rarePack = RentTopLeftPack(monster);
+                rarePack.Monsters.Add(monster);
+
+                if (ShowRareMinionsInTopLeftList && monster.Pack != null)
                 {
-                    var rarePack = new ElitePackListEntry
+                    try
                     {
-                        Representative = m,
-                        Name = GetShortMonsterName(m),
-                        Monsters = new System.Collections.Generic.List<IMonster>()
-                    };
-
-                    rarePack.Monsters.Add(m);
-
-                    if (ShowRareMinionsInTopLeftList && m.Pack != null)
-                    {
-                        try
+                        var alive = monster.Pack.MonstersAlive;
+                        if (alive != null)
                         {
-                            var alive = m.Pack.MonstersAlive;
-                            if (alive != null)
+                            foreach (var minion in alive)
                             {
-                                foreach (var pm in alive)
-                                {
-                                    if (pm == null || !pm.IsAlive) continue;
-                                    if (pm.Rarity != ActorRarity.RareMinion) continue;
-                                    if (HideIllusions && pm.Illusion) continue;
+                                if (minion == null || !minion.IsAlive) continue;
+                                if (minion.Rarity != ActorRarity.RareMinion) continue;
+                                if (HideIllusions && minion.Illusion) continue;
 
-                                    bool pmEliteLikeForVisibility = IsEliteLikeForVisibility(pm);
-                                    if (!ShowInvisible && !pmEliteLikeForVisibility && (pm.Invisible || pm.Hidden || pm.Stealthed)) continue;
+                                bool eliteLikeForVisibility = IsEliteLikeForVisibility(minion);
+                                if (!ShowInvisible && !eliteLikeForVisibility && (minion.Invisible || minion.Hidden || minion.Stealthed)) continue;
+                                if (minion.MaxHealth <= 0) continue;
 
-                                    if (pm.MaxHealth <= 0) continue;
-
-                                    rarePack.Monsters.Add(pm);
-                                }
+                                rarePack.Monsters.Add(minion);
                             }
                         }
-                        catch
-                        {
-                        }
                     }
-
-                    result.Add(rarePack);
+                    catch
+                    {
+                    }
                 }
+
+                _topLeftPacks.Add(rarePack);
             }
 
-            foreach (var pack in result)
-            {
-                if (pack.Monsters == null) continue;
+            for (int i = 0; i < _topLeftPacks.Count; i++)
+                _topLeftPacks[i].Monsters.Sort(CompareMonsterHealthDescending);
+        }
 
-                pack.Monsters.Sort(delegate(IMonster a, IMonster b)
-                {
-                    double ahp = a != null && a.MaxHealth > 0 ? a.CurHealth / a.MaxHealth : 0.0;
-                    double bhp = b != null && b.MaxHealth > 0 ? b.CurHealth / b.MaxHealth : 0.0;
-                    return bhp.CompareTo(ahp);
-                });
-            }
-
-            return result;
+        private static int CompareMonsterHealthDescending(IMonster a, IMonster b)
+        {
+            double ahp = a != null && a.MaxHealth > 0 ? a.CurHealth / a.MaxHealth : 0.0;
+            double bhp = b != null && b.MaxHealth > 0 ? b.CurHealth / b.MaxHealth : 0.0;
+            return bhp.CompareTo(ahp);
         }
 
         private bool ShouldShowInTopLeftList(IMonster m)
         {
             if (m == null || !m.IsAlive || m.SnoMonster == null) return false;
             if (m.MaxHealth <= 0) return false;
+
+            // This list can only ever admit blue champions, yellow rares, or their
+            // minions. Fail ordinary trash/special actors before the expensive proxy
+            // and boss classification checks below.
+            if (m.Rarity != ActorRarity.Champion
+                && m.Rarity != ActorRarity.Rare
+                && m.Rarity != ActorRarity.RareMinion)
+            {
+                return false;
+            }
 
             if (!ShowInvisible)
             {
@@ -1995,101 +2047,63 @@ namespace Turbo.Plugins.s7o
             return false;
         }
 
-        private string GetChampionFallbackGroupKey(IMonster m)
+        private ChampionFamilyKey GetChampionFamilyKey(IMonster monster)
         {
-            if (m == null) return "";
+            if (monster == null)
+                return default(ChampionFamilyKey);
 
-            if (m.SnoActor != null)
-                return "actor:" + m.SnoActor.Sno.ToString();
+            if (monster.SnoActor != null)
+                return ChampionFamilyKey.FromActor((uint)monster.SnoActor.Sno);
 
-            if (m.SnoMonster != null && !string.IsNullOrEmpty(m.SnoMonster.Code))
-                return "code:" + m.SnoMonster.Code;
+            if (monster.SnoMonster != null && !string.IsNullOrEmpty(monster.SnoMonster.Code))
+                return ChampionFamilyKey.FromCode(monster.SnoMonster.Code);
 
-            return "name:" + GetShortMonsterName(m);
+            return ChampionFamilyKey.FromName(GetShortMonsterName(monster));
         }
 
         private IBrush GetTopLeftHealthBrush(IMonster monster)
         {
-            if (monster == null)
-                return TopLeftRareBrush ?? RareBrush;
+            EliteRenderState state = GetRenderState(monster);
+            if (state.IsUnavailable) return TopLeftUnavailableEliteBrush ?? UnavailableEliteBrush;
 
-            if (IsEliteTemporarilyUnavailable(monster))
-                return TopLeftUnavailableEliteBrush ?? UnavailableEliteBrush;
-
-            if (IsJuggernaut(monster))
-                return TopLeftJuggernautBrush ?? JuggernautBrush;
-
-            switch (monster.Rarity)
+            switch (state.Kind)
             {
-                case ActorRarity.Champion:
-                    if (IsFinalAliveChampion(monster))
-                        return TopLeftFinalChampionBrush ?? FinalChampionBrush;
-                    return TopLeftChampionBrush ?? ChampionBrush;
-
-                case ActorRarity.Rare:
-                    return TopLeftRareBrush ?? RareBrush;
-
-                case ActorRarity.RareMinion:
-                    return TopLeftRareMinionBrush ?? RareMinionBrush;
+                case EliteVisualKind.Champion: return TopLeftChampionBrush ?? ChampionBrush;
+                case EliteVisualKind.FinalChampion: return TopLeftFinalChampionBrush ?? FinalChampionBrush;
+                case EliteVisualKind.RareMinion: return TopLeftRareMinionBrush ?? RareMinionBrush;
+                case EliteVisualKind.Juggernaut: return TopLeftJuggernautBrush ?? JuggernautBrush;
+                default: return TopLeftRareBrush ?? RareBrush;
             }
-
-            return TopLeftRareBrush ?? RareBrush;
         }
 
         private IBrush GetTopLeftHealthLightBrush(IMonster monster)
         {
-            if (monster == null)
-                return TopLeftRareLightBrush ?? RareLightBrush;
+            EliteRenderState state = GetRenderState(monster);
+            if (state.IsUnavailable) return TopLeftUnavailableEliteLightBrush ?? UnavailableEliteLightBrush;
 
-            if (IsEliteTemporarilyUnavailable(monster))
-                return TopLeftUnavailableEliteLightBrush ?? UnavailableEliteLightBrush;
-
-            if (IsJuggernaut(monster))
-                return TopLeftJuggernautLightBrush ?? JuggernautLightBrush;
-
-            switch (monster.Rarity)
+            switch (state.Kind)
             {
-                case ActorRarity.Champion:
-                    if (IsFinalAliveChampion(monster))
-                        return TopLeftFinalChampionLightBrush ?? FinalChampionLightBrush;
-                    return TopLeftChampionLightBrush ?? ChampionLightBrush;
-
-                case ActorRarity.Rare:
-                    return TopLeftRareLightBrush ?? RareLightBrush;
-
-                case ActorRarity.RareMinion:
-                    return TopLeftRareMinionLightBrush ?? RareMinionLightBrush;
+                case EliteVisualKind.Champion: return TopLeftChampionLightBrush ?? ChampionLightBrush;
+                case EliteVisualKind.FinalChampion: return TopLeftFinalChampionLightBrush ?? FinalChampionLightBrush;
+                case EliteVisualKind.RareMinion: return TopLeftRareMinionLightBrush ?? RareMinionLightBrush;
+                case EliteVisualKind.Juggernaut: return TopLeftJuggernautLightBrush ?? JuggernautLightBrush;
+                default: return TopLeftRareLightBrush ?? RareLightBrush;
             }
-
-            return TopLeftRareLightBrush ?? RareLightBrush;
         }
 
         private IBrush GetTopLeftHealthShadowBrush(IMonster monster)
         {
-            if (monster == null)
-                return TopLeftRareShadowBrush ?? RareShadowBrush;
+            EliteRenderState state = GetRenderState(monster);
+            if (state.IsUnavailable) return TopLeftUnavailableEliteShadowBrush ?? UnavailableEliteShadowBrush;
 
-            if (IsEliteTemporarilyUnavailable(monster))
-                return TopLeftUnavailableEliteShadowBrush ?? UnavailableEliteShadowBrush;
-
-            if (IsJuggernaut(monster))
-                return TopLeftJuggernautShadowBrush ?? JuggernautShadowBrush;
-
-            switch (monster.Rarity)
+            switch (state.Kind)
             {
-                case ActorRarity.Champion:
-                    if (IsFinalAliveChampion(monster))
-                        return TopLeftFinalChampionShadowBrush ?? FinalChampionShadowBrush;
-                    return TopLeftChampionShadowBrush ?? ChampionShadowBrush;
-
-                case ActorRarity.Rare:
-                    return TopLeftRareShadowBrush ?? RareShadowBrush;
-
-                case ActorRarity.RareMinion:
-                    return TopLeftRareMinionShadowBrush ?? RareMinionShadowBrush;
+                case EliteVisualKind.Champion: return TopLeftChampionShadowBrush ?? ChampionShadowBrush;
+                case EliteVisualKind.FinalChampion: return TopLeftFinalChampionShadowBrush ?? FinalChampionShadowBrush;
+                case EliteVisualKind.RareMinion: return TopLeftRareMinionShadowBrush ?? RareMinionShadowBrush;
+                case EliteVisualKind.Juggernaut: return TopLeftJuggernautShadowBrush ?? JuggernautShadowBrush;
+                default: return TopLeftRareShadowBrush ?? RareShadowBrush;
             }
-
-            return TopLeftRareShadowBrush ?? RareShadowBrush;
         }
 
         private void DrawTopLeftHealthFill(IMonster monster, float fillX, float fillY, float fillW, float fillH, float hp)
@@ -2132,7 +2146,10 @@ namespace Turbo.Plugins.s7o
 
             if (ShowHpPercentText && TextFont != null && h >= 7.0f)
             {
-                string pct = (hp * 100.0).ToString("F0", System.Globalization.CultureInfo.InvariantCulture) + "%";
+                int pctValue = (int)Math.Round(hp * 100.0);
+                if (pctValue < 0) pctValue = 0;
+                if (pctValue > 100) pctValue = 100;
+                string pct = _hpPercentText[pctValue];
                 var layout = TextFont.GetTextLayout(pct);
 
                 if (layout.Metrics.Height <= h + 4.0f && layout.Metrics.Width <= w)
