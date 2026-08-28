@@ -11,7 +11,7 @@ namespace Turbo.Plugins.s7o
     // s7o_RiftInfo.cs — TurboHUD Free 1.4.3.0
     //
     // Owns rift progression prediction, rift timers, boss timer, and a safe
-    // Bane of the Stricken estimator for selected/hovered elite targets.
+    // Bane of the Stricken estimator for the active Rift Guardian.
     //
     // Nearby RP uses native monster body RiftProgression values plus estimated
     // elite purple-orb progression. Stricken is an estimator based on proc edges;
@@ -93,7 +93,6 @@ namespace Turbo.Plugins.s7o
         // Display-only correction for FreeHUD tick/format rounding so elapsed matches the native timer.
         public int RiftElapsedDisplayOffsetTicks { get; set; } = 59;
         public bool ShowStricken { get; set; } = true;
-        public bool ShowStrickenOnAnySelectedElite { get; set; } = true;
 
         // ── Nearby RP ────────────────────────────────────────────────────
         public int NearbyRangeYards { get; set; } = 40;
@@ -123,11 +122,10 @@ namespace Turbo.Plugins.s7o
         // Names are intentionally hidden; the stack counter is drawn below the icon instead.
         public bool ShowStrickenPlayerNames { get; set; } = false;
 
-        // For testing, show the icon even at 0 so we can confirm target/player detection.
-        // Later stable release can set this false if desired.
+        // Keep the icon visible at 0 stacks so the tracked player/guardian state is explicit.
         public bool ShowStrickenZeroStacks { get; set; } = true;
 
-        // For party testing, show remote Stricken players even before their first estimated stack.
+        // Show remote Stricken players before their first estimated stack.
         public bool ShowRemoteStrickenZeroStacks { get; set; } = true;
 
         // Larger icon. Counter is drawn below the icon so it does not cover the gem texture.
@@ -180,11 +178,8 @@ namespace Turbo.Plugins.s7o
         // reject the attribution instead of guessing.
         public bool RejectAmbiguousStrickenFirstHits { get; set; } = true;
 
-        // Selected monster can flicker null briefly while the top HP bar still belongs
-        // to the same target. Keep a tiny cache so proc/damage attribution survives it.
-        public int StrickenTargetCacheTicks { get; set; } = 15;
-
-        // During Rift Guardian phase, keep the last boss target identity through town/load transitions.
+        // During Rift Guardian phase, keep the last boss target identity through brief
+        // selection/unload transitions.
         public int StrickenBossTargetCacheTicks { get; set; } = 7200;
 
         // Dedicated Stricken debug. Enable manually for diagnostics.
@@ -352,6 +347,10 @@ namespace Turbo.Plugins.s7o
 
         private const uint StrickenSno = 428348u;
         private const uint StrickenSecondarySno = 428349u;
+        private static readonly uint[] ActorAttributeReadModifiers =
+        {
+            0u, 0xFFFFFu, 0xFFFFFFFFu, 2147483647u
+        };
 
         private readonly Dictionary<uint, StrickenProcState> _strickenProcByHero =
             new Dictionary<uint, StrickenProcState>();
@@ -362,6 +361,43 @@ namespace Turbo.Plugins.s7o
 
         private readonly Dictionary<int, StrickenGlobalDamageSample> _strickenGlobalDamageSamples =
             new Dictionary<int, StrickenGlobalDamageSample>();
+
+        private readonly NearbyRpSnapshot _nearbyRpSnapshot = new NearbyRpSnapshot();
+        private readonly HashSet<ElitePackKey> _nearbyRpBluePacks = new HashSet<ElitePackKey>();
+        private readonly HashSet<ElitePackKey> _nearbyRpYellowPacks = new HashSet<ElitePackKey>();
+        private bool _nearbyRpSnapshotValid;
+
+        private struct ElitePackKey : IEquatable<ElitePackKey>
+        {
+            public int Kind;
+            public int A;
+            public int B;
+            public int C;
+            public int D;
+
+            public bool Equals(ElitePackKey other)
+            {
+                return Kind == other.Kind && A == other.A && B == other.B && C == other.C && D == other.D;
+            }
+
+            public override bool Equals(object obj)
+            {
+                return obj is ElitePackKey && Equals((ElitePackKey)obj);
+            }
+
+            public override int GetHashCode()
+            {
+                unchecked
+                {
+                    int hash = Kind;
+                    hash = (hash * 397) ^ A;
+                    hash = (hash * 397) ^ B;
+                    hash = (hash * 397) ^ C;
+                    hash = (hash * 397) ^ D;
+                    return hash;
+                }
+            }
+        }
 
         private class NearbyRpSnapshot
         {
@@ -376,6 +412,16 @@ namespace Turbo.Plugins.s7o
             public double TrashRP { get { return TrashBodyPct; } }
             public double EliteRP { get { return EliteBodyPct + EliteOrbPct; } }
             public double TotalRP { get { return TrashRP + EliteRP; } }
+
+            public void Reset()
+            {
+                TrashBodyPct = 0.0d;
+                EliteBodyPct = 0.0d;
+                EliteOrbPct = 0.0d;
+                BluePacks = 0;
+                YellowPacks = 0;
+                RareMinions = 0;
+            }
         }
 
         private class StrickenProcState
@@ -670,6 +716,8 @@ namespace Turbo.Plugins.s7o
             bool inGR = Hud.Game.Me.InGreaterRift;
             bool inNR = !inGR && Hud.Game.RiftPercentage > 0 && !Hud.Game.IsInTown;
 
+            UpdateNearbyRpSnapshot((inGR || inNR) && ShowNearbyRP);
+
             // If a stale completed summary survived into the next GR, clear it immediately
             // so elapsed/boss timers do not block the next run's RP panel.
             if (HasNewGreaterRiftStartedWhileSummaryActive())
@@ -702,7 +750,9 @@ namespace Turbo.Plugins.s7o
                 if (!_riftSummaryActive && _bossStartTick > 0 && IsUrshiVisible())
                     FreezeCompletedRiftTimers(tick, "urshi-visible-in-gr");
 
-                if (ShowStricken)
+                // Stricken is useful only for the guardian fight. Keep the estimator and
+                // damage attribution completely dormant during normal rift progression.
+                if (ShowStricken && _bossStartTick > 0 && !_riftSummaryActive)
                     UpdateStrickenEstimator(tick);
 
                 return;
@@ -1914,9 +1964,10 @@ namespace Turbo.Plugins.s7o
             if (Hud.Game.RiftPercentage >= 100.0)
                 return;
 
-            NearbyRpSnapshot rp = CalculateNearbyRp();
-            if (rp == null || rp.TotalRP < 0.001)
+            if (!_nearbyRpSnapshotValid || _nearbyRpSnapshot.TotalRP < 0.001)
                 return;
+
+            NearbyRpSnapshot rp = _nearbyRpSnapshot;
 
             double remaining = Math.Max(0.0, 100.0 - Hud.Game.RiftPercentage);
 
@@ -2047,20 +2098,23 @@ namespace Turbo.Plugins.s7o
             font.DrawText(text, x, y);
         }
 
-        private NearbyRpSnapshot CalculateNearbyRp()
+        private void UpdateNearbyRpSnapshot(bool enabled)
         {
+            _nearbyRpSnapshotValid = false;
+            _nearbyRpSnapshot.Reset();
+            _nearbyRpBluePacks.Clear();
+            _nearbyRpYellowPacks.Clear();
+
+            if (!enabled || Hud == null || Hud.Game == null)
+                return;
+
             double maxProg = Hud.Game.MaxQuestProgress;
             if (maxProg <= 0)
-                return null;
+                return;
 
             var monsters = Hud.Game.AliveMonsters;
             if (monsters == null)
-                return null;
-
-            var rp = new NearbyRpSnapshot();
-
-            var countedBluePacks = new HashSet<string>();
-            var countedYellowPacks = new HashSet<string>();
+                return;
 
             foreach (var m in monsters)
             {
@@ -2072,13 +2126,13 @@ namespace Turbo.Plugins.s7o
 
                 if (m.Rarity == ActorRarity.Champion)
                 {
-                    rp.EliteBodyPct += bodyPct;
+                    _nearbyRpSnapshot.EliteBodyPct += bodyPct;
 
-                    string key = GetPackKey(m);
-                    if (countedBluePacks.Add(key))
+                    ElitePackKey key = GetPackKey(m);
+                    if (_nearbyRpBluePacks.Add(key))
                     {
-                        rp.BluePacks++;
-                        rp.EliteOrbPct += GetBluePackOrbPct();
+                        _nearbyRpSnapshot.BluePacks++;
+                        _nearbyRpSnapshot.EliteOrbPct += GetBluePackOrbPct();
                     }
 
                     continue;
@@ -2086,13 +2140,13 @@ namespace Turbo.Plugins.s7o
 
                 if (m.Rarity == ActorRarity.Rare)
                 {
-                    rp.EliteBodyPct += bodyPct;
+                    _nearbyRpSnapshot.EliteBodyPct += bodyPct;
 
-                    string key = GetPackKey(m);
-                    if (countedYellowPacks.Add(key))
+                    ElitePackKey key = GetPackKey(m);
+                    if (_nearbyRpYellowPacks.Add(key))
                     {
-                        rp.YellowPacks++;
-                        rp.EliteOrbPct += GetYellowPackOrbPct();
+                        _nearbyRpSnapshot.YellowPacks++;
+                        _nearbyRpSnapshot.EliteOrbPct += GetYellowPackOrbPct();
                     }
 
                     continue;
@@ -2100,28 +2154,26 @@ namespace Turbo.Plugins.s7o
 
                 if (isRareMinion)
                 {
-                    rp.RareMinions++;
+                    _nearbyRpSnapshot.RareMinions++;
 
                     if (CountRareMinionBodyAsEliteRP)
-                        rp.EliteBodyPct += bodyPct;
+                        _nearbyRpSnapshot.EliteBodyPct += bodyPct;
                     else
-                        rp.TrashBodyPct += bodyPct;
+                        _nearbyRpSnapshot.TrashBodyPct += bodyPct;
 
                     continue;
                 }
 
                 if (m.IsElite)
                 {
-                    // Unknown elite-like things: count body only as elite body,
-                    // but do not add purple-orb estimate.
-                    rp.EliteBodyPct += bodyPct;
+                    _nearbyRpSnapshot.EliteBodyPct += bodyPct;
                     continue;
                 }
 
-                rp.TrashBodyPct += bodyPct;
+                _nearbyRpSnapshot.TrashBodyPct += bodyPct;
             }
 
-            return rp;
+            _nearbyRpSnapshotValid = true;
         }
 
         private bool ShouldCountMonsterForNearbyRp(IMonster m)
@@ -2179,15 +2231,21 @@ namespace Turbo.Plugins.s7o
             return orbs * ProgressOrbPct;
         }
 
-        private string GetPackKey(IMonster m)
+        private ElitePackKey GetPackKey(IMonster m)
         {
             if (m == null)
-                return "null";
+                return default(ElitePackKey);
 
             try
             {
                 if (m.Pack != null)
-                    return "pack:" + m.Pack.GetHashCode().ToString(CultureInfo.InvariantCulture);
+                {
+                    return new ElitePackKey
+                    {
+                        Kind = 1,
+                        A = m.Pack.GetHashCode()
+                    };
+                }
             }
             catch
             {
@@ -2197,24 +2255,27 @@ namespace Turbo.Plugins.s7o
             {
                 if (m.FloorCoordinate != null)
                 {
-                    int gx = (int)(m.FloorCoordinate.X / 80.0f);
-                    int gy = (int)(m.FloorCoordinate.Y / 80.0f);
-
-                    return "fallback:" +
-                           m.Rarity.ToString() + ":" +
-                           m.SnoMonster.Sno.ToString(CultureInfo.InvariantCulture) + ":" +
-                           gx.ToString(CultureInfo.InvariantCulture) + ":" +
-                           gy.ToString(CultureInfo.InvariantCulture);
+                    return new ElitePackKey
+                    {
+                        Kind = 2,
+                        A = (int)m.Rarity,
+                        B = unchecked((int)m.SnoMonster.Sno),
+                        C = (int)(m.FloorCoordinate.X / 80.0f),
+                        D = (int)(m.FloorCoordinate.Y / 80.0f)
+                    };
                 }
             }
             catch
             {
             }
 
-            return "fallback:" +
-                   m.Rarity.ToString() + ":" +
-                   m.SnoMonster.Sno.ToString(CultureInfo.InvariantCulture) + ":" +
-                   m.AcdId.ToString(CultureInfo.InvariantCulture);
+            return new ElitePackKey
+            {
+                Kind = 3,
+                A = (int)m.Rarity,
+                B = unchecked((int)m.SnoMonster.Sno),
+                C = unchecked((int)m.AcdId)
+            };
         }
 
         private void DrawRpLine(string label, double pct, float x, float y, IFont font)
@@ -2804,6 +2865,9 @@ namespace Turbo.Plugins.s7o
             if (m == null || !m.IsAlive || m.SnoMonster == null)
                 return false;
 
+            if (!IsRiftGuardianLike(m))
+                return false;
+
             if (m.CurHealth <= 0)
                 return false;
 
@@ -2849,15 +2913,7 @@ namespace Turbo.Plugins.s7o
             if (actor == null || attribute == null)
                 return 0;
 
-            uint[] modifiers = new uint[]
-            {
-                0,
-                0xFFFFF,
-                0xFFFFFFFF,
-                2147483647
-            };
-
-            foreach (uint modifier in modifiers)
+            foreach (uint modifier in ActorAttributeReadModifiers)
             {
                 try
                 {
@@ -3081,6 +3137,9 @@ namespace Turbo.Plugins.s7o
 
         private int GetFreshTrackedStrickenTargetKey(IMonster trackedTarget, int tick)
         {
+            if (_bossStartTick <= 0 || _riftSummaryActive)
+                return 0;
+
             if (trackedTarget != null && IsValidStrickenDisplayTarget(trackedTarget))
             {
                 int liveKey = GetMonsterTargetKey(trackedTarget);
@@ -3088,17 +3147,10 @@ namespace Turbo.Plugins.s7o
                     return liveKey;
             }
 
-            if (_lastValidStrickenTargetKey == 0)
+            if (_lastValidStrickenTargetKey == 0 || _lastValidStrickenTargetTick <= 0)
                 return 0;
 
-            if (_lastValidStrickenTargetTick <= 0)
-                return 0;
-
-            int cacheTicks = (_bossStartTick > 0 && !_riftSummaryActive)
-                ? StrickenBossTargetCacheTicks
-                : StrickenTargetCacheTicks;
-
-            if (tick - _lastValidStrickenTargetTick > cacheTicks)
+            if (tick - _lastValidStrickenTargetTick > StrickenBossTargetCacheTicks)
                 return 0;
 
             return _lastValidStrickenTargetKey;
@@ -3132,31 +3184,7 @@ namespace Turbo.Plugins.s7o
 
         private bool IsValidStrickenDisplayTarget(IMonster m)
         {
-            if (m == null || !m.IsAlive || m.SnoMonster == null)
-                return false;
-
-            if (!ShowStrickenOnAnySelectedElite)
-                return IsRiftGuardianLike(m);
-
-            if (IsRiftGuardianLike(m))
-                return true;
-
-            if (m.Rarity == ActorRarity.Champion)
-                return true;
-
-            if (m.Rarity == ActorRarity.Rare)
-                return true;
-
-            if (m.Rarity == ActorRarity.Unique)
-                return true;
-
-            if (m.SnoMonster.Priority == MonsterPriority.keywarden)
-                return true;
-
-            if (m.SnoMonster.Priority == MonsterPriority.boss)
-                return true;
-
-            return false;
+            return IsRiftGuardianLike(m);
         }
 
         private bool PlayerHasStricken(IPlayer player)
