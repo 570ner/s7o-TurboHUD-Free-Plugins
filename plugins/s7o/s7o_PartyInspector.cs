@@ -252,6 +252,22 @@ namespace Turbo.Plugins.s7o
         private readonly Dictionary<string, PortraitHoverPlayerStatsSnapshot> _portraitHoverStatsCache =
             new Dictionary<string, PortraitHoverPlayerStatsSnapshot>();
 
+        // Shared per-game-tick party snapshot. Multiple portrait/CoE paths consume the
+        // same ordered players, so do not rebuild LINQ lists several times per frame.
+        private readonly List<IPlayer> _partyPlayersCache = new List<IPlayer>(4);
+        private int _partyPlayersCacheTick = int.MinValue;
+
+        // Last-known portrait stats are informational and do not need render-frequency
+        // refreshes. Live hover reads remain immediate.
+        private int _nextPortraitHoverStatsCacheRefreshMs = int.MinValue;
+        private const int PortraitHoverStatsCacheRefreshMs = 250;
+
+        // Reusable movable-CoE render buffers.
+        private readonly Dictionary<string, IPlayer> _movableCoePlayers =
+            new Dictionary<string, IPlayer>();
+        private readonly List<MovableCoeLayer> _movableCoeAutomaticLayers =
+            new List<MovableCoeLayer>();
+
         private readonly Dictionary<string, GemUpgradeDisplayState> _gemUpgradeStateCache =
             new Dictionary<string, GemUpgradeDisplayState>();
 
@@ -781,27 +797,44 @@ namespace Turbo.Plugins.s7o
             // Apply live public settings before layout so a later HUD Menu binding updates immediately.
             _movableCoeRules.SizeMultiplier = Math.Max(0.20f, Math.Min(1.50f, MovableCoESizeMultiplier));
 
-            var players = new Dictionary<string, IPlayer>();
+            _movableCoePlayers.Clear();
             foreach (IPlayer player in GetPartyPlayers())
             {
                 string key = GetMovableCoEPlayerKey(player);
-                if (!string.IsNullOrEmpty(key)) players[key] = player;
+                if (!string.IsNullOrEmpty(key))
+                    _movableCoePlayers[key] = player;
             }
 
             for (int i = _movableCoeOrder.Count - 1; i >= 0; i--)
-                if (!players.ContainsKey(_movableCoeOrder[i])) RemoveMovableCoELayer(_movableCoeOrder[i]);
+                if (!_movableCoePlayers.ContainsKey(_movableCoeOrder[i]))
+                    RemoveMovableCoELayer(_movableCoeOrder[i]);
 
-            var automatic = _movableCoeOrder
-                .Where(k => _movableCoeLayers.ContainsKey(k) && !_movableCoeLayers[k].Manual && players.ContainsKey(k))
-                .Select(k => _movableCoeLayers[k]).ToList();
-            LayoutAutomaticMovableCoELayers(automatic, players);
-
-            foreach (string key in _movableCoeOrder.ToList())
+            _movableCoeAutomaticLayers.Clear();
+            for (int i = 0; i < _movableCoeOrder.Count; i++)
             {
+                string key = _movableCoeOrder[i];
+                MovableCoeLayer layer;
+                if (_movableCoeLayers.TryGetValue(key, out layer) &&
+                    layer != null &&
+                    !layer.Manual &&
+                    _movableCoePlayers.ContainsKey(key))
+                {
+                    _movableCoeAutomaticLayers.Add(layer);
+                }
+            }
+
+            LayoutAutomaticMovableCoELayers(_movableCoeAutomaticLayers, _movableCoePlayers);
+
+            for (int i = 0; i < _movableCoeOrder.Count; i++)
+            {
+                string key = _movableCoeOrder[i];
                 MovableCoeLayer layer;
                 IPlayer player;
-                if (_movableCoeLayers.TryGetValue(key, out layer) && players.TryGetValue(key, out player))
+                if (_movableCoeLayers.TryGetValue(key, out layer) &&
+                    _movableCoePlayers.TryGetValue(key, out player))
+                {
                     DrawMovableCoELayer(player, layer);
+                }
             }
         }
 
@@ -1777,16 +1810,58 @@ namespace Turbo.Plugins.s7o
 
         private List<IPlayer> GetPartyPlayers()
         {
+            int tick = int.MinValue;
+
             try
             {
-                return Hud.Game.Players
-                    .Where(p => p != null && p.IsInGame)
-                    .OrderBy(p => p.PortraitIndex)
-                    .ToList();
+                if (Hud != null && Hud.Game != null)
+                    tick = Hud.Game.CurrentGameTick;
+            }
+            catch { }
+
+            if (tick != int.MinValue && tick == _partyPlayersCacheTick)
+                return _partyPlayersCache;
+
+            _partyPlayersCache.Clear();
+
+            try
+            {
+                if (Hud != null && Hud.Game != null && Hud.Game.Players != null)
+                {
+                    foreach (IPlayer player in Hud.Game.Players)
+                    {
+                        if (player != null && player.IsInGame)
+                            _partyPlayersCache.Add(player);
+                    }
+
+                    _partyPlayersCache.Sort(ComparePartyPlayersByPortrait);
+                }
             }
             catch
             {
-                return new List<IPlayer>();
+                _partyPlayersCache.Clear();
+            }
+
+            _partyPlayersCacheTick = tick;
+            return _partyPlayersCache;
+        }
+
+        private static int ComparePartyPlayersByPortrait(IPlayer left, IPlayer right)
+        {
+            if (ReferenceEquals(left, right))
+                return 0;
+            if (left == null)
+                return 1;
+            if (right == null)
+                return -1;
+
+            try
+            {
+                return left.PortraitIndex.CompareTo(right.PortraitIndex);
+            }
+            catch
+            {
+                return 0;
             }
         }
 
@@ -3704,8 +3779,16 @@ namespace Turbo.Plugins.s7o
 
         private void UpdatePortraitHoverStatsCache(List<IPlayer> players)
         {
-            if (!PortraitHoverStatsUseLastKnownStats || players == null)
+            if (!ShowPortraitHoverStats || !PortraitHoverStatsUseLastKnownStats || players == null)
                 return;
+
+            int now = Environment.TickCount;
+            if (_nextPortraitHoverStatsCacheRefreshMs != int.MinValue &&
+                unchecked(now - _nextPortraitHoverStatsCacheRefreshMs) < 0)
+                return;
+
+            _nextPortraitHoverStatsCacheRefreshMs =
+                unchecked(now + PortraitHoverStatsCacheRefreshMs);
 
             try
             {
