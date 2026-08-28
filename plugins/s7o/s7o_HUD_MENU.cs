@@ -35,10 +35,6 @@ namespace Turbo.Plugins.s7o
         private const float AutoLootIndicatorBaseY = 1027f;
         private const float AutoLootIndicatorBaseSize = 17f;
 
-        // Larger header reserve because the menu has title controls,
-        // page tabs, and a No-Click Background toggle above page content.
-        private const float HeaderReserveHeight = 132f;
-
         // Profile/no-click background timing copied from the Auto Gem Upgrader pattern.
         private const int ProfileOpenGraceMs = 500;
         private const int ChatCloseBeforeProfileCloseMs = 75;
@@ -48,7 +44,7 @@ namespace Turbo.Plugins.s7o
         // while avoiding the old overly large +4f inflated hit test.
         private const float ProfileCloseMaskPaddingPx = 3f;
 
-        private const int SettingsVersion = 21;
+        private const int SettingsVersion = 22;
 
         // Default menu-dot placement target:
         // lower-right skill-bar area on 1920x1080, away from chat and other overlays.
@@ -245,9 +241,7 @@ namespace Turbo.Plugins.s7o
         private int _macrosScroll = 0;
         private int _macrosTotalItems = 0;
         private int _macrosVisibleItems = 1;
-        private float _macrosTotalH = 0f;
         private bool _draggingMacrosThumb = false;
-        private float _macrosVisH = 0f;  // visible height of macros content area
         private float _macrosScrollDragOffsetY = 0f;
         private RectangleF _macrosScrollUpRect = RectangleF.Empty;
         private RectangleF _macrosScrollDownRect = RectangleF.Empty;
@@ -535,7 +529,32 @@ namespace Turbo.Plugins.s7o
         // still enable it from the Plugins page if they prefer it.
         private static readonly string[] DefaultDisabledPluginTypeNames =
         {
+            // Stock overlays intentionally disabled by the s7o pack. Users can still
+            // override any of these from the Plugins page and the choice is persisted.
+            "MiniMapLeftBuffListPlugin",
             "PlayerBottomBuffListPlugin",
+            "ExperienceOverBarPlugin",
+            "PlayerLeftBuffListPlugin",
+            "PlayerRightBuffListPlugin",
+            "PlayerTopBuffListPlugin",
+            "TopLeftBuffListPlugin",
+            "TopRightBuffListPlugin",
+
+            // Redundant or low-value stock overlays. Keep Default source untouched;
+            // users can still override these choices from the Plugins page.
+            "AttributeLabelListPlugin",
+            "DamageBonusPlugin",
+            "PortraitBottomStatsPlugin",
+            "BannerPlugin",
+            "CheatDeathBuffFeederPlugin",
+            "CosmeticItemsPlugin",
+            "PickupRangePlugin",
+
+            // HUD_MENU supplies a smaller cooldown-only painter for the native skill bar.
+            "OriginalSkillBarPlugin",
+            "OriginalHealthPotionSkillPlugin",
+
+            // Build-specific helpers remain opt-in.
             "s7o_Pestilence_RGK",
             "s7o_Inarius_RGK",
         };
@@ -640,7 +659,6 @@ namespace Turbo.Plugins.s7o
         private const int TtsCustomDefaultsCurrentVersion = 3;
         private const int MaxTtsCustomMessageChars = 64;
         private const char TtsKeyboardFakeSpaceChar = '\u00A0'; // legacy editor-space marker from prior builds
-        private const string TtsKeyboardFakeSpaceString = "\u00A0";
         private const string TtsDuplicateLineSalt = "\u00A0";
         private const int TtsScrollStepPx = 42;
 
@@ -832,7 +850,7 @@ namespace Turbo.Plugins.s7o
         // Skill cache used by AutoSnap.
         private IPlayerSkill[] _asSkills = new IPlayerSkill[6];
         // AutoSnap transient runtime state.
-        private int _asLockedAcdId = 0;
+        private uint _asLockedAcdId = 0u;
         private int _asLastMoveTick = 0;
         private bool _asLeftStandStillOwned = false;
 
@@ -854,6 +872,13 @@ namespace Turbo.Plugins.s7o
         private bool _asHotkeyCastPending = false;
         private int _asHotkeyCastTick = 0;
         private ActionKey _asHotkeyCastAction = ActionKey.Unknown;
+
+        // Synthetic hotkey taps are released asynchronously on a later collect pass.
+        // This preserves the short key/mouse hold without blocking FreeHUD's main thread.
+        private bool _asSyntheticReleasePending = false;
+        private ActionKey _asSyntheticReleaseAction = ActionKey.Unknown;
+        private int _asSyntheticReleaseAtMs = int.MinValue;
+        private const int AnySnapSyntheticHoldMs = 8;
 
         private bool _asHotkeyRestorePending = false;
         private int _asHotkeyRestoreTick = 0;
@@ -1073,6 +1098,9 @@ namespace Turbo.Plugins.s7o
         private readonly ITexture[] _playerCoePreviewTextures = new ITexture[4];
         private BuffRuleCalculator _playerCoePreviewRules;
         private IFont _fTitle, _fLabel, _fSection, _fText, _fSmall, _fButton, _fButtonActive;
+        private IFont _fSkillCooldown;
+        private OriginalSkillBarPlugin _originalSkillBarPlugin;
+        private OriginalHealthPotionSkillPlugin _originalPotionSkillPlugin;
         private IFont _fSmallShadow, _fButtonShadow;
         private IFont _fButtonLarge, _fButtonLargeActive, _fButtonLargeShadow;
         private IFont _fButtonTiny, _fButtonTinyActive, _fButtonTinyShadow;
@@ -2023,6 +2051,7 @@ namespace Turbo.Plugins.s7o
             if (clipState == ClipState.BeforeClip)
             {
                 EnsureResources();
+                try { DrawNativeSkillCooldowns(); } catch { }
                 try { DrawVisualSiphonDebuffRing(); } catch { }
                 try { DrawVisualRemoteSiphonPrimaryTargetRings(); } catch { }
                 return;
@@ -3734,19 +3763,7 @@ namespace Turbo.Plugins.s7o
                     _mainTotalItems > _mainVisibleItems &&
                     Contains(_mainScrollTrackRect, x, y))
                 {
-                    int mainMax = MaxMainScroll();
-
-                    if (mainMax > 0)
-                    {
-                        RectangleF mainThumb = GetMainScrollThumbRect(_mainScrollTrackRect);
-                        float mainTravel = Math.Max(1f, _mainScrollTrackRect.Height - mainThumb.Height);
-                        float mainRatio = Clamp01((y - _mainScrollTrackRect.Top - mainThumb.Height * 0.5f) / mainTravel);
-
-                        _mainScroll = (int)Math.Round(mainRatio * mainMax);
-                        ClampMainScroll();
-                        MarkLayoutDirty();
-                    }
-
+                    JumpIndexScrollToCursor(ref _mainScroll, _mainScrollTrackRect, _mainTotalItems, _mainVisibleItems, y);
                     return true;
                 }
             }
@@ -3776,16 +3793,7 @@ namespace Turbo.Plugins.s7o
                     _visualTotalItems > _visualVisibleItems &&
                     Contains(_visualScrollTrackRect, x, y))
                 {
-                    int vMax = MaxVisualScroll();
-                    if (vMax > 0)
-                    {
-                        RectangleF vThumb = GetVisualScrollThumbRect(_visualScrollTrackRect);
-                        float travel = Math.Max(1f, _visualScrollTrackRect.Height - vThumb.Height);
-                        float ratio  = Clamp01((y - _visualScrollTrackRect.Top - vThumb.Height * 0.5f) / travel);
-                        _visualScroll = (int)Math.Round(ratio * vMax);
-                        ClampVisualScroll();
-                        MarkLayoutDirty();
-                    }
+                    JumpIndexScrollToCursor(ref _visualScroll, _visualScrollTrackRect, _visualTotalItems, _visualVisibleItems, y);
                     return true;
                 }
                 return false;
@@ -3928,6 +3936,7 @@ namespace Turbo.Plugins.s7o
 
                 ReconcileFavoritesWithPlugins();
                 ApplyPersistedPluginStates();
+                ApplyDefaultPluginPerformancePolicy();
                 ApplyBoundPluginStatesFromPrimary();
                 ApplyGlobalTtsSettings();
                 ApplyZBarbAutoSnapSettingsToPlugin();
@@ -4084,6 +4093,24 @@ namespace Turbo.Plugins.s7o
                     string typeName = DefaultDisabledPluginTypeNames[i];
                     if (!string.IsNullOrWhiteSpace(typeName) && !_pluginEnabledOverrides.ContainsKey(typeName))
                         _pluginEnabledOverrides[typeName] = false;
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        private void ApplyDefaultPluginPolicyMigrationV22()
+        {
+            try
+            {
+                for (int i = 0; i < DefaultDisabledPluginTypeNames.Length; i++)
+                {
+                    string typeName = DefaultDisabledPluginTypeNames[i];
+                    if (string.IsNullOrWhiteSpace(typeName) || typeName.StartsWith("s7o_", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    _pluginEnabledOverrides[typeName] = false;
                 }
             }
             catch
@@ -4973,7 +5000,143 @@ namespace Turbo.Plugins.s7o
             }
         }
 
-                private void ApplyHudMenuRuntimeControlledSettings(bool force)
+        private void DrawNativeSkillCooldowns()
+        {
+            if (_fSkillCooldown == null || Hud == null || Hud.Game == null || Hud.Game.Me == null || Hud.Render == null)
+                return;
+            if (Hud.Render.UiHidden)
+                return;
+            if (Hud.Game.MapMode == MapMode.WaypointMap || Hud.Game.MapMode == MapMode.ActMap || Hud.Game.MapMode == MapMode.Map)
+                return;
+
+            // If the user explicitly re-enables either stock painter from HUD_MENU, do not
+            // double-draw that cooldown. The s7o defaults keep both stock painters disabled.
+            bool stockSkillBarEnabled = _originalSkillBarPlugin != null && _originalSkillBarPlugin.Enabled;
+            bool stockPotionEnabled = _originalPotionSkillPlugin != null && _originalPotionSkillPlugin.Enabled;
+
+            if (!stockSkillBarEnabled)
+            {
+                var skills = Hud.Game.Me.Powers != null ? Hud.Game.Me.Powers.CurrentSkills : null;
+                if (skills != null)
+                {
+                    IUiElement uiSkill1 = null;
+
+                    foreach (var skill in skills)
+                    {
+                        if (skill == null || !skill.IsOnCooldown)
+                            continue;
+
+                        if (uiSkill1 == null)
+                            uiSkill1 = Hud.Render.GetPlayerSkillUiElement(ActionKey.Skill1);
+
+                        var ui = Hud.Render.GetPlayerSkillUiElement(skill.Key);
+                        if (ui == null || uiSkill1 == null)
+                            continue;
+
+                        var rect = new RectangleF(
+                            (float)Math.Round(ui.Rectangle.X) + 0.5f,
+                            (float)Math.Round(uiSkill1.Rectangle.Y) + 0.5f,
+                            (float)Math.Round(ui.Rectangle.Width),
+                            (float)Math.Round(uiSkill1.Rectangle.Height));
+
+                        DrawNativeCooldownForSkill(skill, rect);
+                    }
+                }
+            }
+
+            if (!stockPotionEnabled && Hud.Game.Me.Powers != null)
+            {
+                var potion = Hud.Game.Me.Powers.HealthPotionSkill;
+                if (potion != null && potion.IsOnCooldown)
+                {
+                    var ui = Hud.Render.GetPlayerSkillUiElement(ActionKey.Heal);
+                    if (ui != null)
+                    {
+                        var rect = new RectangleF(
+                            (float)Math.Round(ui.Rectangle.X) + 0.5f,
+                            (float)Math.Round(ui.Rectangle.Y) + 0.5f,
+                            (float)Math.Round(ui.Rectangle.Width),
+                            (float)Math.Round(ui.Rectangle.Height));
+
+                        DrawNativeCooldownForSkill(potion, rect);
+                    }
+                }
+            }
+        }
+
+        private void DrawNativeCooldownForSkill(IPlayerSkill skill, RectangleF rect)
+        {
+            if (skill == null || !skill.IsOnCooldown || rect.Width <= 0.0f || rect.Height <= 0.0f)
+                return;
+
+            double remainingSeconds = (skill.CooldownFinishTick - Hud.Game.CurrentGameTick) / 60.0d;
+            string text = remainingSeconds > 1.0d
+                ? remainingSeconds.ToString("F0", CultureInfo.InvariantCulture)
+                : remainingSeconds.ToString("F1", CultureInfo.InvariantCulture);
+
+            var layout = _fSkillCooldown.GetTextLayout(text);
+            float x = rect.X + ((rect.Width - (float)Math.Ceiling(layout.Metrics.Width)) * 0.5f);
+            float y = rect.Y + ((rect.Height - layout.Metrics.Height) * 0.5f);
+            _fSkillCooldown.DrawText(layout, x, y);
+        }
+
+        private void ApplyDefaultPluginPerformancePolicy()
+        {
+            try
+            {
+                // Safety for users who explicitly re-enable either stock painter: keep it
+                // cooldown-only rather than restoring the expensive DPS/tooltip branch.
+                Hud.RunOnPlugin<OriginalSkillBarPlugin>(plugin =>
+                {
+                    _originalSkillBarPlugin = plugin;
+                    if (plugin != null && plugin.SkillPainter != null)
+                    {
+                        plugin.SkillPainter.EnableSkillDpsBar = false;
+                        plugin.SkillPainter.EnableDetailedDpsHint = false;
+                    }
+                });
+
+                Hud.RunOnPlugin<OriginalHealthPotionSkillPlugin>(plugin =>
+                {
+                    _originalPotionSkillPlugin = plugin;
+                    if (plugin != null && plugin.SkillPainter != null)
+                    {
+                        plugin.SkillPainter.EnableSkillDpsBar = false;
+                        plugin.SkillPainter.EnableDetailedDpsHint = false;
+                    }
+                });
+
+                // s7o_RiftInfo already provides a richer nearby-RP breakdown. Keep the
+                // stock progression-colored monster dots, but remove RiftPlugin's second
+                // AliveMonsters traversal for the simple "progression within 40 yd" label.
+                Hud.RunOnPlugin<RiftPlugin>(plugin =>
+                {
+                    if (plugin != null)
+                        plugin.NearMonsterProgressionEnabled = false;
+                });
+
+                // Keep only the useful XP/hour label. The first stock label owns the
+                // expandable current-paragon/time-to-level calculator.
+                Hud.RunOnPlugin<TopExperienceStatistics>(plugin =>
+                {
+                    if (plugin == null || plugin.LabelList == null || plugin.LabelList.LabelDecorators == null)
+                        return;
+
+                    var labels = plugin.LabelList.LabelDecorators;
+                    if (labels.Count > 1)
+                    {
+                        var xpPerHour = labels[labels.Count - 1];
+                        labels.Clear();
+                        labels.Add(xpPerHour);
+                    }
+                });
+            }
+            catch
+            {
+            }
+        }
+
+        private void ApplyHudMenuRuntimeControlledSettings(bool force)
         {
             ApplyMonsterVisualToggles();
             ApplyRiftFishingMapSettings();
@@ -5267,9 +5430,7 @@ namespace Turbo.Plugins.s7o
 
         private void ClampScroll(MenuLayout layout, int rowCount)
         {
-            int max = Math.Max(0, rowCount - VisibleRowCount(layout));
-            if (_scroll > max) _scroll = max;
-            if (_scroll < 0) _scroll = 0;
+            _scroll = ClampIndexScrollValue(_scroll, rowCount, VisibleRowCount(layout));
         }
 
         private int MaxScroll(MenuLayout layout)
@@ -5296,53 +5457,15 @@ namespace Turbo.Plugins.s7o
 
         private RectangleF GetScrollThumbRect(MenuLayout layout, int total, int visible)
         {
-            if (layout == null) return RectangleF.Empty;
-            if (total <= visible || visible <= 0) return RectangleF.Empty;
-
-            float trackTop = layout.ScrollTrack.Top;
-            float trackH = Math.Max(8f, layout.ScrollTrack.Height);
-
-            float thumbH = Math.Max(18f, trackH * (visible / (float)Math.Max(visible, total)));
-            float maxScroll = Math.Max(1f, total - visible);
-
-            float thumbY = trackTop + (trackH - thumbH) * (_scroll / maxScroll);
-
-            return new RectangleF(
-                layout.ScrollTrack.Left + 2f,
-                thumbY,
-                Math.Max(4f, layout.ScrollTrack.Width - 4f),
-                thumbH);
+            return layout == null
+                ? RectangleF.Empty
+                : GetIndexScrollThumbRect(layout.ScrollTrack, total, visible, _scroll);
         }
 
         private void JumpScrollToCursor(MenuLayout layout, float cursorY)
         {
             if (layout == null) layout = GetLayout();
-
-            int total = GetActiveRowsCached().Count;
-            int visible = VisibleRowCount(layout);
-            int max = Math.Max(0, total - visible);
-
-            if (max <= 0)
-            {
-                if (_scroll != 0)
-                {
-                    _scroll = 0;
-                    MarkLayoutDirty();
-                }
-                return;
-            }
-
-            RectangleF thumb = GetScrollThumbRect(layout, total, visible);
-            float thumbH = thumb.IsEmpty ? 18f : thumb.Height;
-
-            float travel = Math.Max(1f, layout.ScrollTrack.Height - thumbH);
-            float targetTop = cursorY - thumbH * 0.5f;
-            float ratio = Clamp01((targetTop - layout.ScrollTrack.Top) / travel);
-
-            int old = _scroll;
-            _scroll = Math.Max(0, Math.Min(max, (int)Math.Round(ratio * max)));
-            if (_scroll != old)
-                MarkLayoutDirty();
+            JumpIndexScrollToCursor(ref _scroll, layout.ScrollTrack, GetActiveRowsCached().Count, VisibleRowCount(layout), cursorY);
         }
 
         private void DragScrollThumbToCursor(MenuLayout layout, float cursorY)
@@ -5351,9 +5474,7 @@ namespace Turbo.Plugins.s7o
 
             int total = GetActiveRowsCached().Count;
             int visible = VisibleRowCount(layout);
-            int max = Math.Max(0, total - visible);
-
-            if (max <= 0)
+            if (MaxIndexScroll(total, visible) <= 0)
             {
                 if (_scroll != 0)
                 {
@@ -5363,17 +5484,7 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
-            RectangleF thumb = GetScrollThumbRect(layout, total, visible);
-            float thumbH = thumb.IsEmpty ? 18f : thumb.Height;
-
-            float travel = Math.Max(1f, layout.ScrollTrack.Height - thumbH);
-            float targetTop = cursorY - _scrollDragOffsetY;
-            float ratio = Clamp01((targetTop - layout.ScrollTrack.Top) / travel);
-
-            int old = _scroll;
-            _scroll = Math.Max(0, Math.Min(max, (int)Math.Round(ratio * max)));
-            if (_scroll != old)
-                MarkLayoutDirty();
+            DragIndexScrollThumbToCursor(ref _scroll, layout.ScrollTrack, total, visible, cursorY, _scrollDragOffsetY);
         }
 
         private static float Clamp01(float value)
@@ -5381,6 +5492,78 @@ namespace Turbo.Plugins.s7o
             if (value < 0f) return 0f;
             if (value > 1f) return 1f;
             return value;
+        }
+
+        private static int MaxIndexScroll(int total, int visible)
+        {
+            return Math.Max(0, total - Math.Max(0, visible));
+        }
+
+        private static int ClampIndexScrollValue(int value, int total, int visible)
+        {
+            return Math.Max(0, Math.Min(MaxIndexScroll(total, visible), value));
+        }
+
+        private void ScrollIndexBy(ref int value, int delta, int total, int visible)
+        {
+            int old = value;
+            value = ClampIndexScrollValue(value + delta, total, visible);
+            if (value != old)
+                MarkLayoutDirty();
+        }
+
+        private static RectangleF GetIndexScrollThumbRect(RectangleF track, int total, int visible, int scroll)
+        {
+            if (total <= visible || visible <= 0 || track.Height <= 0f)
+                return RectangleF.Empty;
+
+            float trackH = Math.Max(8f, track.Height);
+            float thumbH = Math.Max(18f, trackH * (visible / (float)Math.Max(visible, total)));
+            float maxScroll = Math.Max(1f, total - visible);
+            float thumbY = track.Top + (trackH - thumbH) * (ClampIndexScrollValue(scroll, total, visible) / maxScroll);
+
+            return new RectangleF(track.Left + 2f, thumbY, Math.Max(4f, track.Width - 4f), thumbH);
+        }
+
+        private void JumpIndexScrollToCursor(ref int value, RectangleF track, int total, int visible, float cursorY)
+        {
+            int max = MaxIndexScroll(total, visible);
+            if (max <= 0)
+            {
+                if (value != 0)
+                {
+                    value = 0;
+                    MarkLayoutDirty();
+                }
+                return;
+            }
+
+            RectangleF thumb = GetIndexScrollThumbRect(track, total, visible, value);
+            float thumbH = thumb.IsEmpty ? 18f : thumb.Height;
+            float travel = Math.Max(1f, track.Height - thumbH);
+            float ratio = Clamp01((cursorY - thumbH * 0.5f - track.Top) / travel);
+
+            int old = value;
+            value = ClampIndexScrollValue((int)Math.Round(ratio * max), total, visible);
+            if (value != old)
+                MarkLayoutDirty();
+        }
+
+        private void DragIndexScrollThumbToCursor(ref int value, RectangleF track, int total, int visible, float cursorY, float dragOffsetY)
+        {
+            int max = MaxIndexScroll(total, visible);
+            if (max <= 0 || track.Height <= 0f)
+                return;
+
+            RectangleF thumb = GetIndexScrollThumbRect(track, total, visible, value);
+            float thumbH = thumb.IsEmpty ? 18f : thumb.Height;
+            float travel = Math.Max(1f, track.Height - thumbH);
+            float ratio = Clamp01((cursorY - dragOffsetY - track.Top) / travel);
+
+            int old = value;
+            value = ClampIndexScrollValue((int)Math.Round(ratio * max), total, visible);
+            if (value != old)
+                MarkLayoutDirty();
         }
 
 
@@ -5952,103 +6135,31 @@ namespace Turbo.Plugins.s7o
 
         private int MaxMainScroll()
         {
-            return Math.Max(0, _mainTotalItems - _mainVisibleItems);
+            return MaxIndexScroll(_mainTotalItems, _mainVisibleItems);
         }
 
         private void ClampMainScroll()
         {
-            int mainLimit = MaxMainScroll();
-
-            if (_mainScroll < 0)
-                _mainScroll = 0;
-
-            if (_mainScroll > mainLimit)
-                _mainScroll = mainLimit;
+            _mainScroll = ClampIndexScrollValue(_mainScroll, _mainTotalItems, _mainVisibleItems);
         }
 
         private void ScrollMainBy(int delta)
         {
-            int old = _mainScroll;
-            _mainScroll += delta;
-            ClampMainScroll();
-            if (_mainScroll != old)
-                MarkLayoutDirty();
-        }
-
-        private RectangleF GetMainScrollThumbRect(RectangleF track)
-        {
-            if (_mainTotalItems <= _mainVisibleItems || _mainVisibleItems <= 0 || track.Height <= 0f)
-                return RectangleF.Empty;
-
-            float trackH = Math.Max(8f, track.Height);
-            float thumbH = Math.Max(18f, trackH * (_mainVisibleItems / (float)Math.Max(_mainVisibleItems, _mainTotalItems)));
-            float maxScroll = Math.Max(1f, _mainTotalItems - _mainVisibleItems);
-            float thumbY = track.Top + (trackH - thumbH) * (_mainScroll / maxScroll);
-
-            return new RectangleF(track.Left + 2f, thumbY, Math.Max(4f, track.Width - 4f), thumbH);
+            ScrollIndexBy(ref _mainScroll, delta, _mainTotalItems, _mainVisibleItems);
         }
 
         private void DragMainScrollThumbToCursor(float cursorY)
         {
-            int mainScrollMax = MaxMainScroll();
-
-            if (mainScrollMax <= 0 || _mainScrollTrackRect.Height <= 0f)
-                return;
-
-            RectangleF dragThumb = GetMainScrollThumbRect(_mainScrollTrackRect);
-            float dragTravel = Math.Max(1f, _mainScrollTrackRect.Height - dragThumb.Height);
-            float targetTop = cursorY - _mainScrollDragOffsetY;
-            float dragRatio = Clamp01((targetTop - _mainScrollTrackRect.Top) / dragTravel);
-
-            int old = _mainScroll;
-            _mainScroll = Math.Max(0, Math.Min(mainScrollMax, (int)Math.Round(dragRatio * mainScrollMax)));
-            if (_mainScroll != old)
-                MarkLayoutDirty();
+            DragIndexScrollThumbToCursor(ref _mainScroll, _mainScrollTrackRect, _mainTotalItems, _mainVisibleItems, cursorY, _mainScrollDragOffsetY);
         }
 
         private void DrawPluginsStyleMainScrollbar(RectangleF detail)
         {
-            const float sbW = 18f;
-            const float btnH = 20f;
-
-            float left = detail.Right - sbW - 2f;
-
-            _mainScrollUpRect = new RectangleF(left, detail.Top + 2f, sbW - 2f, btnH);
-            _mainScrollDownRect = new RectangleF(left, detail.Bottom - btnH - 2f, sbW - 2f, btnH);
-            _mainScrollTrackRect = new RectangleF(
-                left,
-                _mainScrollUpRect.Bottom + 2f,
-                sbW - 2f,
-                Math.Max(8f, _mainScrollDownRect.Top - _mainScrollUpRect.Bottom - 4f));
-
-            _bScrollTrackSolid.DrawRectangle(
-                _mainScrollTrackRect.Left - 2f,
-                _mainScrollUpRect.Top,
-                _mainScrollTrackRect.Width + 4f,
-                _mainScrollDownRect.Bottom - _mainScrollUpRect.Top);
-
-            DrawFlashButton(_mainScrollUpRect, "^", _lastMainScrollUpTick, true);
-            DrawFlashButton(_mainScrollDownRect, "v", _lastMainScrollDownTick, true);
-
-            DrawSolidScrollbarRect(_mainScrollTrackRect, _bScrollTrackSolid, _bScrollBorder);
-
-            _mainScrollThumbRect = GetMainScrollThumbRect(_mainScrollTrackRect);
-
-            if (_mainScrollThumbRect.IsEmpty)
-                return;
-
-            bool active =
-                _draggingMainThumb ||
-                IsFlashActive(_lastMainScrollUpTick) ||
-                IsFlashActive(_lastMainScrollDownTick);
-
-            DrawSolidScrollbarRect(
-                _mainScrollThumbRect,
-                active ? _bScrollThumbGreenActive : _bScrollThumbGreen,
-                _bScrollBorder);
-
-            if (active)
-                DrawGlowRings(_mainScrollThumbRect);
+            LayoutPluginsStyleScrollbar(detail, ref _mainScrollUpRect, ref _mainScrollDownRect, ref _mainScrollTrackRect);
+            DrawPluginsStyleIndexScrollbar(
+                _mainScrollUpRect, _mainScrollDownRect, _mainScrollTrackRect, ref _mainScrollThumbRect,
+                _mainTotalItems, _mainVisibleItems, _mainScroll, _draggingMainThumb,
+                _lastMainScrollUpTick, _lastMainScrollDownTick);
         }
 
         private void DrawAutoSnapPanel(RectangleF r)
@@ -6603,79 +6714,27 @@ namespace Turbo.Plugins.s7o
 
         private int MaxMacroScroll()
         {
-            return Math.Max(0, _macrosTotalItems - _macrosVisibleItems);
+            return MaxIndexScroll(_macrosTotalItems, _macrosVisibleItems);
         }
 
         private void ClampMacroScroll()
         {
-            int max = MaxMacroScroll();
-
-            if (_macrosScroll < 0)
-                _macrosScroll = 0;
-
-            if (_macrosScroll > max)
-                _macrosScroll = max;
+            _macrosScroll = ClampIndexScrollValue(_macrosScroll, _macrosTotalItems, _macrosVisibleItems);
         }
 
         private void ScrollMacrosBy(int delta)
         {
-            int old = _macrosScroll;
-            _macrosScroll += delta;
-            ClampMacroScroll();
-            if (_macrosScroll != old)
-                MarkLayoutDirty();
-        }
-
-        private RectangleF GetMacrosScrollThumbRect(RectangleF track)
-        {
-            if (_macrosTotalItems <= _macrosVisibleItems || _macrosVisibleItems <= 0)
-                return RectangleF.Empty;
-
-            float trackH = Math.Max(8f, track.Height);
-            float thumbH = Math.Max(18f, trackH * (_macrosVisibleItems / (float)Math.Max(_macrosVisibleItems, _macrosTotalItems)));
-            float maxScroll = Math.Max(1f, _macrosTotalItems - _macrosVisibleItems);
-
-            float thumbY = track.Top + (trackH - thumbH) * (_macrosScroll / maxScroll);
-
-            return new RectangleF(
-                track.Left + 2f,
-                thumbY,
-                Math.Max(4f, track.Width - 4f),
-                thumbH);
+            ScrollIndexBy(ref _macrosScroll, delta, _macrosTotalItems, _macrosVisibleItems);
         }
 
         private void JumpMacrosScrollToCursor(float cursorY)
         {
-            int max = MaxMacroScroll();
-
-            if (max <= 0)
-            {
-                if (_macrosScroll != 0)
-                {
-                    _macrosScroll = 0;
-                    MarkLayoutDirty();
-                }
-                return;
-            }
-
-            RectangleF thumb = GetMacrosScrollThumbRect(_macrosScrollTrackRect);
-            float thumbH = thumb.IsEmpty ? 18f : thumb.Height;
-
-            float travel = Math.Max(1f, _macrosScrollTrackRect.Height - thumbH);
-            float targetTop = cursorY - thumbH * 0.5f;
-            float ratio = Clamp01((targetTop - _macrosScrollTrackRect.Top) / travel);
-
-            int old = _macrosScroll;
-            _macrosScroll = Math.Max(0, Math.Min(max, (int)Math.Round(ratio * max)));
-            if (_macrosScroll != old)
-                MarkLayoutDirty();
+            JumpIndexScrollToCursor(ref _macrosScroll, _macrosScrollTrackRect, _macrosTotalItems, _macrosVisibleItems, cursorY);
         }
 
         private void DragMacrosScrollThumbToCursor(float cursorY)
         {
-            int max = MaxMacroScroll();
-
-            if (max <= 0)
+            if (MaxMacroScroll() <= 0)
             {
                 if (_macrosScroll != 0)
                 {
@@ -6685,17 +6744,7 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
-            RectangleF thumb = GetMacrosScrollThumbRect(_macrosScrollTrackRect);
-            float thumbH = thumb.IsEmpty ? 18f : thumb.Height;
-
-            float travel = Math.Max(1f, _macrosScrollTrackRect.Height - thumbH);
-            float targetTop = cursorY - _macrosScrollDragOffsetY;
-            float ratio = Clamp01((targetTop - _macrosScrollTrackRect.Top) / travel);
-
-            int old = _macrosScroll;
-            _macrosScroll = Math.Max(0, Math.Min(max, (int)Math.Round(ratio * max)));
-            if (_macrosScroll != old)
-                MarkLayoutDirty();
+            DragIndexScrollThumbToCursor(ref _macrosScroll, _macrosScrollTrackRect, _macrosTotalItems, _macrosVisibleItems, cursorY, _macrosScrollDragOffsetY);
         }
 
 
@@ -7913,143 +7962,38 @@ namespace Turbo.Plugins.s7o
                 RegisterToggleHit(actionKey, stateR);
         }
 
-        private float DrawToggleDetailHeader(RectangleF detail, string title, string description)
-        {
-            _fSection.DrawText(DisplayText(title), detail.Left + 14f, detail.Top + 10f);
-
-            if (!string.IsNullOrWhiteSpace(description))
-            {
-                DrawLeftFittedText(
-                    _fLabel,
-                    _fSmall,
-                    DisplayText(description),
-                    new RectangleF(detail.Left + 14f, detail.Top + 28f, Math.Max(40f, detail.Width - 28f), 28f));
-            }
-
-            return detail.Top + 64f;
-        }
-
 
         // ── VISUAL page index scrollbar helpers (mirrors MACROS pattern) ──────────
 
-        private int VisibleVisualItemCount(RectangleF listRect)
-        {
-            if (VisualListSlotH <= 0f) return 1;
-            return Math.Max(1, (int)Math.Floor((listRect.Height - 4f) / VisualListSlotH));
-        }
-
-        private int MaxVisualScroll()
-        {
-            return Math.Max(0, _visualTotalItems - _visualVisibleItems);
-        }
-
         private void ClampVisualScroll()
         {
-            int max = MaxVisualScroll();
-            if (_visualScroll < 0) _visualScroll = 0;
-            if (_visualScroll > max) _visualScroll = max;
+            _visualScroll = ClampIndexScrollValue(_visualScroll, _visualTotalItems, _visualVisibleItems);
         }
 
         private void ScrollVisualBy(int delta)
         {
-            int old = _visualScroll;
-            _visualScroll += delta;
-            ClampVisualScroll();
-            if (_visualScroll != old)
-                MarkLayoutDirty();
-        }
-
-        private RectangleF GetVisualScrollThumbRect(RectangleF track)
-        {
-            int total   = _visualTotalItems;
-            int visible = _visualVisibleItems;
-
-            if (total <= 0 || visible >= total || visible <= 0 || track.Height <= 0f)
-                return RectangleF.Empty;
-
-            float trackH    = Math.Max(8f, track.Height);
-            float thumbH    = Math.Max(18f, trackH * (visible / (float)Math.Max(visible, total)));
-            float maxScroll = Math.Max(1f, total - visible);
-            float thumbY    = track.Top + (trackH - thumbH) * (_visualScroll / maxScroll);
-
-            return new RectangleF(
-                track.Left + 2f,
-                thumbY,
-                Math.Max(4f, track.Width - 4f),
-                thumbH);
+            ScrollIndexBy(ref _visualScroll, delta, _visualTotalItems, _visualVisibleItems);
         }
 
         private void DragVisualScrollThumbToCursor(float cursorY)
         {
-            int max = MaxVisualScroll();
-
-            if (max <= 0 || _visualScrollTrackRect.Height <= 0f)
+            if (MaxIndexScroll(_visualTotalItems, _visualVisibleItems) <= 0 || _visualScrollTrackRect.Height <= 0f)
                 return;
 
-            RectangleF thumb = GetVisualScrollThumbRect(_visualScrollTrackRect);
-            float usable = _visualScrollTrackRect.Height - thumb.Height;
-
-            if (usable <= 0f)
+            RectangleF thumb = GetIndexScrollThumbRect(_visualScrollTrackRect, _visualTotalItems, _visualVisibleItems, _visualScroll);
+            if (_visualScrollTrackRect.Height - thumb.Height <= 0f)
                 return;
 
-            float local = cursorY - _visualScrollTrackRect.Top - _visualScrollDragOffsetY;
-            int old = _visualScroll;
-            _visualScroll = (int)Math.Round(Clamp01(local / usable) * max);
-
-            ClampVisualScroll();
-            if (_visualScroll != old)
-                MarkLayoutDirty();
+            DragIndexScrollThumbToCursor(ref _visualScroll, _visualScrollTrackRect, _visualTotalItems, _visualVisibleItems, cursorY, _visualScrollDragOffsetY);
         }
 
         private void DrawPluginsStyleVisualScrollbar(RectangleF detail)
         {
-            const float sbW  = 18f;
-            const float btnH = 20f;
-
-            float left = detail.Right - sbW - 2f;
-
-            _visualScrollUpRect = new RectangleF(
-                left, detail.Top + 2f, sbW - 2f, btnH);
-
-            _visualScrollDownRect = new RectangleF(
-                left, detail.Bottom - btnH - 2f, sbW - 2f, btnH);
-
-            _visualScrollTrackRect = new RectangleF(
-                left,
-                _visualScrollUpRect.Bottom + 2f,
-                sbW - 2f,
-                Math.Max(8f, _visualScrollDownRect.Top - _visualScrollUpRect.Bottom - 4f));
-
-            // Same outer track backing as MACROS
-            _bScrollTrackSolid.DrawRectangle(
-                _visualScrollTrackRect.Left - 2f,
-                _visualScrollUpRect.Top,
-                _visualScrollTrackRect.Width + 4f,
-                _visualScrollDownRect.Bottom - _visualScrollUpRect.Top);
-
-            DrawFlashButton(_visualScrollUpRect,   "^", _lastVisualScrollUpTick,   true);
-            DrawFlashButton(_visualScrollDownRect, "v", _lastVisualScrollDownTick, true);
-
-            // Black-bordered inner track — same as MACROS / PLUGINS
-            DrawSolidScrollbarRect(_visualScrollTrackRect, _bScrollTrackSolid, _bScrollBorder);
-
-            _visualScrollThumbRect = GetVisualScrollThumbRect(_visualScrollTrackRect);
-
-            if (_visualScrollThumbRect.IsEmpty)
-                return;
-
-            bool active =
-                _draggingVisualThumb ||
-                IsFlashActive(_lastVisualScrollUpTick) ||
-                IsFlashActive(_lastVisualScrollDownTick);
-
-            DrawSolidScrollbarRect(
-                _visualScrollThumbRect,
-                active ? _bScrollThumbGreenActive : _bScrollThumbGreen,
-                _bScrollBorder);
-
-            if (active)
-                DrawGlowRings(_visualScrollThumbRect);
+            LayoutPluginsStyleScrollbar(detail, ref _visualScrollUpRect, ref _visualScrollDownRect, ref _visualScrollTrackRect);
+            DrawPluginsStyleIndexScrollbar(
+                _visualScrollUpRect, _visualScrollDownRect, _visualScrollTrackRect, ref _visualScrollThumbRect,
+                _visualTotalItems, _visualVisibleItems, _visualScroll, _draggingVisualThumb,
+                _lastVisualScrollUpTick, _lastVisualScrollDownTick);
         }
 
 
@@ -10057,46 +10001,54 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
         private void DrawVisualColorPickerInline(RectangleF r, string feature, int colorIdx, int tone)
         {
+            DrawToggleColorPickerInline(r, colorIdx, tone, "visual:color:" + feature + ":");
+        }
+        private void DrawToggleColorPickerInline(RectangleF r, int colorIdx, int tone, string actionPrefix)
+        {
             const float box = 18f;
             const float gap = 4f;
 
             colorIdx = ViClamp(colorIdx, 0, 7);
             tone = ViClamp(tone, 0, 10);
-
             EnsureVisualPickerBrushes();
 
             float x = r.Left;
             float y = r.Top + (r.Height - box) * 0.5f;
-
             for (int i = 0; i < 8; i++)
             {
                 RectangleF sw = new RectangleF(x, y, box, box);
-
                 IBrush fill = _visualPickerFillBrushes[i, tone];
                 if (fill != null)
                     fill.DrawRectangle(sw.Left, sw.Top, sw.Width, sw.Height);
 
-                IBrush edge = (i == colorIdx) ? _visualPickerEdgeSelected : _visualPickerEdgeNormal;
+                IBrush edge = i == colorIdx ? _visualPickerEdgeSelected : _visualPickerEdgeNormal;
                 if (edge != null)
                     edge.DrawRectangle(sw.Left, sw.Top, sw.Width, sw.Height);
 
-                RegisterToggleHit("visual:color:" + feature + ":" + i.ToString(CultureInfo.InvariantCulture), sw);
-
+                RegisterToggleHit(actionPrefix + i.ToString(CultureInfo.InvariantCulture), sw);
                 x += box + gap;
             }
         }
 
         private void DrawVisualStepperWide(RectangleF r, string label, string valueText, string minusAction, string plusAction)
         {
-            const float btnW = 24f;
-            RectangleF minus = new RectangleF(r.Left, r.Top, btnW, r.Height);
-            RectangleF plus  = new RectangleF(r.Right - btnW, r.Top, btnW, r.Height);
-            RectangleF val   = new RectangleF(minus.Right + 4f, r.Top, Math.Max(30f, r.Width - btnW * 2f - 8f), r.Height);
-            DrawGlossButton(minus, "-", IsVisualButtonFlashActive(minusAction), false, true);
-            DrawGlossButton(val,   s7o_Localization.DisplayButton(label) + " " + valueText, false, false, true);
-            DrawGlossButton(plus,  "+", IsVisualButtonFlashActive(plusAction), false, true);
+            DrawToggleStepper(r, s7o_Localization.DisplayButton(label) + " " + valueText, minusAction, plusAction, true, 24f, 4f);
+        }
+        private void DrawToggleStepper(RectangleF r, string centerText, string minusAction, string plusAction, bool enabled, float buttonWidth, float gap)
+        {
+            RectangleF minus = new RectangleF(r.Left, r.Top, buttonWidth, r.Height);
+            RectangleF plus = new RectangleF(r.Right - buttonWidth, r.Top, buttonWidth, r.Height);
+            RectangleF center = new RectangleF(minus.Right + gap, r.Top, Math.Max(30f, r.Width - buttonWidth * 2f - gap * 2f), r.Height);
+
+            DrawGlossButton(minus, "-", enabled && IsVisualButtonFlashActive(minusAction), false, enabled);
+            DrawGlossButton(center, centerText, false, false, enabled);
+            DrawGlossButton(plus, "+", enabled && IsVisualButtonFlashActive(plusAction), false, enabled);
+
+            if (!enabled)
+                return;
+
             RegisterToggleHit(minusAction, minus);
-            RegisterToggleHit(plusAction,  plus);
+            RegisterToggleHit(plusAction, plus);
         }
 
         private static string FormatVisualFloat(float value)
@@ -11930,7 +11882,6 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
         }
 
 
-        private static readonly MacroEntry[] MacroFavoritesSentinel = new MacroEntry[0]; // unused; just for clarity
 
         private void DrawMacrosFixedHeader(RectangleF detail)
         {
@@ -12954,20 +12905,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
         private void DrawAutoLootRangeStepper(RectangleF r, string valueText, string minusAction, string plusAction, bool installed)
         {
-            const float buttonWidth = 26f;
-            RectangleF minus = new RectangleF(r.Left, r.Top, buttonWidth, r.Height);
-            RectangleF plus = new RectangleF(r.Right - buttonWidth, r.Top, buttonWidth, r.Height);
-            RectangleF value = new RectangleF(minus.Right + 5f, r.Top, Math.Max(40f, r.Width - buttonWidth * 2f - 10f), r.Height);
-
-            DrawGlossButton(minus, "-", installed && IsVisualButtonFlashActive(minusAction), false, installed);
-            DrawGlossButton(value, installed ? valueText : "NOT INSTALLED", false, false, installed);
-            DrawGlossButton(plus, "+", installed && IsVisualButtonFlashActive(plusAction), false, installed);
-
-            if (!installed)
-                return;
-
-            RegisterToggleHit(minusAction, minus);
-            RegisterToggleHit(plusAction, plus);
+            DrawToggleStepper(r, installed ? valueText : "NOT INSTALLED", minusAction, plusAction, installed, 26f, 5f);
         }
 
         private void DrawInventoryDropChildRow(RectangleF r, MacroEntry entry, int rowIdx)
@@ -13135,33 +13073,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
         private void DrawPestilenceZeiColorPickerInline(RectangleF r)
         {
-            const float box = 18f;
-            const float gap = 4f;
-
-            int colorIdx = ViClamp(_pestilenceRgkZeiColorIdx, 0, 7);
-            int tone = ViClamp(_pestilenceRgkZeiTone, 0, 10);
-
-            EnsureVisualPickerBrushes();
-
-            float x = r.Left;
-            float y = r.Top + (r.Height - box) * 0.5f;
-
-            for (int i = 0; i < 8; i++)
-            {
-                RectangleF sw = new RectangleF(x, y, box, box);
-
-                IBrush fill = _visualPickerFillBrushes[i, tone];
-                if (fill != null)
-                    fill.DrawRectangle(sw.Left, sw.Top, sw.Width, sw.Height);
-
-                IBrush edge = (i == colorIdx) ? _visualPickerEdgeSelected : _visualPickerEdgeNormal;
-                if (edge != null)
-                    edge.DrawRectangle(sw.Left, sw.Top, sw.Width, sw.Height);
-
-                RegisterToggleHit("pestilence:zei:color:" + i.ToString(CultureInfo.InvariantCulture), sw);
-
-                x += box + gap;
-            }
+            DrawToggleColorPickerInline(r, _pestilenceRgkZeiColorIdx, _pestilenceRgkZeiTone, "pestilence:zei:color:");
         }
 
         private void DrawToggleMacrosCategory(RectangleF detail)
@@ -14058,37 +13970,43 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 border.DrawRectangle(r.Left, r.Top, r.Width, r.Height);
         }
 
+        private static void LayoutPluginsStyleScrollbar(RectangleF detail, ref RectangleF up, ref RectangleF down, ref RectangleF track)
+        {
+            const float sbW = 18f;
+            const float btnH = 20f;
+            float left = detail.Right - sbW - 2f;
+
+            up = new RectangleF(left, detail.Top + 2f, sbW - 2f, btnH);
+            down = new RectangleF(left, detail.Bottom - btnH - 2f, sbW - 2f, btnH);
+            track = new RectangleF(left, up.Bottom + 2f, sbW - 2f, Math.Max(8f, down.Top - up.Bottom - 4f));
+        }
+
+        private void DrawPluginsStyleIndexScrollbar(
+            RectangleF up, RectangleF down, RectangleF track, ref RectangleF thumb,
+            int total, int visible, int scroll, bool dragging, int lastUpTick, int lastDownTick)
+        {
+            _bScrollTrackSolid.DrawRectangle(track.Left - 2f, up.Top, track.Width + 4f, down.Bottom - up.Top);
+            DrawFlashButton(up, "^", lastUpTick, true);
+            DrawFlashButton(down, "v", lastDownTick, true);
+            DrawSolidScrollbarRect(track, _bScrollTrackSolid, _bScrollBorder);
+
+            thumb = GetIndexScrollThumbRect(track, total, visible, scroll);
+            if (thumb.IsEmpty)
+                return;
+
+            bool active = dragging || IsFlashActive(lastUpTick) || IsFlashActive(lastDownTick);
+            DrawSolidScrollbarRect(thumb, active ? _bScrollThumbGreenActive : _bScrollThumbGreen, _bScrollBorder);
+            if (active)
+                DrawGlowRings(thumb);
+        }
+
         // Draws the MACROS detail scrollbar using the same visual model as the PLUGINS page.
         private void DrawPluginsStyleMacrosScrollbar()
         {
-            _bScrollTrackSolid.DrawRectangle(
-                _macrosScrollTrackRect.Left - 2f,
-                _macrosScrollUpRect.Top,
-                _macrosScrollTrackRect.Width + 4f,
-                _macrosScrollDownRect.Bottom - _macrosScrollUpRect.Top);
-
-            DrawFlashButton(_macrosScrollUpRect, "^", _lastMacrosScrollUpTick, true);
-            DrawFlashButton(_macrosScrollDownRect, "v", _lastMacrosScrollDownTick, true);
-
-            DrawSolidScrollbarRect(_macrosScrollTrackRect, _bScrollTrackSolid, _bScrollBorder);
-
-            _macrosScrollThumbRect = GetMacrosScrollThumbRect(_macrosScrollTrackRect);
-
-            if (_macrosScrollThumbRect.IsEmpty)
-                return;
-
-            bool active =
-                _draggingMacrosThumb ||
-                IsFlashActive(_lastMacrosScrollUpTick) ||
-                IsFlashActive(_lastMacrosScrollDownTick);
-
-            DrawSolidScrollbarRect(
-                _macrosScrollThumbRect,
-                active ? _bScrollThumbGreenActive : _bScrollThumbGreen,
-                _bScrollBorder);
-
-            if (active)
-                DrawGlowRings(_macrosScrollThumbRect);
+            DrawPluginsStyleIndexScrollbar(
+                _macrosScrollUpRect, _macrosScrollDownRect, _macrosScrollTrackRect, ref _macrosScrollThumbRect,
+                _macrosTotalItems, _macrosVisibleItems, _macrosScroll, _draggingMacrosThumb,
+                _lastMacrosScrollUpTick, _lastMacrosScrollDownTick);
         }
 
 
@@ -14554,29 +14472,6 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 DrawCenteredTextExact(outline, text, new RectangleF(r.Left + 1f, r.Top + 1f, r.Width, r.Height));
             }
             if (main != null) DrawCenteredTextExact(main, text, r);
-        }
-
-        private void DrawCenteredOutlinedText(IFont mainFont, IFont outlineFont, string text, RectangleF r)
-        {
-            if (string.IsNullOrEmpty(text))
-                return;
-
-            IFont outline = outlineFont ?? mainFont;
-            IFont main = mainFont ?? outline;
-
-            // Thick black outline / cartoon-style label border.
-            DrawCenteredText(outline, text, new RectangleF(r.Left - 2f, r.Top, r.Width, r.Height));
-            DrawCenteredText(outline, text, new RectangleF(r.Left + 2f, r.Top, r.Width, r.Height));
-            DrawCenteredText(outline, text, new RectangleF(r.Left, r.Top - 2f, r.Width, r.Height));
-            DrawCenteredText(outline, text, new RectangleF(r.Left, r.Top + 2f, r.Width, r.Height));
-
-            DrawCenteredText(outline, text, new RectangleF(r.Left - 1f, r.Top - 1f, r.Width, r.Height));
-            DrawCenteredText(outline, text, new RectangleF(r.Left + 1f, r.Top - 1f, r.Width, r.Height));
-            DrawCenteredText(outline, text, new RectangleF(r.Left - 1f, r.Top + 1f, r.Width, r.Height));
-            DrawCenteredText(outline, text, new RectangleF(r.Left + 1f, r.Top + 1f, r.Width, r.Height));
-
-            // Final white/light text.
-            DrawCenteredText(main, text, r);
         }
 
         private void DrawCenteredText(IFont font, string text, RectangleF r)
@@ -15341,21 +15236,6 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             return _profileBackgroundActiveForMenu || _profileOpenedByHudMenu || _profileConfirmedVisibleForMenu;
         }
 
-        private bool IsProfileOpenGraceActive()
-        {
-            try
-            {
-                if (!_profileOpenRequested || _profileOpenRequestTick == int.MinValue)
-                    return false;
-
-                return unchecked(Environment.TickCount - _profileOpenRequestTick) < ProfileOpenGraceMs;
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
         private void SchedulePendingProfileClose(bool hideMenuAfterClose, int delayMs)
         {
             _pendingProfileCloseAfterChat = true;
@@ -15994,11 +15874,6 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             return s.Substring(0, max - 3) + "...";
         }
 
-        private static bool Intersects(RectangleF a, RectangleF b)
-        {
-            return a.Right > b.Left && a.Left < b.Right && a.Bottom > b.Top && a.Top < b.Bottom;
-        }
-
         private static bool FullyInsideViewport(RectangleF r, RectangleF viewport)
         {
             return r.Left >= viewport.Left
@@ -16096,6 +15971,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             _bPlayerCoePreviewBorder = Hud.Render.CreateBrush(255, 0, 0, 0, 2.0f);
             _bPlayerCoePreviewHighlight = Hud.Render.CreateBrush(220, 255, 215, 60, 2.0f);
 
+            _fSkillCooldown = Hud.Render.CreateFont("arial", 14.0f, 255, 255, 255, 255, true, false, 255, 0, 0, 0, true);
             _fTitle   = Hud.Render.CreateFont("tahoma", 10.5f, 255, 255, 225, 70, true, false, 145, 0, 0, 0, true);
             _fLabel   = Hud.Render.CreateFont("tahoma",  8.2f, 255, 215, 222, 226, false, false, 108, 0, 0, 0, true);
             _fSection = Hud.Render.CreateFont("tahoma",  9.5f, 255, 255, 225, 70, true, false, 125, 0, 0, 0, true);
@@ -16419,6 +16295,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
         private void AnySnapHotkeyResetTransient()
         {
+            AnySnapForceSyntheticRelease();
+
             _asHotkeyRequestPending = false;
             _asHotkeyRequestSlot = -1;
             _asHotkeyRequestTick = 0;
@@ -16462,7 +16340,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 _asHotkeySavedY = 0f;
             }
 
-            if (!_asHotkeyRequestPending && !_asHotkeyCastPending)
+            if (!_asHotkeyRequestPending && !_asHotkeyCastPending && !_asSyntheticReleasePending)
             {
                 try { AnySnapQueueHotkeyRequest(slot, tick, Hud.Window.CursorX, Hud.Window.CursorY); }
                 catch { }
@@ -16499,60 +16377,128 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             return AnySnapSlotToActionKey(slot);
         }
 
-        private void AnySnapHotkeyTapAction(ActionKey key)
+        private bool AnySnapHotkeyBeginAction(ActionKey key)
+        {
+            try
+            {
+                if (_asSyntheticReleasePending || key == ActionKey.Unknown)
+                    return false;
+
+                AnySnapSuppressHeldActionEcho(key);
+
+                switch (key)
+                {
+                    case ActionKey.Skill1:
+                        keybd_event(0x31, 0, 0, UIntPtr.Zero);
+                        break;
+
+                    case ActionKey.Skill2:
+                        keybd_event(0x32, 0, 0, UIntPtr.Zero);
+                        break;
+
+                    case ActionKey.Skill3:
+                        keybd_event(0x33, 0, 0, UIntPtr.Zero);
+                        break;
+
+                    case ActionKey.Skill4:
+                        keybd_event(0x34, 0, 0, UIntPtr.Zero);
+                        break;
+
+                    case ActionKey.LeftSkill:
+                        mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
+                        break;
+
+                    case ActionKey.RightSkill:
+                        mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, UIntPtr.Zero);
+                        break;
+
+                    default:
+                        return false;
+                }
+
+                _asSyntheticReleasePending = true;
+                _asSyntheticReleaseAction = key;
+                _asSyntheticReleaseAtMs = unchecked(Environment.TickCount + AnySnapSyntheticHoldMs);
+                return true;
+            }
+            catch
+            {
+                AnySnapForceSyntheticRelease();
+                return false;
+            }
+        }
+
+        private void AnySnapReleaseSyntheticAction(ActionKey key)
         {
             try
             {
                 switch (key)
                 {
                     case ActionKey.Skill1:
-                        AnySnapSuppressHeldActionEcho(key);
-                        TapVirtualKey(0x31, 8);
-                        return;
+                        keybd_event(0x31, 0, KEYEVENTF_KEYUP_SIMPLE, UIntPtr.Zero);
+                        break;
 
                     case ActionKey.Skill2:
-                        AnySnapSuppressHeldActionEcho(key);
-                        TapVirtualKey(0x32, 8);
-                        return;
+                        keybd_event(0x32, 0, KEYEVENTF_KEYUP_SIMPLE, UIntPtr.Zero);
+                        break;
 
                     case ActionKey.Skill3:
-                        AnySnapSuppressHeldActionEcho(key);
-                        TapVirtualKey(0x33, 8);
-                        return;
+                        keybd_event(0x33, 0, KEYEVENTF_KEYUP_SIMPLE, UIntPtr.Zero);
+                        break;
 
                     case ActionKey.Skill4:
-                        AnySnapSuppressHeldActionEcho(key);
-                        TapVirtualKey(0x34, 8);
-                        return;
+                        keybd_event(0x34, 0, KEYEVENTF_KEYUP_SIMPLE, UIntPtr.Zero);
+                        break;
 
                     case ActionKey.LeftSkill:
-                        AnySnapSuppressHeldActionEcho(key);
-                        try
-                        {
-                            mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
-                            Thread.Sleep(8);
-                        }
-                        finally
-                        {
-                            try { mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero); } catch { }
-                        }
-                        return;
+                        mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
+                        break;
 
                     case ActionKey.RightSkill:
-                        AnySnapSuppressHeldActionEcho(key);
-                        try
-                        {
-                            mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, UIntPtr.Zero);
-                            Thread.Sleep(8);
-                        }
-                        finally
-                        {
-                            try { mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, UIntPtr.Zero); } catch { }
-                        }
-                        return;
+                        mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, UIntPtr.Zero);
+                        break;
                 }
             }
             catch { }
+        }
+
+        private void AnySnapForceSyntheticRelease()
+        {
+            if (!_asSyntheticReleasePending)
+                return;
+
+            ActionKey action = _asSyntheticReleaseAction;
+            _asSyntheticReleasePending = false;
+            _asSyntheticReleaseAction = ActionKey.Unknown;
+            _asSyntheticReleaseAtMs = int.MinValue;
+
+            AnySnapReleaseSyntheticAction(action);
+        }
+
+        private void AnySnapProcessSyntheticRelease()
+        {
+            if (!_asSyntheticReleasePending)
+                return;
+
+            int now = Environment.TickCount;
+            if (_asSyntheticReleaseAtMs != int.MinValue &&
+                unchecked(now - _asSyntheticReleaseAtMs) < 0)
+                return;
+
+            ActionKey action = _asSyntheticReleaseAction;
+            _asSyntheticReleasePending = false;
+            _asSyntheticReleaseAction = ActionKey.Unknown;
+            _asSyntheticReleaseAtMs = int.MinValue;
+            AnySnapReleaseSyntheticAction(action);
+
+            if (_autoSnapRestoreCursor && _asHotkeyPressStartTick > 0)
+            {
+                _asReleaseRestorePending = true;
+                _asReleaseRestoreSlot = _asHotkeyActiveSlot;
+                _asReleaseRestorePressStartTick = _asHotkeyPressStartTick;
+                _asReleaseRestoreX = _asHotkeySavedX;
+                _asReleaseRestoreY = _asHotkeySavedY;
+            }
         }
 
         private int AnySnapCurrentTick()
@@ -16811,6 +16757,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             try { tick = Hud.Game != null ? Hud.Game.CurrentGameTick : Environment.TickCount; }
             catch { tick = Environment.TickCount; }
 
+            AnySnapProcessSyntheticRelease();
+
             if (!AnySnapHotkeysCanHandle())
             {
                 AnySnapHotkeyResetTransient();
@@ -16837,7 +16785,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     if (heldTicks >= AnySnapHotkeyHoldRepeatStartTicks &&
                         (tick - _asHotkeyLastRepeatTick[i]) >= AnySnapHotkeyHoldRepeatIntervalTicks &&
                         !_asHotkeyRequestPending &&
-                        !_asHotkeyCastPending)
+                        !_asHotkeyCastPending &&
+                        !_asSyntheticReleasePending)
                     {
                         _asHotkeyLastRepeatTick[i] = tick;
 
@@ -16856,7 +16805,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     _asHotkeyDownPrev[i] = down;
             }
 
-            if (_asHotkeyRequestPending && !_asHotkeyCastPending)
+            if (_asHotkeyRequestPending && !_asHotkeyCastPending && !_asSyntheticReleasePending)
             {
                 int slot = _asHotkeyRequestSlot;
                 ActionKey castAction = AnySnapGetActionForSlot(slot);
@@ -16916,12 +16865,19 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 _asHotkeyRequestPending = false;
             }
 
-            if (_asHotkeyCastPending && tick >= _asHotkeyCastTick)
+            if (_asHotkeyCastPending && tick >= _asHotkeyCastTick && !_asSyntheticReleasePending)
             {
-                try { AnySnapHotkeyTapAction(_asHotkeyCastAction); }
+                bool started = false;
+                try { started = AnySnapHotkeyBeginAction(_asHotkeyCastAction); }
                 catch { }
 
-                if (_autoSnapRestoreCursor && _asHotkeyPressStartTick > 0)
+                _asHotkeyCastPending = false;
+                _asHotkeyCastTick = 0;
+                _asHotkeyCastAction = ActionKey.Unknown;
+
+                // If native input injection failed before a press was established,
+                // preserve the old restore behavior instead of leaving the cursor snapped.
+                if (!started && _autoSnapRestoreCursor && _asHotkeyPressStartTick > 0)
                 {
                     _asReleaseRestorePending = true;
                     _asReleaseRestoreSlot = _asHotkeyActiveSlot;
@@ -16929,18 +16885,16 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     _asReleaseRestoreX = _asHotkeySavedX;
                     _asReleaseRestoreY = _asHotkeySavedY;
                 }
-
-                _asHotkeyCastPending = false;
-                _asHotkeyCastTick = 0;
-                _asHotkeyCastAction = ActionKey.Unknown;
             }
 
+            AnySnapProcessSyntheticRelease();
             AnySnapProcessReleaseRestore(tick);
 
             if (_autoSnapRestoreCursor &&
                 !AnySnapAnyHotkeyHeld() &&
                 !_asHotkeyRequestPending &&
                 !_asHotkeyCastPending &&
+                !_asSyntheticReleasePending &&
                 !_asReleaseRestorePending &&
                 _asHotkeyPressStartTick > 0)
             {
@@ -16973,7 +16927,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             ActionKey heldKey;
             if (!TryGetAnyAutoSnapHeldAction(out heldKey))
             {
-                _asLockedAcdId = 0;
+                _asLockedAcdId = 0u;
                 AnySnapSetLeftStandStill(false);
                 AnySnapHandleReleaseRestore(tick);
                 return;
@@ -16985,7 +16939,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             if (target == null || !target.IsAlive || !target.IsOnScreen)
             {
-                _asLockedAcdId = 0;
+                _asLockedAcdId = 0u;
                 AnySnapSetLeftStandStill(false);
                 return;
             }
@@ -16995,7 +16949,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             float sx, sy;
             if (!AnySnapGetScreen(target, out sx, out sy))
             {
-                _asLockedAcdId = 0;
+                _asLockedAcdId = 0u;
                 AnySnapSetLeftStandStill(false);
                 return;
             }
@@ -17256,15 +17210,6 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             }
         }
 
-
-        private bool AnySnapIsValidTarget(IMonster m)
-        {
-            if (m == null || !m.IsAlive) return false;
-            try { if (!m.IsOnScreen) return false; } catch { return false; }
-            if (m.FloorCoordinate == null) return false;
-            if (AnySnapShouldIgnoreMonster(m) || AnySnapIsInvulnerable(m)) return false;
-            return true;
-        }
 
         private bool AnySnapIsValidLocked(IMonster m, IWorldCoordinate anchorWorld, float range, bool meleeMode, bool requireOnScreen)
         {
@@ -17591,13 +17536,27 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
         {
             if (m == null || AnySnapIsLeader(m)) return false;
             if (AnySnapIsRareMinion(m)) return true;
-            bool b;
-            return ZbTryGetBool(m, "IsElite", out b) && b;
+            try { return m.IsElite; } catch { return false; }
         }
 
         private static bool AnySnapIsJuggernautPack(IMonster m)
         {
-            return ZbHasAffixName(m, "Juggernaut");
+            if (m == null)
+                return false;
+
+            try
+            {
+                var affixes = m.AffixSnoList;
+                if (affixes == null)
+                    return false;
+
+                foreach (var affix in affixes)
+                    if (affix != null && affix.Affix == MonsterAffix.Juggernaut)
+                        return true;
+            }
+            catch { }
+
+            return false;
         }
 
         private static bool AnySnapIsShieldingActive(IMonster m)
@@ -17614,9 +17573,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
         private static bool AnySnapIsInvulnerable(IMonster m)
         {
+            if (m == null)
+                return false;
+
+            try { if (m.Invulnerable) return true; } catch { }
+
             bool b;
-            if (ZbTryGetBool(m, "Invulnerable", out b) && b) return true;
-            if (ZbTryGetBool(m, "IsInvulnerable", out b) && b) return true;
             if (ZbTryGetBool(m, "Untargetable", out b) && b) return true;
             if (ZbTryGetBool(m, "IsUntargetable", out b) && b) return true;
             return false;
@@ -17754,41 +17716,25 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             try { if (m.Illusion) return true; } catch { }
 
             bool b;
-            if (ZbTryGetBool(m, "IsIllusion", out b) && b) return true;
-            if (ZbTryGetBool(m, "Illusion", out b) && b) return true;
             if (ZbTryGetBool(m, "IsClone", out b) && b) return true;
             if (ZbTryGetBool(m, "Clone", out b) && b) return true;
 
-            if (AnySnapIsOrlashCloneOrBreathMinion(m))
-                return true;
-
-            return false;
+            return AnySnapIsOrlashCloneOrBreathMinion(m);
         }
 
-        private static int AnySnapGetAcdId(IMonster m)
+        private static uint AnySnapGetAcdId(IMonster m)
         {
-            if (m == null) return 0;
-            try
-            {
-                var pi = m.GetType().GetProperty("AcdId", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-                if (pi != null)
-                {
-                    object v = pi.GetValue(m, null);
-                    if (v is int) return (int)v;
-                    if (v != null) return Convert.ToInt32(v, CultureInfo.InvariantCulture);
-                }
-            }
-            catch { }
-            return 0;
+            if (m == null) return 0u;
+            try { return m.AcdId; } catch { return 0u; }
         }
 
-        private static IMonster AnySnapFindAliveMonsterByAcdId(IEnumerable<IMonster> monsters, int acdId)
+        private static IMonster AnySnapFindAliveMonsterByAcdId(IEnumerable<IMonster> monsters, uint acdId)
         {
-            if (monsters == null || acdId == 0) return null;
+            if (monsters == null || acdId == 0u) return null;
             foreach (var m in monsters)
             {
                 if (m == null || !m.IsAlive) continue;
-                try { if (AnySnapGetAcdId(m) == acdId) return m; } catch { }
+                try { if (m.AcdId == acdId) return m; } catch { }
             }
             return null;
         }
@@ -17812,26 +17758,6 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     value = (bool)f.GetValue(obj);
                     return true;
                 }
-            }
-            catch { }
-            return false;
-        }
-
-        private static bool ZbHasAffixName(IMonster m, string token)
-        {
-            if (m == null || string.IsNullOrEmpty(token)) return false;
-            try
-            {
-                var affixProp = m.GetType().GetProperty("AffixSnoList", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-                object affixValue = affixProp == null ? null : affixProp.GetValue(m, null);
-                string s = Convert.ToString(affixValue, CultureInfo.InvariantCulture);
-                if (!string.IsNullOrEmpty(s) && s.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0) return true;
-            }
-            catch { }
-            try
-            {
-                string s = m.ToString();
-                if (!string.IsNullOrEmpty(s) && s.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0) return true;
             }
             catch { }
             return false;
@@ -17887,17 +17813,13 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
         {
             try
             {
-                if (dxKey != Key.Unknown && Hud.Input != null)
-                {
-                    var t = Hud.Input.GetType();
-                    var md = t.GetMethod("IsKeyDown", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, new[] { typeof(Key) }, null);
-                    if (md != null && md.ReturnType == typeof(bool)) return (bool)md.Invoke(Hud.Input, new object[] { dxKey });
-                }
-                if (winKey != Keys.None && Hud.Input != null)
-                    return Hud.Input.IsKeyDown(winKey);
+                if (Hud.Input == null)
+                    return false;
+
+                Keys key = winKey != Keys.None ? winKey : KeyToWinKeys(dxKey);
+                return key != Keys.None && Hud.Input.IsKeyDown(key);
             }
-            catch { }
-            return false;
+            catch { return false; }
         }
 
         private Keys KeyToWinKeys(Key k)
@@ -18471,7 +18393,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             TryParseFloat(p[2], ref _eliteHpBarWidth);
             TryParseFloat(p[3], ref _eliteHpBarHeight);
 
-            // REV66-REV68 embedded circle state and thickness in this line.
+            // Older settings embedded circle state and thickness in this line.
             // The new independent circle feature intentionally starts OFF, but
             // preserve a customized legacy thickness for the user.
             if (p.Length >= 6)
@@ -18536,6 +18458,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
         }
         private void LoadSettings()
         {
+            bool settingsMigrationApplied = false;
             _loadedSettingsVersion = 0;
             _favorites.Clear();
             _pluginEnabledOverrides.Clear();
@@ -18747,7 +18670,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     {
                         _visDangerousAffixVisualsExpanded = ParseBool(val, _visDangerousAffixVisualsExpanded);
                     }
-                    // Compatibility with abandoned intermediate revisions.
+                    // Legacy setting aliases.
                     else if (key == "VIS_DANGER_ZONES")
                     {
                         _visDangerousAffixVisualsEnabled = ParseBool(val, _visDangerousAffixVisualsEnabled);
@@ -18864,7 +18787,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     {
                         _dangerousMonsterLabelsEnabled = ParseBool(val, _dangerousMonsterLabelsEnabled);
                     }
-                    // Compatibility with abandoned intermediate revisions.
+                    // Legacy setting aliases.
                     else if (key == "VIS_ELITE_AFFIX_LABELS")
                     {
                         _eliteAffixLabelsEnabled = ParseBool(val, _eliteAffixLabelsEnabled);
@@ -19373,6 +19296,16 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
                 _activePage = NormalizeMenuPage(_activePage);
                 NormalizePluginsTabForEmptyFavorites();
+
+                // Phase-2 stock-overlay defaults were introduced after many users already
+                // had persisted plugin states. Migrate those defaults exactly once, then
+                // save SettingsVersion 22 so future manual choices remain authoritative.
+                if (_loadedSettingsVersion > 0 && _loadedSettingsVersion < 22)
+                {
+                    ApplyDefaultPluginPolicyMigrationV22();
+                    settingsMigrationApplied = true;
+                }
+
                 SeedDefaultDisabledPluginOverrides();
                 _globalTtsVolume = ClampGlobalTtsVolume(_globalTtsVolume);
                 TrimTtsCustomMessages();
@@ -19381,7 +19314,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 SyncTtsCustomRuntimeLists();
                 RequestPluginCacheRefresh();
 
-                // Clean migration from abandoned v5/v6 OpenGR selector test builds.
+                // Migrate older OpenGR selector settings.
                 if (_loadedSettingsVersion > 0 && _loadedSettingsVersion < 7)
                 {
                     _riftMapSelectionHasOverride = true;
@@ -19397,7 +19330,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     _inventoryDropGems = false;
                 }
 
-                // Update each exact REV75 default independently. A customized value
+                // Update each prior default independently. A customized value
                 // remains untouched even when the other value still used its old default.
                 if (_loadedSettingsVersion > 0 && _loadedSettingsVersion < 21)
                 {
@@ -19410,10 +19343,14 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
                 try
                 {
-                    if (!SamePath(readPath, officialPath))
+                    if (settingsMigrationApplied || !SamePath(readPath, officialPath))
                     {
                         SaveSettings();
-                        LogDebug("Settings migrated to " + officialPath + " from " + readPath + ".");
+
+                        if (!SamePath(readPath, officialPath))
+                            LogDebug("Settings migrated to " + officialPath + " from " + readPath + ".");
+                        else if (settingsMigrationApplied)
+                            LogDebug("Default plugin policy migrated to settings version " + SettingsVersion.ToString(CultureInfo.InvariantCulture) + ".");
                     }
                 }
                 catch { }
