@@ -349,10 +349,12 @@ namespace Turbo.Plugins.s7o
             if (HandleBlockingRiftDialog(now))
                 return;
 
-            string healBlockedReason;
+            string standardBlockedReason;
+            bool standardContextValid = IsValidAutomationContext(false, out standardBlockedReason);
+
             if (EnableManualSlotAutoCast
                 && _enabledSlots[HealSlotIndex]
-                && IsValidAutomationContext(false, out healBlockedReason)
+                && standardContextValid
                 && TryRunHealSlotAutoCast(now))
             {
                 return;
@@ -360,8 +362,13 @@ namespace Turbo.Plugins.s7o
 
             if (EnableAutomaticBuffUpkeep && IsTickReached(now, _nextBuffCheckTick))
             {
-                string buffBlockedReason;
-                if (IsValidAutomationContext(AllowBuffUpkeepInTown, out buffBlockedReason))
+                string buffBlockedReason = standardBlockedReason;
+                bool buffContextValid = standardContextValid;
+
+                if (AllowBuffUpkeepInTown && Hud != null && Hud.Game != null && Hud.Game.IsInTown)
+                    buffContextValid = IsValidAutomationContext(true, out buffBlockedReason);
+
+                if (buffContextValid)
                 {
                     StartEntryBuffBurstIfNeeded(now);
                     _nextBuffCheckTick = now + GetBuffCheckInterval(now);
@@ -377,15 +384,14 @@ namespace Turbo.Plugins.s7o
 
             if (EnableConditionalAutoCastProfiles && IsTickReached(now, _nextConditionalProfileCheckTick))
             {
-                string conditionalBlockedReason;
-                if (IsValidAutomationContext(false, out conditionalBlockedReason))
+                if (standardContextValid)
                 {
                     _nextConditionalProfileCheckTick = now + Math.Max(25, ConditionalProfileRecheckMs);
 
                     if (TryRunConditionalAutoCastProfiles(now))
                         return;
                 }
-                else if (StringEquals(conditionalBlockedReason, "player busy")
+                else if (StringEquals(standardBlockedReason, "player busy")
                     && IsOwnBuffActive(Hud.Sno.SnoPowers.Necromancer_LandOfTheDead.Sno)
                     && !IsHardBusyOrTeleportMovementForLotdDevour())
                 {
@@ -396,14 +402,13 @@ namespace Turbo.Plugins.s7o
                 }
                 else
                 {
-                    LogContextBlockedThrottled("conditional: " + conditionalBlockedReason, now);
+                    LogContextBlockedThrottled("conditional: " + standardBlockedReason, now);
                 }
             }
 
-            string manualBlockedReason;
-            if (!IsValidAutomationContext(false, out manualBlockedReason))
+            if (!standardContextValid)
             {
-                LogContextBlockedThrottled("manual: " + manualBlockedReason, now);
+                LogContextBlockedThrottled("manual: " + standardBlockedReason, now);
                 return;
             }
 
@@ -472,11 +477,6 @@ namespace Turbo.Plugins.s7o
         #endregion
 
         #region Context Guard
-
-        private bool IsValidAutomationContext(out string reason)
-        {
-            return IsValidAutomationContext(false, out reason);
-        }
 
         private bool IsValidAutomationContext(bool allowTown, out string reason)
         {
