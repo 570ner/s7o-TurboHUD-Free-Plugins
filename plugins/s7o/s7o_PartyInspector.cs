@@ -230,6 +230,7 @@ namespace Turbo.Plugins.s7o
             public bool PredictionRateSynchronized;
             public double LastNativeCyclePhase;
             public long LastNativeCyclePhaseMs;
+            public readonly List<BuffRule> Rules = new List<BuffRule>(5);
             public readonly List<int> ElementOrder = new List<int>();
             public readonly Dictionary<int, BuffPaintInfo> ElementTemplates = new Dictionary<int, BuffPaintInfo>();
             public readonly List<BuffPaintInfo> PaintInfoList = new List<BuffPaintInfo>();
@@ -842,14 +843,11 @@ namespace Turbo.Plugins.s7o
         {
             if (layers.Count == 0) return;
 
+            // Automatic CoE layers are HUD overlays, not world decorators. Keep their
+            // default anchor fixed to the game-window center so camera/player projection
+            // jitter cannot make an otherwise stationary UI layer twitch while moving.
             float centerX = Hud.Window.Size.Width * 0.5f;
             float centerY = Hud.Window.Size.Height * 0.5f;
-            try
-            {
-                var screen = Hud.Game.Me.FloorCoordinate.ToScreenCoordinate(true, true);
-                if (screen != null) { centerX = screen.X; centerY = screen.Y; }
-            }
-            catch { }
 
             float spacing = Math.Max(0, MovableCoELayerSpacing);
             float totalWidth = spacing * Math.Max(0, layers.Count - 1);
@@ -1005,7 +1003,15 @@ namespace Turbo.Plugins.s7o
             try
             {
                 HeroClass heroClass = player.HeroClassDefinition.HeroClass;
-                List<BuffRule> rules = GetMovableCoERules(heroClass).ToList();
+                bool heroClassChanged = layer.TrackedHeroClass != heroClass;
+                if (heroClassChanged || layer.Rules.Count == 0)
+                {
+                    layer.Rules.Clear();
+                    foreach (BuffRule rule in GetMovableCoERules(heroClass))
+                        layer.Rules.Add(rule);
+                }
+
+                List<BuffRule> rules = layer.Rules;
                 _movableCoeRules.CalculatePaintInfo(player, rules);
                 if (_movableCoeRules.PaintInfoList.Count == 0
                     || !_movableCoeRules.PaintInfoList.Any(info => info != null && info.TimeLeft > 0))
@@ -1041,7 +1047,7 @@ namespace Turbo.Plugins.s7o
                 if (layer.ElementTemplates.Count < layer.ElementOrder.Count)
                     return false;
 
-                bool orderChanged = layer.TrackedHeroClass != heroClass
+                bool orderChanged = heroClassChanged
                     || layer.ElementOrder.Count != rules.Count
                     || !layer.ElementOrder.Contains(activeElement);
                 if (orderChanged)
@@ -1079,7 +1085,8 @@ namespace Turbo.Plugins.s7o
 
             int element = source.Rule.IconIndex.Value;
             BuffPaintInfo template;
-            if (!layer.ElementTemplates.TryGetValue(element, out template) || template == null)
+            bool created = !layer.ElementTemplates.TryGetValue(element, out template) || template == null;
+            if (created)
             {
                 template = new BuffPaintInfo();
                 layer.ElementTemplates[element] = template;
@@ -1090,7 +1097,12 @@ namespace Turbo.Plugins.s7o
             template.Elapsed = source.Elapsed;
             template.TimeLeft = source.TimeLeft;
             template.Stacks = source.Stacks;
-            template.Icons = source.Icons != null ? new List<SnoPowerIcon>(source.Icons) : new List<SnoPowerIcon>();
+
+            // Element icon metadata is static for a given CoE rule. Reuse the captured
+            // list instead of allocating a new List<SnoPowerIcon> every render sync.
+            if (created || template.Icons == null || template.Icons.Count == 0)
+                template.Icons = source.Icons != null ? new List<SnoPowerIcon>(source.Icons) : new List<SnoPowerIcon>();
+
             template.Rule = source.Rule;
             template.BackgroundTexture = source.BackgroundTexture;
             template.Texture = source.Texture;
@@ -1352,8 +1364,30 @@ namespace Turbo.Plugins.s7o
         private float EstimateMovableCoEWidth(IPlayer player)
         {
             int count = 4;
-            try { count = GetMovableCoERules(player.HeroClassDefinition.HeroClass).Count(); } catch { }
+            try { count = GetMovableCoERuleCount(player.HeroClassDefinition.HeroClass); } catch { }
             return GetMovableCoEIconSize() * (Math.Max(1, count) + 0.35f);
+        }
+
+        private int GetMovableCoERuleCount(HeroClass heroClass)
+        {
+            switch (heroClass)
+            {
+                case HeroClass.Monk:
+                    return 5;
+
+                case HeroClass.Necromancer:
+                    return 3;
+
+                case HeroClass.Barbarian:
+                case HeroClass.Crusader:
+                case HeroClass.DemonHunter:
+                case HeroClass.WitchDoctor:
+                case HeroClass.Wizard:
+                    return 4;
+
+                default:
+                    return 7;
+            }
         }
 
         private string GetMovableCoEPlayerKey(IPlayer player)
