@@ -9,6 +9,12 @@ namespace Turbo.Plugins.s7o
     public class s7o_EliteHealthBars : BasePlugin, IBeforeRenderHandler, IInGameWorldPainter, IInGameTopPainter
     {
         private const double MorluRecoveryHealthThreshold = 0.12d;
+        // Structural elite/pack classification is intentionally slower than drawing.
+        // Monster references remain live and bar anchors/HP still update every render;
+        // only membership, pack grouping and availability classification refresh at ~15 Hz.
+        private const int ClassificationIntervalTicks = 4;
+        private const float BarAnchorJitterThresholdPx = 3.5f;
+        private const float BarAnchorJitterFollow = 0.60f;
 
         private bool _defaultEliteMinimapCirclesAdjusted;
         private int _defaultEliteMinimapCircleAdjustAttempts;
@@ -122,6 +128,9 @@ namespace Turbo.Plugins.s7o
         private readonly Dictionary<IMonsterPack, int> _championPackAliveCounts = new Dictionary<IMonsterPack, int>();
         private readonly Dictionary<IMonster, EliteRenderState> _renderStateByMonster = new Dictionary<IMonster, EliteRenderState>();
 
+        // One broad AliveMonsters pass feeds this small candidate list and champion counts.
+        // Dense trash never reaches the more expensive elite/special classification pass.
+        private readonly List<IMonster> _candidateMonsters = new List<IMonster>(64);
         private readonly List<IMonster> _barMonsters = new List<IMonster>();
         private readonly List<IMonster> _offscreenMonsters = new List<IMonster>();
         private readonly List<IMonster> _topLeftCandidates = new List<IMonster>();
@@ -138,7 +147,21 @@ namespace Turbo.Plugins.s7o
         private readonly Dictionary<ChampionFamilyKey, ElitePackListEntry> _topLeftFallbackChampionGroups = new Dictionary<ChampionFamilyKey, ElitePackListEntry>();
 
         private readonly string[] _hpPercentText = new string[101];
+        private readonly float[] _hpPercentTextWidth = new float[101];
+        private readonly float[] _hpPercentTextHeight = new float[101];
         private int _preparedGameTick = int.MinValue;
+        private int _nextPrepareGameTick = int.MinValue;
+
+        private struct BarAnchorState
+        {
+            public float X;
+            public float Y;
+            public int LastSeenTick;
+        }
+
+        private readonly Dictionary<uint, BarAnchorState> _barAnchorState = new Dictionary<uint, BarAnchorState>(32);
+        private readonly List<uint> _staleBarAnchorIds = new List<uint>(32);
+        private int _lastBarAnchorPruneTick = int.MinValue;
 
         public bool ShowChampionBars { get; set; }
         public bool ShowRareBars { get; set; }
@@ -187,6 +210,7 @@ namespace Turbo.Plugins.s7o
         public float BarFootYOffset { get; set; }
         public bool UseHitboxBottomAnchor { get; set; }
         public bool UsePreciseAnchorProjection { get; set; }
+        public float BarEdgeFollowRangePx { get; set; }
         public float HitboxAnchorRadiusScale { get; set; }
         public float MaxHitboxAnchorRadius { get; set; }
         public bool UseSimpleFeetAnchorForBossesAndKeywardens { get; set; }
@@ -350,6 +374,9 @@ namespace Turbo.Plugins.s7o
             // This reduces the large variable gap between elite affix labels and HP bars.
             UseHitboxBottomAnchor = false;
             UsePreciseAnchorProjection = true;
+            // Keep a visible edge bar while a large monster model remains in view
+            // after its floor anchor has crossed the projected viewport edge.
+            BarEdgeFollowRangePx = 300.0f;
             // Kept as a reasonable value in case users re-enable hitbox-bottom anchoring manually.
             HitboxAnchorRadiusScale = 0.35f;
             MaxHitboxAnchorRadius = 50.0f;
@@ -367,6 +394,8 @@ namespace Turbo.Plugins.s7o
             MaxOffscreenLines = 6;
 
             ShowHpPercentText = true;
+            // Preserve the original two-tone highlight/shadow treatment. Performance
+            // logging showed no meaningful PaintTopInGame reduction with it disabled.
             UseTwoToneBarLighting = true;
 
             ShowTopLeftEliteList = true;
@@ -466,7 +495,12 @@ namespace Turbo.Plugins.s7o
             TextFont = Hud.Render.CreateFont("tahoma", 8.0f, 245, 255, 255, 255, true, false, 230, 0, 0, 0, true);
 
             for (int i = 0; i < _hpPercentText.Length; i++)
+            {
                 _hpPercentText[i] = i.ToString() + "%";
+                var layout = TextFont.GetTextLayout(_hpPercentText[i]);
+                _hpPercentTextWidth[i] = layout.Metrics.Width;
+                _hpPercentTextHeight[i] = layout.Metrics.Height;
+            }
 
             _eliteMinimapCircleOutlineBrush = Hud.Render.CreateBrush(
                 EliteMinimapCircleOutlineAlpha,
@@ -758,8 +792,12 @@ namespace Turbo.Plugins.s7o
 
             int maxLines = Math.Max(0, MaxOffscreenLines);
             int count = Math.Min(maxLines, _offscreenMonsters.Count);
+            IScreenCoordinate playerSc = count > 0 ? GetPlayerFeetScreenCoordinate() : null;
+            if (playerSc == null)
+                return;
+
             for (int i = 0; i < count; i++)
-                DrawOffscreenLine(_offscreenMonsters[i]);
+                DrawOffscreenLine(_offscreenMonsters[i], playerSc);
         }
 
         private void EnsureEliteGroundCircleBrushes()
@@ -808,7 +846,7 @@ namespace Turbo.Plugins.s7o
 
         private void DrawEliteGroundCircle(IMonster monster)
         {
-            if (monster == null || monster.FloorCoordinate == null ||
+            if (monster == null || !monster.IsAlive || monster.FloorCoordinate == null ||
                 !monster.FloorCoordinate.IsValid)
                 return;
 
@@ -855,8 +893,21 @@ namespace Turbo.Plugins.s7o
             try { gameTick = Hud.Game.CurrentGameTick; }
             catch { gameTick = int.MinValue; }
 
-            if (_preparedGameTick != gameTick)
+            if (ShouldPrepareFrame(gameTick))
                 PrepareFrameData();
+        }
+
+        private bool ShouldPrepareFrame(int gameTick)
+        {
+            if (_preparedGameTick == int.MinValue)
+                return true;
+
+            // A new game/session can reset the collected tick counter. Rebuild immediately
+            // instead of carrying references from the previous actor snapshot.
+            if (gameTick < _preparedGameTick)
+                return true;
+
+            return gameTick >= _nextPrepareGameTick;
         }
 
         private void PrepareFrameData()
@@ -865,10 +916,25 @@ namespace Turbo.Plugins.s7o
             try { gameTick = Hud != null && Hud.Game != null ? Hud.Game.CurrentGameTick : int.MinValue; }
             catch { gameTick = int.MinValue; }
 
-            if (_preparedGameTick == gameTick)
+            if (!ShouldPrepareFrame(gameTick))
                 return;
 
+            bool newSessionTick = _preparedGameTick != int.MinValue && gameTick < _preparedGameTick;
             _preparedGameTick = gameTick;
+            _nextPrepareGameTick = gameTick == int.MinValue
+                ? int.MinValue
+                : unchecked(gameTick + ClassificationIntervalTicks);
+
+            if (newSessionTick)
+            {
+                _barAnchorState.Clear();
+                _lastBarAnchorPruneTick = int.MinValue;
+            }
+            else
+            {
+                PruneBarAnchorState(gameTick);
+            }
+
             ClearPreparedFrameData();
 
             if (!Enabled || Hud == null || Hud.Game == null || Hud.Game.Me == null)
@@ -876,25 +942,47 @@ namespace Turbo.Plugins.s7o
             if (!Hud.Game.IsInGame || Hud.Game.IsLoading)
                 return;
 
+            if (!ShowLayeredEliteMinimapOverlay
+                && !ShowEliteHealthBars
+                && !ShowEliteGroundCircles
+                && !ShowOffscreenEliteLines)
+            {
+                return;
+            }
+
             var monsters = Hud.Game.AliveMonsters;
             if (monsters == null)
                 return;
 
-            BuildChampionAliveCounts(monsters);
+            BuildCandidateMonstersAndChampionCounts(monsters);
 
             bool needMap = ShowLayeredEliteMinimapOverlay;
             bool needBars = ShowEliteHealthBars || ShowEliteGroundCircles;
             bool needOffscreen = ShowOffscreenEliteLines;
             bool needTopLeft = ShowEliteHealthBars && ShowTopLeftEliteList;
 
-            foreach (var monster in monsters)
+            foreach (var monster in _candidateMonsters)
             {
                 if (monster == null)
                     continue;
 
                 bool eliteLikeForVisibility = IsEliteLikeForVisibility(monster);
-                bool showBar = needBars && ShouldDrawMonster(monster, eliteLikeForVisibility);
-                bool showOffscreen = needOffscreen && !showBar && ShouldDrawOffscreenLine(monster, eliteLikeForVisibility);
+                bool needFilteredEligibility = needBars || (needOffscreen && OffscreenLinesUseFilteredMonstersOnly);
+                bool filteredEligible = needFilteredEligibility && IsMonsterBarEligible(monster, eliteLikeForVisibility);
+                bool barEligible = needBars && filteredEligible;
+                bool projectedVisible = barEligible && IsMonsterProjectedInViewport(monster);
+                bool offscreenEligible = false;
+                if (needOffscreen && !projectedVisible)
+                {
+                    offscreenEligible = OffscreenLinesUseFilteredMonstersOnly
+                        ? filteredEligible && IsNearbyMonster(monster)
+                        : IsMonsterOffscreenLineEligible(monster, eliteLikeForVisibility);
+
+                    if (!barEligible && offscreenEligible)
+                        projectedVisible = IsMonsterProjectedInViewport(monster);
+                }
+                bool showBar = barEligible && projectedVisible;
+                bool showOffscreen = offscreenEligible && !projectedVisible;
                 bool showTopLeft = needTopLeft && ShouldShowInTopLeftList(monster);
                 bool mapEligible = needMap
                     && eliteLikeForVisibility
@@ -952,6 +1040,7 @@ namespace Turbo.Plugins.s7o
         private void ClearPreparedFrameData()
         {
             _renderStateByMonster.Clear();
+            _candidateMonsters.Clear();
             _barMonsters.Clear();
             _offscreenMonsters.Clear();
             _topLeftCandidates.Clear();
@@ -1042,11 +1131,10 @@ namespace Turbo.Plugins.s7o
             return false;
         }
 
-        private bool ShouldDrawMonster(IMonster monster, bool eliteLikeForVisibility)
+        private bool IsMonsterBarEligible(IMonster monster, bool eliteLikeForVisibility)
         {
             if (monster == null) return false;
             if (!monster.IsAlive) return false;
-            if (!monster.IsOnScreen) return false;
             if (monster.MaxHealth <= 0) return false;
 
             if (!ShowInvisible && !eliteLikeForVisibility)
@@ -1120,86 +1208,25 @@ namespace Turbo.Plugins.s7o
             }
         }
 
-        private bool ShouldDrawOffscreenLine(IMonster monster, bool eliteLikeForVisibility)
+        private bool IsMonsterOffscreenLineEligible(IMonster monster, bool eliteLikeForVisibility)
         {
-            if (!ShowOffscreenEliteLines) return false;
-            if (monster == null) return false;
-            if (!monster.IsAlive) return false;
-            if (monster.IsOnScreen) return false;
-            if (monster.MaxHealth <= 0) return false;
-
-            if (!ShowInvisible && !eliteLikeForVisibility)
-            {
-                if (monster.Invisible || monster.Hidden || monster.Stealthed) return false;
-            }
-            if (HideIllusions && monster.Illusion) return false;
-
-            if (RequireAttackable && !eliteLikeForVisibility && !monster.Attackable) return false;
+            if (!ShowOffscreenEliteLines || monster == null || !monster.IsAlive || monster.MaxHealth <= 0)
+                return false;
 
             if (OffscreenLinesUseFilteredMonstersOnly)
+                return IsMonsterBarEligible(monster, eliteLikeForVisibility) && IsNearbyMonster(monster);
+
+            if (!ShowInvisible && !eliteLikeForVisibility
+                && (monster.Invisible || monster.Hidden || monster.Stealthed))
             {
-                // Fast path for normal blue/yellow elites. Trust Rarity even if IsElite flickers false while burrowed/changing state.
-                if (monster.IsElite
-                    || monster.Rarity == ActorRarity.Champion
-                    || monster.Rarity == ActorRarity.Rare
-                    || monster.Rarity == ActorRarity.RareMinion)
-                {
-                    switch (monster.Rarity)
-                    {
-                        case ActorRarity.Champion:
-                            return ShowChampionBars && IsNearbyMonster(monster);
-
-                        case ActorRarity.Rare:
-                            return ShowRareBars && IsNearbyMonster(monster);
-
-                        case ActorRarity.RareMinion:
-                            return ShowRareMinionBars && IsNearbyMonster(monster);
-                    }
-                }
-
-                if (!monster.IsElite
-                    && monster.Rarity != ActorRarity.Champion
-                    && monster.Rarity != ActorRarity.Rare
-                    && monster.Rarity != ActorRarity.RareMinion
-                    && monster.Rarity != ActorRarity.Unique
-                    && monster.Rarity != ActorRarity.Boss)
-                {
-                    return ShowGoblinBars
-                        && HasMonsterPriority(monster, MonsterPriority.goblin)
-                        && IsNearbyMonster(monster);
-                }
-
-                if (IsOrlashCloneOrBreathMinion(monster)) return false;
-                if (IsRiftGuardianSpawnedMinion(monster)) return false;
-                if (IsKnownFalseUniqueSpecial(monster)) return false;
-                if (ShouldSuppressUnstableSpecialMonster(monster)) return false;
-
-                if (ShowRiftGuardianBars && IsRiftGuardian(monster)) return IsNearbyMonster(monster);
-                if (ShowKeywardenBars && IsKeywarden(monster)) return IsNearbyMonster(monster);
-                if (ShowBossBars && IsBossLikeMonster(monster)) return IsNearbyMonster(monster);
-                if (ShowGoblinBars && IsGoblin(monster)) return IsNearbyMonster(monster);
-                if (ShowUniqueBars && IsUniqueMonster(monster)) return IsNearbyMonster(monster);
-
-                if (!monster.IsElite
-                    && monster.Rarity != ActorRarity.Champion
-                    && monster.Rarity != ActorRarity.Rare
-                    && monster.Rarity != ActorRarity.RareMinion)
-                {
-                    return false;
-                }
-
-                switch (monster.Rarity)
-                {
-                    case ActorRarity.Unique:
-                        return ShowUniqueBars && IsUniqueMonster(monster) && IsNearbyMonster(monster);
-
-                    case ActorRarity.Boss:
-                        return ShowBossBars && IsBossLikeMonster(monster) && IsNearbyMonster(monster);
-
-                    default:
-                        return false;
-                }
+                return false;
             }
+
+            if (HideIllusions && monster.Illusion)
+                return false;
+
+            if (RequireAttackable && !eliteLikeForVisibility && !monster.Attackable)
+                return false;
 
             return IsNearbyMonster(monster);
         }
@@ -1245,12 +1272,13 @@ namespace Turbo.Plugins.s7o
             return HasAnyEliteAffix(monster);
         }
 
-        private void BuildChampionAliveCounts(IEnumerable<IMonster> monsters)
+        private void BuildCandidateMonstersAndChampionCounts(IEnumerable<IMonster> monsters)
         {
+            _candidateMonsters.Clear();
             _championFamilyAliveCounts.Clear();
             _championPackAliveCounts.Clear();
 
-            if (!HighlightFinalChampion || monsters == null)
+            if (monsters == null)
                 return;
 
             try
@@ -1259,33 +1287,81 @@ namespace Turbo.Plugins.s7o
                 {
                     if (monster == null || !monster.IsAlive)
                         continue;
-                    if (HideIllusions && monster.Illusion)
-                        continue;
-                    if (monster.Rarity != ActorRarity.Champion)
-                        continue;
 
-                    ChampionFamilyKey familyKey = GetChampionFamilyKey(monster);
-                    if (!familyKey.IsEmpty)
+                    if (HighlightFinalChampion
+                        && monster.Rarity == ActorRarity.Champion
+                        && (!HideIllusions || !monster.Illusion))
                     {
-                        int familyCount;
-                        _championFamilyAliveCounts.TryGetValue(familyKey, out familyCount);
-                        _championFamilyAliveCounts[familyKey] = familyCount + 1;
+                        ChampionFamilyKey familyKey = GetChampionFamilyKey(monster);
+                        if (!familyKey.IsEmpty)
+                        {
+                            int familyCount;
+                            _championFamilyAliveCounts.TryGetValue(familyKey, out familyCount);
+                            _championFamilyAliveCounts[familyKey] = familyCount + 1;
+                        }
+
+                        var pack = monster.Pack;
+                        if (pack != null)
+                        {
+                            int packCount;
+                            _championPackAliveCounts.TryGetValue(pack, out packCount);
+                            _championPackAliveCounts[pack] = packCount + 1;
+                        }
                     }
 
-                    var pack = monster.Pack;
-                    if (pack != null)
+                    if (IsPotentialEliteRenderCandidate(monster))
+                        _candidateMonsters.Add(monster);
+                }
+            }
+            catch
+            {
+                _candidateMonsters.Clear();
+                _championFamilyAliveCounts.Clear();
+                _championPackAliveCounts.Clear();
+            }
+        }
+
+        private bool IsPotentialEliteRenderCandidate(IMonster monster)
+        {
+            if (monster == null || !monster.IsAlive)
+                return false;
+
+            // Preserve the optional unfiltered-line mode exactly: when enabled, ordinary
+            // nearby trash is intentionally eligible for offscreen-line consideration.
+            if (ShowOffscreenEliteLines && !OffscreenLinesUseFilteredMonstersOnly)
+                return true;
+
+            if (monster.IsElite)
+                return true;
+
+            switch (monster.Rarity)
+            {
+                case ActorRarity.Champion:
+                case ActorRarity.Rare:
+                case ActorRarity.RareMinion:
+                case ActorRarity.Unique:
+                case ActorRarity.Boss:
+                    return true;
+            }
+
+            try
+            {
+                if (monster.SnoMonster != null)
+                {
+                    MonsterPriority priority = monster.SnoMonster.Priority;
+                    if (priority == MonsterPriority.goblin
+                        || priority == MonsterPriority.keywarden
+                        || priority == MonsterPriority.boss)
                     {
-                        int packCount;
-                        _championPackAliveCounts.TryGetValue(pack, out packCount);
-                        _championPackAliveCounts[pack] = packCount + 1;
+                        return true;
                     }
                 }
             }
             catch
             {
-                _championFamilyAliveCounts.Clear();
-                _championPackAliveCounts.Clear();
             }
+
+            return false;
         }
 
         private bool IsFinalAliveChampion(IMonster monster)
@@ -1379,7 +1455,11 @@ namespace Turbo.Plugins.s7o
 
         private IBrush GetHealthBrush(IMonster monster)
         {
-            EliteRenderState state = GetRenderState(monster);
+            return GetHealthBrush(GetRenderState(monster));
+        }
+
+        private IBrush GetHealthBrush(EliteRenderState state)
+        {
             if (state.IsUnavailable) return UnavailableEliteBrush;
 
             switch (state.Kind)
@@ -1395,9 +1475,8 @@ namespace Turbo.Plugins.s7o
             }
         }
 
-        private IBrush GetHealthLightBrush(IMonster monster)
+        private IBrush GetHealthLightBrush(EliteRenderState state)
         {
-            EliteRenderState state = GetRenderState(monster);
             if (state.IsUnavailable) return UnavailableEliteLightBrush;
 
             switch (state.Kind)
@@ -1413,9 +1492,8 @@ namespace Turbo.Plugins.s7o
             }
         }
 
-        private IBrush GetHealthShadowBrush(IMonster monster)
+        private IBrush GetHealthShadowBrush(EliteRenderState state)
         {
-            EliteRenderState state = GetRenderState(monster);
             if (state.IsUnavailable) return UnavailableEliteShadowBrush;
 
             switch (state.Kind)
@@ -1448,35 +1526,42 @@ namespace Turbo.Plugins.s7o
             }
         }
 
-        private void DrawHealthFill(IMonster monster, float fillX, float fillY, float fillW, float fillH, float hp)
+        private void DrawHealthFill(EliteRenderState state, float fillX, float fillY, float fillW, float fillH, float hp)
         {
             float hpW = fillW * hp;
             if (hpW <= 0.0f)
                 return;
 
-            var baseBrush = GetHealthBrush(monster);
+            var baseBrush = GetHealthBrush(state);
             if (baseBrush != null)
                 baseBrush.DrawRectangleGridFit(fillX, fillY, hpW, fillH);
 
             if (!UseTwoToneBarLighting || fillH < 6.0f)
                 return;
 
-            var lightBrush = GetHealthLightBrush(monster);
+            var lightBrush = GetHealthLightBrush(state);
             if (lightBrush != null)
                 lightBrush.DrawRectangleGridFit(fillX, fillY, hpW, fillH * 0.45f);
 
-            var shadowBrush = GetHealthShadowBrush(monster);
+            var shadowBrush = GetHealthShadowBrush(state);
             if (shadowBrush != null)
                 shadowBrush.DrawRectangleGridFit(fillX, fillY + fillH * 0.72f, hpW, fillH * 0.28f);
         }
 
         private void DrawMonsterBar(IMonster monster)
         {
+            if (monster == null || !monster.IsAlive)
+                return;
+
             var sc = AnchorBarsToFeet
                 ? GetMonsterFeetScreenCoordinate(monster)
                 : monster.ScreenCoordinate;
 
             if (sc == null) return;
+
+            float anchorX = sc.X;
+            float anchorY = sc.Y;
+            StabilizeBarAnchor(monster, ref anchorX, ref anchorY);
 
             float hp = 0.0f;
             if (monster.MaxHealth > 0)
@@ -1495,10 +1580,23 @@ namespace Turbo.Plugins.s7o
                 h += Math.Max(0.0f, JuggernautBarHeightBonus);
             }
 
-            float x = sc.X - w * 0.5f;
+            float x = anchorX - w * 0.5f;
             float y = AnchorBarsToFeet
-                ? sc.Y + BarFootYOffset
-                : sc.Y + BarYOffset;
+                ? anchorY + BarFootYOffset
+                : anchorY + BarYOffset;
+
+            // The monster model can remain visible after its floor anchor leaves the
+            // viewport, especially along the top edge at deep zoom. Candidates are
+            // bounded by BarEdgeFollowRangePx; keep their bar inside the real window.
+            if (Hud != null && Hud.Window != null)
+            {
+                var size = Hud.Window.Size;
+                float inset = 4.0f;
+                if (size.Width > w + inset * 2.0f)
+                    x = Math.Max(inset, Math.Min(size.Width - w - inset, x));
+                if (size.Height > h + inset * 2.0f)
+                    y = Math.Max(inset, Math.Min(size.Height - h - inset, y));
+            }
 
             float pad = BarBorderPadding;
             if (pad < 0.0f) pad = 0.0f;
@@ -1511,12 +1609,74 @@ namespace Turbo.Plugins.s7o
             float fillH = h - pad * 2.0f;
 
             BackgroundBrush.DrawRectangleGridFit(x, y, w, h);
-            DrawHealthFill(monster, fillX, fillY, fillW, fillH, hp);
+            DrawHealthFill(renderState, fillX, fillY, fillW, fillH, hp);
             BorderBrush.DrawRectangleGridFit(x, y, w, h);
 
             if (ShowHpPercentText)
                 DrawHpText(monster, x, y, w, h);
 
+        }
+
+        private void StabilizeBarAnchor(IMonster monster, ref float x, ref float y)
+        {
+            if (monster == null || float.IsNaN(x) || float.IsInfinity(x) || float.IsNaN(y) || float.IsInfinity(y))
+                return;
+
+            uint acdId;
+            try { acdId = (uint)monster.AcdId; }
+            catch { return; }
+            if (acdId == 0)
+                return;
+
+            int tick;
+            try { tick = Hud.Game.CurrentGameTick; }
+            catch { tick = int.MinValue; }
+
+            BarAnchorState previous;
+            if (_barAnchorState.TryGetValue(acdId, out previous)
+                && tick >= previous.LastSeenTick
+                && tick - previous.LastSeenTick <= 4)
+            {
+                float dx = x - previous.X;
+                float dy = y - previous.Y;
+                if (Math.Abs(dx) <= BarAnchorJitterThresholdPx
+                    && Math.Abs(dy) <= BarAnchorJitterThresholdPx)
+                {
+                    x = previous.X + (dx * BarAnchorJitterFollow);
+                    y = previous.Y + (dy * BarAnchorJitterFollow);
+                }
+            }
+
+            _barAnchorState[acdId] = new BarAnchorState
+            {
+                X = x,
+                Y = y,
+                LastSeenTick = tick,
+            };
+        }
+
+        private void PruneBarAnchorState(int gameTick)
+        {
+            if (_barAnchorState.Count == 0 || gameTick == int.MinValue)
+                return;
+
+            if (_lastBarAnchorPruneTick != int.MinValue
+                && gameTick >= _lastBarAnchorPruneTick
+                && gameTick - _lastBarAnchorPruneTick < 120)
+            {
+                return;
+            }
+
+            _lastBarAnchorPruneTick = gameTick;
+            _staleBarAnchorIds.Clear();
+            foreach (var pair in _barAnchorState)
+            {
+                if (gameTick < pair.Value.LastSeenTick || gameTick - pair.Value.LastSeenTick > 180)
+                    _staleBarAnchorIds.Add(pair.Key);
+            }
+
+            for (int i = 0; i < _staleBarAnchorIds.Count; i++)
+                _barAnchorState.Remove(_staleBarAnchorIds[i]);
         }
 
         private IScreenCoordinate GetMonsterFeetScreenCoordinate(IMonster monster)
@@ -1546,21 +1706,11 @@ namespace Turbo.Plugins.s7o
             if (radius <= 0.1f || baseCoord == null)
                 return centerSc;
 
-            // Start from floor-center, then sample the monster's ground footprint.
-            // The screen-lowest projected point is the visual bottom edge of the hitbox.
-            var bestSc = centerSc;
-            TryUseLowerProjectedPoint(baseCoord,  radius, 0.0f, ref bestSc);
-            TryUseLowerProjectedPoint(baseCoord, -radius, 0.0f, ref bestSc);
-            TryUseLowerProjectedPoint(baseCoord, 0.0f,  radius, ref bestSc);
-            TryUseLowerProjectedPoint(baseCoord, 0.0f, -radius, ref bestSc);
-
-            const float diagonal = 0.70710677f;
-            TryUseLowerProjectedPoint(baseCoord,  radius * diagonal,  radius * diagonal, ref bestSc);
-            TryUseLowerProjectedPoint(baseCoord,  radius * diagonal, -radius * diagonal, ref bestSc);
-            TryUseLowerProjectedPoint(baseCoord, -radius * diagonal,  radius * diagonal, ref bestSc);
-            TryUseLowerProjectedPoint(baseCoord, -radius * diagonal, -radius * diagonal, ref bestSc);
-
-            return bestSc;
+            // Resolve the screen-lowest point of the circular ground footprint from the
+            // local screen-Y gradient. This is continuous as the camera/monster moves,
+            // unlike choosing the winner from eight discrete compass samples, and it
+            // cuts the hitbox anchor from nine raw projections to four.
+            return GetStableHitboxBottomScreenCoordinate(baseCoord, centerSc, radius);
         }
 
         private bool ShouldUseSimpleFeetAnchor(IMonster monster)
@@ -1598,6 +1748,33 @@ namespace Turbo.Plugins.s7o
             return null;
         }
 
+        private bool IsMonsterProjectedInViewport(IMonster monster)
+        {
+            if (Hud == null || Hud.Window == null)
+                return false;
+
+            var screen = GetScreenCoordinateSafe(GetMonsterAnchorWorldCoordinate(monster), null);
+            if (screen == null ||
+                float.IsNaN(screen.X) || float.IsInfinity(screen.X) ||
+                float.IsNaN(screen.Y) || float.IsInfinity(screen.Y))
+                return false;
+
+            var size = Hud.Window.Size;
+            if (size.Width <= 0 || size.Height <= 0)
+                return false;
+
+            float range = BarEdgeFollowRangePx;
+            if (float.IsNaN(range) || float.IsInfinity(range))
+                range = 0.0f;
+            else
+                range = Math.Max(0.0f, range);
+
+            // Measure the configured follow range from the projected monster anchor,
+            // not from the bar rectangle, so 300 px means exactly 300 px on every edge.
+            return screen.X >= -range && screen.X <= size.Width + range &&
+                   screen.Y >= -range && screen.Y <= size.Height + range;
+        }
+
         private IScreenCoordinate GetScreenCoordinateSafe(IWorldCoordinate coord, IScreenCoordinate fallback)
         {
             if (coord == null)
@@ -1605,15 +1782,15 @@ namespace Turbo.Plugins.s7o
 
             try
             {
-                return UsePreciseAnchorProjection
-                    ? coord.ToScreenCoordinate(false, true)
-                    : coord.ToScreenCoordinate();
+                // Raw projection preserves the true screen position outside the
+                // viewport; non-raw FreeHUD projection can pull it back toward the edge.
+                return coord.ToScreenCoordinate(true, UsePreciseAnchorProjection);
             }
             catch
             {
                 try
                 {
-                    return coord.ToScreenCoordinate();
+                    return coord.ToScreenCoordinate(true, false);
                 }
                 catch
                 {
@@ -1622,26 +1799,46 @@ namespace Turbo.Plugins.s7o
             }
         }
 
-        private void TryUseLowerProjectedPoint(
+        private IScreenCoordinate GetStableHitboxBottomScreenCoordinate(
             IWorldCoordinate baseCoord,
-            float offsetX,
-            float offsetY,
-            ref IScreenCoordinate bestSc)
+            IScreenCoordinate centerSc,
+            float radius)
         {
-            if (baseCoord == null)
-                return;
+            if (baseCoord == null || centerSc == null || radius <= 0.1f)
+                return centerSc;
 
             try
             {
-                var candidateCoord = baseCoord.Offset(offsetX, offsetY, 0.0f);
-                var candidateSc = GetScreenCoordinateSafe(candidateCoord, null);
-                if (candidateSc != null && (bestSc == null || candidateSc.Y > bestSc.Y))
-                    bestSc = candidateSc;
+                var xProbe = GetScreenCoordinateSafe(baseCoord.Offset(radius, 0.0f, 0.0f), null);
+                var yProbe = GetScreenCoordinateSafe(baseCoord.Offset(0.0f, radius, 0.0f), null);
+                if (!IsFiniteScreenCoordinate(xProbe) || !IsFiniteScreenCoordinate(yProbe))
+                    return centerSc;
+
+                float gradientX = xProbe.Y - centerSc.Y;
+                float gradientY = yProbe.Y - centerSc.Y;
+                float gradientLength = (float)Math.Sqrt((gradientX * gradientX) + (gradientY * gradientY));
+                if (gradientLength <= 0.0001f || float.IsNaN(gradientLength) || float.IsInfinity(gradientLength))
+                    return centerSc;
+
+                float scale = radius / gradientLength;
+                var bottomWorld = baseCoord.Offset(gradientX * scale, gradientY * scale, 0.0f);
+                var bottomSc = GetScreenCoordinateSafe(bottomWorld, null);
+                if (!IsFiniteScreenCoordinate(bottomSc))
+                    return centerSc;
+
+                return bottomSc.Y >= centerSc.Y ? bottomSc : centerSc;
             }
             catch
             {
-                // Ignore one bad candidate and keep the best valid anchor.
+                return centerSc;
             }
+        }
+
+        private static bool IsFiniteScreenCoordinate(IScreenCoordinate coordinate)
+        {
+            return coordinate != null
+                && !float.IsNaN(coordinate.X) && !float.IsInfinity(coordinate.X)
+                && !float.IsNaN(coordinate.Y) && !float.IsInfinity(coordinate.Y);
         }
 
         private IScreenCoordinate GetPlayerFeetScreenCoordinate()
@@ -1652,7 +1849,7 @@ namespace Turbo.Plugins.s7o
             try
             {
                 if (Hud.Game.Me.FloorCoordinate != null)
-                    return Hud.Game.Me.FloorCoordinate.ToScreenCoordinate();
+                    return GetScreenCoordinateSafe(Hud.Game.Me.FloorCoordinate, Hud.Game.Me.ScreenCoordinate);
             }
             catch
             {
@@ -1662,15 +1859,12 @@ namespace Turbo.Plugins.s7o
             return Hud.Game.Me.ScreenCoordinate;
         }
 
-        private void DrawOffscreenLine(IMonster monster)
+        private void DrawOffscreenLine(IMonster monster, IScreenCoordinate playerSc)
         {
-            if (monster == null) return;
+            if (monster == null || !monster.IsAlive || playerSc == null) return;
 
             var brush = GetStrokeBrush(monster);
             if (brush == null) return;
-
-            var playerSc = GetPlayerFeetScreenCoordinate();
-            if (playerSc == null) return;
 
             var monsterSc = GetMonsterFeetScreenCoordinate(monster);
             if (monsterSc == null) return;
@@ -1809,15 +2003,13 @@ namespace Turbo.Plugins.s7o
             if (pct > 100) pct = 100;
 
             string text = _hpPercentText[pct];
-            var layout = TextFont.GetTextLayout(text);
-
             TextFont.DrawText(
-                layout,
-                x + (w - layout.Metrics.Width) * 0.5f,
-                y + (h - layout.Metrics.Height) * 0.5f);
+                text,
+                x + (w - _hpPercentTextWidth[pct]) * 0.5f,
+                y + (h - _hpPercentTextHeight[pct]) * 0.5f);
         }
 
-        
+
 
         private class ElitePackListEntry
         {
@@ -2150,13 +2342,14 @@ namespace Turbo.Plugins.s7o
                 if (pctValue < 0) pctValue = 0;
                 if (pctValue > 100) pctValue = 100;
                 string pct = _hpPercentText[pctValue];
-                var layout = TextFont.GetTextLayout(pct);
+                float textWidth = _hpPercentTextWidth[pctValue];
+                float textHeight = _hpPercentTextHeight[pctValue];
 
-                if (layout.Metrics.Height <= h + 4.0f && layout.Metrics.Width <= w)
+                if (textHeight <= h + 4.0f && textWidth <= w)
                 {
-                    float tx = x + w * 0.5f - layout.Metrics.Width * 0.5f;
-                    float ty = y + h * 0.5f - layout.Metrics.Height * 0.5f;
-                    TextFont.DrawText(layout, tx, ty);
+                    float tx = x + w * 0.5f - textWidth * 0.5f;
+                    float ty = y + h * 0.5f - textHeight * 0.5f;
+                    TextFont.DrawText(pct, tx, ty);
                 }
             }
         }
