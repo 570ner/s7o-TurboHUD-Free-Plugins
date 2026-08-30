@@ -311,6 +311,23 @@ namespace Turbo.Plugins.s7o
         private SpearImpactProbe _spearImpactProbe;
         private readonly List<UnsafeImpactSample> _unsafeImpactSamples = new List<UnsafeImpactSample>(12);
 
+        // Reused native-plan scratch space. Dense pulls can evaluate hundreds of aim
+        // candidates from the same actor snapshot; keep that work allocation-free.
+        private readonly List<PullBody> _pullBodies = new List<PullBody>(96);
+        private readonly List<float> _pullRelativeCandidates = new List<float>(384);
+        private readonly List<float> _pullEvaluationAngles = new List<float>(768);
+        private readonly Dictionary<IMonsterPack, int> _pullPackGroupIds = new Dictionary<IMonsterPack, int>();
+        private int[] _pullPackHitMarks = new int[16];
+        private int _pullPackHitStamp;
+
+        // Geometry blockers are a property of the collected game tick, not of each aim
+        // candidate. One merged actor pass per used tick replaces repeated full actor
+        // scans and transient blocker allocations inside ComputeLineSafetyPenalty().
+        private int _geometryBlockerSnapshotTick = int.MinValue;
+        private readonly List<BlockerCircle> _cachedPylonBlockers = new List<BlockerCircle>(8);
+        private readonly List<BlockerCircle> _cachedWallerBlockers = new List<BlockerCircle>(24);
+        private readonly List<BlockerCircle> _cachedProjectileBlockers = new List<BlockerCircle>(32);
+
         private struct SpearImpactProbe
         {
             public bool Active;
@@ -346,10 +363,13 @@ namespace Turbo.Plugins.s7o
         private struct PullBody
         {
             public IMonster Monster;
+            public float RelX;
+            public float RelY;
             public float Angle;
             public float Distance;
             public float Radius;
             public int Tier;
+            public int PackGroup;
             public float Progression;
         }
 
@@ -358,6 +378,7 @@ namespace Turbo.Plugins.s7o
             public bool Valid;
             public float Angle;
             public float AimDistance;
+            public float SafetyDistance;
             public int PackHits;
             public int LeaderHits;
             public int MinionHits;
@@ -372,7 +393,7 @@ namespace Turbo.Plugins.s7o
             public int WeightedDensity => (HighTrashHits * 3) + TrashHits;
         }
 
-        private sealed class BlockerCircle
+        private struct BlockerCircle
         {
             public float X;
             public float Y;
@@ -920,7 +941,11 @@ namespace Turbo.Plugins.s7o
                 maximumReach = Math.Min(maximumReach, MaxPlayerDistanceYards);
 
             bool aimingPastStack = manualDistance > StackedLeaderSuppressYards + 3f;
-            var bodies = new List<PullBody>(96);
+            List<PullBody> bodies = _pullBodies;
+            bodies.Clear();
+            _pullPackGroupIds.Clear();
+            int nextPackGroup = 0;
+            bool hasLeader = false;
 
             foreach (IMonster monster in Hud.Game.AliveMonsters)
             {
@@ -972,29 +997,57 @@ namespace Turbo.Plugins.s7o
                 }
                 catch { }
 
+                int packGroup = -1;
+                if (tier == 3)
+                {
+                    hasLeader = true;
+                    IMonsterPack pack = null;
+                    try { pack = monster.Pack; } catch { }
+
+                    if (pack != null)
+                    {
+                        if (!_pullPackGroupIds.TryGetValue(pack, out packGroup))
+                        {
+                            packGroup = nextPackGroup++;
+                            _pullPackGroupIds[pack] = packGroup;
+                        }
+                    }
+                    else
+                    {
+                        // Preserve the previous behavior: leaders without a Pack object
+                        // count independently for pull-plan pack coverage.
+                        packGroup = nextPackGroup++;
+                    }
+                }
+
                 bodies.Add(new PullBody
                 {
                     Monster = monster,
+                    RelX = relX,
+                    RelY = relY,
                     Angle = angle,
                     Distance = distance,
                     Radius = radius,
                     Tier = tier,
+                    PackGroup = packGroup,
                     Progression = progression,
                 });
             }
 
-            bool hasLeader = bodies.Any(body => body.Tier == 3);
             if (!hasLeader)
-                bodies.RemoveAll(body => body.Tier == 2);
+            {
+                for (int i = bodies.Count - 1; i >= 0; i--)
+                    if (bodies[i].Tier == 2)
+                        bodies.RemoveAt(i);
+            }
             if (bodies.Count == 0)
                 return false;
 
-            var relativeCandidates = new List<float>(bodies.Count * 4 + 4)
-            {
-                -maximumAngle,
-                0f,
-                maximumAngle,
-            };
+            List<float> relativeCandidates = _pullRelativeCandidates;
+            relativeCandidates.Clear();
+            relativeCandidates.Add(-maximumAngle);
+            relativeCandidates.Add(0f);
+            relativeCandidates.Add(maximumAngle);
 
             foreach (PullBody body in bodies)
             {
@@ -1006,16 +1059,19 @@ namespace Turbo.Plugins.s7o
                 relativeCandidates.Add(ClampFloat(relativeAngle + halfWidth, -maximumAngle, maximumAngle));
             }
 
-            relativeCandidates = relativeCandidates
-                .OrderBy(value => value)
-                .Aggregate(new List<float>(), (unique, value) =>
-                {
-                    if (unique.Count == 0 || Math.Abs(unique[unique.Count - 1] - value) > 0.00025f)
-                        unique.Add(value);
-                    return unique;
-                });
+            relativeCandidates.Sort();
+            int uniqueCount = 0;
+            for (int i = 0; i < relativeCandidates.Count; i++)
+            {
+                float value = relativeCandidates[i];
+                if (uniqueCount == 0 || Math.Abs(relativeCandidates[uniqueCount - 1] - value) > 0.00025f)
+                    relativeCandidates[uniqueCount++] = value;
+            }
+            if (uniqueCount < relativeCandidates.Count)
+                relativeCandidates.RemoveRange(uniqueCount, relativeCandidates.Count - uniqueCount);
 
-            var evaluationAngles = new List<float>(relativeCandidates.Count * 2);
+            List<float> evaluationAngles = _pullEvaluationAngles;
+            evaluationAngles.Clear();
             for (int i = 0; i < relativeCandidates.Count; i++)
             {
                 evaluationAngles.Add(relativeCandidates[i]);
@@ -1023,17 +1079,30 @@ namespace Turbo.Plugins.s7o
                     evaluationAngles.Add((relativeCandidates[i] + relativeCandidates[i + 1]) * 0.5f);
             }
 
-            PullPlan manualPlan = EvaluatePullPlan(bodies, mePos, manualAngle, manualAngle, maximumReach, hasLeader);
+            EnsurePullPackHitCapacity(nextPackGroup);
+
+            PullPlan manualPlan = EvaluatePullPlanGeometry(
+                bodies, manualAngle, manualAngle, maximumReach, hasLeader);
+            FinalizePullPlanSafety(ref manualPlan, mePos, maximumReach, hasLeader);
+
             PullPlan bestPlan = new PullPlan();
             foreach (float relativeAngle in evaluationAngles)
             {
-                PullPlan candidate = EvaluatePullPlan(
+                PullPlan candidate = EvaluatePullPlanGeometry(
                     bodies,
-                    mePos,
                     manualAngle + relativeAngle,
                     manualAngle,
                     maximumReach,
                     hasLeader);
+
+                // Safety is the expensive portion (world-coordinate creation plus blocker
+                // intersection work). A geometry result that already loses on the metrics
+                // ranked ahead of Safety can never become the winner, so reject it before
+                // doing that work.
+                if (!IsPullPlanGeometryCompetitive(candidate, bestPlan, hasLeader))
+                    continue;
+
+                FinalizePullPlanSafety(ref candidate, mePos, maximumReach, hasLeader);
                 if (IsBetterPullPlan(candidate, bestPlan, hasLeader))
                     bestPlan = candidate;
             }
@@ -1085,9 +1154,8 @@ namespace Turbo.Plugins.s7o
             return true;
         }
 
-        private PullPlan EvaluatePullPlan(
+        private PullPlan EvaluatePullPlanGeometry(
             List<PullBody> bodies,
-            IWorldCoordinate mePos,
             float angle,
             float manualAngle,
             float maximumReach,
@@ -1098,40 +1166,40 @@ namespace Turbo.Plugins.s7o
                 Angle = angle,
                 ManualDeviation = Math.Abs(NormalizeAngle(angle - manualAngle)),
                 AimDistance = PullPlanMinimumAimYards,
+                SafetyDistance = PullPlanMinimumAimYards,
                 Safety = float.MaxValue,
             };
 
             float directionX = (float)Math.Cos(angle);
             float directionY = (float)Math.Sin(angle);
             float farthestProjection = 0f;
-            var packs = new HashSet<IMonsterPack>();
-            int leaderWithoutPack = 0;
+            int packHitStamp = NextPullPackHitStamp();
             float markerPriority = float.MinValue;
 
-            foreach (PullBody body in bodies)
+            for (int i = 0; i < bodies.Count; i++)
             {
-                float relX = body.Monster.FloorCoordinate.X - mePos.X;
-                float relY = body.Monster.FloorCoordinate.Y - mePos.Y;
-                float projection = (relX * directionX) + (relY * directionY);
+                PullBody body = bodies[i];
+                float projection = (body.RelX * directionX) + (body.RelY * directionY);
                 if (projection < 1.5f || projection > maximumReach + 4f)
                     continue;
 
-                float lateral = Math.Abs((relX * directionY) - (relY * directionX));
+                float lateral = Math.Abs((body.RelX * directionY) - (body.RelY * directionX));
                 if (lateral > body.Radius + PullRayExtraRadiusYards)
                     continue;
 
-                farthestProjection = Math.Max(farthestProjection, projection);
+                if (projection > farthestProjection)
+                    farthestProjection = projection;
                 plan.Progression += body.Progression;
 
                 if (body.Tier == 3)
                 {
                     plan.LeaderHits++;
-                    IMonsterPack pack = null;
-                    try { pack = body.Monster.Pack; } catch { }
-                    if (pack != null)
-                        packs.Add(pack);
-                    else
-                        leaderWithoutPack++;
+                    if (body.PackGroup >= 0 && body.PackGroup < _pullPackHitMarks.Length
+                        && _pullPackHitMarks[body.PackGroup] != packHitStamp)
+                    {
+                        _pullPackHitMarks[body.PackGroup] = packHitStamp;
+                        plan.PackHits++;
+                    }
                 }
                 else if (body.Tier == 2)
                     plan.MinionHits++;
@@ -1148,7 +1216,6 @@ namespace Turbo.Plugins.s7o
                 }
             }
 
-            plan.PackHits = packs.Count + leaderWithoutPack;
             if (requireLeader && plan.LeaderHits <= 0)
                 return plan;
             if (!requireLeader && plan.BodyHits <= 0)
@@ -1158,21 +1225,111 @@ namespace Turbo.Plugins.s7o
                 farthestProjection + 4f,
                 PullPlanMinimumAimYards,
                 PullPlanMaximumAimYards);
+            plan.SafetyDistance = Math.Min(maximumReach, farthestProjection + 4f);
+            return plan;
+        }
 
-            float safetyDistance = Math.Min(maximumReach, farthestProjection + 4f);
+        private void FinalizePullPlanSafety(
+            ref PullPlan plan,
+            IWorldCoordinate mePos,
+            float maximumReach,
+            bool requireLeader)
+        {
+            if (mePos == null)
+                return;
+            if (requireLeader && plan.LeaderHits <= 0)
+                return;
+            if (!requireLeader && plan.BodyHits <= 0)
+                return;
+
+            if (!UseGeometrySafety)
+            {
+                plan.Safety = 0f;
+                plan.Valid = true;
+                return;
+            }
+
+            float directionX = (float)Math.Cos(plan.Angle);
+            float directionY = (float)Math.Sin(plan.Angle);
+            float safetyDistance = Math.Min(maximumReach, Math.Max(0f, plan.SafetyDistance));
             IWorldCoordinate aimWorld = Hud.Window.CreateWorldCoordinate(
                 mePos.X + (directionX * safetyDistance),
                 mePos.Y + (directionY * safetyDistance),
                 mePos.Z);
             if (aimWorld == null)
-                return plan;
+                return;
 
             plan.Safety = Math.Max(0f, ComputeLineSafetyPenalty(mePos, aimWorld));
             if (plan.Safety >= SimplePathRejectThreshold)
-                return plan;
+                return;
 
             plan.Valid = true;
-            return plan;
+        }
+
+        private static bool IsPullPlanGeometryCompetitive(PullPlan candidate, PullPlan current, bool leadersPresent)
+        {
+            if (leadersPresent)
+            {
+                if (candidate.LeaderHits <= 0)
+                    return false;
+            }
+            else if (candidate.BodyHits <= 0)
+            {
+                return false;
+            }
+
+            if (!current.Valid)
+                return true;
+
+            if (leadersPresent)
+            {
+                if (candidate.PackHits != current.PackHits)
+                    return candidate.PackHits > current.PackHits;
+                if (candidate.LeaderHits != current.LeaderHits)
+                    return candidate.LeaderHits > current.LeaderHits;
+                if (candidate.MinionHits != current.MinionHits)
+                    return candidate.MinionHits > current.MinionHits;
+                if (candidate.HighTrashHits != current.HighTrashHits)
+                    return candidate.HighTrashHits > current.HighTrashHits;
+                if (candidate.TrashHits != current.TrashHits)
+                    return candidate.TrashHits > current.TrashHits;
+            }
+            else
+            {
+                if (candidate.WeightedDensity != current.WeightedDensity)
+                    return candidate.WeightedDensity > current.WeightedDensity;
+                if (candidate.BodyHits != current.BodyHits)
+                    return candidate.BodyHits > current.BodyHits;
+            }
+
+            if (Math.Abs(candidate.Progression - current.Progression) > 0.001f)
+                return candidate.Progression > current.Progression;
+
+            // Same geometry score: Safety and then manual deviation decide.
+            return true;
+        }
+
+        private void EnsurePullPackHitCapacity(int required)
+        {
+            if (required <= _pullPackHitMarks.Length)
+                return;
+
+            int size = _pullPackHitMarks.Length;
+            while (size < required)
+                size *= 2;
+            Array.Resize(ref _pullPackHitMarks, size);
+        }
+
+        private int NextPullPackHitStamp()
+        {
+            if (_pullPackHitStamp == int.MaxValue)
+            {
+                Array.Clear(_pullPackHitMarks, 0, _pullPackHitMarks.Length);
+                _pullPackHitStamp = 1;
+                return _pullPackHitStamp;
+            }
+
+            return ++_pullPackHitStamp;
         }
 
         private static bool IsBetterPullPlan(PullPlan candidate, PullPlan current, bool leadersPresent)
@@ -3274,10 +3431,12 @@ namespace Turbo.Plugins.s7o
         {
             if (!UseGeometrySafety || fromWorld == null || toWorld == null || Hud?.Game == null) return 0f;
 
+            EnsureGeometryBlockerSnapshot();
+
             float penalty = 0f;
-            penalty += AccumulateBlockerPenalty(SafeGetWallerBlockers(), fromWorld, toWorld, EliteWallPenaltyWeight * 1.20f);
-            penalty += AccumulateBlockerPenalty(SafeGetPylonBlockers(), fromWorld, toWorld, EliteWallPenaltyWeight * 0.95f);
-            penalty += AccumulateBlockerPenalty(SafeGetProjectileBlockingActors(), fromWorld, toWorld, ObstaclePenaltyWeight * 1.10f);
+            penalty += AccumulateBlockerPenalty(_cachedWallerBlockers, fromWorld, toWorld, EliteWallPenaltyWeight * 1.20f);
+            penalty += AccumulateBlockerPenalty(_cachedPylonBlockers, fromWorld, toWorld, EliteWallPenaltyWeight * 0.95f);
+            penalty += AccumulateBlockerPenalty(_cachedProjectileBlockers, fromWorld, toWorld, ObstaclePenaltyWeight * 1.10f);
             penalty += AccumulateUnsafeImpactPenalty(fromWorld, toWorld, SpearImpactUnsafePenaltyWeight);
 
             return penalty < 0f ? 0f : penalty;
@@ -3287,17 +3446,19 @@ namespace Turbo.Plugins.s7o
         {
             if (!UseGeometrySafety || fromWorld == null || toWorld == null || Hud?.Game == null) return 0f;
 
+            EnsureGeometryBlockerSnapshot();
+
             float penalty = 0f;
-            penalty += AccumulateBlockerPenalty(SafeGetPylonBlockers(), fromWorld, toWorld, EliteWallPenaltyWeight * 1.15f);
-            penalty += AccumulateBlockerPenalty(SafeGetWallerBlockers(), fromWorld, toWorld, EliteWallPenaltyWeight * 1.35f);
-            penalty += AccumulateBlockerPenalty(SafeGetProjectileBlockingActors(), fromWorld, toWorld, ObstaclePenaltyWeight * 1.25f);
+            penalty += AccumulateBlockerPenalty(_cachedPylonBlockers, fromWorld, toWorld, EliteWallPenaltyWeight * 1.15f);
+            penalty += AccumulateBlockerPenalty(_cachedWallerBlockers, fromWorld, toWorld, EliteWallPenaltyWeight * 1.35f);
+            penalty += AccumulateBlockerPenalty(_cachedProjectileBlockers, fromWorld, toWorld, ObstaclePenaltyWeight * 1.25f);
             penalty += AccumulateUnsafeImpactPenalty(fromWorld, toWorld, SpearImpactUnsafePenaltyWeight * 1.15f);
             return penalty < 0f ? 0f : penalty;
         }
 
-        private float AccumulateBlockerPenalty(IEnumerable<BlockerCircle> collection, IWorldCoordinate fromWorld, IWorldCoordinate toWorld, float weight)
+        private float AccumulateBlockerPenalty(List<BlockerCircle> collection, IWorldCoordinate fromWorld, IWorldCoordinate toWorld, float weight)
         {
-            if (collection == null || fromWorld == null || toWorld == null) return 0f;
+            if (collection == null || collection.Count == 0 || fromWorld == null || toWorld == null) return 0f;
 
             float penalty = 0f;
             float ax = fromWorld.X;
@@ -3309,9 +3470,9 @@ namespace Turbo.Plugins.s7o
             float len2 = dx * dx + dy * dy;
             if (len2 <= 0.001f) return 0f;
 
-            foreach (BlockerCircle blocker in collection)
+            for (int i = 0; i < collection.Count; i++)
             {
-                if (blocker == null) continue;
+                BlockerCircle blocker = collection[i];
                 float ox = blocker.X;
                 float oy = blocker.Y;
                 float radius = blocker.Radius;
@@ -3343,75 +3504,96 @@ namespace Turbo.Plugins.s7o
             return penalty;
         }
 
-        private IEnumerable<BlockerCircle> SafeGetPylonBlockers()
+        private void EnsureGeometryBlockerSnapshot()
         {
-            var list = new List<BlockerCircle>(8);
-            if (!IncludePylonsAsPullBlockers) return list;
+            int tick;
+            try { tick = Hud.Game.CurrentGameTick; }
+            catch { tick = int.MinValue; }
+
+            if (_geometryBlockerSnapshotTick != int.MinValue && _geometryBlockerSnapshotTick == tick)
+                return;
+
+            _geometryBlockerSnapshotTick = tick;
+            _cachedPylonBlockers.Clear();
+            _cachedWallerBlockers.Clear();
+            _cachedProjectileBlockers.Clear();
+
             try
             {
-                if (Hud?.Game?.Shrines == null) return list;
-                foreach (var shrine in Hud.Game.Shrines)
+                if (IncludePylonsAsPullBlockers && Hud?.Game?.Shrines != null)
                 {
-                    if (shrine == null || !shrine.IsPylon || shrine.FloorCoordinate == null) continue;
-                    // Pylons block pulls, but we often stand on/near them, so keep the radius restrained.
-                    list.Add(new BlockerCircle { X = shrine.FloorCoordinate.X, Y = shrine.FloorCoordinate.Y, Radius = 2.35f });
-                }
-            }
-            catch { }
-            return list;
-        }
-
-        private IEnumerable<BlockerCircle> SafeGetWallerBlockers()
-        {
-            var list = new List<BlockerCircle>(24);
-            if (!IncludeWallerAsPullBlockers) return list;
-            try
-            {
-                if (Hud?.Game?.Actors == null) return list;
-                foreach (var a in Hud.Game.Actors)
-                {
-                    if (a == null || a.FloorCoordinate == null || a.SnoActor == null) continue;
-                    if (a.CentralXyDistanceToMe > 145.0) continue;
-
-                    uint sno = (uint)a.SnoActor.Sno;
-                    bool waller = sno == 226296u || sno == 226808u || sno == 445916u;
-                    if (!waller)
+                    foreach (var shrine in Hud.Game.Shrines)
                     {
-                        string code = a.SnoActor.Code ?? a.SnoActor.NameEnglish ?? a.SnoActor.NameLocalized;
-                        waller = !string.IsNullOrEmpty(code) && code.ToLowerInvariant().Contains("waller");
+                        if (shrine == null || !shrine.IsPylon || shrine.FloorCoordinate == null) continue;
+                        _cachedPylonBlockers.Add(new BlockerCircle
+                        {
+                            X = shrine.FloorCoordinate.X,
+                            Y = shrine.FloorCoordinate.Y,
+                            Radius = 2.35f,
+                        });
                     }
-                    if (!waller) continue;
+                }
 
-                    var cc = a.CollisionCoordinate ?? a.FloorCoordinate;
-                    if (cc == null) continue;
-                    float radius = Math.Max(2.0f, a.RadiusScaled * 1.35f);
-                    if (sno == 226808u || sno == 226296u) radius = Math.Max(radius, 3.25f);
-                    list.Add(new BlockerCircle { X = cc.X, Y = cc.Y, Radius = radius });
+                bool needWaller = IncludeWallerAsPullBlockers;
+                bool needProjectile = IncludeProjectileBlockingActors
+                    && Hud?.Sno?.Attributes?.Blocks_Projectiles != null;
+                if ((!needWaller && !needProjectile) || Hud?.Game?.Actors == null)
+                    return;
+
+                foreach (var actor in Hud.Game.Actors)
+                {
+                    if (actor == null || actor.FloorCoordinate == null) continue;
+                    if (actor.CentralXyDistanceToMe > 145.0) continue;
+
+                    if (needWaller && actor.SnoActor != null)
+                    {
+                        uint sno = (uint)actor.SnoActor.Sno;
+                        bool waller = sno == 226296u || sno == 226808u || sno == 445916u;
+                        if (!waller)
+                        {
+                            string code = actor.SnoActor.Code ?? actor.SnoActor.NameEnglish ?? actor.SnoActor.NameLocalized;
+                            waller = !string.IsNullOrEmpty(code)
+                                && code.IndexOf("waller", StringComparison.OrdinalIgnoreCase) >= 0;
+                        }
+
+                        if (waller)
+                        {
+                            var coordinate = actor.CollisionCoordinate ?? actor.FloorCoordinate;
+                            if (coordinate != null)
+                            {
+                                float radius = Math.Max(2.0f, actor.RadiusScaled * 1.35f);
+                                if (sno == 226808u || sno == 226296u)
+                                    radius = Math.Max(radius, 3.25f);
+                                _cachedWallerBlockers.Add(new BlockerCircle
+                                {
+                                    X = coordinate.X,
+                                    Y = coordinate.Y,
+                                    Radius = radius,
+                                });
+                            }
+                        }
+                    }
+
+                    if (needProjectile)
+                    {
+                        int blocks = actor.GetAttributeValueAsInt(Hud.Sno.Attributes.Blocks_Projectiles, 0, 0);
+                        if (blocks > 0 && !actor.IsDisabled && !actor.IsOperated)
+                            _cachedProjectileBlockers.Add(MakeBlockerCircle(actor, Math.Max(1.6f, actor.RadiusScaled * 1.20f)));
+                    }
                 }
             }
-            catch { }
-            return list;
+            catch
+            {
+                // Fail open for aim scoring if one host actor read is transiently invalid.
+            }
         }
 
-        private IEnumerable<BlockerCircle> SafeGetProjectileBlockingActors()
+        private void ClearGeometryBlockerSnapshot()
         {
-            var list = new List<BlockerCircle>(32);
-            if (!IncludeProjectileBlockingActors) return list;
-            try
-            {
-                if (Hud?.Game?.Actors == null || Hud?.Sno?.Attributes?.Blocks_Projectiles == null) return list;
-                foreach (var a in Hud.Game.Actors)
-                {
-                    if (a == null || a.FloorCoordinate == null) continue;
-                    if (a.CentralXyDistanceToMe > 145.0) continue;
-                    int blocks = a.GetAttributeValueAsInt(Hud.Sno.Attributes.Blocks_Projectiles, 0, 0);
-                    if (blocks <= 0) continue;
-                    if (a.IsDisabled || a.IsOperated) continue;
-                    list.Add(MakeBlockerCircle(a, Math.Max(1.6f, a.RadiusScaled * 1.20f)));
-                }
-            }
-            catch { }
-            return list;
+            _geometryBlockerSnapshotTick = int.MinValue;
+            _cachedPylonBlockers.Clear();
+            _cachedWallerBlockers.Clear();
+            _cachedProjectileBlockers.Clear();
         }
 
         private BlockerCircle MakeBlockerCircle(IActor actor, float radius)
@@ -3915,6 +4097,7 @@ namespace Turbo.Plugins.s7o
                 _hotkeyDownLatched = false;
 
             _lastObservedGameTick = -1;
+            ClearGeometryBlockerSnapshot();
             ClearHeldWhirlwindResume();
 
             ClearPendingCastOnly();
