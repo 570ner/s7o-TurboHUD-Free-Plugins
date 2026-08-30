@@ -48,8 +48,13 @@ namespace Turbo.Plugins.s7o
         public bool PylonPartyStatusUsePylonActors { get; set; } = true;
         public bool PylonPartyStatusUsePylonMarkers { get; set; } = true;
 
-        // Draw range from local player to pylon. Set 0 or negative to disable range limiting.
-        public int PylonPartyStatusMaxDistanceYards { get; set; } = 180;
+        // Secondary bounded guard; projected viewport visibility remains the display gate.
+        // This comfortably covers the deepest supported zoom without scanning the world.
+        public int PylonPartyStatusMaxDistanceYards { get; set; } = 300;
+
+        // Allows the edge-following label to remain visible while the pylon model is
+        // still on screen but its projected floor anchor has crossed the viewport edge.
+        public float PylonPartyStatusEdgeFollowRangePx { get; set; } = 80.0f;
 
         // Duplicate suppression between actor and marker entries for the same pylon.
         public float PylonPartyStatusDuplicateDistanceYards { get; set; } = 3.0f;
@@ -1068,7 +1073,7 @@ namespace Turbo.Plugins.s7o
             }
         }
 
-        
+
 
         private void ResetVolatileState(bool clearStrickenStacks)
         {
@@ -1578,11 +1583,6 @@ namespace Turbo.Plugins.s7o
                 if (!pylon.FloorCoordinate.IsValid)
                     return;
 
-                // Draw only when the pylon is actually on screen.
-                // This prevents random off-screen text.
-                if (!pylon.FloorCoordinate.IsOnScreen(1))
-                    return;
-
                 var status = GetPylonPartyFloorStatus(pylon.WorldId);
 
                 if (status == null || status.Lines == null || status.Lines.Count == 0)
@@ -1595,14 +1595,36 @@ namespace Turbo.Plugins.s7o
                 if (coordinate == null)
                     return;
 
+                float x = coordinate.X;
+                float y = coordinate.Y + PylonPartyStatusScreenOffsetY;
+                if (Hud == null || Hud.Window == null ||
+                    float.IsNaN(x) || float.IsInfinity(x) ||
+                    float.IsNaN(y) || float.IsInfinity(y))
+                    return;
+
+                var size = Hud.Window.Size;
+                float margin = PylonPartyStatusEdgeFollowRangePx;
+                if (float.IsNaN(margin) || float.IsInfinity(margin))
+                    margin = 0.0f;
+                else
+                    margin = Math.Max(0.0f, margin);
+                if (size.Width <= 0 || size.Height <= 0 ||
+                    x < -margin || x > size.Width + margin ||
+                    y < -margin || y > size.Height + margin)
+                    return;
+
+                float inset = Math.Min(80.0f, Math.Min(size.Width, size.Height) * 0.25f);
+                x = Math.Max(inset, Math.Min(size.Width - inset, x));
+                y = Math.Max(inset, Math.Min(size.Height - inset, y));
+
                 var font = status.Ready ? PylonReadyFont : PylonMissingFont;
 
                 DrawOutlinedCenteredTextLines(
                     status.Lines,
                     font,
                     PylonStatusOutlineFont,
-                    coordinate.X,
-                    coordinate.Y + PylonPartyStatusScreenOffsetY,
+                    x,
+                    y,
                     PylonPartyStatusOutlineRadiusPx,
                     PylonPartyStatusLineGapPx);
             }
@@ -2516,7 +2538,7 @@ namespace Turbo.Plugins.s7o
             return false;
         }
 
-        
+
 
         // ── Stricken estimator ───────────────────────────────────────────
         private void UpdateStrickenEstimator(int tick)
