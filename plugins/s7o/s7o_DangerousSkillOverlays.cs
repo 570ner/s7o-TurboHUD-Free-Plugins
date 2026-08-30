@@ -162,8 +162,27 @@ namespace Turbo.Plugins.s7o
         private readonly HashSet<uint> _paintedRatKingRatBallKeys =
             new HashSet<uint>();
 
-        // Reused during PaintWorld to avoid allocating a new actor list every frame.
-        private readonly List<IActor> _paintWorldActorBuffer = new List<IActor>(256);
+        // Reused across render calls for the current collected game tick.
+        // Dense trash/effect actors are discarded before the paint pass.
+        private readonly List<IActor> _paintWorldActorBuffer = new List<IActor>(64);
+        private readonly List<IActor> _orbiterFocalGroundSourceBuffer = new List<IActor>(16);
+        private int _paintWorldPreparedGameTick = int.MinValue;
+        private PaintBossContext _paintBossContext = PaintBossContext.None;
+
+        [Flags]
+        private enum PaintBossContext
+        {
+            None = 0,
+            Perendi = 1 << 0,
+            Bloodmaw = 1 << 1,
+            Ember = 1 << 2,
+            SandShaper = 1 << 3,
+            Blighter = 1 << 4,
+            RatKing = 1 << 5,
+            AdriaOrTethrys = 1 << 6,
+            Rime = 1 << 7,
+            FireDot = 1 << 8,
+        }
 
         private sealed class CachedGroundCircle
         {
@@ -656,96 +675,27 @@ namespace Turbo.Plugins.s7o
         // ============================================================
         public void PaintWorld(WorldLayer layer)
         {
-            _paintWorldActorBuffer.Clear();
-
             if (layer != WorldLayer.Ground)
                 return;
 
             if (!CanPaint())
                 return;
 
-            var actors = Hud.Game.Actors;
-            if (actors == null)
+            if (!PreparePaintActorSnapshot())
                 return;
 
             _paintedRatKingRatBallKeys.Clear();
 
-            // Boss special-attack actors are often shared by trash/elites using the
-            // same monster family.  Build a lightweight Rift Guardian context first,
-            // then draw boss overlays only while the matching guardian is actually
-            // present in the same actor pass.
             var actorList = _paintWorldActorBuffer;
-            bool isPerendiRiftGuardianPresent = false;
-            bool isBloodmawRiftGuardianPresent = false;
-            bool isEmberRiftGuardianPresent = false;
-            bool isSandShaperRiftGuardianPresent = false;
-            bool isBlighterRiftGuardianPresent = false;
-            bool isRatKingRiftGuardianPresent = false;
-            bool isAdriaOrTethrysBossPresent = false;
-            bool isRimeRiftGuardianPresent = false;
-            bool isFireDotBossPresent = false;
-
-            foreach (var actor in actors)
-            {
-                if (!IsValidActor(actor))
-                    continue;
-
-                actorList.Add(actor);
-
-                switch (actor.SnoActor.Sno)
-                {
-                    case ActorSnoEnum._x1_lr_boss_malletdemon:
-                    case ActorSnoEnum._p73_lr_boss_malletdemon:
-                    case ActorSnoEnum._p76_lr_boss_malletdemon:
-                        isPerendiRiftGuardianPresent = true;
-                        break;
-
-                    case ActorSnoEnum._x1_lr_boss_westmarchbrute:
-                    case ActorSnoEnum._p73_lr_boss_westmarchbrute:
-                    case ActorSnoEnum._p76_lr_boss_westmarchbrute:
-                        isBloodmawRiftGuardianPresent = true;
-                        break;
-
-                    case ActorSnoEnum._x1_lr_boss_morluspellcaster_fire:
-                        isEmberRiftGuardianPresent = true;
-                        isFireDotBossPresent = true;
-                        break;
-
-                    case ActorSnoEnum._x1_lr_boss_zoltunkulle:
-                    case ActorSnoEnum._x1_lr_boss_sandmonster:
-                    case ActorSnoEnum._p73_lr_boss_sandmonster:
-                    case ActorSnoEnum._p76_lr_boss_sandmonster:
-                        isSandShaperRiftGuardianPresent = true;
-                        break;
-
-                    case ActorSnoEnum._x1_lr_boss_creepmob_a:
-                    case ActorSnoEnum._p1_lr_bogblight_a:
-                        isBlighterRiftGuardianPresent = true;
-                        break;
-
-                    case ActorSnoEnum._x1_lr_boss_ratking_a:
-                        isRatKingRiftGuardianPresent = true;
-                        break;
-
-                    case ActorSnoEnum._x1_adria_boss:
-                    case ActorSnoEnum._x1_lr_boss_succubus_a:
-                    case ActorSnoEnum._p73_lr_boss_succubus_a:
-                    case ActorSnoEnum._p76_lr_boss_succubus_a:
-                        isAdriaOrTethrysBossPresent = true;
-                        break;
-
-                    case ActorSnoEnum._x1_lr_boss_morluspellcaster_ice:
-                        isRimeRiftGuardianPresent = true;
-                        break;
-
-                    case ActorSnoEnum._x1_lr_boss_butcher:
-                    case ActorSnoEnum._p73_lr_boss_butcher:
-                    case ActorSnoEnum._p76_lr_boss_butcher:
-                    case ActorSnoEnum._x1_lr_boss_demonflyermega:
-                        isFireDotBossPresent = true;
-                        break;
-                }
-            }
+            bool isPerendiRiftGuardianPresent = HasPaintBossContext(PaintBossContext.Perendi);
+            bool isBloodmawRiftGuardianPresent = HasPaintBossContext(PaintBossContext.Bloodmaw);
+            bool isEmberRiftGuardianPresent = HasPaintBossContext(PaintBossContext.Ember);
+            bool isSandShaperRiftGuardianPresent = HasPaintBossContext(PaintBossContext.SandShaper);
+            bool isBlighterRiftGuardianPresent = HasPaintBossContext(PaintBossContext.Blighter);
+            bool isRatKingRiftGuardianPresent = HasPaintBossContext(PaintBossContext.RatKing);
+            bool isAdriaOrTethrysBossPresent = HasPaintBossContext(PaintBossContext.AdriaOrTethrys);
+            bool isRimeRiftGuardianPresent = HasPaintBossContext(PaintBossContext.Rime);
+            bool isFireDotBossPresent = HasPaintBossContext(PaintBossContext.FireDot);
 
             foreach (var actor in actorList)
             {
@@ -1018,11 +968,193 @@ namespace Turbo.Plugins.s7o
             return rawZ;
         }
 
-        private bool IsOrbiterFocalGroundSourceSno(ActorSnoEnum sno)
+        private bool PreparePaintActorSnapshot()
         {
-            return sno == ActorSnoEnum._x1_monsteraffix_orbiter_glowsphere ||
-                   sno == ActorSnoEnum._x1_monsteraffix_orbiter_projectile_focus ||
-                   sno == ActorSnoEnum._x1_monsteraffix_avenger_orbiter_projectile_focus;
+            int gameTick;
+            try { gameTick = Hud.Game.CurrentGameTick; }
+            catch { gameTick = int.MinValue; }
+
+            if (gameTick != int.MinValue && _paintWorldPreparedGameTick == gameTick)
+                return true;
+
+            _paintWorldActorBuffer.Clear();
+            _orbiterFocalGroundSourceBuffer.Clear();
+            _paintBossContext = PaintBossContext.None;
+
+            var actors = Hud.Game.Actors;
+            if (actors == null)
+            {
+                _paintWorldPreparedGameTick = gameTick;
+                return false;
+            }
+
+            try
+            {
+                foreach (var actor in actors)
+                {
+                    if (actor == null || actor.SnoActor == null)
+                        continue;
+
+                    PaintBossContext bossContext;
+                    bool orbiterSource;
+                    bool paintCandidate = ClassifyPaintActor(
+                        actor.SnoActor.Sno,
+                        out bossContext,
+                        out orbiterSource);
+
+                    if (!paintCandidate &&
+                        bossContext == PaintBossContext.None &&
+                        !orbiterSource)
+                    {
+                        continue;
+                    }
+
+                    // Preserve the original valid-actor requirement only for the small
+                    // set of actors that can affect a dangerous-skill overlay.
+                    if (actor.FloorCoordinate == null)
+                        continue;
+
+                    _paintBossContext |= bossContext;
+
+                    if (paintCandidate)
+                        _paintWorldActorBuffer.Add(actor);
+
+                    if (orbiterSource)
+                        _orbiterFocalGroundSourceBuffer.Add(actor);
+                }
+            }
+            catch
+            {
+                _paintWorldActorBuffer.Clear();
+                _orbiterFocalGroundSourceBuffer.Clear();
+                _paintBossContext = PaintBossContext.None;
+                _paintWorldPreparedGameTick = gameTick;
+                return false;
+            }
+
+            _paintWorldPreparedGameTick = gameTick;
+            return true;
+        }
+
+        private bool HasPaintBossContext(PaintBossContext context)
+        {
+            return (_paintBossContext & context) != 0;
+        }
+
+        private bool ClassifyPaintActor(
+            ActorSnoEnum sno,
+            out PaintBossContext bossContext,
+            out bool orbiterSource)
+        {
+            bossContext = PaintBossContext.None;
+            orbiterSource = false;
+
+            switch (sno)
+            {
+                // Guardian context only.
+                case ActorSnoEnum._x1_lr_boss_malletdemon:
+                case ActorSnoEnum._p73_lr_boss_malletdemon:
+                case ActorSnoEnum._p76_lr_boss_malletdemon:
+                    bossContext = PaintBossContext.Perendi;
+                    return false;
+
+                case ActorSnoEnum._x1_lr_boss_westmarchbrute:
+                case ActorSnoEnum._p73_lr_boss_westmarchbrute:
+                case ActorSnoEnum._p76_lr_boss_westmarchbrute:
+                    bossContext = PaintBossContext.Bloodmaw;
+                    return false;
+
+                case ActorSnoEnum._x1_lr_boss_morluspellcaster_fire:
+                    bossContext = PaintBossContext.Ember | PaintBossContext.FireDot;
+                    return false;
+
+                case ActorSnoEnum._x1_lr_boss_zoltunkulle:
+                case ActorSnoEnum._x1_lr_boss_sandmonster:
+                case ActorSnoEnum._p73_lr_boss_sandmonster:
+                case ActorSnoEnum._p76_lr_boss_sandmonster:
+                    bossContext = PaintBossContext.SandShaper;
+                    return false;
+
+                case ActorSnoEnum._x1_lr_boss_creepmob_a:
+                case ActorSnoEnum._p1_lr_bogblight_a:
+                    bossContext = PaintBossContext.Blighter;
+                    return false;
+
+                case ActorSnoEnum._x1_lr_boss_ratking_a:
+                    bossContext = PaintBossContext.RatKing;
+                    return false;
+
+                case ActorSnoEnum._x1_adria_boss:
+                case ActorSnoEnum._x1_lr_boss_succubus_a:
+                case ActorSnoEnum._p73_lr_boss_succubus_a:
+                case ActorSnoEnum._p76_lr_boss_succubus_a:
+                    bossContext = PaintBossContext.AdriaOrTethrys;
+                    return false;
+
+                case ActorSnoEnum._x1_lr_boss_morluspellcaster_ice:
+                    bossContext = PaintBossContext.Rime;
+                    return false;
+
+                case ActorSnoEnum._x1_lr_boss_butcher:
+                case ActorSnoEnum._p73_lr_boss_butcher:
+                case ActorSnoEnum._p76_lr_boss_butcher:
+                case ActorSnoEnum._x1_lr_boss_demonflyermega:
+                    bossContext = PaintBossContext.FireDot;
+                    return false;
+
+                // Orbiter source actors are retained only for focal-point grounding.
+                case ActorSnoEnum._x1_monsteraffix_orbiter_glowsphere:
+                case ActorSnoEnum._x1_monsteraffix_orbiter_projectile_focus:
+                case ActorSnoEnum._x1_monsteraffix_avenger_orbiter_projectile_focus:
+                    orbiterSource = true;
+                    return false;
+
+                // Every remaining case reaches the existing paint switch.
+                case ActorSnoEnum._x1_monsteraffix_orbiter_projectile:
+                case ActorSnoEnum._x1_monsteraffix_avenger_orbiter_projectile:
+                case ActorSnoEnum._x1_monsteraffix_orbiter_focalpoint:
+                case ActorSnoEnum._x1_monsteraffix_avenger_orbiter_focalpoint:
+                case ActorSnoEnum._monsteraffix_waller_model:
+                case ActorSnoEnum._x1_monsteraffix_teleportmines:
+                case ActorSnoEnum._x1_monsteraffix_corpsebomber_projectile:
+                case ActorSnoEnum._x1_lr_boss_malletdemon_fallingrocks:
+                case ActorSnoEnum._a2dun_zolt_random_fallingrocks_c:
+                case ActorSnoEnum._x1_westmarchbrute_leap_telegraph:
+                case ActorSnoEnum._x1_westmarchbrute_b_leap_telegraph:
+                case ActorSnoEnum._p2_westmarchbrute_leap_telegraph:
+                case ActorSnoEnum._morluspellcaster_meteor_pending:
+                case ActorSnoEnum._morluspellcast_meteor_castsphere:
+                case ActorSnoEnum._morluspellcaster_meteor_model:
+                case ActorSnoEnum._morluspellcaster_meteor_impact:
+                case ActorSnoEnum._belial_groundbomb_event_pending:
+                case ActorSnoEnum._zoltunkulle_energytwister:
+                case ActorSnoEnum._zoltunkulle_fieryboulder_model:
+                case ActorSnoEnum._zoltunkulle_fieryboulder_projectile:
+                case ActorSnoEnum._zoltunkulle_fieryboulder_groundimpact:
+                case ActorSnoEnum._zoltunkulle_slowtime_bubble:
+                case ActorSnoEnum._zoltunkulle_slowtime_shield_dome:
+                case ActorSnoEnum._creepmobarm:
+                case ActorSnoEnum._x1_bogblight_pustulespawn_proxy:
+                case ActorSnoEnum._x1_bogblight_pustule_model:
+                case ActorSnoEnum._x1_bogblight_pustule_model_fade:
+                case ActorSnoEnum._p4_ratking_ratballmonster:
+                case ActorSnoEnum._p4_ratking_thunderdome_proxyactor:
+                case ActorSnoEnum._p4_ratking_thunderdome_ringgeo:
+                case ActorSnoEnum._p4_ratking_thunderdomewall:
+                case ActorSnoEnum._p4_ratking_wasprain_impact:
+                case ActorSnoEnum._x1_lr_boss_ratking_ratvolcano_a:
+                case ActorSnoEnum._x1_adria_geyser_pending:
+                case ActorSnoEnum._x1_adria_geyser:
+                case ActorSnoEnum._x1_unique_monster_generic_aoe_dot_cold_10foot:
+                case ActorSnoEnum._x1_unique_monster_generic_aoe_dot_cold_20foot:
+                case ActorSnoEnum._x1_unique_monster_generic_aoe_dot_fire_10foot:
+                case ActorSnoEnum._x1_pand_ext_ordnance_tower_shock_a:
+                case ActorSnoEnum._p4_lr_boss_sandmonster_turret:
+                    return true;
+
+                default:
+                    return false;
+            }
         }
 
         private int GetOrbiterFocalGroundSourcePriority(ActorSnoEnum sno)
@@ -1048,18 +1180,12 @@ namespace Turbo.Plugins.s7o
 
             try
             {
-                if (Hud.Game == null || Hud.Game.Actors == null)
-                    return null;
-
-                foreach (var a in Hud.Game.Actors)
+                foreach (var a in _orbiterFocalGroundSourceBuffer)
                 {
                     if (a == null || a.SnoActor == null || a.FloorCoordinate == null)
                         continue;
 
                     ActorSnoEnum sno = a.SnoActor.Sno;
-
-                    if (!IsOrbiterFocalGroundSourceSno(sno))
-                        continue;
 
                     float distance = focalActor.FloorCoordinate.XYDistanceTo(a.FloorCoordinate);
 
@@ -1889,20 +2015,6 @@ namespace Turbo.Plugins.s7o
                 return false;
 
             if (Hud.Game.Me == null)
-                return false;
-
-            return true;
-        }
-
-        private static bool IsValidActor(IActor actor)
-        {
-            if (actor == null)
-                return false;
-
-            if (actor.SnoActor == null)
-                return false;
-
-            if (actor.FloorCoordinate == null)
                 return false;
 
             return true;
