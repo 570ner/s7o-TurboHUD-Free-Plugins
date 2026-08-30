@@ -962,10 +962,16 @@ namespace Turbo.Plugins.s7o
                     if (BannerArrowMoveToVisibleBanner)
                     {
                         var targetCoordinate = me.Offset(dxWorld, dyWorld, _activeBannerArrow.Z - me.Z);
-                        if (targetCoordinate != null && targetCoordinate.IsValid && targetCoordinate.IsOnScreen(1))
+                        if (targetCoordinate != null && targetCoordinate.IsValid)
                         {
                             var screenTarget = targetCoordinate.ToScreenCoordinate(true, true);
-                            if (screenTarget != null)
+                            var size = Hud.Window.Size;
+                            if (screenTarget != null &&
+                                !float.IsNaN(screenTarget.X) && !float.IsInfinity(screenTarget.X) &&
+                                !float.IsNaN(screenTarget.Y) && !float.IsInfinity(screenTarget.Y) &&
+                                size.Width > 0 && size.Height > 0 &&
+                                screenTarget.X >= 0.0f && screenTarget.X <= size.Width &&
+                                screenTarget.Y >= 0.0f && screenTarget.Y <= size.Height)
                             {
                                 float sx = screenTarget.X - screenMe.X;
                                 float sy = screenTarget.Y - screenMe.Y;
