@@ -154,7 +154,9 @@ namespace Turbo.Plugins.s7o
         public int EfficientMultishotLeadMs = 300;
         public float EfficientMultishotCoverageRatio = 0.80f;
         public int AttackMultishotMaintenanceMs = 2100;
-        public int BossMultishotMaintenanceMs = 2100;
+        // Iceblink lasts about 3 seconds. Start RG maintenance early enough to leave
+        // room for the existing 600 ms validation window and one bounded miss retry.
+        public int BossMultishotMaintenanceMs = 1500;
         // Odyssey lasts about 2 seconds on the RG. Refresh proactively so the boss never
         // has to become fully missing before the standalone scheduler reacts.
         public int BossEntangleMaintenanceMs = 1500;
