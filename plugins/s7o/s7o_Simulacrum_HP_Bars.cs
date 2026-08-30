@@ -7,7 +7,7 @@ namespace Turbo.Plugins.s7o
 {
     // Lightweight Simulacrum health bars and movable party list for FreeHUD and LightningMOD.
     // Simulacrum alert/list concept credited to RNN's SimulacrumsAlertIcon community plugin.
-    // Actor-following bars use every live on-screen Sim exposed natively. The fixed list can
+    // Actor-following bars use every live Sim projected into the current viewport. The fixed list can
     // apply a separate range/completeness gate so it never reports a partial two-Sim set as complete.
     public class s7o_Simulacrum_HP_Bars : BasePlugin, IInGameTopPainter, IKeyEventHandler
     {
@@ -29,6 +29,7 @@ namespace Turbo.Plugins.s7o
         public float BarYOffset { get; set; } = 15.0f;
         public float OutlineSize { get; set; } = 2.0f;
         public bool UseTwoToneLighting { get; set; } = true;
+        public float ActorBarEdgeFollowRangePx { get; set; } = 300.0f;
 
         public bool ShowScreenList { get; set; } = true;
         public float ScreenListWidth { get; set; } = 130.0f;
@@ -188,7 +189,7 @@ namespace Turbo.Plugins.s7o
             // Screen-list completeness/range rules must never suppress a visible actor bar.
             foreach (ScreenListEntry entry in liveEntries)
             {
-                if (entry.Actor != null && entry.Actor.IsOnScreen)
+                if (entry.Actor != null)
                     DrawSimulacrumBar(entry.Actor, entry.HealthRatio, entry.Mine);
             }
 
@@ -493,7 +494,19 @@ namespace Turbo.Plugins.s7o
 
         private void DrawSimulacrumBar(IActor actor, float hpRatio, bool mine)
         {
-            var sc = actor.FloorCoordinate != null ? actor.FloorCoordinate.ToScreenCoordinate() : actor.ScreenCoordinate;
+            IScreenCoordinate sc;
+            try
+            {
+                if (actor == null || actor.FloorCoordinate == null || !actor.FloorCoordinate.IsValid)
+                    return;
+
+                sc = actor.FloorCoordinate.ToScreenCoordinate(true, true);
+            }
+            catch
+            {
+                return;
+            }
+
             if (sc == null)
                 return;
 
@@ -501,6 +514,30 @@ namespace Turbo.Plugins.s7o
             float h = BaseHeight * ClampScale(mine ? OwnHeightScale : OtherHeightScale, 0.25f, 3.0f);
             float x = sc.X - w * 0.5f;
             float y = sc.Y + BarYOffset;
+
+            if (Hud == null || Hud.Window == null ||
+                float.IsNaN(x) || float.IsInfinity(x) ||
+                float.IsNaN(y) || float.IsInfinity(y))
+                return;
+
+            var size = Hud.Window.Size;
+            float range = ActorBarEdgeFollowRangePx;
+            if (float.IsNaN(range) || float.IsInfinity(range))
+                range = 0.0f;
+            else
+                range = Math.Max(0.0f, range);
+
+            if (size.Width <= 0 || size.Height <= 0 ||
+                sc.X < -range || sc.X > size.Width + range ||
+                sc.Y < -range || sc.Y > size.Height + range)
+                return;
+
+            const float inset = 4.0f;
+            if (size.Width > w + inset * 2.0f)
+                x = Math.Max(inset, Math.Min(size.Width - w - inset, x));
+            if (size.Height > h + inset * 2.0f)
+                y = Math.Max(inset, Math.Min(size.Height - h - inset, y));
+
             DrawHealthBar(x, y, w, h, hpRatio, mine);
         }
 
