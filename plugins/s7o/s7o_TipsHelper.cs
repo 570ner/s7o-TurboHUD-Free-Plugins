@@ -148,6 +148,7 @@ namespace Turbo.Plugins.s7o
         public float PylonProgressIconSize { get; set; } = 26.0f;
         public float PylonProgressIconGapPx { get; set; } = 6.0f;
         public float PoolStatusLineGapPx { get; set; } = 1.0f;
+        public float PoolStatusEdgeFollowRangePx { get; set; } = 80.0f;
         public float PoolTopTextYFrac { get; set; } = 0.115f;
         public float PoolListOffsetXPx { get; set; } = 8.0f;
         public float PoolListOffsetYPx { get; set; } = 4.0f;
@@ -2099,9 +2100,9 @@ namespace Turbo.Plugins.s7o
         }
 
 
-        
 
-        
+
+
 
         private void CreateBloodIsPowerVisualResources()
         {
@@ -5929,20 +5930,37 @@ namespace Turbo.Plugins.s7o
 
                 try
                 {
-                    if (!spot.FloorCoordinate.IsOnScreen(1))
+                    if (!spot.FloorCoordinate.IsValid)
                         continue;
+
+                    var screen = spot.FloorCoordinate.ToScreenCoordinate(true, true);
+                    if (screen == null || !IsFinite(screen.X) || !IsFinite(screen.Y))
+                        continue;
+
+                    var size = Hud.Window.Size;
+                    var followRange = PoolStatusEdgeFollowRangePx;
+                    if (!IsFinite(followRange))
+                        followRange = 0.0f;
+                    else
+                        followRange = Math.Max(0.0f, followRange);
+
+                    if (size.Width <= 0 || size.Height <= 0 ||
+                        screen.X < -followRange || screen.X > size.Width + followRange ||
+                        screen.Y < -followRange || screen.Y > size.Height + followRange)
+                        continue;
+
+                    var status = GetWorldPartyStatus(spot.WorldId);
+                    var font = status.Ready ? PoolReadyFont : PoolMissingFont;
+                    var inset = Math.Min(80.0f * Hud.Window.HeightUiRatio, Math.Min(size.Width, size.Height) * 0.25f);
+                    var x = Clamp(screen.X, inset, size.Width - inset);
+                    var y = Clamp(screen.Y - (34.0f * Hud.Window.HeightUiRatio), inset, size.Height - inset);
+                    foreach (var line in status.Lines)
+                        y += DrawCenteredLine(line, x, y + PoolStatusLineGapPx, font, PoolOutlineFont, 2);
                 }
-                catch { continue; }
-
-                var screen = spot.FloorCoordinate.ToScreenCoordinate(true, true);
-                if (screen == null || !IsFinite(screen.X) || !IsFinite(screen.Y))
-                    continue;
-
-                var status = GetWorldPartyStatus(spot.WorldId);
-                var font = status.Ready ? PoolReadyFont : PoolMissingFont;
-                var y = screen.Y - (34.0f * Hud.Window.HeightUiRatio);
-                foreach (var line in status.Lines)
-                    y += DrawCenteredLine(line, screen.X, y + PoolStatusLineGapPx, font, PoolOutlineFont, 2);
+                catch
+                {
+                    // Stored pool coordinates can become stale during area handoff.
+                }
             }
         }
 
@@ -6103,10 +6121,11 @@ namespace Turbo.Plugins.s7o
                 try
                 {
                     var targetCoordinate = me.Offset(dxWorld, dyWorld, arrow.Z - me.Z);
-                    if (targetCoordinate != null && targetCoordinate.IsValid && targetCoordinate.IsOnScreen(1))
+                    if (targetCoordinate != null && targetCoordinate.IsValid)
                     {
                         var screenTarget = targetCoordinate.ToScreenCoordinate(true, true);
-                        if (screenTarget != null)
+                        if (screenTarget != null && IsFinite(screenTarget.X) && IsFinite(screenTarget.Y) &&
+                            IsPointInsideWindow(screenTarget.X, screenTarget.Y, 0.0f))
                         {
                             float sx = screenTarget.X - screenMe.X;
                             float sy = screenTarget.Y - screenMe.Y;
