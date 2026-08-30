@@ -163,6 +163,7 @@ namespace Turbo.Plugins.s7o
         private const int AlternateScanWindowTicks = 18;
         private const float TeleportThresholdSq = 100f;
         private const int PostTeleportForceSnapTicks = 15;
+        private const int PostTeleportSelectionSettleTicks = 2;
         private const int PostTeleportSelectionInvalidateTicks = 90;
         private const float SiphonEdgeFallbackMarginPx = 48.0f;
         private const float MobilityCircleRadiusYards = 10.0f;
@@ -879,11 +880,12 @@ namespace Turbo.Plugins.s7o
                 if (TryRunLateRefreshIntent(tick))
                     return;
 
-                bool delayInitialAutosnapForRefresh = ShouldDelayInitialAutosnapForLateRefresh(newLanceEngagement, manualSiphonDown);
-                if (delayInitialAutosnapForRefresh)
+                bool queueInitialLateRefresh = ShouldQueueInitialLateRefresh(newLanceEngagement, manualSiphonDown);
+                if (queueInitialLateRefresh)
                 {
+                    // Preserve the Power Shift refresh intent, but a fresh Lance engagement
+                    // must acquire/snap its combat target immediately instead of waiting here.
                     QueueLateRefreshIntent(tick, true);
-                    return;
                 }
 
                 IMonster target = null;
@@ -1918,7 +1920,7 @@ namespace Turbo.Plugins.s7o
             return IsCorpseLanceRicochetRune() ? RicochetFirstEngageSiphonDelayTicks : FirstEngageSiphonDelayTicks;
         }
 
-        private bool ShouldDelayInitialAutosnapForLateRefresh(bool newLanceEngagement, bool manualSiphonDown)
+        private bool ShouldQueueInitialLateRefresh(bool newLanceEngagement, bool manualSiphonDown)
         {
             if (!newLanceEngagement || manualSiphonDown || _engageRefreshConsumed || _pulseActive)
                 return false;
@@ -4690,12 +4692,17 @@ namespace Turbo.Plugins.s7o
                 return false;
             }
 
-            return _postTeleportReacquireMoveTick <= 0 || tick <= _postTeleportReacquireMoveTick;
+            if (_postTeleportReacquireMoveTick <= 0)
+                return true;
+
+            int lastAutosnapMoveTick = Math.Max(_postTeleportReacquireMoveTick, _lastMouseMoveTick);
+            return lastAutosnapMoveTick > 0
+                && tick - lastAutosnapMoveTick <= PostTeleportSelectionSettleTicks;
         }
 
         private bool TryMovePostTeleportReacquire(IMonster target, float x, float y, uint acd, int tick)
         {
-            if (!IsPostTeleportSelectionStale(acd, tick))
+            if (!IsPostTeleportSelectionStale(acd, tick) || _postTeleportReacquireMoveTick > 0)
                 return false;
 
             float pointX = x;
@@ -4722,7 +4729,8 @@ namespace Turbo.Plugins.s7o
                 float dx, dy;
                 if (TryBuildProbeGeometry(target, x, y, out geometry))
                 {
-                    GetBodyProbeOffset(geometry, 0.40f, 0f, out dx, out dy);
+                    // Match the normal focused scan: try the lower core / near-feet point first.
+                    GetBodyProbeOffset(geometry, 0.88f, 0f, out dx, out dy);
                     pointX = x + dx;
                     pointY = y + dy;
                 }
@@ -6043,10 +6051,11 @@ namespace Turbo.Plugins.s7o
             IMonster selected = null;
             try { selected = Hud.Game.SelectedMonster2; } catch { }
             bool postTeleportSelectionStale = IsPostTeleportSelectionStale(acd, tick);
-            bool selectedTargetSame = !postTeleportSelectionStale && IsSameAcd(selected, acd);
+            IMonster selectionForHover = postTeleportSelectionStale ? null : selected;
+            bool selectedTargetSame = IsSameAcd(selectionForHover, acd);
             bool selectedSame = eliteLike && selectedTargetSame;
-            bool samePackLeaderOcclusion = IsSamePackLeaderOcclusion(monster, selected);
-            EvaluatePreviousProbeOutcome(monster, selected, acd, tick);
+            bool samePackLeaderOcclusion = IsSamePackLeaderOcclusion(monster, selectionForHover);
+            EvaluatePreviousProbeOutcome(monster, selectionForHover, acd, tick);
 
             if (eliteLike)
             {
@@ -6096,7 +6105,7 @@ namespace Turbo.Plugins.s7o
             if (postTeleportSelectionStale && TryMovePostTeleportReacquire(monster, x, y, acd, tick))
                 return;
 
-            if (!selectedSame && TryAcceptAdjacentEligibleHover(monster, selected, tick))
+            if (!selectedSame && TryAcceptAdjacentEligibleHover(monster, selectionForHover, tick))
                 return;
 
             if (selectedSame)
@@ -6121,7 +6130,7 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
-            bool badRecentHover = IsBadRecentHover(acd, selected, tick);
+            bool badRecentHover = IsBadRecentHover(acd, selectionForHover, tick);
             int badHoverInvalidateTicks = leaderLike
                 ? LeaderBadHoverInvalidateTicks
                 : BadHoverInvalidateTicks;
