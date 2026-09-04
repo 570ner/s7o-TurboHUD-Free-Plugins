@@ -2764,12 +2764,15 @@ namespace Turbo.Plugins.s7o
             if (actionKey == ActionKey.Heal)
                 return true;
 
+            // Do not let an automatic cast cancel an item, chest, portal, shrine,
+            // or other world interaction already selected under the cursor.
+            if (IsSelectedClickableWorldObject() &&
+                (actionKey != ActionKey.LeftSkill || BlockLeftSkillOnSelectedClickableActor))
+                return false;
+
             if (actionKey == ActionKey.LeftSkill)
             {
                 if (!IsCursorInsideGroundRect())
-                    return false;
-
-                if (BlockLeftSkillOnSelectedClickableActor && IsSelectedClickableWorldObject())
                     return false;
 
                 return true;
