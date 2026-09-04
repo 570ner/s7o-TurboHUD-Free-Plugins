@@ -26,7 +26,8 @@ namespace Turbo.Plugins.s7o
         public bool PrioritizeDebuffedElites = true;
         public bool RemoteNecromancerTargetAssist = true;
         public bool ShowRemoteSiphonPrimaryTargetRing = false;
-        public bool AggressiveScanMode = false;
+        // Legacy configuration compatibility; targeting now has one unified mode.
+        public bool AggressiveScanMode { get { return false; } set { } }
         public bool IncludeTrashTargets = true;
         public bool RestoreCursorOnReleaseOrMove = true;
         public int PestilenceRangeYards = 70;
@@ -42,6 +43,8 @@ namespace Turbo.Plugins.s7o
         public bool TriuneDamageTeleportFallbackEnabled = true;
         public bool TriuneCooldownTeleportFallbackEnabled = true;
         public ushort OculusTeleportVirtualKey = 0x20; // Space
+        // Legacy customization fields retained for source compatibility. Circle combat
+        // distance now uses one 60-yard limit, independent of direction/scan range.
         public float MobilityEliteSideLimitYards = 60.0f;
         public float MobilityEliteVerticalLimitYards = 50.0f;
         public float MobilityEliteDiagonalLimitYards = 70.0f;
@@ -149,10 +152,10 @@ namespace Turbo.Plugins.s7o
 
         private const int AdaptiveBinCount = 8;
         private const int AdaptiveCandidateCapacity = 128;
-        private const int ProbeZoneCount = 9;
+        private const float UpperProbeBodyRatio = -0.32f;
+        private const float UpperProbeSideRatio = 0.85f;
+        private static readonly float[] BodyProbeLevels = { 0.16f, -0.56f, 0.64f, -0.08f, 0.88f, -0.80f, 0.40f, -0.32f };
         private const int MinTicksBetweenMouseMoves = 1;
-        private const int NormalScanProbeIntervalTicks = 4;
-        private const int NormalScanCyclePauseTicks = 12;
         private const int PendingPulseHoverTicks = 36;
         private const float CursorNoOpTolerancePxSq = 2.25f;
         private const float AdjacentEliteHoverMaxScreenPxSq = 36100f;
@@ -172,12 +175,13 @@ namespace Turbo.Plugins.s7o
         private const float MobilityCircleLifetimeSeconds = 7.0f;
         private const float MobilityCircleDurationEpsilonSeconds = 0.25f;
         private const float MobilityCircleExpiringSeconds = 1.25f;
+        private const float MobilityZeiOptimalDistanceYards = 50.0f;
+        private const float MobilityTargetHardLimitYards = 60.0f;
         private const float CircleTeleportArrivalDistanceSq = 9.0f;
         private const int CircleTeleportAimSettleTicks = 2;
         private const int CircleTeleportCastHoldTicks = 3;
         private const int CircleTeleportPostCastMinTicks = 2;
         private const int CircleTeleportMaxCastRetries = 1;
-        private const int CircleTeleportSameCircleGuardTicks = 5;
         private const int CircleTeleportPostCastTimeoutTicks = 12;
         private const int CircleTeleportReacquireTicks = 36;
         private const int CircleReengageSnapshotTicks = 120;
@@ -190,7 +194,6 @@ namespace Turbo.Plugins.s7o
         private const int MovementDisengageAfterCursorOverrideTicks = 4;
         private const int ManualCursorOverridePauseTicks = 18;
         private const int LockedHoverManualOverridePauseTicks = 6;
-        private const int LeaderNormalReprobeTicks = 8;
         private const int UiClickGuardRetryTicks = 6;
         private const float HudMenuButtonReferenceWidth = 1920f;
         private const float HudMenuButtonReferenceHeight = 1080f;
@@ -256,13 +259,11 @@ namespace Turbo.Plugins.s7o
         private const int UserCursorOverrideMaxTicks = 45;
         private const int BadHoverInvalidateTicks = 2;
         private const int LeaderBadHoverInvalidateTicks = 6;
-        private const int LeaderPackCoreRetryTicks = 8;
         private const int HoverTruthRecentTicks = 90;
         private const int LearnedHoverProfileCapacity = 96;
         private const int RecentProbePointCapacity = 48;
         private const int RecentProbePointAvoidTicks = 18;
-        private const int NormalRecentProbePointAvoidTicks = 90;
-        private const float RecentProbePointAvoidPxSq = 100f;
+        private const float RecentProbePointAvoidPxSq = 16f;
         private const int SolverProfileRefreshTicks = 3;
         private const uint PowerPylonBuffSno = 262935u; // Generic_PagesBuffDamage
 
@@ -324,7 +325,15 @@ namespace Turbo.Plugins.s7o
         private int _trashAcquireStartTick;
         private uint _snapPhaseAcdId;
         private int _snapPhase;
-        private int _normalScanPauseUntilTick;
+        private int _probeSweepPass;
+        private float _probeSweepSide = -1f;
+        private float _probeSweepVertical = -1f;
+        private bool _probeSweepExpanded;
+        private bool _probeSweepUpperFirst;
+        private uint _probeHistoryAcdId;
+        private float _probeOriginX, _probeOriginY, _probeBodyDx, _probeBodyDy, _probeRadiusX;
+        private float _solverCoreRisk, _solverUpperLeftRisk, _solverUpperRightRisk;
+        private int _lastTrackedHoverTick;
         private int _lastMouseMoveTick;
         private bool _cursorOwned;
         private bool _cursorWasMovedByPlugin;
@@ -345,13 +354,9 @@ namespace Turbo.Plugins.s7o
         private readonly float[] _rankedProbeDy = new float[AdaptiveCandidateCapacity];
         private readonly int[] _rankedProbeBin = new int[AdaptiveCandidateCapacity];
         private readonly int[] _rankedProbeZone = new int[AdaptiveCandidateCapacity];
-        private readonly float[] _rankedProbeScore = new float[AdaptiveCandidateCapacity];
-        private readonly float[] _adaptiveBinGood = new float[AdaptiveBinCount];
-        private readonly float[] _adaptiveBinBad = new float[AdaptiveBinCount];
-        private uint _adaptiveModelSno;
         private readonly Dictionary<uint, LearnedHoverProfile> _learnedHoverProfiles = new Dictionary<uint, LearnedHoverProfile>(LearnedHoverProfileCapacity);
-        private readonly float[] _recentProbePointX = new float[RecentProbePointCapacity];
-        private readonly float[] _recentProbePointY = new float[RecentProbePointCapacity];
+        private readonly float[] _recentProbeBodyRatio = new float[RecentProbePointCapacity];
+        private readonly float[] _recentProbeSideRatio = new float[RecentProbePointCapacity];
         private readonly int[] _recentProbePointTick = new int[RecentProbePointCapacity];
         private int _recentProbePointNext;
         private int _rankedProbeCount;
@@ -359,13 +364,6 @@ namespace Turbo.Plugins.s7o
         private int _lastSnapAttemptBin = -1;
         private int _lastSnapAttemptZone = -1;
         private int _lastSnapAttemptTick;
-        private int _lastEvaluatedProbeTick;
-        private uint _probeZoneAcdId;
-        private readonly int[] _probeZoneLastTryTick = new int[ProbeZoneCount];
-        private readonly int[] _probeZoneTryCount = new int[ProbeZoneCount];
-        private uint _probeZoneSuccessAcdId;
-        private int _lastSuccessProbeZone = -1;
-        private int _lastSuccessProbeZoneTick;
         private uint _stableLockAcdId;
         private float _stableLockDx;
         private float _stableLockDy;
@@ -434,6 +432,11 @@ namespace Turbo.Plugins.s7o
         private bool _oculusTeleportHotkeyWasDown;
         private bool _postBossRewardSpaceHandoffActive;
         private CircleTeleportStage _circleTeleportStage;
+        private int _circleTeleportRequestUntilTick;
+        private IWorldCoordinate _circleTeleportDestination;
+        private int _circleTeleportStartCharges, _circleTeleportStartCooldownTick;
+        private bool _circleTeleportCastAccepted, _circleTeleportStartWasTransform;
+        private bool _circleTeleportLastAccepted;
         private int _circleTeleportAimReadyTick;
         private int _circleTeleportCastTick;
         private int _circleTeleportKeyUpTick;
@@ -474,8 +477,6 @@ namespace Turbo.Plugins.s7o
         private uint _badHoverAcdId;
         private int _badHoverCount;
         private int _badHoverLastTick;
-        private uint _leaderPackCoreRetryAcdId;
-        private int _leaderPackCoreRetryTick;
         private uint _forcedSnapAcdId;
         private int _forcedSnapUntilTick;
         private int _movementDisengageUntilTick;
@@ -658,12 +659,11 @@ namespace Turbo.Plugins.s7o
             AutoSiphonEnabled = autoSiphon;
             LateRefreshAssist = lateRefreshAssist;
             PrioritizeDebuffedElites = prioritizeDebuffedElites;
-            AggressiveScanMode = aggressiveScanMode;
             IncludeTrashTargets = includeTrashTargets;
             RestoreCursorOnReleaseOrMove = restoreCursorOnReleaseOrMove;
             PestilenceRangeYards = ClampRange(pestilenceRangeYards);
             JuggerHotkeyEnabled = juggerHotkeyEnabled;
-            JuggerHotkeyVirtualKey = juggerHotkeyVirtualKey == OculusTeleportVirtualKey ? (ushort)0x11 : juggerHotkeyVirtualKey;
+            ConfigureHotkeys(juggerHotkeyVirtualKey, OculusTeleportVirtualKey);
             RgAutoSnapSiphonAssist = rgAutoSnapSiphonAssist;
             if (!AutoSnapEnabled)
                 ClearAutosnapLockState();
@@ -673,7 +673,34 @@ namespace Turbo.Plugins.s7o
 
         public void SetStackTargets(int normal, int power)
         {
-            Configure(normal, power, AutoSnapEnabled, AutoSiphonEnabled, LateRefreshAssist, PrioritizeDebuffedElites, AggressiveScanMode, IncludeTrashTargets, RestoreCursorOnReleaseOrMove, PestilenceRangeYards, JuggerHotkeyEnabled, JuggerHotkeyVirtualKey, RgAutoSnapSiphonAssist);
+            Configure(normal, power, AutoSnapEnabled, AutoSiphonEnabled, LateRefreshAssist, PrioritizeDebuffedElites, false, IncludeTrashTargets, RestoreCursorOnReleaseOrMove, PestilenceRangeYards, JuggerHotkeyEnabled, JuggerHotkeyVirtualKey, RgAutoSnapSiphonAssist);
+        }
+
+        public void ConfigureHotkeys(ushort juggerHotkeyVirtualKey, ushort oculusTeleportVirtualKey)
+        {
+            if (juggerHotkeyVirtualKey != 0 && juggerHotkeyVirtualKey == oculusTeleportVirtualKey)
+            {
+                if (oculusTeleportVirtualKey == 0x20)
+                    juggerHotkeyVirtualKey = 0x11;
+                else
+                    oculusTeleportVirtualKey = 0x20;
+            }
+
+            bool juggerChanged = JuggerHotkeyVirtualKey != juggerHotkeyVirtualKey;
+            bool oculusChanged = OculusTeleportVirtualKey != oculusTeleportVirtualKey;
+
+            JuggerHotkeyVirtualKey = juggerHotkeyVirtualKey;
+            OculusTeleportVirtualKey = oculusTeleportVirtualKey;
+
+            if (juggerChanged || !JuggerHotkeyEnabled || JuggerHotkeyVirtualKey == 0)
+                ClearManualJuggerLock();
+
+            if (oculusChanged || !OculusTeleportAssistEnabled || OculusTeleportVirtualKey == 0)
+            {
+                ClearCircleTeleportState();
+                _oculusTeleportHotkeyWasDown = false;
+                _postBossRewardSpaceHandoffActive = false;
+            }
         }
 
         public void ForceStopForDisable()
@@ -1727,8 +1754,18 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
+            // A build channel must not park on a minion while the elite is still
+            // being acquired. Opening/urgent refresh pulses retain their own rules.
+            if (needBuild && NeedsEliteHoverBeforeBuild(currentTarget, tick))
+                return;
+
             _pulseWasBuild = needBuild;
             _pulseBuildTarget = needBuild ? activeTarget : 0;
+
+            // Do not overwrite a fresh scan point to prepare a pulse whose
+            // existing cadence/backoff gates would reject it anyway.
+            if (!CanStartSiphonPulse(tick, pulseRate, Stopwatch.GetTimestamp()))
+                return;
 
             bool anchorReady = needRefresh
                 ? TryPrepareUrgentLateRefreshAnchor(currentTarget, tick)
@@ -2322,6 +2359,7 @@ namespace Turbo.Plugins.s7o
         {
             public IActor Actor;
             public IWorldCoordinate Center;
+            public IMonster CombatTarget;
             public MobilityCircleKind Kind;
             public float PlayerDistance;
             public float TargetDistance;
@@ -2333,6 +2371,7 @@ namespace Turbo.Plugins.s7o
         {
             if (!OculusTeleportAssistEnabled || OculusTeleportVirtualKey == 0)
             {
+                ClearCircleTeleportState();
                 _oculusTeleportHotkeyWasDown = false;
                 _postBossRewardSpaceHandoffActive = false;
                 return false;
@@ -2346,16 +2385,19 @@ namespace Turbo.Plugins.s7o
             bool pressed = (down && !_oculusTeleportHotkeyWasDown) || pressedSinceLastQuery;
             _oculusTeleportHotkeyWasDown = down;
 
-            // A reward-dialog Space received while Lance is still held is synthetic input
-            // from Auto Gem, not a new mobility command. Immediately release all Pestilence
-            // ownership and remain inert until that already-held Lance key is released.
-            // This is state-based and adds no timed delay to loot pickup or other plugins.
+            // Reward-dialog Space may come from Auto Gem. Yield while that dialog is
+            // present, but do not require releasing Lance after the dialog has closed.
             if (_postBossRewardSpaceHandoffActive)
             {
-                if (lanceHeld)
+                if (lanceHeld && IsCompletedGreaterRiftRewardDialogVisible())
                     return true;
 
                 _postBossRewardSpaceHandoffActive = false;
+                // BeginPostBossRewardSpaceHandoff already released owned input. Resume
+                // targeting with the resolved skill keys; consume this Space sample.
+                if (lanceHeld)
+                    return false;
+
                 ResetRuntime(true);
                 _oculusTeleportHotkeyWasDown = down;
                 return true;
@@ -2367,15 +2409,35 @@ namespace Turbo.Plugins.s7o
                 return true;
             }
 
+            // Coalesce rapid taps into one short-lived request, never an unbounded queue.
+            // Keep attacking while Blood Rush is unavailable; release cancels the request.
+            if (!lanceHeld)
+                _circleTeleportRequestUntilTick = 0;
+            else if (pressed)
+                _circleTeleportRequestUntilTick = tick + CircleTeleportReacquireTicks;
+
             if (_circleTeleportStage != CircleTeleportStage.Idle)
                 return ContinueCircleTeleport(tick, lanceHeld);
 
             // The physical Lance hotkey is the arbiter. A prior sampled Lance frame is
             // not required, so SPACE can be pressed immediately after Lance is held.
-            if (!pressed || !lanceHeld)
+            if (!lanceHeld || _circleTeleportRequestUntilTick == 0)
                 return false;
 
-            return TryBeginCircleTeleport(tick);
+            if (tick > _circleTeleportRequestUntilTick)
+            {
+                _circleTeleportRequestUntilTick = 0;
+                return false;
+            }
+            if (!CanCastBloodRush(ResolveBloodRushSkill()))
+                return false;
+
+            // A transient missing circle/projection must not discard a short tap.
+            // Keep the existing expiry and continue combat until a destination is ready.
+            if (!TryBeginCircleTeleport(tick))
+                return false;
+            _circleTeleportRequestUntilTick = 0;
+            return true;
         }
 
         private void BeginPostBossRewardSpaceHandoff()
@@ -2414,7 +2476,7 @@ namespace Turbo.Plugins.s7o
             IMonster target = GetCircleTeleportTarget(tick);
             IWorldCoordinate destination;
             bool sameCircleRecast;
-            if (!TryPickCircleTeleportPoint(target, out destination, out sameCircleRecast))
+            if (!TryPickCircleTeleportPoint(ref target, out destination, out sameCircleRecast))
                 return false;
 
             IScreenCoordinate screen;
@@ -2453,6 +2515,7 @@ namespace Turbo.Plugins.s7o
 
             _circleTeleportCursorX = screen.X;
             _circleTeleportCursorY = screen.Y;
+            _circleTeleportDestination = destination.Offset(0f, 0f, 0f);
             _circleTeleportSameCircleRecast = sameCircleRecast;
             _circleTeleportTransformObserved = false;
             _circleTeleportRetryCount = 0;
@@ -2480,8 +2543,8 @@ namespace Turbo.Plugins.s7o
 
             if (_circleTeleportStage == CircleTeleportStage.Aiming)
             {
-                // Hold the exact circle center for at least two collections so normal
-                // autosnap cannot reclaim the cursor before Blood Rush is issued.
+                // Reproject the world destination while ownership settles; do not cast
+                // outside the preserved combat target's range.
                 if (!MoveCircleTeleportCursor(tick))
                 {
                     ClearCircleTeleportState();
@@ -2491,6 +2554,13 @@ namespace Turbo.Plugins.s7o
                 if (tick < _circleTeleportAimReadyTick
                     || !IsCursorAtPoint(_circleTeleportCursorX, _circleTeleportCursorY, 9.0f))
                 {
+                    return true;
+                }
+
+                if (!IsCircleDestinationInCombatRange(_circleTeleportDestination,
+                    FindAliveMonsterByAcdId(_circleTeleportTargetAcdId)))
+                {
+                    ResumeCircleTeleportTarget(tick);
                     return true;
                 }
 
@@ -2521,6 +2591,24 @@ namespace Turbo.Plugins.s7o
 
             if (_circleTeleportStage == CircleTeleportStage.WaitingForTeleport)
             {
+                // A confirmed in-place arrival need not hold the circle through the
+                // remaining Transform animation. Keep unconfirmed/travelling casts
+                // on the original path; return before another circle cursor move.
+                if (_circleTeleportSameCircleRecast && _circleTeleportCastAccepted
+                    && !_circleTeleportBloodRushKeyOwned
+                    && tick >= _circleTeleportCastTick + CircleTeleportPostCastMinTicks
+                    && Hud.Game.Me.AnimationState == AcdAnimationState.Transform
+                    && HasCircleTeleportMovement())
+                {
+                    var position = Hud.Game.Me.FloorCoordinate;
+                    if (position != null && _circleTeleportDestination != null
+                        && position.XYDistanceTo(_circleTeleportDestination) <= 0.5f)
+                    {
+                        ResumeCircleTeleportTarget(tick);
+                        return true;
+                    }
+                }
+
                 // Keep the destination fixed until movement is observed or the bounded
                 // cast window expires. This prevents an early elite autosnap from turning
                 // Blood Rush back toward the target.
@@ -2528,15 +2616,17 @@ namespace Turbo.Plugins.s7o
 
                 bool minimumGuardDone = tick >= _circleTeleportCastTick + CircleTeleportPostCastMinTicks;
                 bool moved = minimumGuardDone && HasCircleTeleportMovement();
-                bool sameCircleComplete = _circleTeleportSameCircleRecast
-                    && tick >= _circleTeleportCastTick + CircleTeleportSameCircleGuardTicks;
-                if (!moved && !sameCircleComplete && tick < _circleTeleportTimeoutTick)
+                bool accepted = _circleTeleportCastAccepted || (moved && !_circleTeleportSameCircleRecast);
+                bool transforming = Hud.Game.Me.AnimationState == AcdAnimationState.Transform;
+                // In-place casts require native acceptance too. Never count a timer as
+                // success or snap back while a transform is still moving the player.
+                if ((!accepted || transforming || !minimumGuardDone) && tick < _circleTeleportTimeoutTick)
                     return true;
 
                 // If neither movement nor the native Blood Rush transform was observed,
                 // retry the staged cast once while retaining the same verified destination.
                 // A cast that was accepted and then cancelled is never restarted.
-                if (!moved && !sameCircleComplete && !_circleTeleportTransformObserved &&
+                if (!accepted &&
                     _circleTeleportRetryCount < CircleTeleportMaxCastRetries &&
                     TryRetryCircleTeleportBloodRush(tick))
                 {
@@ -2553,6 +2643,12 @@ namespace Turbo.Plugins.s7o
 
         private bool BeginCircleTeleportBloodRushPress(int tick, bool retry)
         {
+            IPlayerSkill bloodRush = ResolveBloodRushSkill();
+            if (bloodRush == null)
+                return false;
+            _circleTeleportStartCharges = bloodRush.Charges;
+            _circleTeleportStartCooldownTick = bloodRush.CooldownStartTick;
+            _circleTeleportStartWasTransform = Hud.Game.Me.AnimationState == AcdAnimationState.Transform;
             try
             {
                 IWorldCoordinate me = Hud.Game.Me.FloorCoordinate;
@@ -2570,6 +2666,7 @@ namespace Turbo.Plugins.s7o
 
             _circleTeleportBloodRushKeyOwned = true;
             _circleTeleportTransformObserved = false;
+            _circleTeleportCastAccepted = false;
             if (retry)
                 _circleTeleportRetryCount++;
 
@@ -2591,13 +2688,21 @@ namespace Turbo.Plugins.s7o
 
         private void ObserveCircleTeleportAcceptance()
         {
-            if (_circleTeleportTransformObserved)
+            if (_circleTeleportStage != CircleTeleportStage.Casting
+                && _circleTeleportStage != CircleTeleportStage.WaitingForTeleport)
                 return;
 
             try
             {
-                _circleTeleportTransformObserved = Hud.Game.Me != null &&
-                    Hud.Game.Me.AnimationState == AcdAnimationState.Transform;
+                bool transforming = Hud.Game.Me.AnimationState == AcdAnimationState.Transform;
+                if (!transforming)
+                    _circleTeleportStartWasTransform = false;
+                if (transforming && !_circleTeleportStartWasTransform)
+                    _circleTeleportTransformObserved = true;
+                IPlayerSkill skill = Hud.Game.Me.Powers.GetUsedSkill(Hud.Sno.SnoPowers.Necromancer_BloodRush);
+                _circleTeleportCastAccepted |= _circleTeleportTransformObserved || (skill != null
+                    && (skill.Charges < _circleTeleportStartCharges
+                        || (skill.CooldownStartTick > 0 && skill.CooldownStartTick != _circleTeleportStartCooldownTick)));
             }
             catch { }
         }
@@ -2626,11 +2731,25 @@ namespace Turbo.Plugins.s7o
                 && _bloodRushKeyKnown
                 && _bloodRushKey != _lanceKey
                 && _bloodRushKey != _siphonKey
-                && (!bloodRush.IsOnCooldown || bloodRush.Charges > 0);
+                && Hud.Game.Me.AnimationState != AcdAnimationState.Transform
+                // Metabolism can report no cooldown while its charges are empty.
+                // Do not take cursor ownership for a cast the game cannot accept.
+                && (bloodRush.Charges > 0 || (!bloodRush.IsOnCooldown
+                    && !string.Equals(bloodRush.RuneNameEnglish, "Metabolism", StringComparison.OrdinalIgnoreCase)));
         }
 
         private bool MoveCircleTeleportCursor(int tick)
         {
+            if (_circleTeleportDestination != null)
+            {
+                IScreenCoordinate screen;
+                try { screen = _circleTeleportDestination.ToScreenCoordinate(); }
+                catch { return false; }
+                if (!IsValidCircleTeleportScreenPoint(screen))
+                    return false;
+                _circleTeleportCursorX = screen.X;
+                _circleTeleportCursorY = screen.Y;
+            }
             // Blood Rush is a keyboard-cast movement skill. Unlike mouse-cast Siphon,
             // aiming over HUD controls cannot click or activate them.
             if (!IsInsideGameWindow(_circleTeleportCursorX, _circleTeleportCursorY))
@@ -2675,7 +2794,25 @@ namespace Turbo.Plugins.s7o
         private void ResumeCircleTeleportTarget(int tick)
         {
             uint acd = _circleTeleportTargetAcdId;
+            _circleTeleportLastAccepted = _circleTeleportCastAccepted
+                || (_circleTeleportCastTick > 0 && !_circleTeleportSameCircleRecast && HasCircleTeleportMovement());
+            // Motion sampling is suspended during our circle cast. Consume its known
+            // displacement so the next collection does not treat it as manual movement.
+            // Preserve detection of genuine running and of any subsequent displacement.
+            var me = Hud.Game.Me;
+            if (_circleTeleportLastAccepted && me != null && me.AnimationState != AcdAnimationState.Running)
+            {
+                var position = me.FloorCoordinate;
+                if (position != null)
+                {
+                    _lastMeX = position.X;
+                    _lastMeY = position.Y;
+                    _haveLastMePos = true;
+                }
+            }
+            int pendingRequest = _circleTeleportRequestUntilTick;
             ClearCircleTeleportState();
+            _circleTeleportRequestUntilTick = pendingRequest;
 
             IMonster target = FindAliveMonsterByAcdId(acd);
             if (target == null || !target.IsAlive)
@@ -2713,6 +2850,11 @@ namespace Turbo.Plugins.s7o
         private void ClearCircleTeleportState()
         {
             ReleaseCircleTeleportBloodRushKey();
+            _circleTeleportRequestUntilTick = 0;
+            _circleTeleportDestination = null;
+            _circleTeleportCastAccepted = false;
+            _circleTeleportStartWasTransform = false;
+            _circleTeleportStartCharges = _circleTeleportStartCooldownTick = 0;
             _circleTeleportStage = CircleTeleportStage.Idle;
             _circleTeleportAimReadyTick = 0;
             _circleTeleportCastTick = 0;
@@ -2939,6 +3081,12 @@ namespace Turbo.Plugins.s7o
             IMonster target = GetManualJuggerLockTarget();
             if (IsCircleTeleportEliteTarget(target)) return target;
 
+            // A temporary Siphon/minion hover must not replace the active Lance elite.
+            target = FindAliveMonsterByAcdId(_snapPhaseAcdId);
+            if (IsCircleTeleportEliteTarget(target) && (IsLeader(target) || IsBossLike(target))) return target;
+            target = FindAliveMonsterByAcdId(_lockedTargetAcdId);
+            if (IsCircleTeleportEliteTarget(target) && (IsLeader(target) || IsBossLike(target))) return target;
+
             try { target = Hud.Game.SelectedMonster2; } catch { target = null; }
             if (IsCircleTeleportEliteTarget(target)) return target;
 
@@ -2972,10 +3120,13 @@ namespace Turbo.Plugins.s7o
             if (IsLeader(target))
                 return !IsJuggernautPack(target) || GetMonsterAcdId(target) == _manualJuggerLockAcdId;
 
+            if (IsBossLike(target))
+                return RgAutoSnapSiphonAssist;
+
             return IsEliteMinionLike(target);
         }
 
-        private bool TryPickCircleTeleportPoint(IMonster target, out IWorldCoordinate bestPoint, out bool sameCircleRecast)
+        private bool TryPickCircleTeleportPoint(ref IMonster target, out IWorldCoordinate bestPoint, out bool sameCircleRecast)
         {
             bestPoint = null;
             sameCircleRecast = false;
@@ -3000,16 +3151,11 @@ namespace Turbo.Plugins.s7o
                     IWorldCoordinate center = actor.FloorCoordinate;
                     float playerDistance = me.XYDistanceTo(center);
                     bool playerInside = playerDistance <= MobilityCircleRadiusYards + MobilityCircleInsideToleranceYards;
-                    float targetDistance = targetCoordinate != null ? targetCoordinate.XYDistanceTo(center) : -1f;
-
-                    // New destinations use a 16:9-aware directional leash from the
-                    // preserved elite: 60y sideways, 50y vertically, and 70y diagonally.
-                    // A circle already occupied remains eligible for the same-circle BIP recast.
-                    if (targetCoordinate != null && !playerInside
-                        && targetDistance > GetMobilityEliteDistanceLimit(center, targetCoordinate))
-                    {
+                    IMonster combatTarget = ResolveCircleCombatTarget(center, target);
+                    if (targetCoordinate != null && combatTarget == null)
                         continue;
-                    }
+                    IWorldCoordinate combatCoordinate = combatTarget != null ? combatTarget.FloorCoordinate : null;
+                    float targetDistance = combatCoordinate != null ? combatCoordinate.XYDistanceTo(center) : -1f;
 
                     IScreenCoordinate screen;
                     try { screen = center.ToScreenCoordinate(); }
@@ -3017,14 +3163,14 @@ namespace Turbo.Plugins.s7o
                     if (!IsValidCircleTeleportScreenPoint(screen))
                         continue;
 
+                    // Native presence/IsDisabled controls eligibility. Estimated age
+                    // only ranks freshness; it must not reject a still-active circle.
                     float remaining = GetMobilityCircleRemainingSeconds(actor);
-                    if (remaining <= 0f)
-                        continue;
-
                     candidates.Add(new MobilityCircleCandidate
                     {
                         Actor = actor,
                         Center = center,
+                        CombatTarget = combatTarget,
                         Kind = kind,
                         PlayerDistance = playerDistance,
                         TargetDistance = targetDistance,
@@ -3037,6 +3183,17 @@ namespace Turbo.Plugins.s7o
 
             if (candidates.Count <= 0)
                 return false;
+
+            // Prefer retaining the engagement. Alternate nearby elites remain a fallback
+            // only when no in-range circle supports the original target.
+            bool keepsTarget = false;
+            for (int i = 0; i < candidates.Count; i++)
+                if (target != null && SameMonster(candidates[i].CombatTarget, target))
+                    keepsTarget = true;
+            if (keepsTarget)
+                for (int i = candidates.Count - 1; i >= 0; i--)
+                    if (!SameMonster(candidates[i].CombatTarget, target))
+                        candidates.RemoveAt(i);
 
             MobilityCircleCandidate current;
             bool hasCurrent = TryGetCurrentMobilityCircle(candidates, out current);
@@ -3067,7 +3224,77 @@ namespace Turbo.Plugins.s7o
             }
 
             sameCircleRecast = chosen.PlayerInside;
-            return TryBuildCircleTeleportDestination(chosen, targetCoordinate, out bestPoint);
+            if (chosen.CombatTarget != null)
+                target = chosen.CombatTarget;
+            IWorldCoordinate chosenTargetCoordinate = target != null ? target.FloorCoordinate : null;
+            if (!TryBuildCircleTeleportDestination(chosen, chosenTargetCoordinate, out bestPoint))
+                return false;
+            // The in-circle BIP offset must pass the same range gate as its center.
+            if (!IsCircleDestinationInCombatRange(bestPoint, target))
+                bestPoint = chosen.Center;
+            return IsCircleDestinationInCombatRange(bestPoint, target);
+        }
+
+        private bool IsCircleDestinationInCombatRange(IWorldCoordinate point, IMonster target)
+        {
+            if (point == null)
+                return false;
+            if (target == null)
+                return true;
+            if (target.FloorCoordinate == null)
+                return false;
+            return point.XYDistanceTo(target.FloorCoordinate) <= MobilityTargetHardLimitYards;
+        }
+
+        private IMonster ResolveCircleCombatTarget(IWorldCoordinate circle, IMonster preferred)
+        {
+            if (circle == null)
+                return null;
+
+            if (IsCircleTeleportEliteTarget(preferred) && preferred.FloorCoordinate != null)
+            {
+                if (IsCircleDestinationInCombatRange(circle, preferred))
+                    return preferred;
+                if (GetMonsterAcdId(preferred) == _manualJuggerLockAcdId)
+                    return null;
+            }
+
+            IMonster best = null;
+            int bestRank = int.MaxValue;
+            float bestScore = float.MinValue;
+            try
+            {
+                foreach (IMonster monster in Hud.Game.AliveMonsters)
+                {
+                    if (!IsCircleTeleportEliteTarget(monster) || monster.FloorCoordinate == null)
+                        continue;
+
+                    float distance = circle.XYDistanceTo(monster.FloorCoordinate);
+                    if (!IsCircleDestinationInCombatRange(circle, monster))
+                        continue;
+
+                    int rank = IsLeader(monster) ? 0 : 1;
+                    float score = GetMobilityZeiDistanceScore(distance);
+                    if (best == null || rank < bestRank || (rank == bestRank && score > bestScore + 0.10f))
+                    {
+                        best = monster;
+                        bestRank = rank;
+                        bestScore = score;
+                    }
+                }
+            }
+            catch { }
+
+            return best;
+        }
+
+        private float GetMobilityZeiDistanceScore(float distance)
+        {
+            if (distance <= MobilityZeiOptimalDistanceYards)
+                return distance;
+            if (distance <= 60.0f)
+                return MobilityZeiOptimalDistanceYards - (distance - MobilityZeiOptimalDistanceYards) * 0.25f;
+            return 47.5f - (distance - 60.0f) * 1.5f;
         }
 
         private bool TryGetCurrentMobilityCircle(List<MobilityCircleCandidate> candidates, out MobilityCircleCandidate current)
@@ -3160,12 +3387,20 @@ namespace Turbo.Plugins.s7o
 
         private bool IsBetterMobilityCircle(MobilityCircleCandidate candidate, MobilityCircleCandidate current, IWorldCoordinate target)
         {
-            if (target != null)
+            bool candidateHasTarget = candidate.TargetDistance >= 0f;
+            bool currentHasTarget = current.TargetDistance >= 0f;
+            if (candidateHasTarget && currentHasTarget)
             {
-                if (candidate.TargetDistance > current.TargetDistance + 0.10f)
+                float candidateScore = GetMobilityZeiDistanceScore(candidate.TargetDistance);
+                float currentScore = GetMobilityZeiDistanceScore(current.TargetDistance);
+                if (candidateScore > currentScore + 0.10f)
                     return true;
-                if (current.TargetDistance > candidate.TargetDistance + 0.10f)
+                if (currentScore > candidateScore + 0.10f)
                     return false;
+            }
+            else if (candidateHasTarget != currentHasTarget)
+            {
+                return candidateHasTarget;
             }
             else
             {
@@ -3181,38 +3416,6 @@ namespace Turbo.Plugins.s7o
                 return false;
 
             return candidate.PlayerDistance < current.PlayerDistance;
-        }
-
-        private float GetMobilityEliteDistanceLimit(IWorldCoordinate circle, IWorldCoordinate target)
-        {
-            float side = ClampFloat(MobilityEliteSideLimitYards, 1.0f, 200.0f);
-            float vertical = ClampFloat(MobilityEliteVerticalLimitYards, 1.0f, 200.0f);
-            float diagonal = ClampFloat(MobilityEliteDiagonalLimitYards, 1.0f, 200.0f);
-            float configured = PestiPick() + PestilenceTargetRangeLeewayYards;
-
-            try
-            {
-                IScreenCoordinate circleScreen = circle.ToScreenCoordinate();
-                IScreenCoordinate targetScreen = target.ToScreenCoordinate();
-                float width = Math.Max(1.0f, Hud.Window.Size.Width);
-                float height = Math.Max(1.0f, Hud.Window.Size.Height);
-                float x = Math.Abs(circleScreen.X - targetScreen.X) / width;
-                float y = Math.Abs(circleScreen.Y - targetScreen.Y) / height;
-                float sum = x + y;
-                if (sum <= 0.0001f)
-                    return Math.Min(configured, diagonal);
-
-                float horizontalWeight = x / sum;
-                float verticalWeight = y / sum;
-                float diagonalWeight = 1.0f - Math.Abs(horizontalWeight - verticalWeight);
-                float axisLimit = vertical + (side - vertical) * horizontalWeight;
-                float directionalLimit = axisLimit + (diagonal - (side + vertical) * 0.5f) * diagonalWeight;
-                return Math.Min(configured, ClampFloat(directionalLimit, Math.Min(side, vertical), diagonal));
-            }
-            catch
-            {
-                return Math.Min(configured, vertical);
-            }
         }
 
         private bool TryBuildCircleTeleportDestination(MobilityCircleCandidate candidate, IWorldCoordinate target, out IWorldCoordinate destination)
@@ -3516,11 +3719,6 @@ namespace Turbo.Plugins.s7o
 
             if (_reacquireAcdId == acd) { _reacquireAcdId = 0; _reacquireUntilTick = 0; }
             if (_alternateScanAcdId == acd) { _alternateScanAcdId = 0; _alternateScanUntilTick = 0; }
-            if (_leaderPackCoreRetryAcdId == acd)
-            {
-                _leaderPackCoreRetryAcdId = 0;
-                _leaderPackCoreRetryTick = 0;
-            }
             ClearBadHoverState(acd);
             _manualJuggerLockAcdId = 0;
             _manualTargetUntilTick = 0;
@@ -3598,7 +3796,6 @@ namespace Turbo.Plugins.s7o
             _returnToRareAcdId = 0;
             _snapPhaseAcdId = 0;
             _snapPhase = 0;
-            _normalScanPauseUntilTick = 0;
             _stableLockAcdId = 0;
             _stableLockUntilTick = 0;
             _softLockAcdId = 0;
@@ -4592,7 +4789,6 @@ namespace Turbo.Plugins.s7o
             return best;
         }
 
-
         #endregion
 
         private void UpdatePlayerMotionState(int tick)
@@ -4650,7 +4846,6 @@ namespace Turbo.Plugins.s7o
             _reacquireAcdId = acd;
             _reacquireUntilTick = Math.Max(_reacquireUntilTick, tick + PostTeleportForceSnapTicks);
             _lastMouseMoveTick = 0;
-            _normalScanPauseUntilTick = 0;
             _snapPhaseAcdId = acd;
             _snapPhase = 0;
             _alternateScanAcdId = 0;
@@ -4708,15 +4903,26 @@ namespace Turbo.Plugins.s7o
             float pointX = x;
             float pointY = y;
 
-            if (_verifiedHoverAcdId == acd && _verifiedHoverHasTargetAnchor)
+            if (_verifiedHoverAcdId == acd
+                && TryProjectVerifiedHoverPoint(target, x, y, out pointX, out pointY))
             {
-                pointX = x + (_verifiedHoverScreenX - _verifiedHoverTargetScreenX);
-                pointY = y + (_verifiedHoverScreenY - _verifiedHoverTargetScreenY);
+                // Reuse the same normalized body point after world/camera movement.
             }
             else if (_cachedHoverAcdId == acd)
             {
-                pointX = x + _cachedHoverDx;
-                pointY = y + _cachedHoverDy;
+                ProbeGeometry geometry;
+                float dx, dy;
+                if (TryBuildProbeGeometry(target, x, y, out geometry)
+                    && TryGetCachedHoverOffset(acd, geometry, tick, out dx, out dy))
+                {
+                    pointX = x + dx;
+                    pointY = y + dy;
+                }
+                else
+                {
+                    pointX = x + _cachedHoverDx;
+                    pointY = y + _cachedHoverDy;
+                }
             }
             else if (_stableLockAcdId == acd)
             {
@@ -4725,14 +4931,10 @@ namespace Turbo.Plugins.s7o
             }
             else
             {
-                ProbeGeometry geometry;
-                float dx, dy;
-                if (TryBuildProbeGeometry(target, x, y, out geometry))
+                if (!TryGetNativeCorePoint(target, out pointX, out pointY))
                 {
-                    // Match the normal focused scan: try the lower core / near-feet point first.
-                    GetBodyProbeOffset(geometry, 0.88f, 0f, out dx, out dy);
-                    pointX = x + dx;
-                    pointY = y + dy;
+                    pointX = x;
+                    pointY = y;
                 }
             }
 
@@ -4925,7 +5127,13 @@ namespace Turbo.Plugins.s7o
                 uint acd = hovered.AcdId;
                 if (_lastPassiveHoverCaptureTick == tick && _lastPassiveHoverCaptureAcdId == acd)
                     return;
-                if (IsPostTeleportSelectionStale(acd, tick))
+                if (IsPostTeleportSelectionStale(acd, tick) || _lastPluginCursorMoveTick >= tick)
+                    return;
+                // Keep the confirmed body anchor while autosnap owns it. Relearning
+                // cursor-minus-target every collection absorbs movement into the offset.
+                if (_lanceWasDown && AutoSnapEnabled && (_cursorOwned || _snapPhaseAcdId == acd) && !_pulseActive
+                    && _verifiedHoverAcdId == acd && tick <= _verifiedHoverUntilTick
+                    && !IsManualCursorOverrideActive(tick))
                     return;
                 if (!IsOpportunisticHoverPriorityAllowed(hovered, tick))
                     return;
@@ -5805,7 +6013,6 @@ namespace Turbo.Plugins.s7o
             return score;
         }
 
-
         #endregion
 
         #region Aiming
@@ -6029,15 +6236,10 @@ namespace Turbo.Plugins.s7o
 
             TrackCursorRestoreTargetSegment(monster, tick);
 
-            bool forcedSnap = acd == _forcedSnapAcdId && tick < _forcedSnapUntilTick;
-
             if (_snapPhaseAcdId != acd)
             {
                 _snapPhaseAcdId = acd;
                 _snapPhase = 0;
-                _normalScanPauseUntilTick = 0;
-                _leaderPackCoreRetryAcdId = 0;
-                _leaderPackCoreRetryTick = 0;
                 ResetRecentProbePoints();
             }
 
@@ -6054,8 +6256,6 @@ namespace Turbo.Plugins.s7o
             IMonster selectionForHover = postTeleportSelectionStale ? null : selected;
             bool selectedTargetSame = IsSameAcd(selectionForHover, acd);
             bool selectedSame = eliteLike && selectedTargetSame;
-            bool samePackLeaderOcclusion = IsSamePackLeaderOcclusion(monster, selectionForHover);
-            EvaluatePreviousProbeOutcome(monster, selectionForHover, acd, tick);
 
             if (eliteLike)
             {
@@ -6079,21 +6279,10 @@ namespace Turbo.Plugins.s7o
                 }
             }
 
-            int minTicks;
-            if (forcedSnap)
-                minTicks = 0;
-            else if (selectedSame || _stableLockAcdId == acd || _cachedHoverAcdId == acd)
-                minTicks = 1;
-            else if (AggressiveScanMode)
-                minTicks = 1;
-            else if (reacquireQuick || alternateScan)
-                minTicks = Math.Max(2, NormalScanProbeIntervalTicks - 1);
-            else
-                minTicks = Math.Max(MinTicksBetweenMouseMoves, NormalScanProbeIntervalTicks);
-            if (!forcedSnap && (_pulseActive || tick < _siphonAssistUntilTick) && !selectedSame && _stableLockAcdId != acd && _cachedHoverAcdId != acd)
-                minTicks = Math.Max(1, minTicks + 1);
-
-            if (!forcedSnap && _lastMouseMoveTick > 0 && tick - _lastMouseMoveTick < minTicks)
+            // One cursor decision per fresh native game tick, including forced snaps.
+            // Collection snapshots cannot acknowledge another move made in this tick.
+            if (_lastPluginCursorMoveTick >= tick
+                || (_lastMouseMoveTick > 0 && tick - _lastMouseMoveTick < MinTicksBetweenMouseMoves))
                 return;
 
             float x, y;
@@ -6102,7 +6291,10 @@ namespace Turbo.Plugins.s7o
 
             bool cheapFarTarget = SafeDistance(monster) > PestiPick() + 2f && !SafeIsOnScreen(monster);
 
-            if (postTeleportSelectionStale && TryMovePostTeleportReacquire(monster, x, y, acd, tick))
+            // Hold the issued reacquire point while native selection settles. Another
+            // move here would restart IsPostTeleportSelectionStale's settling window.
+            if (postTeleportSelectionStale
+                && (TryMovePostTeleportReacquire(monster, x, y, acd, tick) || _postTeleportReacquireMoveTick > 0))
                 return;
 
             if (!selectedSame && TryAcceptAdjacentEligibleHover(monster, selectionForHover, tick))
@@ -6110,6 +6302,17 @@ namespace Turbo.Plugins.s7o
 
             if (selectedSame)
             {
+                CompletePostTeleportReacquire(acd);
+                if (_pendingPulseHoverAcdId == acd)
+                    ClearPendingPulseHover();
+                if (_verifiedHoverAcdId != acd || tick > _verifiedHoverUntilTick)
+                    RememberVerifiedHoverPoint(acd, Hud.Window.CursorX, Hud.Window.CursorY, tick);
+                if (TryTrackVerifiedHoverPoint(monster, x, y, acd, tick))
+                {
+                    _snapPhase = 0;
+                    return;
+                }
+
                 float cursorX = Hud.Window.CursorX;
                 float cursorY = Hud.Window.CursorY;
                 float currentDx = cursorX - x;
@@ -6120,7 +6323,7 @@ namespace Turbo.Plugins.s7o
                     currentDy = _lastHoverDy;
                 }
 
-                // SelectedMonster2 confirms the current cursor point; do not move again this collection.
+                // Initial/manual native confirmation when no reusable body anchor exists.
                 RegisterHoverSuccess(acd, tick, currentDx, currentDy, _lastSnapAttemptBin);
                 RememberVerifiedHoverPoint(acd, cursorX, cursorY, tick);
                 CompletePostTeleportReacquire(acd);
@@ -6131,14 +6334,12 @@ namespace Turbo.Plugins.s7o
             }
 
             bool badRecentHover = IsBadRecentHover(acd, selectionForHover, tick);
-            int badHoverInvalidateTicks = leaderLike
-                ? LeaderBadHoverInvalidateTicks
-                : BadHoverInvalidateTicks;
+            int badHoverInvalidateTicks = BadHoverInvalidateTicks;
             if (badRecentHover)
             {
                 RegisterBadHover(acd, tick);
-                if (_badHoverAcdId == acd && _badHoverCount >= badHoverInvalidateTicks)
-                    InvalidateHoverPoint(acd, true);
+                if (_badHoverAcdId == acd && _badHoverCount == badHoverInvalidateTicks)
+                    InvalidateHoverPoint(acd);
             }
             else
             {
@@ -6188,39 +6389,14 @@ namespace Turbo.Plugins.s7o
                 && TryMoveCachedHover(acd, x, y, tick, false))
                 return;
 
-            // Dense packs can temporarily place a same-pack minion over the leader's selectable
-            // lower core. Recheck that high-probability point periodically instead of excluding it
-            // for the full normal-mode recent-point window.
-            if (!AggressiveScanMode && samePackLeaderOcclusion
-                && TryMoveLeaderPackCoreRetry(monster, x, y, acd, tick))
-                return;
-
-            if (!AggressiveScanMode && tick < _normalScanPauseUntilTick)
-            {
-                if (leaderLike)
-                {
-                    if (_lastSnapAttemptTick > 0 && tick - _lastSnapAttemptTick < LeaderNormalReprobeTicks)
-                        return;
-                    _normalScanPauseUntilTick = 0;
-                }
-                else if (TryMoveNormalScanRestPoint(monster, x, y, acd, tick))
-                {
-                    return;
-                }
-            }
-
-            BuildAdaptiveProbeOrder(monster, x, y, cheapFarTarget, alternateScan, reacquireQuick, tick);
+            BuildAdaptiveProbeOrder(monster, x, y, cheapFarTarget, alternateScan, tick);
 
             int maxProbes = _rankedProbeCount;
             if (maxProbes <= 0)
             {
-                // Never park a leader on an unverified native anchor. Wait briefly and rebuild geometry.
+                // Rebuild unavailable geometry next collection; do not park a leader.
                 if (leaderLike)
-                {
-                    if (!AggressiveScanMode)
-                        _normalScanPauseUntilTick = Math.Max(_normalScanPauseUntilTick, tick + LeaderNormalReprobeTicks);
                     return;
-                }
 
                 if (SafeMouseMove(x, y, tick))
                 {
@@ -6258,41 +6434,32 @@ namespace Turbo.Plugins.s7o
 
                 int bin = _rankedProbeBin[idx];
                 int zone = _rankedProbeZone[idx];
-                _lastHoverDx = dx;
-                _lastHoverDy = dy;
-                _lastSnapAttemptAcd = acd;
-                _lastSnapAttemptBin = bin;
-                _lastSnapAttemptZone = zone;
-                _lastSnapAttemptTick = tick;
-                RecordProbeZoneAttempt(acd, zone, tick);
-                RecordRecentProbePoint(px, py, tick);
-
                 if (SafeMouseMove(px, py, tick))
                 {
+                    _lastHoverDx = dx;
+                    _lastHoverDy = dy;
+                    _lastSnapAttemptAcd = acd;
+                    _lastSnapAttemptBin = bin;
+                    _lastSnapAttemptZone = zone;
+                    _lastSnapAttemptTick = tick;
+                    RecordRecentProbePoint(px, py, tick);
                     _lastMouseMoveTick = tick;
                     _snapPhase = idx + 1;
                     if (_snapPhase >= maxProbes)
                     {
                         _snapPhase = 0;
-                        if (!AggressiveScanMode && !alternateScan && !reacquireQuick)
-                            _normalScanPauseUntilTick = tick + NormalScanCyclePauseTicks;
+                        _probeSweepPass = (_probeSweepPass + 1) % 4;
+                        _alternateScanAcdId = acd;
+                        _alternateScanUntilTick = tick + AlternateScanWindowTicks;
                     }
                     return;
                 }
             }
 
-            if (AggressiveScanMode || reacquireQuick || forcedSnap)
-            {
-                _alternateScanAcdId = acd;
-                _alternateScanUntilTick = tick + AlternateScanWindowTicks;
-            }
-            else
-            {
-                _alternateScanAcdId = 0;
-                _alternateScanUntilTick = 0;
-                _normalScanPauseUntilTick = tick + NormalScanCyclePauseTicks;
-            }
+            _alternateScanAcdId = acd;
+            _alternateScanUntilTick = tick + AlternateScanWindowTicks;
             _snapPhase = 0;
+            _probeSweepPass = (_probeSweepPass + 1) % 4;
 
             // A probe miss changes scan order; it does not invalidate the target.
             if (_lockedTargetAcdId == acd && !IsActuallySelectedTarget(acd) && _manualJuggerLockAcdId != acd)
@@ -6300,36 +6467,6 @@ namespace Turbo.Plugins.s7o
                 _lockedTargetAcdId = 0;
                 _lockedTargetKeepUntilTick = 0;
             }
-        }
-
-        private bool TryMoveNormalScanRestPoint(IMonster monster, float x, float y, uint acd, int tick)
-        {
-            ProbeGeometry geometry;
-            if (!TryBuildProbeGeometry(monster, x, y, out geometry))
-                return false;
-
-            float dx, dy;
-            GetBodyProbeOffset(geometry, 0.40f, 0f, out dx, out dy);
-            float px = x + dx;
-            float py = y + dy;
-            if (!IsAutoSnapHoverPoint(px, py))
-                return false;
-
-            if (IsCursorAtPoint(px, py, CursorNoOpTolerancePxSq))
-                return true;
-
-            _lastHoverDx = dx;
-            _lastHoverDy = dy;
-            _lastSnapAttemptAcd = acd;
-            _lastSnapAttemptBin = 1;
-            _lastSnapAttemptZone = GetProbeZone(monster, dx, dy);
-            _lastSnapAttemptTick = tick;
-
-            if (!SafeMouseMove(px, py, tick))
-                return false;
-
-            _lastMouseMoveTick = tick;
-            return true;
         }
 
         private float ClampFloat(float value, float min, float max)
@@ -6342,59 +6479,6 @@ namespace Turbo.Plugins.s7o
         private bool IsSameAcd(IMonster monster, uint acd)
         {
             return IsAliveTarget(monster) && GetMonsterAcdId(monster) == acd;
-        }
-
-        private bool IsSamePackLeaderOcclusion(IMonster leader, IMonster hovered)
-        {
-            if (!IsAliveTarget(leader) || !IsLeader(leader)
-                || !IsAliveTarget(hovered) || !IsEliteMinionLike(hovered))
-                return false;
-
-            object pack = GetPackObject(leader);
-            return pack != null && SamePack(hovered, pack);
-        }
-
-        private bool TryMoveLeaderPackCoreRetry(IMonster leader, float x, float y, uint acd, int tick)
-        {
-            if (acd == 0 || !IsLeader(leader))
-                return false;
-
-            if (_leaderPackCoreRetryAcdId != acd)
-            {
-                _leaderPackCoreRetryAcdId = acd;
-                _leaderPackCoreRetryTick = 0;
-            }
-
-            if (_leaderPackCoreRetryTick > 0
-                && tick - _leaderPackCoreRetryTick < LeaderPackCoreRetryTicks)
-                return false;
-
-            ProbeGeometry geometry;
-            if (!TryBuildProbeGeometry(leader, x, y, out geometry))
-                return false;
-
-            float dx, dy;
-            GetBodyProbeOffset(geometry, 0.40f, 0f, out dx, out dy);
-            float px = x + dx;
-            float py = y + dy;
-            if (!IsAutoSnapHoverPoint(px, py))
-                return false;
-
-            _leaderPackCoreRetryTick = tick;
-            _lastHoverDx = dx;
-            _lastHoverDy = dy;
-            _lastSnapAttemptAcd = acd;
-            _lastSnapAttemptBin = BodyProbeBin(0.40f, false);
-            _lastSnapAttemptZone = GetProbeZone(leader, dx, dy);
-            _lastSnapAttemptTick = tick;
-            RecordProbeZoneAttempt(acd, _lastSnapAttemptZone, tick);
-            RecordRecentProbePoint(px, py, tick);
-
-            if (!SafeMouseMove(px, py, tick))
-                return false;
-
-            _lastMouseMoveTick = tick;
-            return true;
         }
 
         private bool IsBadRecentHover(uint acd, IMonster selected, int tick)
@@ -6465,21 +6549,21 @@ namespace Turbo.Plugins.s7o
             }
         }
 
-        private void InvalidateHoverPoint(uint acd, bool advanceProbe)
+        private void InvalidateHoverPoint(uint acd)
         {
             if (_verifiedHoverAcdId == acd)
                 ClearVerifiedHoverPoint();
             if (_stableLockAcdId == acd) { _stableLockAcdId = 0; _stableLockUntilTick = 0; }
             if (_softLockAcdId == acd) { _softLockAcdId = 0; _softLockUntilTick = 0; }
-            if (_cachedHoverAcdId == acd) ClearCachedHoverPoint();
-            if (_lastSnapAttemptAcd == acd && _lastSnapAttemptBin >= 0 && _lastSnapAttemptBin < AdaptiveBinCount)
-                _adaptiveBinBad[_lastSnapAttemptBin] = Math.Min(20f, _adaptiveBinBad[_lastSnapAttemptBin] + 0.65f);
-            if (advanceProbe && _snapPhaseAcdId == acd)
-                _snapPhase = (_snapPhase + 1) % Math.Max(1, _rankedProbeCount);
+            // Retain the last good normalized point for the ordered fallback sweep,
+            // but stop retrying it directly. Only an issued probe advances the sweep.
+            if (_cachedHoverAcdId == acd)
+                _cachedHoverTryUntilTick = 0;
         }
 
         private void RegisterHoverSuccess(uint acd, int tick, float dx, float dy, int bin)
         {
+            _probeSweepPass = 0;
             LearnHoverProfile(FindAliveMonsterByAcdId(acd), dx, dy);
             _lastHoverAcdId = acd;
             _lastHoverTick = tick;
@@ -6493,77 +6577,93 @@ namespace Turbo.Plugins.s7o
             _softLockDy = dy;
             _softLockUntilTick = tick + SoftLockTicks;
 
-            if (bin >= 0 && bin < AdaptiveBinCount)
-            {
-                _adaptiveBinGood[bin] = Math.Min(20f, _adaptiveBinGood[bin] + 1.0f);
-                _adaptiveBinBad[bin] = Math.Max(0f, _adaptiveBinBad[bin] - 0.25f);
-            }
-
-            if (_lastSnapAttemptAcd == acd && _lastSnapAttemptZone >= 0)
-                RecordProbeZoneSuccess(acd, _lastSnapAttemptZone, tick);
-
             if (_reacquireAcdId == acd) { _reacquireAcdId = 0; _reacquireUntilTick = 0; }
             if (_circleReengageAcdId == acd) ClearCircleReengageSnapshot();
             if (_alternateScanAcdId == acd) { _alternateScanAcdId = 0; _alternateScanUntilTick = 0; }
-            if (_leaderPackCoreRetryAcdId == acd)
-            {
-                _leaderPackCoreRetryAcdId = 0;
-                _leaderPackCoreRetryTick = 0;
-            }
         }
 
-        private void BuildAdaptiveProbeOrder(IMonster monster, float fx, float fy, bool cheapFarTarget, bool alternateScan, bool reacquireQuick, int tick)
+        private void BuildAdaptiveProbeOrder(IMonster monster, float fx, float fy, bool cheapFarTarget, bool alternateScan, int tick)
         {
             _rankedProbeCount = 0;
+            uint acd = GetMonsterAcdId(monster);
+            if (_probeHistoryAcdId != acd)
+            {
+                ResetRecentProbePoints();
+                _probeHistoryAcdId = acd;
+                _snapPhase = 0;
+            }
 
             ProbeGeometry geometry;
             if (!TryBuildProbeGeometry(monster, fx, fy, out geometry))
             {
+                _probeBodyDy = 0f;
                 AddRankedProbeCandidate(0f, 0f, 0, monster, fx, fy, cheapFarTarget);
                 return;
             }
+            _probeOriginX = fx;
+            _probeOriginY = fy;
+            _probeBodyDx = geometry.BodyDx;
+            _probeBodyDy = geometry.BodyDy;
+            _probeRadiusX = geometry.RadiusX;
 
-            EnsureAdaptiveModelState(monster);
-            uint acd = GetMonsterAcdId(monster);
-            bool leaderRecovery = (IsLeader(monster) || IsBossLike(monster))
-                && (reacquireQuick || alternateScan
-                    || (_lastHoverAcdId == acd && tick - _lastHoverTick <= HoverTruthRecentTicks));
-
-            BuildSolverBlockerProfile(monster, fx, fy, geometry, tick);
-            float left = _solverOccLeft + _solverBigLeft * 1.05f;
-            float right = _solverOccRight + _solverBigRight * 1.05f;
-            float up = _solverOccUp + _solverBigUp * 1.05f;
-            float down = _solverOccDown + _solverBigDown * 1.05f;
-            float cleanSide = left <= right ? -1f : 1f;
-            float cleanVertical = up <= down ? -1f : 1f;
-
-            float trackedDx, trackedDy;
-            bool haveTrackedPoint = TryGetCachedHoverOffset(acd, geometry, tick, out trackedDx, out trackedDy)
-                || TryGetLearnedHoverOffset(monster, geometry, out trackedDx, out trackedDy);
-            if (haveTrackedPoint)
-                AddPrecisionReacquireBurst(geometry, trackedDx, trackedDy, cleanSide, cleanVertical, monster, fx, fy, cheapFarTarget);
-            else
-                AddFocusedProbeSweep(geometry, cleanSide, cleanVertical, monster, fx, fy, cheapFarTarget);
-            int focusedPrefixCount = _rankedProbeCount;
-
-            // The established broad sweep remains the fallback after the tracked,
-            // low-overlap core, and upper-body probes.
-            AddBarcodeProbeSweep(geometry, cleanSide, monster, fx, fy, cheapFarTarget);
-
-            if (AggressiveScanMode || alternateScan)
+            // Keep order fixed for this sweep; refresh positions from native geometry.
+            // Density work runs once per sweep, not on every individual probe.
+            if (_snapPhase == 0)
             {
-                AddBodyProbeCandidate(geometry, 1.05f, 0f, 6, monster, fx, fy, cheapFarTarget);
-                AddBodyProbeCandidate(geometry, -1.10f, 0f, 6, monster, fx, fy, cheapFarTarget);
-                AddBodyProbeCandidate(geometry, 0.55f, cleanSide * 1.15f, 6, monster, fx, fy, cheapFarTarget);
-                AddBodyProbeCandidate(geometry, 0.10f, cleanSide * 1.15f, 6, monster, fx, fy, cheapFarTarget);
-                AddBodyProbeCandidate(geometry, -0.45f, cleanSide * 1.15f, 6, monster, fx, fy, cheapFarTarget);
-                AddBodyProbeCandidate(geometry, 0.55f, -cleanSide * 1.15f, 6, monster, fx, fy, cheapFarTarget);
-                AddBodyProbeCandidate(geometry, 0.10f, -cleanSide * 1.15f, 6, monster, fx, fy, cheapFarTarget);
-                AddBodyProbeCandidate(geometry, -0.45f, -cleanSide * 1.15f, 6, monster, fx, fy, cheapFarTarget);
+                BuildSolverBlockerProfile(monster, fx, fy, geometry, tick);
+                float left = _solverOccLeft + _solverBigLeft * 1.05f;
+                float right = _solverOccRight + _solverBigRight * 1.05f;
+                _probeSweepSide = _solverUpperLeftRisk == _solverUpperRightRisk
+                    ? (left <= right ? -1f : 1f)
+                    : (_solverUpperLeftRisk < _solverUpperRightRisk ? -1f : 1f);
+                _probeSweepVertical = _solverOccUp <= _solverOccDown ? -1f : 1f;
+                _probeSweepUpperFirst = _solverCoreRisk >
+                    Math.Min(_solverUpperLeftRisk, _solverUpperRightRisk);
+                _probeSweepExpanded = alternateScan;
             }
 
-            if (AggressiveScanMode || leaderRecovery)
-                RankAdaptiveProbeCandidates(acd, tick, focusedPrefixCount);
+            float side = _probeSweepSide;
+            float coreX, coreY;
+            bool haveCore = TryGetNativeCorePoint(monster, out coreX, out coreY);
+            float trackedDx, trackedDy;
+            bool haveTracked = TryGetCachedHoverOffset(acd, geometry, tick, out trackedDx, out trackedDy)
+                || TryGetLearnedHoverOffset(monster, geometry, out trackedDx, out trackedDy);
+
+            // Spread the first probes across distinct regions. A remembered model
+            // point gets one early try, not five neighboring tries before coverage.
+            if (!_probeSweepUpperFirst)
+            {
+                if (haveCore)
+                    AddRankedProbeCandidate(coreX - fx, coreY - fy, 0, monster, fx, fy, cheapFarTarget);
+                AddRankedProbeCandidate(0f, 0f, 0, monster, fx, fy, cheapFarTarget);
+            }
+            if (haveTracked)
+                AddRankedProbeCandidate(trackedDx, trackedDy, 7, monster, fx, fy, cheapFarTarget);
+            AddBodyProbeCandidate(geometry, UpperProbeBodyRatio, side * UpperProbeSideRatio, 5, monster, fx, fy, cheapFarTarget);
+            AddBodyProbeCandidate(geometry, UpperProbeBodyRatio, -side * UpperProbeSideRatio, 5, monster, fx, fy, cheapFarTarget);
+            AddBodyProbeCandidate(geometry, 0.16f, 0f, 1, monster, fx, fy, cheapFarTarget);
+            if (_probeSweepUpperFirst)
+            {
+                AddRankedProbeCandidate(0f, 0f, 0, monster, fx, fy, cheapFarTarget);
+                if (haveCore)
+                    AddRankedProbeCandidate(coreX - fx, coreY - fy, 0, monster, fx, fy, cheapFarTarget);
+            }
+
+            AddBarcodeProbeSweep(geometry, side, monster, fx, fy, cheapFarTarget);
+            // Keep the legacy broad fallback once per cycle; later passes fill gaps.
+            if (_probeSweepExpanded && _probeSweepPass == 1)
+            {
+                if (haveTracked)
+                    AddPrecisionReacquireBurst(geometry, trackedDx, trackedDy, side, _probeSweepVertical, monster, fx, fy, cheapFarTarget);
+                AddBodyProbeCandidate(geometry, 1.05f, 0f, 6, monster, fx, fy, cheapFarTarget);
+                AddBodyProbeCandidate(geometry, -1.10f, 0f, 6, monster, fx, fy, cheapFarTarget);
+                for (int i = 0; i < 3; i++)
+                {
+                    float level = 0.55f - i * 0.50f;
+                    AddBodyProbeCandidate(geometry, level, side * 1.15f, 6, monster, fx, fy, cheapFarTarget);
+                    AddBodyProbeCandidate(geometry, level, -side * 1.15f, 6, monster, fx, fy, cheapFarTarget);
+                }
+            }
         }
 
         private bool TryGetCachedHoverOffset(uint acd, ProbeGeometry geometry, int tick, out float dx, out float dy)
@@ -6602,48 +6702,24 @@ namespace Turbo.Plugins.s7o
             AddRankedProbeCandidate(dx - cleanSide * microX, dy, 7, monster, fx, fy, cheapFarTarget);
         }
 
-        private void AddFocusedProbeSweep(ProbeGeometry geometry, float cleanSide, float cleanVertical, IMonster monster, float fx, float fy, bool cheapFarTarget)
-        {
-            AddBodyProbeCandidate(geometry, 0.88f, 0f, 0, monster, fx, fy, cheapFarTarget);
-            if (IsBossLike(monster))
-            {
-                AddBodyProbeCandidate(geometry, -0.80f, 0f, 3, monster, fx, fy, cheapFarTarget);
-                AddBodyProbeCandidate(geometry, 0.64f, cleanSide * 0.58f, 4, monster, fx, fy, cheapFarTarget);
-                AddBodyProbeCandidate(geometry, -0.56f, cleanSide * 0.58f, 5, monster, fx, fy, cheapFarTarget);
-                AddBodyProbeCandidate(geometry, 0.40f, 0f, 1, monster, fx, fy, cheapFarTarget);
-                return;
-            }
-
-            if (cleanVertical < 0f)
-            {
-                AddBodyProbeCandidate(geometry, 0.16f, cleanSide * 0.58f, 4, monster, fx, fy, cheapFarTarget);
-                AddBodyProbeCandidate(geometry, 0.40f, 0f, 1, monster, fx, fy, cheapFarTarget);
-                AddBodyProbeCandidate(geometry, -0.56f, cleanSide * 0.58f, 5, monster, fx, fy, cheapFarTarget);
-                AddBodyProbeCandidate(geometry, 0.64f, cleanSide * 0.58f, 4, monster, fx, fy, cheapFarTarget);
-            }
-            else
-            {
-                AddBodyProbeCandidate(geometry, 0.64f, cleanSide * 0.58f, 4, monster, fx, fy, cheapFarTarget);
-                AddBodyProbeCandidate(geometry, 0.16f, cleanSide * 0.58f, 4, monster, fx, fy, cheapFarTarget);
-                AddBodyProbeCandidate(geometry, 0.40f, 0f, 1, monster, fx, fy, cheapFarTarget);
-                AddBodyProbeCandidate(geometry, -0.80f, 0f, 3, monster, fx, fy, cheapFarTarget);
-            }
-        }
-
         private void AddBarcodeProbeSweep(ProbeGeometry geometry, float cleanSide, IMonster monster, float fx, float fy, bool cheapFarTarget)
         {
-            float[] levels = { 0.88f, 0.64f, 0.40f, 0.16f, -0.08f, -0.32f, -0.56f, -0.80f };
-
-            // Center column moves smoothly from the projected feet toward the upper model.
-            for (int i = 0; i < levels.Length; i++)
-                AddBodyProbeCandidate(geometry, levels[i], 0f, BodyProbeBin(levels[i], false), monster, fx, fy, cheapFarTarget);
-
-            // Return down the cleaner side, then rise on the opposite side.
-            for (int i = levels.Length - 1; i >= 0; i--)
-                AddBodyProbeCandidate(geometry, levels[i], cleanSide * 0.58f, BodyProbeBin(levels[i], true), monster, fx, fy, cheapFarTarget);
-
-            for (int i = 0; i < levels.Length; i++)
-                AddBodyProbeCandidate(geometry, levels[i], -cleanSide * 0.58f, BodyProbeBin(levels[i], true), monster, fx, fy, cheapFarTarget);
+            // Visit different heights and columns before returning to nearby points.
+            // Four bounded passes interleave half-grid gaps; native confirmation resets them.
+            float heightShift = (_probeSweepPass & 1) == 0 ? 0f : 0.12f;
+            int columns = _probeSweepPass < 2 ? 3 : 4;
+            for (int column = 0; column < columns; column++)
+            {
+                for (int i = 0; i < BodyProbeLevels.Length; i++)
+                {
+                    int lane = (column + i) % columns;
+                    float level = BodyProbeLevels[i] + heightShift;
+                    float side = columns == 3
+                        ? (lane == 0 ? cleanSide * 0.58f : lane == 1 ? 0f : -cleanSide * 0.58f)
+                        : cleanSide * ((lane & 1) == 0 ? 1f : -1f) * (0.29f + (lane / 2) * 0.58f);
+                    AddBodyProbeCandidate(geometry, level, side, BodyProbeBin(level, Math.Abs(side) > 0.01f), monster, fx, fy, cheapFarTarget);
+                }
+            }
         }
 
         private int BodyProbeBin(float bodyRatio, bool side)
@@ -6692,68 +6768,7 @@ namespace Turbo.Plugins.s7o
             _rankedProbeDy[_rankedProbeCount] = dy;
             _rankedProbeBin[_rankedProbeCount] = safeBin;
             _rankedProbeZone[_rankedProbeCount] = zone;
-            _rankedProbeScore[_rankedProbeCount] = 0f;
             _rankedProbeCount++;
-        }
-
-
-        private void RankAdaptiveProbeCandidates(uint acd, int tick, int fixedPrefixCount)
-        {
-            for (int i = 0; i < _rankedProbeCount; i++)
-            {
-                int bin = _rankedProbeBin[i];
-                int zone = _rankedProbeZone[i];
-                float score = (_rankedProbeCount - i) * 0.012f;
-                score += GetProbeZoneCoverageBonus(acd, zone, tick) * 1.45f;
-                score += _adaptiveBinGood[bin] * 0.16f;
-                score -= _adaptiveBinBad[bin] * 0.24f;
-
-                if (_lastSnapAttemptAcd == acd && zone == _lastSnapAttemptZone)
-                {
-                    int age = _lastSnapAttemptTick > 0 ? tick - _lastSnapAttemptTick : int.MaxValue;
-                    if (age <= 2) score -= 3.0f;
-                    else if (age <= 6) score -= 1.35f;
-                }
-
-                _rankedProbeScore[i] = score;
-            }
-
-            int prefix = Math.Max(0, Math.Min(fixedPrefixCount, _rankedProbeCount));
-            for (int i = Math.Max(1, prefix + 1); i < _rankedProbeCount; i++)
-            {
-                int j = i;
-                while (j > prefix && _rankedProbeScore[j] > _rankedProbeScore[j - 1])
-                {
-                    SwapRankedProbeCandidates(j, j - 1);
-                    j--;
-                }
-            }
-        }
-
-        private void SwapRankedProbeCandidates(int a, int b)
-        {
-            float f = _rankedProbeDx[a]; _rankedProbeDx[a] = _rankedProbeDx[b]; _rankedProbeDx[b] = f;
-            f = _rankedProbeDy[a]; _rankedProbeDy[a] = _rankedProbeDy[b]; _rankedProbeDy[b] = f;
-            f = _rankedProbeScore[a]; _rankedProbeScore[a] = _rankedProbeScore[b]; _rankedProbeScore[b] = f;
-
-            int n = _rankedProbeBin[a]; _rankedProbeBin[a] = _rankedProbeBin[b]; _rankedProbeBin[b] = n;
-            n = _rankedProbeZone[a]; _rankedProbeZone[a] = _rankedProbeZone[b]; _rankedProbeZone[b] = n;
-        }
-
-        private void EvaluatePreviousProbeOutcome(IMonster requested, IMonster selected, uint acd, int tick)
-        {
-            if (_lastSnapAttemptTick <= 0 || tick <= _lastSnapAttemptTick
-                || _lastEvaluatedProbeTick == _lastSnapAttemptTick)
-                return;
-
-            _lastEvaluatedProbeTick = _lastSnapAttemptTick;
-            if (_lastSnapAttemptAcd != acd || IsSameAcd(selected, acd))
-                return;
-
-            if (IsAdjacentEligibleHover(requested, selected, tick))
-                return;
-
-            RecordAdaptiveAttempt(_lastSnapAttemptBin);
         }
 
         private bool TryAcceptAdjacentEligibleHover(IMonster requested, IMonster hovered, int tick)
@@ -6843,6 +6858,7 @@ namespace Turbo.Plugins.s7o
             _solverBlockerCx = _solverBlockerCy = 0f;
             _solverBlockerWeightTotal = 0f;
             _solverBlockerCount = 0;
+            _solverCoreRisk = _solverUpperLeftRisk = _solverUpperRightRisk = 0f;
 
             if (target == null || targetAcd == 0)
                 return;
@@ -6857,6 +6873,16 @@ namespace Turbo.Plugins.s7o
             float targetCy = fy + targetGeometry.BodyDy * 0.42f;
             float targetHalfX = Math.Max(12f, targetGeometry.RadiusX * 1.20f);
             float targetHalfY = Math.Max(20f, targetBodyLength * 0.58f + targetGeometry.RadiusY);
+
+            float coreX, coreY;
+            if (!TryGetNativeCorePoint(target, out coreX, out coreY))
+            {
+                coreX = fx;
+                coreY = fy;
+            }
+            float upperX = fx + targetGeometry.BodyDx * UpperProbeBodyRatio;
+            float upperY = fy + targetGeometry.BodyDy * UpperProbeBodyRatio;
+            float upperSide = targetGeometry.RadiusX * UpperProbeSideRatio;
 
             try
             {
@@ -6901,7 +6927,11 @@ namespace Turbo.Plugins.s7o
                     if (projectedOverlap <= 0f)
                         continue;
 
-                    float occ = (0.30f + projectedOverlap * 1.70f) * GetAdaptiveBlockerWeight(other);
+                    float weight = GetAdaptiveBlockerWeight(other);
+                    _solverCoreRisk += ProjectedProbeOverlap(coreX, coreY, otherCx, otherCy, otherHalfX, otherHalfY) * weight;
+                    _solverUpperLeftRisk += ProjectedProbeOverlap(upperX - upperSide, upperY, otherCx, otherCy, otherHalfX, otherHalfY) * weight;
+                    _solverUpperRightRisk += ProjectedProbeOverlap(upperX + upperSide, upperY, otherCx, otherCy, otherHalfX, otherHalfY) * weight;
+                    float occ = (0.30f + projectedOverlap * 1.70f) * weight;
                     float horizontalBias = ClampFloat(relx / Math.Max(1f, combinedX), -1f, 1f);
                     float verticalBias = ClampFloat(rely / Math.Max(1f, combinedY), -1f, 1f);
                     float leftShare = (1f - horizontalBias) * 0.50f;
@@ -6936,6 +6966,14 @@ namespace Turbo.Plugins.s7o
                 _solverBlockerCx /= _solverBlockerWeightTotal;
                 _solverBlockerCy /= _solverBlockerWeightTotal;
             }
+        }
+
+        private static float ProjectedProbeOverlap(float x, float y, float cx, float cy, float halfX, float halfY)
+        {
+            // Elliptical projected-body approximation, not a selectable-mesh claim.
+            float dx = (x - cx) / Math.Max(1f, halfX);
+            float dy = (y - cy) / Math.Max(1f, halfY);
+            return Math.Max(0f, 1f - dx * dx - dy * dy);
         }
 
         private float GetAdaptiveBlockerWeight(IMonster blocker)
@@ -7104,20 +7142,6 @@ namespace Turbo.Plugins.s7o
             catch { return 0u; }
         }
 
-        private void EnsureAdaptiveModelState(IMonster monster)
-        {
-            uint sno = GetMonsterSno(monster);
-            if (_adaptiveModelSno == sno)
-                return;
-
-            _adaptiveModelSno = sno;
-            for (int i = 0; i < AdaptiveBinCount; i++)
-            {
-                _adaptiveBinGood[i] = 0f;
-                _adaptiveBinBad[i] = 0f;
-            }
-        }
-
         private bool TryBuildProbeGeometry(IMonster monster, float nativeX, float nativeY, out ProbeGeometry geometry)
         {
             geometry = new ProbeGeometry();
@@ -7128,7 +7152,7 @@ namespace Turbo.Plugins.s7o
             try
             {
                 IScreenCoordinate floor = monster != null && monster.FloorCoordinate != null
-                    ? monster.FloorCoordinate.ToScreenCoordinate()
+                    ? monster.FloorCoordinate.ToScreenCoordinate(true, true)
                     : null;
                 if (floor != null)
                 {
@@ -7184,7 +7208,7 @@ namespace Turbo.Plugins.s7o
 
                 for (int i = 0; i < points.Length; i++)
                 {
-                    IScreenCoordinate screen = points[i] != null ? points[i].ToScreenCoordinate() : null;
+                    IScreenCoordinate screen = points[i] != null ? points[i].ToScreenCoordinate(true, true) : null;
                     if (screen == null)
                         continue;
 
@@ -7210,14 +7234,12 @@ namespace Turbo.Plugins.s7o
         {
             bodyRatio = 0f;
             sideRatio = 0f;
-
-            float lengthSq = geometry.BodyDx * geometry.BodyDx + geometry.BodyDy * geometry.BodyDy;
-            if (lengthSq < 16f)
+            // Invert GetBodyProbeOffset exactly. A dot-product projection incorrectly
+            // folds horizontal side offsets into height when the body axis is tilted.
+            if (Math.Abs(geometry.BodyDy) < 1f)
                 return false;
-
-            bodyRatio = (dx * geometry.BodyDx + dy * geometry.BodyDy) / lengthSq;
-            float bodyX = geometry.BodyDx * bodyRatio;
-            sideRatio = (dx - bodyX) / Math.Max(8f, geometry.RadiusX);
+            bodyRatio = dy / geometry.BodyDy;
+            sideRatio = (dx - geometry.BodyDx * bodyRatio) / Math.Max(8f, geometry.RadiusX);
             return true;
         }
 
@@ -7319,63 +7341,91 @@ namespace Turbo.Plugins.s7o
         {
             if (acd == 0 || _verifiedHoverAcdId != acd)
                 return false;
-
             if (tick > _verifiedHoverUntilTick || _verifiedHoverRetryCount >= VerifiedHoverMaxRetries)
             {
                 ClearVerifiedHoverPoint();
                 return false;
             }
-
             IMonster target = FindAliveMonsterByAcdId(acd);
-            if (!IsAliveTarget(target) || !IsWithinPestilenceTargetRange(target))
+            float targetX, targetY, pointX, pointY;
+            if (!IsAliveTarget(target) || !IsWithinPestilenceTargetRange(target)
+                || !TryGetMonsterScreen(target, out targetX, out targetY)
+                || !TryProjectVerifiedHoverPoint(target, targetX, targetY, out pointX, out pointY))
             {
                 ClearVerifiedHoverPoint();
                 return false;
             }
-
             if (_verifiedHoverLastTryTick > 0
                 && tick - _verifiedHoverLastTryTick < VerifiedHoverRetryIntervalTicks)
                 return true;
-
-            float pointX = _verifiedHoverScreenX;
-            float pointY = _verifiedHoverScreenY;
-            float targetX, targetY;
-            if (TryGetMonsterScreen(target, out targetX, out targetY))
-            {
-                ProbeGeometry geometry;
-                float dx, dy;
-                if (_verifiedHoverHasBodyPoint
-                    && TryBuildProbeGeometry(target, targetX, targetY, out geometry))
-                {
-                    GetBodyProbeOffset(geometry, _verifiedHoverBodyRatio, _verifiedHoverSideRatio, out dx, out dy);
-                    pointX = targetX + dx;
-                    pointY = targetY + dy;
-                }
-                else if (_verifiedHoverHasTargetAnchor)
-                {
-                    pointX = targetX + (_verifiedHoverScreenX - _verifiedHoverTargetScreenX);
-                    pointY = targetY + (_verifiedHoverScreenY - _verifiedHoverTargetScreenY);
-                }
-            }
-
-            if (!IsAutoSnapHoverPoint(pointX, pointY))
-            {
-                ClearVerifiedHoverPoint();
-                return false;
-            }
-
             _verifiedHoverLastTryTick = tick;
             _verifiedHoverRetryCount++;
-
-            if (IsCursorAtPoint(pointX, pointY, CursorNoOpTolerancePxSq))
-                return true;
-
             if (!SafeMouseMove(pointX, pointY, tick))
                 return false;
-
             _lastMouseMoveTick = tick;
             return true;
         }
+
+        private bool TryProjectVerifiedHoverPoint(IMonster target, float x, float y, out float pointX, out float pointY)
+        {
+            pointX = _verifiedHoverScreenX;
+            pointY = _verifiedHoverScreenY;
+            ProbeGeometry geometry;
+            float dx, dy;
+            if (_verifiedHoverHasBodyPoint && TryBuildProbeGeometry(target, x, y, out geometry))
+            {
+                GetBodyProbeOffset(geometry, _verifiedHoverBodyRatio, _verifiedHoverSideRatio, out dx, out dy);
+                pointX = x + dx;
+                pointY = y + dy;
+            }
+            else if (_verifiedHoverHasTargetAnchor)
+            {
+                pointX = x + (_verifiedHoverScreenX - _verifiedHoverTargetScreenX);
+                pointY = y + (_verifiedHoverScreenY - _verifiedHoverTargetScreenY);
+            }
+            return IsAutoSnapHoverPoint(pointX, pointY);
+        }
+
+        private bool TryTrackVerifiedHoverPoint(IMonster target, float x, float y, uint acd, int tick)
+        {
+            float pointX, pointY;
+            if (_verifiedHoverAcdId != acd || tick > _verifiedHoverUntilTick
+                || !TryProjectVerifiedHoverPoint(target, x, y, out pointX, out pointY))
+                return false;
+            // SelectedMonster2 confirmed the previous position. Translate the saved
+            // body point using the target's current native world-to-screen geometry.
+            RegisterHoverSuccess(acd, tick, pointX - x, pointY - y, _lastSnapAttemptBin);
+            ClearBadHoverState(acd);
+            _verifiedHoverUntilTick = tick + VerifiedHoverHoldTicks;
+            _verifiedHoverLastTryTick = 0;
+            _verifiedHoverRetryCount = 0;
+            if (!IsCursorAtPoint(pointX, pointY, CursorNoOpTolerancePxSq)
+                && SafeMouseMove(pointX, pointY, tick))
+            {
+                _lastTrackedHoverTick = tick;
+                _lastMouseMoveTick = tick;
+            }
+            return true;
+        }
+
+        private bool TryGetNativeCorePoint(IMonster target, out float x, out float y)
+        {
+            x = y = 0f;
+            try
+            {
+                if (target == null || target.FloorCoordinate == null)
+                    return false;
+                var point = target.FloorCoordinate.ToScreenCoordinate(true, true);
+                if (point == null)
+                    return false;
+                x = point.X;
+                y = point.Y;
+                return IsAutoSnapHoverPoint(x, y);
+            }
+            catch { return false; }
+        }
+
+
 
         private void ClearVerifiedHoverPoint()
         {
@@ -7395,38 +7445,55 @@ namespace Turbo.Plugins.s7o
 
         private void ResetRecentProbePoints()
         {
+            _probeHistoryAcdId = 0;
+            _probeSweepPass = 0;
             _recentProbePointNext = 0;
-            Array.Clear(_recentProbePointX, 0, _recentProbePointX.Length);
-            Array.Clear(_recentProbePointY, 0, _recentProbePointY.Length);
+            Array.Clear(_recentProbeBodyRatio, 0, _recentProbeBodyRatio.Length);
+            Array.Clear(_recentProbeSideRatio, 0, _recentProbeSideRatio.Length);
             Array.Clear(_recentProbePointTick, 0, _recentProbePointTick.Length);
         }
 
         private bool WasRecentProbePoint(float x, float y, int tick)
         {
-            int avoidTicks = AggressiveScanMode
-                ? RecentProbePointAvoidTicks
-                : NormalRecentProbePointAvoidTicks;
+            float body, side;
+            if (!TryMeasureCurrentProbePoint(x, y, out body, out side))
+                return false;
 
             for (int i = 0; i < RecentProbePointCapacity; i++)
             {
                 int age = _recentProbePointTick[i] > 0 ? tick - _recentProbePointTick[i] : int.MaxValue;
-                if (age < 0 || age > avoidTicks)
+                if (age < 0 || age > RecentProbePointAvoidTicks)
                     continue;
 
-                float dx = _recentProbePointX[i] - x;
-                float dy = _recentProbePointY[i] - y;
+                // Reproject remembered regions so camera/target motion does not
+                // turn the same failed body point into an apparently new probe.
+                float bodyDelta = _recentProbeBodyRatio[i] - body;
+                float dx = _probeBodyDx * bodyDelta + _probeRadiusX * (_recentProbeSideRatio[i] - side);
+                float dy = _probeBodyDy * bodyDelta;
                 if (dx * dx + dy * dy <= RecentProbePointAvoidPxSq)
                     return true;
             }
-
             return false;
+        }
+
+        private bool TryMeasureCurrentProbePoint(float x, float y, out float body, out float side)
+        {
+            body = side = 0f;
+            if (Math.Abs(_probeBodyDy) < 1f || _probeRadiusX < 1f)
+                return false;
+            body = (y - _probeOriginY) / _probeBodyDy;
+            side = (x - _probeOriginX - _probeBodyDx * body) / _probeRadiusX;
+            return true;
         }
 
         private void RecordRecentProbePoint(float x, float y, int tick)
         {
+            float body, side;
+            if (!TryMeasureCurrentProbePoint(x, y, out body, out side))
+                return;
             int index = _recentProbePointNext++ % RecentProbePointCapacity;
-            _recentProbePointX[index] = x;
-            _recentProbePointY[index] = y;
+            _recentProbeBodyRatio[index] = body;
+            _recentProbeSideRatio[index] = side;
             _recentProbePointTick[index] = tick;
         }
 
@@ -7443,14 +7510,6 @@ namespace Turbo.Plugins.s7o
             public float BodyRatio;
             public float SideRatio;
             public int Samples;
-        }
-
-        private void RecordAdaptiveAttempt(int bin)
-        {
-            if (bin < 0 || bin >= AdaptiveBinCount)
-                return;
-
-            _adaptiveBinBad[bin] = Math.Min(20f, _adaptiveBinBad[bin] + 0.10f);
         }
 
         private int GetProbeZone(IMonster monster, float dx, float dy)
@@ -7476,92 +7535,6 @@ namespace Turbo.Plugins.s7o
             int row = dy <= topCut ? 0 : (dy >= bottomCut ? 2 : 1);
 
             return row * 3 + col;
-        }
-
-        private void ClearProbeZoneState()
-        {
-            _probeZoneAcdId = 0;
-            _probeZoneSuccessAcdId = 0;
-            _lastSuccessProbeZone = -1;
-            _lastSuccessProbeZoneTick = 0;
-            for (int i = 0; i < ProbeZoneCount; i++)
-            {
-                _probeZoneLastTryTick[i] = 0;
-                _probeZoneTryCount[i] = 0;
-            }
-        }
-
-        private void EnsureProbeZoneState(uint acd)
-        {
-            if (_probeZoneAcdId == acd)
-                return;
-
-            _probeZoneAcdId = acd;
-            for (int i = 0; i < ProbeZoneCount; i++)
-            {
-                _probeZoneLastTryTick[i] = 0;
-                _probeZoneTryCount[i] = 0;
-            }
-        }
-
-        private float GetProbeZoneCoverageBonus(uint acd, int zone, int tick)
-        {
-            if (acd == 0 || zone < 0 || zone >= ProbeZoneCount)
-                return 0f;
-
-            EnsureProbeZoneState(acd);
-
-            int last = _probeZoneLastTryTick[zone];
-            int age = last > 0 ? tick - last : 9999;
-            int tries = _probeZoneTryCount[zone];
-            float bonus = 0f;
-
-            if (last == 0)
-                bonus += 0.95f;
-            else if (age >= 10)
-                bonus += 0.55f;
-            else if (age >= 5)
-                bonus += 0.25f;
-
-            bonus -= Math.Min(1.10f, tries * 0.16f);
-
-            if (_probeZoneSuccessAcdId == acd && _lastSuccessProbeZone >= 0)
-            {
-                if (zone == _lastSuccessProbeZone)
-                    bonus += 0.80f;
-                else if (ProbeZonesAdjacent(zone, _lastSuccessProbeZone))
-                    bonus += 0.32f;
-            }
-
-            return bonus;
-        }
-
-        private bool ProbeZonesAdjacent(int a, int b)
-        {
-            if (a < 0 || b < 0) return false;
-            int ar = a / 3, ac = a % 3;
-            int br = b / 3, bc = b % 3;
-            return Math.Abs(ar - br) <= 1 && Math.Abs(ac - bc) <= 1;
-        }
-
-        private void RecordProbeZoneAttempt(uint acd, int zone, int tick)
-        {
-            if (acd == 0 || zone < 0 || zone >= ProbeZoneCount)
-                return;
-
-            EnsureProbeZoneState(acd);
-            _probeZoneLastTryTick[zone] = tick;
-            _probeZoneTryCount[zone] = Math.Min(99, _probeZoneTryCount[zone] + 1);
-        }
-
-        private void RecordProbeZoneSuccess(uint acd, int zone, int tick)
-        {
-            if (acd == 0 || zone < 0 || zone >= ProbeZoneCount)
-                return;
-
-            _probeZoneSuccessAcdId = acd;
-            _lastSuccessProbeZone = zone;
-            _lastSuccessProbeZoneTick = tick;
         }
 
         private bool IsCursorAtPoint(float x, float y, float toleranceSq)
@@ -8456,7 +8429,18 @@ namespace Turbo.Plugins.s7o
             return timestamp + (long)Math.Ceiling(Stopwatch.Frequency * (milliseconds / 1000d));
         }
 
-        private bool PulseSiphon(int tick, int intervalTicks, int downTicks, bool allowEarlyRelease, SiphonPulseRate pulseRate)
+        private bool NeedsEliteHoverBeforeBuild(IMonster target, int tick)
+        {
+            if (!AutoSnapEnabled || !IsAliveTarget(target)
+                || !(IsLeader(target) || IsBossLike(target)) || !IsWithinPestilenceTargetRange(target))
+                return false;
+            uint acd = GetMonsterAcdId(target);
+            return IsPostTeleportSelectionStale(acd, tick)
+                || !IsActuallySelectedTarget(acd)
+                || (_lastSnapAttemptAcd == acd && _lastSnapAttemptTick == tick);
+        }
+
+        private bool CanStartSiphonPulse(int tick, SiphonPulseRate pulseRate, long wallNow)
         {
             if (_pulseActive)
                 return false;
@@ -8466,7 +8450,6 @@ namespace Turbo.Plugins.s7o
             if (pulseRate == SiphonPulseRate.SafeNonBuild && _nextPulseTick > 0 && tick < _nextPulseTick)
                 return false;
 
-            long wallNow = Stopwatch.GetTimestamp();
             int minimumStartGapMs = pulseRate == SiphonPulseRate.BuildChannel || pulseRate == SiphonPulseRate.OpeningOneShot
                 ? FastPulseWallTimeFloorMs
                 : NonBuildPulseWallTimeFloorMs;
@@ -8476,6 +8459,15 @@ namespace Turbo.Plugins.s7o
                 return false;
 
             if (pulseRate == SiphonPulseRate.BuildChannel && _buildRetryNotBeforeWallTimestamp > wallNow)
+                return false;
+
+            return true;
+        }
+
+        private bool PulseSiphon(int tick, int intervalTicks, int downTicks, bool allowEarlyRelease, SiphonPulseRate pulseRate)
+        {
+            long wallNow = Stopwatch.GetTimestamp();
+            if (!CanStartSiphonPulse(tick, pulseRate, wallNow))
                 return false;
 
             if (IsMouseSiphonAction() && IsManualCursorOverrideActive(tick) && !IsCursorOnValidSiphonAnchor())
@@ -8564,6 +8556,17 @@ namespace Turbo.Plugins.s7o
 
             if (_pulseWasBuild && _pulseBuildTarget > 0)
             {
+                // Recover hover if teleport/movement invalidates a held build's target.
+                // Release owned input before allowing another scan move.
+                IMonster buildTarget = GetManualJuggerLockTarget();
+                if (!IsAliveTarget(buildTarget))
+                    buildTarget = FindAliveMonsterByAcdId(_snapPhaseAcdId);
+                if (_siphonPulseOwned && NeedsEliteHoverBeforeBuild(buildTarget, tick))
+                {
+                    ReleasePulseInput();
+                    return;
+                }
+
                 int stacks;
                 float timeLeft;
                 bool havePowerShift = TryGetPowerShift(out stacks, out timeLeft);
@@ -8668,7 +8671,7 @@ namespace Turbo.Plugins.s7o
             _trashAcquireStartTick = 0;
             _snapPhaseAcdId = 0;
             _snapPhase = 0;
-            _normalScanPauseUntilTick = 0;
+            _lastTrackedHoverTick = 0;
             _lastMouseMoveTick = 0;
             _cursorOwned = false;
             _cursorWasMovedByPlugin = false;
@@ -8689,8 +8692,6 @@ namespace Turbo.Plugins.s7o
             _lastSnapAttemptBin = -1;
             _lastSnapAttemptZone = -1;
             _lastSnapAttemptTick = 0;
-            _lastEvaluatedProbeTick = 0;
-            ClearProbeZoneState();
             _stableLockAcdId = 0;
             _stableLockDx = 0f;
             _stableLockDy = 0f;
@@ -8712,18 +8713,11 @@ namespace Turbo.Plugins.s7o
             _lastPassiveHoverCaptureAcdId = 0;
             _recentPriorityLeaderAcdId = 0;
             _recentPriorityLeaderUntilTick = 0;
-            _recentProbePointNext = 0;
-            _adaptiveModelSno = 0;
-            for (int i = 0; i < AdaptiveBinCount; i++)
-            {
-                _adaptiveBinGood[i] = 0f;
-                _adaptiveBinBad[i] = 0f;
-            }
+            ResetRecentProbePoints();
+            _probeBodyDy = 0f;
             _badHoverAcdId = 0;
             _badHoverCount = 0;
             _badHoverLastTick = 0;
-            _leaderPackCoreRetryAcdId = 0;
-            _leaderPackCoreRetryTick = 0;
             _forcedSnapAcdId = 0;
             _forcedSnapUntilTick = 0;
             _movementDisengageUntilTick = 0;
@@ -8776,6 +8770,11 @@ namespace Turbo.Plugins.s7o
             _oculusTeleportHotkeyWasDown = false;
             _postBossRewardSpaceHandoffActive = false;
             _circleTeleportStage = CircleTeleportStage.Idle;
+            _circleTeleportRequestUntilTick = 0;
+            _circleTeleportDestination = null;
+            _circleTeleportCastAccepted = _circleTeleportStartWasTransform = false;
+            _circleTeleportLastAccepted = false;
+            _circleTeleportStartCharges = _circleTeleportStartCooldownTick = 0;
             _circleTeleportAimReadyTick = 0;
             _circleTeleportCastTick = 0;
             _circleTeleportKeyUpTick = 0;
