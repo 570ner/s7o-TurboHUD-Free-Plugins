@@ -470,6 +470,12 @@ namespace Turbo.Plugins.s7o
         // ── VISUAL / Tips Helper ─────────────────────────────────────────────────────
         private bool _visTipsHelperEnabled = true;
         private bool _visTipsHelperExpanded = false;
+        private bool _visMinimapCursorEnabled = true;
+        private bool _tipsUnscathedEnabled = true;
+        private bool _visMapCursorExpanded = false;
+        private int _visMapCursorColorIdx = 6;
+        private float _visMapCursorSize = 1.0f;
+        private float _visMapCursorThickness = 1.0f;
         private bool _tipsPrimalEnabled = true;
         private bool _tipsPrimalArrows = true;
         private bool _tipsPrimalText = true;
@@ -604,13 +610,14 @@ namespace Turbo.Plugins.s7o
         private bool _pestilenceRgkAutoSiphon = true;
         private bool _pestilenceRgkLateRefreshAssist = true;
         private bool _pestilenceRgkPrioritizeDebuffed = true;
-        private bool _pestilenceRgkAggressiveScan = false;
         private bool _pestilenceRgkIncludeTrash = true;
         private bool _pestilenceRgkCursorRestore = true;
         private int _pestilenceRgkTargetRange = 70;
         private bool _pestilenceRgkJuggerHotkeyEnabled = true;
         private ushort _pestilenceRgkJuggerHotkeyVk = 0x11;
         private bool _pestilenceRgkJuggerHotkeyCapture = false;
+        private ushort _pestilenceRgkOculusHotkeyVk = 0x20;
+        private bool _pestilenceRgkOculusHotkeyCapture = false;
         private bool _pestilenceRgkRgAssist = false;
         private bool _pestilenceRgkShowTargetLineReticle = true;
         private bool _pestilenceRgkZeiCircle = false;
@@ -1591,13 +1598,49 @@ namespace Turbo.Plugins.s7o
                     return;
                 }
 
-                if (vk == 0x20)
-                    vk = 0x11;
-
+                ushort oldVk = _pestilenceRgkJuggerHotkeyVk;
+                bool swapped = vk == _pestilenceRgkOculusHotkeyVk;
                 _pestilenceRgkJuggerHotkeyVk = vk;
+                if (swapped)
+                    _pestilenceRgkOculusHotkeyVk = oldVk;
                 _pestilenceRgkJuggerHotkeyCapture = false;
                 ApplyPestilenceRgkSettingsToPlugin();
-                _status = "PESTILENCE JUGGER HOTKEY SET TO " + AutoSkillVirtualKeyLabel(vk);
+                _status = swapped
+                    ? "PESTILENCE HOTKEYS SWAPPED: ELITE " + AutoSkillVirtualKeyLabel(_pestilenceRgkJuggerHotkeyVk) +
+                        " / OCULUS " + AutoSkillVirtualKeyLabel(_pestilenceRgkOculusHotkeyVk)
+                    : "PESTILENCE JUGGER HOTKEY SET TO " + AutoSkillVirtualKeyLabel(vk);
+                SaveSettings();
+                return;
+            }
+
+            if (_pestilenceRgkOculusHotkeyCapture)
+            {
+                if (IsCaptureCancelKey(keyEvent.Key))
+                {
+                    _pestilenceRgkOculusHotkeyCapture = false;
+                    _status = "PESTILENCE OCULUS HOTKEY CAPTURE CANCELLED";
+                    return;
+                }
+
+                ushort vk;
+                if (!TryGetVirtualKeyFromDirectInputKey(keyEvent.Key, out vk))
+                {
+                    _pestilenceRgkOculusHotkeyCapture = false;
+                    _status = "UNSUPPORTED PESTILENCE OCULUS HOTKEY";
+                    return;
+                }
+
+                ushort oldVk = _pestilenceRgkOculusHotkeyVk;
+                bool swapped = vk == _pestilenceRgkJuggerHotkeyVk;
+                _pestilenceRgkOculusHotkeyVk = vk;
+                if (swapped)
+                    _pestilenceRgkJuggerHotkeyVk = oldVk;
+                _pestilenceRgkOculusHotkeyCapture = false;
+                ApplyPestilenceRgkSettingsToPlugin();
+                _status = swapped
+                    ? "PESTILENCE HOTKEYS SWAPPED: ELITE " + AutoSkillVirtualKeyLabel(_pestilenceRgkJuggerHotkeyVk) +
+                        " / OCULUS " + AutoSkillVirtualKeyLabel(_pestilenceRgkOculusHotkeyVk)
+                    : "PESTILENCE OCULUS HOTKEY SET TO " + AutoSkillVirtualKeyLabel(vk);
                 SaveSettings();
                 return;
             }
@@ -4945,6 +4988,7 @@ namespace Turbo.Plugins.s7o
                 Color p4 = GetVisualPickerColorToned(_tipsPlayer4ColorIdx, _tipsPlayer4Tone);
 
                 tips.VisualHelpersEnabled = _visTipsHelperEnabled;
+                tips.ShowUnscathedMonsters = _tipsUnscathedEnabled;
 
                 tips.ShowPrimalItems = _tipsPrimalEnabled;
                 tips.ShowPrimalItemArrows = _tipsPrimalArrows;
@@ -4994,6 +5038,31 @@ namespace Turbo.Plugins.s7o
                 tips.ValleyOfDeathLineThickness = _visValleyOfDeathThickness;
                 tips.ValleyOfDeathRadiusYards = VisualValleyOfDeathYards;
                 tips.ValleyOfDeathTimerSeconds = VisualValleyOfDeathSeconds;
+            }
+            catch
+            {
+            }
+        }
+
+        private void ApplyMinimapCursorSettingsToPlugin()
+        {
+            try
+            {
+                MapCursor plugin = FindPluginByTypeName("MapCursor") as MapCursor;
+                if (plugin == null)
+                    return;
+
+                bool enabled = _visTipsHelperEnabled && _visMinimapCursorEnabled;
+                if (SafePluginEnabled(plugin) != enabled)
+                    SetPluginEnabledPersistent(plugin, enabled);
+
+                // Preserve the original proportions and pure-white default. Brushes
+                // are cached by style; no new drawing or projection work is needed.
+                plugin.PlusRadius = 10.0f * _visMapCursorSize;
+                plugin.CircleRadius = 5.0f * _visMapCursorSize;
+                Color color = _visMapCursorColorIdx == 6 ? Color.White : GetVisualPickerColorToned(_visMapCursorColorIdx, 5);
+                plugin.Brush = GetVisualBrush(255, color.R, color.G, color.B, _visMapCursorThickness);
+                plugin.ShadowBrush = GetVisualBrush(230, 0, 0, 0, _visMapCursorThickness + 2.0f);
             }
             catch
             {
@@ -5143,6 +5212,7 @@ namespace Turbo.Plugins.s7o
             ApplyPlayerCoeSettingsToPlugin();
             ApplyPartyInspectorHotkeyToPlugin();
             ApplyTipsHelperSettingsToPlugin();
+            ApplyMinimapCursorSettingsToPlugin();
             ApplyEliteHealthBarsSettingsToPlugin();
             ApplySimHpBarsSettingsToPlugin();
             ApplyAutoLootSettingsToPlugin();
@@ -7052,8 +7122,21 @@ namespace Turbo.Plugins.s7o
             return _pestilenceRgkPlugin;
         }
 
+        private void NormalizePestilenceRgkHotkeys()
+        {
+            if (_pestilenceRgkJuggerHotkeyVk == 0 ||
+                _pestilenceRgkJuggerHotkeyVk != _pestilenceRgkOculusHotkeyVk)
+                return;
+
+            if (_pestilenceRgkOculusHotkeyVk == 0x20)
+                _pestilenceRgkJuggerHotkeyVk = 0x11;
+            else
+                _pestilenceRgkOculusHotkeyVk = 0x20;
+        }
+
         private void ApplyPestilenceRgkSettingsToPlugin()
         {
+            NormalizePestilenceRgkHotkeys();
             var plugin = GetPestilenceRgkPlugin();
             if (plugin == null)
                 return;
@@ -7067,13 +7150,17 @@ namespace Turbo.Plugins.s7o
                     _pestilenceRgkAutoSiphon,
                     _pestilenceRgkLateRefreshAssist,
                     _pestilenceRgkPrioritizeDebuffed,
-                    _pestilenceRgkAggressiveScan,
+                    false, // Retired scan-mode argument; RGK uses unified targeting.
                     _pestilenceRgkIncludeTrash,
                     _pestilenceRgkCursorRestore,
                     _pestilenceRgkTargetRange,
                     _pestilenceRgkJuggerHotkeyEnabled,
                     _pestilenceRgkJuggerHotkeyVk,
                     _pestilenceRgkRgAssist);
+
+                plugin.ConfigureHotkeys(
+                    _pestilenceRgkJuggerHotkeyVk,
+                    _pestilenceRgkOculusHotkeyVk);
 
                 plugin.ShowTargetLineReticle = _pestilenceRgkShowTargetLineReticle;
                 // HUD Menu owns this shared visual so it remains available on every local class.
@@ -7180,10 +7267,6 @@ namespace Turbo.Plugins.s7o
                     _pestilenceRgkPrioritizeDebuffed = !_pestilenceRgkPrioritizeDebuffed;
                     _status = "PESTILENCE DEBUFF PRIORITY: " + (_pestilenceRgkPrioritizeDebuffed ? "ON" : "OFF");
                     break;
-                case 6:
-                    _pestilenceRgkAggressiveScan = !_pestilenceRgkAggressiveScan;
-                    _status = "PESTILENCE AGGRESSIVE SCAN: " + (_pestilenceRgkAggressiveScan ? "ON" : "OFF");
-                    break;
                 case 7:
                     _pestilenceRgkIncludeTrash = !_pestilenceRgkIncludeTrash;
                     _status = "PESTILENCE TRASH FALLBACK: " + (_pestilenceRgkIncludeTrash ? "ON" : "OFF");
@@ -7202,6 +7285,9 @@ namespace Turbo.Plugins.s7o
                     break;
                 case 11:
                     BeginPestilenceJuggerHotkeyCapture();
+                    return;
+                case 20:
+                    BeginPestilenceOculusHotkeyCapture();
                     return;
                 case 12:
                     _pestilenceRgkRgAssist = !_pestilenceRgkRgAssist;
@@ -7266,8 +7352,22 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
+            _pestilenceRgkOculusHotkeyCapture = false;
             _pestilenceRgkJuggerHotkeyCapture = true;
             _status = "PRESS PESTILENCE ELITE CYCLING HOTKEY";
+        }
+
+        private void BeginPestilenceOculusHotkeyCapture()
+        {
+            if (GetPestilenceRgkPlugin() == null)
+            {
+                _status = "PESTILENCE RGK PLUGIN NOT FOUND";
+                return;
+            }
+
+            _pestilenceRgkJuggerHotkeyCapture = false;
+            _pestilenceRgkOculusHotkeyCapture = true;
+            _status = "PRESS PESTILENCE OCULUS TELEPORT HOTKEY";
         }
 
         private string GetInventoryDropOptionLabel(int kind, bool installed)
@@ -7303,12 +7403,12 @@ namespace Turbo.Plugins.s7o
                 case 3: return _pestilenceRgkPowerStacks.ToString(CultureInfo.InvariantCulture);
                 case 4: return _pestilenceRgkLateRefreshAssist ? "ON" : "OFF";
                 case 5: return _pestilenceRgkPrioritizeDebuffed ? "ON" : "OFF";
-                case 6: return _pestilenceRgkAggressiveScan ? "ON" : "OFF";
                 case 7: return _pestilenceRgkIncludeTrash ? "ON" : "OFF";
                 case 8: return _pestilenceRgkTargetRange.ToString(CultureInfo.InvariantCulture) + "y";
                 case 9: return _pestilenceRgkCursorRestore ? "ON" : "OFF";
                 case 10: return _pestilenceRgkJuggerHotkeyEnabled ? "ON" : "OFF";
                 case 11: return _pestilenceRgkJuggerHotkeyCapture ? "PRESS" : AutoSkillVirtualKeyLabel(_pestilenceRgkJuggerHotkeyVk);
+                case 20: return _pestilenceRgkOculusHotkeyCapture ? "PRESS" : AutoSkillVirtualKeyLabel(_pestilenceRgkOculusHotkeyVk);
                 case 12: return _pestilenceRgkRgAssist ? "ON" : "OFF";
                 case 13: return _pestilenceRgkShowTargetLineReticle ? "ON" : "OFF";
                 case 16: return _pestilenceRgkZeiCircle ? "ON" : "OFF";
@@ -7344,11 +7444,11 @@ namespace Turbo.Plugins.s7o
                 case 1: return _pestilenceRgkAutoSiphon;
                 case 4: return _pestilenceRgkLateRefreshAssist;
                 case 5: return _pestilenceRgkPrioritizeDebuffed;
-                case 6: return _pestilenceRgkAggressiveScan;
                 case 7: return _pestilenceRgkIncludeTrash;
                 case 9: return _pestilenceRgkCursorRestore;
                 case 10: return _pestilenceRgkJuggerHotkeyEnabled;
                 case 11: return _pestilenceRgkJuggerHotkeyCapture;
+                case 20: return _pestilenceRgkOculusHotkeyCapture;
                 case 12: return _pestilenceRgkRgAssist;
                 case 13: return _pestilenceRgkShowTargetLineReticle;
                 case 16: return _pestilenceRgkZeiCircle;
@@ -9136,9 +9236,9 @@ namespace Turbo.Plugins.s7o
             if (cmd == "elitehp") { HandleEliteHpVisualAction(p); return; }
             if (cmd == "simhp") { HandleSimHpVisualAction(p); return; }
             if (cmd == "playercoe") { HandlePlayerCoeVisualAction(p); return; }
-            if (cmd == "toggle") { ToggleVisualFeature(feature); ApplyTipsHelperSettingsToPlugin(); SaveSettings(); return; }
+            if (cmd == "toggle") { ToggleVisualFeature(feature); ApplyTipsHelperSettingsToPlugin(); ApplyMinimapCursorSettingsToPlugin(); SaveSettings(); return; }
             if (cmd == "expand") { ToggleVisualExpanded(feature); SaveSettings(); return; }
-            if (cmd == "tipstoggle") { ToggleTipsHelperOption(feature); ApplyTipsHelperSettingsToPlugin(); SaveSettings(); return; }
+            if (cmd == "tipstoggle") { ToggleTipsHelperOption(feature); ApplyTipsHelperSettingsToPlugin(); ApplyMinimapCursorSettingsToPlugin(); SaveSettings(); return; }
             if (cmd == "hotkey" && feature == "playercoe")
             {
                 _playerCoeHotkeyCapture = true;
@@ -9180,7 +9280,7 @@ namespace Turbo.Plugins.s7o
             {
                 int idx;
                 if (int.TryParse(p[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out idx))
-                { SetVisualColor(feature, idx); if (feature.StartsWith("menubutton", StringComparison.OrdinalIgnoreCase)) MarkLayoutDirty(); ApplyTipsHelperSettingsToPlugin(); ApplyEliteHealthBarsSettingsToPlugin(); SaveSettings(); }
+                { SetVisualColor(feature, idx); if (feature.StartsWith("menubutton", StringComparison.OrdinalIgnoreCase)) MarkLayoutDirty(); ApplyTipsHelperSettingsToPlugin(); ApplyEliteHealthBarsSettingsToPlugin(); if (feature == "minimapcursor") ApplyMinimapCursorSettingsToPlugin(); SaveSettings(); }
                 return;
             }
 if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd == "dot" || cmd == "seconds") && p.Length >= 4)
@@ -9189,6 +9289,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 AdjustVisualValue(cmd, feature, delta);
                 ApplyTipsHelperSettingsToPlugin();
                 ApplyEliteHealthBarsSettingsToPlugin();
+                if (feature == "minimapcursor") ApplyMinimapCursorSettingsToPlugin();
                 SaveSettings();
                 return;
             }
@@ -9466,6 +9567,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
         private void ToggleVisualExpanded(string feature)
         {
+            if (feature == "minimapcursor")
+            {
+                _visMapCursorExpanded = !_visMapCursorExpanded;
+                return;
+            }
+
             if (feature == "hudlanguage")
             {
                 _hudLanguageExpanded = !_hudLanguageExpanded;
@@ -9597,6 +9704,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 case "progressorbs": _tipsProgressOrbs = !_tipsProgressOrbs; break;
                 case "bloodispower": _tipsBloodIsPowerTracker = !_tipsBloodIsPowerTracker; break;
                 case "playermarkers": _tipsPlayerMarkers = !_tipsPlayerMarkers; break;
+                case "minimapcursor": _visMinimapCursorEnabled = !_visMinimapCursorEnabled; break;
+                case "unscathed": _tipsUnscathedEnabled = !_tipsUnscathedEnabled; break;
             }
         }
 
@@ -9605,6 +9714,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             idx = ViClamp(idx, 0, 7);
             switch (f)
             {
+                case "minimapcursor": _visMapCursorColorIdx = idx; break;
                 case "player":  _visPlayerCircleColorIdx   = idx; break;
                 case "mouse":   _visMouseCircleColorIdx    = idx; break;
                 case "line":    _visLineToTargetColorIdx   = idx; break;
@@ -9652,7 +9762,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     else if (f == "mouse") _visMouseCircleYards = ViClampF(_visMouseCircleYards + delta * 2f, 2f, 60f);
                     break;
                 case "thick":
-                    if (f == "click") _visClickAnimThickness = ViClampF(_visClickAnimThickness + delta * 0.5f, 0.5f, 4.0f);
+                    if (f == "minimapcursor") _visMapCursorThickness = ViClampF(_visMapCursorThickness + delta * 0.5f, 0.5f, 5.0f);
+                    else if (f == "click") _visClickAnimThickness = ViClampF(_visClickAnimThickness + delta * 0.5f, 0.5f, 4.0f);
                     else if (f == "player") _visPlayerCircleThickness = ViClampF(_visPlayerCircleThickness + delta * 0.5f, 0.5f, 8f);
                     else if (f == "mouse") _visMouseCircleThickness = ViClampF(_visMouseCircleThickness + delta * 0.5f, 0.5f, 8f);
                     else if (f == "line") _visLineToTargetThickness = ViClampF(_visLineToTargetThickness + delta * 0.5f, 0.5f, 8f);
@@ -9663,7 +9774,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     else if (f == "elitecircle") _eliteGroundCircleThickness = ViClampF(_eliteGroundCircleThickness + delta * 0.5f, 0.5f, 10.0f);
                     break;
                 case "size":
-                    if (f == "click") _visClickAnimSize = ViClampF(_visClickAnimSize + delta * 0.5f, 0.5f, 4.0f);
+                    if (f == "minimapcursor") _visMapCursorSize = ViClampF(_visMapCursorSize + delta * 0.25f, 0.5f, 3.0f);
+                    else if (f == "click") _visClickAnimSize = ViClampF(_visClickAnimSize + delta * 0.5f, 0.5f, 4.0f);
                     else if (f == "reticle") _visTargetReticleSize = ViClampF(_visTargetReticleSize + delta * 0.25f, 0.25f, 4f);
                     else if (f == "menubuttonclosed") { _menuButtonClosedSize = ViClampF(_menuButtonClosedSize + delta * 1f, 18f, 60f); _dotRect.Width = _menuButtonClosedSize; _dotRect.Height = _menuButtonClosedSize; MarkLayoutDirty(); }
                     else if (f == "menubuttonopen") { _menuButtonOpenSize = ViClampF(_menuButtonOpenSize + delta * 1f, 18f, 70f); MarkLayoutDirty(); }
@@ -10074,7 +10186,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 return 5;
 
             if (feature == "tipshelper")
-                return 13;
+                return _visMapCursorExpanded ? 16 : 15;
 
             if (feature == "dangeraffixes")
                 return 26;
@@ -11004,7 +11116,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             DrawVisualStepperWide(secR, "Time", seconds.ToString(CultureInfo.InvariantCulture) + "s", "visual:seconds:" + durationFeature + ":-1", "visual:seconds:" + durationFeature + ":+1");
         }
 
-        private void DrawTipsToggleSizeRow(RectangleF r, int rowIdx, string title, string desc, bool enabled, string action, string sizeFeature, float size)
+        private void DrawTipsToggleSizeRow(RectangleF r, int rowIdx, string title, string desc, bool enabled, string action, string sizeFeature, float size,
+            string sizeLabel = "Size", string sizeSuffix = "")
         {
             (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
 
@@ -11024,7 +11137,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             if (lines.Length > 1) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[1], textX, r.Top + 44f);
             if (lines.Length > 2) DrawOutlinedTextAt(_fRowText, _fRowTextShadow, lines[2], textX, r.Top + 60f);
 
-            DrawVisualStepperWide(stepR, "Size", FormatVisualFloat(size), "visual:size:" + sizeFeature + ":-1", "visual:size:" + sizeFeature + ":+1");
+            DrawVisualStepperWide(stepR, sizeLabel, FormatVisualFloat(size) + sizeSuffix, "visual:size:" + sizeFeature + ":-1", "visual:size:" + sizeFeature + ":+1");
             DrawGlossButton(btnR, enabled ? "ON" : "OFF", enabled || IsVisualButtonFlashActive(action), false, true);
             RegisterToggleHit(action, btnR);
         }
@@ -11059,7 +11172,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             RegisterToggleHit("visual:tipstoggle:playermarkers", btnR);
         }
 
-        private void DrawTipsSingleToggleRow(RectangleF r, int rowIdx, string title, string desc, bool enabled, string action)
+        private void DrawTipsSingleToggleRow(RectangleF r, int rowIdx, string title, string desc, bool enabled, string action,
+            string expandFeature = null, bool expanded = false)
         {
             if (string.IsNullOrWhiteSpace(title))
                 return;
@@ -11068,6 +11182,14 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             const float btnW = 74f;
             RectangleF btn = new RectangleF(r.Right - btnW - 8f, r.Top + 8f, btnW, r.Height - 16f);
+
+            if (expandFeature != null)
+            {
+                RectangleF expandR = new RectangleF(r.Right - 38f, btn.Top, 30f, btn.Height);
+                btn.X = expandR.Left - btnW - 6f;
+                DrawGlossButton(expandR, expanded ? "-" : "+", expanded, false, true);
+                RegisterToggleHit("visual:expand:" + expandFeature, expandR);
+            }
 
             float textX = r.Left + 14f;
             float textW = Math.Max(30f, btn.Left - textX - 12f);
@@ -11159,6 +11281,20 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     return;
                 case 12:
                     DrawTipsPlayerSizeRow(r, rowIdx);
+                    return;
+                case 13:
+                    DrawTipsSingleToggleRow(r, rowIdx, T("hud.visual.unscathed.title", "Trash HP Bars"),
+                        T("hud.visual.unscathed.description", "Health bars over unscathed trash for visibility."),
+                        _tipsUnscathedEnabled, "visual:tipstoggle:unscathed");
+                    return;
+                case 14:
+                    DrawTipsSingleToggleRow(r, rowIdx, "Minimap Mouse Cursor", "Draw the mouse cursor marker above minimap overlays.", _visMinimapCursorEnabled, "visual:tipstoggle:minimapcursor", "minimapcursor", _visMapCursorExpanded);
+                    return;
+                case 15:
+                    DrawVisualOptionsRow(r, "minimapcursor", rowIdx,
+                        _visMapCursorColorIdx, 5, false, false, 0f,
+                        true, _visMapCursorThickness, true, _visMapCursorSize, false, 0f,
+                        null, null, null);
                     return;
             }
         }
@@ -12448,8 +12584,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             float textX = r.Left + 44f;
             float textW = Math.Max(40f, stateR.Left - textX - 10f);
             DrawOutlinedFittedText(_fRowText, _fRowTextShadow, _fSmall, _fSmallShadow,
-                "• " + entry.Title, textX, r.Top + 7f, textW);
-            string[] lines = WrapTextApprox(entry.Description ?? string.Empty,
+                "• " + GetMacroTitleDisplay(entry), textX, r.Top + 7f, textW);
+            string[] lines = WrapTextApprox(GetMacroDescriptionDisplay(entry),
                 ApproxCharsForToggleDescription(textW), 2);
             if (lines.Length > 0)
                 DrawOutlinedTextAtRaw(_fSmall, _fSmallShadow, lines[0], textX, r.Top + 28f);
@@ -12649,12 +12785,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             AddPestilenceChildItem(items, favoriteDisplay, "Power stacks", "Power Shift target while Power pylon is active.", "pestilence_rgk_power_stacks", 3);
             AddPestilenceChildItem(items, favoriteDisplay, "Late refresh assist", "Allow late refresh pulses when AutoSiphon is off.", "pestilence_rgk_late_refresh", 4);
             AddPestilenceChildItem(items, favoriteDisplay, "Debuffed elite priority", "Prefer Siphon-debuffed elites inside the same priority bucket.", "pestilence_rgk_debuff_priority", 5);
-            AddPestilenceChildItem(items, favoriteDisplay, "Aggressive scan", "Use faster target hover probing for awkward elite hitboxes.", "pestilence_rgk_aggressive_scan", 6);
             AddPestilenceChildItem(items, favoriteDisplay, "Trash fallback", "Target close trash/high-value trash only after elite leaders are gone.", "pestilence_rgk_trash_fallback", 7);
             AddPestilenceChildItem(items, favoriteDisplay, "Target range", "Target selection range in yards.", "pestilence_rgk_target_range", 8);
             AddPestilenceChildItem(items, favoriteDisplay, "Cursor restore", "Restore cursor after short Pestilence target-assist holds.", "pestilence_rgk_cursor_restore", 9);
             AddPestilenceChildItem(items, favoriteDisplay, "Juggernaut / Elite cycling", "Hotkey locks/cycles elites by lowest HP first; orange 10y Juggernaut ring, green 5y elite ring.", "pestilence_rgk_jugger_lock", 10);
             AddPestilenceChildItem(items, favoriteDisplay, "Elite cycle hotkey", "Click to change the Juggernaut / Elite cycling hotkey.", "pestilence_rgk_jugger_hotkey", 11);
+            AddPestilenceChildItem(items, favoriteDisplay, "Oculus teleport hotkey", "Click to change the Oculus / Triune teleport assist hotkey.", "pestilence_rgk_oculus_hotkey", 20);
             AddPestilenceChildItem(items, favoriteDisplay, "RG AutoSnap/Siphon", "Boss assist obeys AutoSnap and AutoSiphon toggles independently.", "pestilence_rgk_rg_assist", 12);
             AddPestilenceChildItem(items, favoriteDisplay, "Target line / reticle", "Draw a red target line and pulsing reticle dot while engaged.", "pestilence_rgk_target_line", 13);
             AddPestilenceChildItem(items, favoriteDisplay, "Zei's 50 Yard Circle", "Draw a 50 yard Zei range reference around your hero.", "pestilence_rgk_zei_circle", 16);
@@ -12872,7 +13008,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 float rangeTextW = Math.Max(40f, stepR.Left - textX - 10f);
 
                 DrawOutlinedFittedText(_fRowText, _fRowTextShadow, _fSmall, _fSmallShadow,
-                    "• " + entry.Title, textX, r.Top + 10f, rangeTextW);
+                    "• " + GetMacroTitleDisplay(entry), textX, r.Top + 10f, rangeTextW);
 
                 string value = (kind == 11 ? _autoLootNormalRangeYards : _autoLootEventRangeYards)
                     .ToString(CultureInfo.InvariantCulture) + "y";
@@ -12891,7 +13027,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             float textW = Math.Max(40f, stateR.Left - textX - 10f);
 
             DrawOutlinedFittedText(_fRowText, _fRowTextShadow, _fSmall, _fSmallShadow,
-                "• " + entry.Title, textX, r.Top + 10f, textW);
+                "• " + GetMacroTitleDisplay(entry), textX, r.Top + 10f, textW);
             DrawGlossButton(stateR, label, on, false, kind == 0);
 
             if (installed)
@@ -12923,7 +13059,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             float textW = Math.Max(40f, stateR.Left - textX - 10f);
 
             DrawOutlinedFittedText(_fRowText, _fRowTextShadow, _fSmall, _fSmallShadow,
-                "• " + entry.Title, textX, r.Top + 10f, textW);
+                "• " + GetMacroTitleDisplay(entry), textX, r.Top + 10f, textW);
             DrawGlossButton(stateR, label, on, false, false);
 
             if (installed)
@@ -12982,7 +13118,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             float textW = Math.Max(40f, stateR.Left - textX - 10f);
 
             DrawOutlinedFittedText(_fRowText, _fRowTextShadow, _fSmall, _fSmallShadow,
-                "• " + entry.Title, textX, r.Top + 10f, textW);
+                "• " + GetMacroTitleDisplay(entry), textX, r.Top + 10f, textW);
             DrawGlossButton(stateR, label, hotkeyRow ? _inariusRgkJuggerHotkeyCapture : on, false, hotkeyRow);
 
             if (installed)
@@ -12997,7 +13133,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             int kind = entry.PestilenceOptionKind;
             string label = GetPestilenceOptionLabel(kind, installed);
             bool on = GetPestilenceOptionEnabled(kind);
-            bool hotkeyRow = kind == 11;
+            bool hotkeyRow = kind == 11 || kind == 20;
 
             float pad = 44f;
             float textX = r.Left + pad;
@@ -13020,12 +13156,13 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             float textRightDefault = kind == 16 ? expandR.Left : stateRDefault.Left;
             float textWDefault = Math.Max(40f, textRightDefault - textX - 10f);
             DrawOutlinedFittedText(_fRowText, _fRowTextShadow, _fSmall, _fSmallShadow,
-                "• " + entry.Title, textX, r.Top + 10f, textWDefault);
+                "• " + GetMacroTitleDisplay(entry), textX, r.Top + 10f, textWDefault);
 
             if (kind == 16)
                 DrawGlossButton(expandR, _pestilenceRgkZeiExpanded ? "-" : "+", _pestilenceRgkZeiExpanded, false, false);
 
-            DrawGlossButton(stateRDefault, label, hotkeyRow ? _pestilenceRgkJuggerHotkeyCapture : on, false, hotkeyRow);
+            bool hotkeyCapture = kind == 11 ? _pestilenceRgkJuggerHotkeyCapture : _pestilenceRgkOculusHotkeyCapture;
+            DrawGlossButton(stateRDefault, label, hotkeyRow ? hotkeyCapture : on, false, hotkeyRow);
 
             if (installed)
             {
@@ -13867,6 +14004,9 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             if (row == null || string.IsNullOrWhiteSpace(row.DisplayName))
                 return string.Empty;
 
+            if (row.TypeName == "MapCursor")
+                return DisplayText("Minimap Mouse Cursor");
+
             string displayKey = "plugin." + TranslationKeyToken(row.DisplayName);
             string displayFallback = T(displayKey, DisplayText(row.DisplayName));
 
@@ -14654,6 +14794,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 _autoSkillKeybindCaptureSlot = -1;
                 _tipsPlayerMarkerHotkeyCapture = false;
                 _pestilenceRgkJuggerHotkeyCapture = false;
+                _pestilenceRgkOculusHotkeyCapture = false;
                 _inariusRgkJuggerHotkeyCapture = false;
                 ClearAnySnapHotkeyCapture();
                 _draggingWindow = false;
@@ -14691,6 +14832,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             _autoSkillKeybindCaptureSlot = -1;
             _tipsPlayerMarkerHotkeyCapture = false;
             _pestilenceRgkJuggerHotkeyCapture = false;
+            _pestilenceRgkOculusHotkeyCapture = false;
             _inariusRgkJuggerHotkeyCapture = false;
             _draggingWindow = false;
             _draggingDot = false;
@@ -18120,6 +18262,13 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     _tipsPlayerGroundSize.ToString(CultureInfo.InvariantCulture) + "|" +
                     _tipsPlayerMinimapDotSize.ToString(CultureInfo.InvariantCulture) + "|" +
                     _tipsBloodIsPowerTracker.ToString(CultureInfo.InvariantCulture));
+                lines.Add("VIS_MINIMAP_CURSOR=" + _visMinimapCursorEnabled.ToString(CultureInfo.InvariantCulture));
+                lines.Add("VIS_UNSCATHED=" + _tipsUnscathedEnabled.ToString(CultureInfo.InvariantCulture));
+                lines.Add("VIS_MAP_CURSOR_STYLE=" +
+                    _visMapCursorExpanded.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _visMapCursorColorIdx.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _visMapCursorSize.ToString(CultureInfo.InvariantCulture) + "|" +
+                    _visMapCursorThickness.ToString(CultureInfo.InvariantCulture));
 
                 lines.Add("VIS_ELITE_HEALTH_BARS=" +
                     _visEliteHpBarsEnabled.ToString(CultureInfo.InvariantCulture) + "|" +
@@ -18239,12 +18388,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 lines.Add("PESTILENCE_RGK_AUTOSIPHON=" + _pestilenceRgkAutoSiphon.ToString(CultureInfo.InvariantCulture));
                 lines.Add("PESTILENCE_RGK_LATE_REFRESH=" + _pestilenceRgkLateRefreshAssist.ToString(CultureInfo.InvariantCulture));
                 lines.Add("PESTILENCE_RGK_DEBUFF_PRIORITY=" + _pestilenceRgkPrioritizeDebuffed.ToString(CultureInfo.InvariantCulture));
-                lines.Add("PESTILENCE_RGK_AGGRESSIVE_SCAN=" + _pestilenceRgkAggressiveScan.ToString(CultureInfo.InvariantCulture));
                 lines.Add("PESTILENCE_RGK_INCLUDE_TRASH=" + _pestilenceRgkIncludeTrash.ToString(CultureInfo.InvariantCulture));
                 lines.Add("PESTILENCE_RGK_CURSOR_RESTORE=" + _pestilenceRgkCursorRestore.ToString(CultureInfo.InvariantCulture));
                 lines.Add("PESTILENCE_RGK_TARGET_RANGE=" + _pestilenceRgkTargetRange.ToString(CultureInfo.InvariantCulture));
                 lines.Add("PESTILENCE_RGK_JUGGER_LOCK=" + _pestilenceRgkJuggerHotkeyEnabled.ToString(CultureInfo.InvariantCulture));
                 lines.Add("PESTILENCE_RGK_JUGGER_HOTKEY=" + _pestilenceRgkJuggerHotkeyVk.ToString(CultureInfo.InvariantCulture));
+                lines.Add("PESTILENCE_RGK_OCULUS_HOTKEY=" + _pestilenceRgkOculusHotkeyVk.ToString(CultureInfo.InvariantCulture));
                 lines.Add("PESTILENCE_RGK_RG_ASSIST=" + _pestilenceRgkRgAssist.ToString(CultureInfo.InvariantCulture));
                 lines.Add("PESTILENCE_RGK_TARGET_LINE_RETICLE=" + _pestilenceRgkShowTargetLineReticle.ToString(CultureInfo.InvariantCulture));
                 lines.Add("PESTILENCE_RGK_ZEI_CIRCLE=" + _pestilenceRgkZeiCircle.ToString(CultureInfo.InvariantCulture));
@@ -18318,6 +18467,36 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             _playerCoeOpacity = ViClampF(_playerCoeOpacity, 0.10f, 1.00f);
             _playerCoeSizeMultiplier = ViClampF(_playerCoeSizeMultiplier, 0.20f, 1.50f);
+        }
+
+        private void ParseUnscathedSettings(string val)
+        {
+            string[] p = (val ?? string.Empty).Split('|');
+            _tipsUnscathedEnabled = ParseBool(p[0], _tipsUnscathedEnabled);
+        }
+
+        private void ParseMapCursorStyle(string val)
+        {
+            if (string.IsNullOrWhiteSpace(val)) return;
+            string[] p = val.Split('|');
+            if (p.Length > 0) _visMapCursorExpanded = ParseBool(p[0], _visMapCursorExpanded);
+            int color;
+            if (p.Length > 1 && int.TryParse(p[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out color))
+                _visMapCursorColorIdx = ViClamp(color, 0, 7);
+            float value;
+            if (p.Length > 2 && float.TryParse(p[2], NumberStyles.Float, CultureInfo.InvariantCulture, out value) &&
+                !float.IsNaN(value) && !float.IsInfinity(value))
+                _visMapCursorSize = ViClampF(value, 0.5f, 3.0f);
+            if (p.Length > 3 && float.TryParse(p[3], NumberStyles.Float, CultureInfo.InvariantCulture, out value) &&
+                !float.IsNaN(value) && !float.IsInfinity(value))
+                _visMapCursorThickness = ViClampF(value, 0.5f, 5.0f);
+        }
+
+        private static string MigrateMapCursorTypeName(string name)
+        {
+            return string.Equals(name, "MinimapCursorPlugin", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(name, "Turbo.Plugins.johnbl.MinimapCursorPlugin", StringComparison.OrdinalIgnoreCase)
+                ? "MapCursor" : name;
         }
 
         private void ParseTipsHelperVisualLine(string val)
@@ -18649,6 +18828,18 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     else if (key == "VIS_TIPS_HELPER")
                     {
                         ParseTipsHelperVisualLine(val);
+                    }
+                    else if (key == "VIS_MINIMAP_CURSOR")
+                    {
+                        _visMinimapCursorEnabled = ParseBool(val, _visMinimapCursorEnabled);
+                    }
+                    else if (key == "VIS_UNSCATHED")
+                    {
+                        ParseUnscathedSettings(val);
+                    }
+                    else if (key == "VIS_MAP_CURSOR_STYLE")
+                    {
+                        ParseMapCursorStyle(val);
                     }
                     else if (key == "VIS_ELITE_HEALTH_BARS")
                     {
@@ -19053,11 +19244,6 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                         bool tmp;
                         if (bool.TryParse(val, out tmp)) _pestilenceRgkPrioritizeDebuffed = tmp;
                     }
-                    else if (string.Equals(key, "PESTILENCE_RGK_AGGRESSIVE_SCAN", StringComparison.OrdinalIgnoreCase))
-                    {
-                        bool tmp;
-                        if (bool.TryParse(val, out tmp)) _pestilenceRgkAggressiveScan = tmp;
-                    }
                     else if (string.Equals(key, "PESTILENCE_RGK_INCLUDE_TRASH", StringComparison.OrdinalIgnoreCase))
                     {
                         bool tmp;
@@ -19083,7 +19269,13 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     {
                         int tmp;
                         if (int.TryParse(val, NumberStyles.Integer, CultureInfo.InvariantCulture, out tmp) && tmp > 0 && tmp <= ushort.MaxValue)
-                            _pestilenceRgkJuggerHotkeyVk = (ushort)(tmp == 0x20 ? 0x11 : tmp);
+                            _pestilenceRgkJuggerHotkeyVk = (ushort)tmp;
+                    }
+                    else if (string.Equals(key, "PESTILENCE_RGK_OCULUS_HOTKEY", StringComparison.OrdinalIgnoreCase))
+                    {
+                        int tmp;
+                        if (int.TryParse(val, NumberStyles.Integer, CultureInfo.InvariantCulture, out tmp) && tmp > 0 && tmp <= ushort.MaxValue)
+                            _pestilenceRgkOculusHotkeyVk = (ushort)tmp;
                     }
                     else if (string.Equals(key, "PESTILENCE_RGK_RG_ASSIST", StringComparison.OrdinalIgnoreCase))
                     {
@@ -19279,7 +19471,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     else if (key == "PLUGIN_ENABLED")
                     {
                         string[] pe = val.Split(new[]{'|'}, 2);
-                        string peName = pe.Length > 0 ? pe[0].Trim() : string.Empty;
+                        string peName = MigrateMapCursorTypeName(pe.Length > 0 ? pe[0].Trim() : string.Empty);
                         string peState = pe.Length > 1 ? pe[1].Trim() : string.Empty;
                         if (!string.IsNullOrWhiteSpace(peName))
                             _pluginEnabledOverrides[peName] = ParseBool(peState, true);
@@ -19287,7 +19479,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     else if (key == "FAVORITE")
                     {
                         string[] parts = val.Split(new[] { '|' }, 2);
-                        string typeName = parts.Length > 0 ? parts[0].Trim() : string.Empty;
+                        string typeName = MigrateMapCursorTypeName(parts.Length > 0 ? parts[0].Trim() : string.Empty);
                         string display = parts.Length > 1 ? parts[1].Trim() : string.Empty;
                         if (!string.IsNullOrWhiteSpace(typeName) && !IsFavorite(typeName))
                             _favorites.Add(new FavoriteEntry { TypeName = typeName, DisplayName = display });
