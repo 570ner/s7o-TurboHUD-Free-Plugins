@@ -115,6 +115,9 @@ namespace Turbo.Plugins.s7o
         };
 
         public bool VisualHelpersEnabled { get; set; } = true;
+        public bool ShowUnscathedMonsters { get; set; } = true;
+        public float UnscathedHealthCutoffPercent { get; set; } = 99.0f;
+        private IBrush _unscathedFillBrush, _unscathedBackBrush;
 
         public bool ShowHealthGlobeDots { get; set; } = true;
         public bool ShowRiftProgressOrbDots { get; set; } = true;
@@ -425,6 +428,8 @@ namespace Turbo.Plugins.s7o
         private readonly HashSet<string> _townRearmKeys = new HashSet<string>();
         private readonly List<PlayerMark> _players = new List<PlayerMark>();
         private long _alertSequence;
+        private string _inventoryFullAlertText = string.Empty;
+        private long _inventoryFullAlertStartMs;
         private bool _townAreaExpected;
         private bool _townVisitActive;
         private long _townSnapshotReadyMs;
@@ -510,6 +515,8 @@ namespace Turbo.Plugins.s7o
             s7o_Localization.Load();
             SetPlayerMarkerHotkey(PlayerMarkerHotkeyKey);
             RebuildResources(true);
+            _unscathedFillBrush = Hud.Render.CreateBrush(255, 195, 15, 15, 0);
+            _unscathedBackBrush = Hud.Render.CreateBrush(230, 0, 0, 0, 0);
             RegisterVisitedWaypointActFallbackElements();
             ClearRuntime();
         }
@@ -530,6 +537,24 @@ namespace Turbo.Plugins.s7o
             {
                 PlayerMarkerHotkey = null;
             }
+        }
+
+        public void ShowInventoryFullAlert(int used, int total)
+        {
+            if (total <= 0)
+                return;
+
+            long now;
+            try { now = Hud.Game.CurrentRealTimeMilliseconds; }
+            catch { return; }
+
+            used = Math.Max(0, Math.Min(total, used));
+            _inventoryFullAlertText = s7o_Localization.Format(
+                "overlay.auto_loot.inventory_full",
+                "INVENTORY FULL {0}/{1}",
+                used,
+                total);
+            _inventoryFullAlertStartMs = now;
         }
 
         public void OnNewArea(bool newGame, ISnoArea area)
@@ -661,19 +686,60 @@ namespace Turbo.Plugins.s7o
             if (clipState != ClipState.BeforeClip)
                 return;
 
+            PaintUnscathedMonsters();
             PaintPylonProgressMarkers();
             PaintPoolTrackerTop();
             PaintPoolWorldStatus();
             PaintPoolDirectionArrows();
             PaintItemScreenEdgeArrows();
             PaintItemAlerts();
+            PaintInventoryFullAlert();
             PaintPlayerPortraitMarkers();
             DrawBloodIsPowerTracker();
         }
 
+        private static bool IsUnscathedCandidate(IMonster monster, uint worldId, double cutoff)
+        {
+            return monster != null && monster.WorldId == worldId && monster.IsAlive &&
+                monster.Rarity == ActorRarity.Normal && !monster.IsElite && !monster.Untargetable &&
+                !monster.Hidden && !monster.Invisible && !monster.Burrowed &&
+                monster.MaxHealth > 0 && !double.IsInfinity(monster.MaxHealth) &&
+                !double.IsNaN(monster.CurHealth) && !double.IsInfinity(monster.CurHealth) &&
+                monster.CurHealth / monster.MaxHealth > cutoff;
+        }
+
+        private void PaintUnscathedMonsters()
+        {
+            if (!ShowUnscathedMonsters || Hud.Game.IsInTown || Hud.Window == null ||
+                _unscathedFillBrush == null || _unscathedBackBrush == null || Hud.Game.AliveMonsters == null) return;
+            double percent = UnscathedHealthCutoffPercent;
+            if (double.IsNaN(percent) || double.IsInfinity(percent)) percent = 99.0;
+            double cutoff = Math.Max(90.0, Math.Min(99.99, percent)) / 100.0;
+            float scale = Hud.Window.Size.Height / 1080.0f;
+            if (scale <= 0) return;
+            float width = 64.8f * scale, height = 4.5f * scale, border = Math.Max(0.75f, scale);
+            uint worldId = Hud.Game.Me.WorldId;
+            foreach (var monster in Hud.Game.AliveMonsters)
+            {
+                if (!IsUnscathedCandidate(monster, worldId, cutoff)) continue;
+                var floor = monster.FloorCoordinate;
+                if (floor == null || !floor.IsValid) continue;
+                // Approximate the top of the body from its native radius; this is
+                // an indicator, not a claimed native health-bar/hitbox anchor.
+                float lift = Math.Max(1.0f, Math.Max(monster.RadiusBottom, monster.RadiusScaled)) * 3.0f;
+                // Actual camera projection, without the native IsOnScreen gate or edge clamping.
+                var point = floor.Offset(0, 0, lift).ToScreenCoordinate(true, true);
+                if (point == null || float.IsNaN(point.X) || float.IsNaN(point.Y) ||
+                    point.X < 0 || point.Y < 0 || point.X > Hud.Window.Size.Width || point.Y > Hud.Window.Size.Height) continue;
+                float x = point.X - width * 0.5f, y = point.Y - height;
+                _unscathedBackBrush.DrawRectangle(x - border, y - border, width + border * 2, height + border * 2);
+                _unscathedFillBrush.DrawRectangle(x, y, width, height);
+            }
+        }
+
         public IEnumerable<ITransparent> GetTransparents()
         {
-            foreach (var brush in Brushes(HealthGlobeBrush, RiftOrbBrush, AncientRingBrush, AncientRingOutlineBrush, PrimalRingBrush, PrimalRingOutlineBrush,
+            foreach (var brush in Brushes(_unscathedFillBrush, _unscathedBackBrush, HealthGlobeBrush, RiftOrbBrush, AncientRingBrush, AncientRingOutlineBrush, PrimalRingBrush, PrimalRingOutlineBrush,
                 AncientMapBrush, AncientMapOutlineBrush, PrimalMapBrush, PrimalMapOutlineBrush, AncientScreenArrowBrush, AncientScreenArrowOutlineBrush,
                 PrimalScreenArrowBrush, PrimalScreenArrowOutlineBrush, AncientAlertArrowBrush, AncientAlertArrowOutlineBrush, AncientAlertArrowHighlightBrush,
                 PrimalAlertArrowBrush, PrimalAlertArrowOutlineBrush, PrimalAlertArrowHighlightBrush, PlayerCircleBlackBrush, PlayerDotOutlineBrush, ValleyOfDeathBrush, ValleyOfDeathOutlineBrush,
@@ -845,6 +911,8 @@ namespace Turbo.Plugins.s7o
             ResetTownVisit();
             _townAreaExpected = false;
             _players.Clear();
+            _inventoryFullAlertText = string.Empty;
+            _inventoryFullAlertStartMs = 0;
             ClearSessionTrackers();
             ResetBloodIsPowerTracker();
             ResetBloodIsPowerGreaterRiftLifecycle();
@@ -3811,6 +3879,55 @@ namespace Turbo.Plugins.s7o
                 DrawMinimapAlerts(alerts.Where(a => IsRankTextEnabled(a.Marker.Rank)).ToList());
         }
 
+        private void PaintInventoryFullAlert()
+        {
+            if (!ShowItemAlertText || string.IsNullOrEmpty(_inventoryFullAlertText) || _inventoryFullAlertStartMs <= 0)
+                return;
+
+            long elapsed = Hud.Game.CurrentRealTimeMilliseconds - _inventoryFullAlertStartMs;
+            int alpha = GetAlertAlphaBucket(PrimalRank, elapsed);
+            if (elapsed < 0 || alpha <= 0)
+            {
+                if (elapsed >= 0)
+                {
+                    _inventoryFullAlertText = string.Empty;
+                    _inventoryFullAlertStartMs = 0;
+                }
+                return;
+            }
+
+            if (ShowItemAlertTextAbovePlayer)
+            {
+                float x = Hud.Window.Size.Width * 0.5f + ItemAlertPlayerXOffset;
+                float y = Hud.Window.Size.Height * 0.5f + Lerp(ItemAlertPlayerStartYOffset, ItemAlertPlayerSettledYOffset, GetTravelProgress(elapsed))
+                    - ItemAlertTextLineHeight - 4.0f;
+                DrawInventoryFullAlertLine(x, y, elapsed, alpha, false);
+            }
+
+            if (ShowItemAlertTextNearMinimap && Hud.Render.MinimapUiElement != null && Hud.Render.MinimapUiElement.Visible)
+            {
+                var rect = Hud.Render.MinimapUiElement.Rectangle;
+                if (rect.Width > 0 && rect.Height > 0)
+                {
+                    float startY = rect.Y + rect.Height * ItemAlertMinimapStartYFrac;
+                    float settledY = rect.Y + Math.Max(ItemAlertMinimapSettledYOffset, rect.Height * Clamp(ItemAlertMinimapSettledYFrac, 0.0f, 1.0f));
+                    float y = Lerp(startY, settledY, GetTravelProgress(elapsed)) - ItemAlertTextLineHeight - 4.0f;
+                    DrawInventoryFullAlertLine(rect.X + rect.Width * 0.5f + ItemAlertMinimapXOffset, y, elapsed, alpha, true);
+                }
+            }
+        }
+
+        private void DrawInventoryFullAlertLine(float centerX, float y, long elapsed, int alpha, bool minimap)
+        {
+            IFont font = GetAlertFont(PrimalRank, elapsed, alpha, false, minimap);
+            IFont outline = GetAlertFont(PrimalRank, elapsed, alpha, true, minimap);
+            if (font == null)
+                return;
+
+            var layout = font.GetTextLayout(_inventoryFullAlertText);
+            DrawOutlinedText(_inventoryFullAlertText, centerX - layout.Metrics.Width * 0.5f, y, font, outline);
+        }
+
         private List<ItemAlert> GetActiveAlerts()
         {
             var now = Hud.Game.CurrentRealTimeMilliseconds;
@@ -3874,15 +3991,12 @@ namespace Turbo.Plugins.s7o
 
         private void DrawAbovePlayerAlerts(List<ItemAlert> alerts)
         {
-            if (alerts == null || alerts.Count == 0 || Hud.Game.Me == null || Hud.Game.Me.FloorCoordinate == null)
+            if (alerts == null || alerts.Count == 0)
                 return;
 
-            var sc = Hud.Game.Me.FloorCoordinate.ToScreenCoordinate(true, true);
-            if (!IsValid(sc))
-                return;
-
-            float x = sc.X + ItemAlertPlayerXOffset;
-            float y = sc.Y + Lerp(ItemAlertPlayerStartYOffset, ItemAlertPlayerSettledYOffset, GetTravelProgress(alerts[0].ElapsedMs));
+            // Match the inventory toast's fixed window anchor; hero projection jitters during movement.
+            float x = Hud.Window.Size.Width * 0.5f + ItemAlertPlayerXOffset;
+            float y = Hud.Window.Size.Height * 0.5f + Lerp(ItemAlertPlayerStartYOffset, ItemAlertPlayerSettledYOffset, GetTravelProgress(alerts[0].ElapsedMs));
             float newestY = y;
             float newestHeight = 0.0f;
 
