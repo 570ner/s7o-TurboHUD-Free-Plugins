@@ -5,6 +5,15 @@
 # Keep button.* values short so compact controls remain readable.
 # Community review: pending
 
+# REV03: Paragon build sync and DHStrafe status text.
+overlay.paragon_helper.build_sync=Paragon Build: {0}
+overlay.dh.prompt_combat=Combat: {0} = Speed | {1} = Stop
+overlay.dh.prompt_speed=Speed: {0} = Combat | {1} = Stop
+overlay.dh.paused_zdh_cast=Paused: ZDH cast
+overlay.dh.paused_pylon_nearby=Paused: pylon nearby
+overlay.dh.prompt_paused_reason=Paused: {0}
+overlay.dh.paused_portal_nearby=Paused: portal nearby
+
 common.status=Status: {0}
 common.on=ON
 common.off=OFF
@@ -1692,7 +1701,6 @@ overlay.paragon_helper.primary=Primary Stat
 overlay.paragon_helper.vitality=Vitality
 overlay.paragon_helper.movement=Movement Speed
 overlay.paragon_helper.resource=Max Resource
-overlay.paragon_helper.build_sync=Paragon Build: {0}
 overlay.paragon_builds.current=current build
 overlay.paragon_builds.save_current_setup=Save current build setup
 overlay.paragon_builds.save_setup=Save setup to build: "{0}"
@@ -1839,10 +1847,6 @@ overlay.dh.portal_failed=portal failed
 overlay.dh.prompt_paused=Paused
 overlay.dh.prompt_attack=Attack: {0} = Move | {1} = Stop
 overlay.dh.prompt_move=Move: {0} = Attack | {1} = Stop
-overlay.dh.prompt_combat=Combat: {0} = Speed | {1} = Stop
-overlay.dh.prompt_speed=Speed: {0} = Combat | {1} = Stop
-overlay.dh.paused_zdh_cast=Paused: ZDH cast
-overlay.dh.paused_pylon_nearby=Paused: pylon nearby
 overlay.dh.prompt_strafe=Strafe: {0} = Stop
 overlay.dh.prompt_start={0} = Strafe
 overlay.dangerous.in_wormhole=In Wormhole
@@ -1950,11 +1954,6 @@ audio.pylon.speed_found=Speed Pylon
 audio.pylon.speed_active=You have Speed
 audio.pylon.speed_lost=Speed Lost
 
-hud.text.zdh_helper_options_expanded=ZDH HELPER OPTIONS: EXPANDED
-hud.text.zdh_helper_options_collapsed=ZDH HELPER OPTIONS: COLLAPSED
-hud.text.zdh_helper_state=ZDH HELPER: {0}
-hud.text.zdh_helper_option_state=ZDH HELPER OPTION: {0}
-
 # ZDH Helper
 zdh.menu.title=ZDH Helper
 zdh.menu.description=Elite debuff uptime and optional support casts.
@@ -1978,3 +1977,21 @@ zdh.tooltip.iceblink=Iceblink
 zdh.tooltip.odyssey=Odyssey
 zdh.tooltip.mark=Mark
 zdh.tooltip.average=Average Uptime
+
+# v1.4.8 AutoLoot / HUD Menu
+hud.text.minimap_mouse_cursor=Minimap Mouse Cursor
+hud.text.draw_the_mouse_cursor_marker_above_minimap_overlays=Draw the mouse cursor marker above minimap overlays.
+hud.text.oculus_teleport_hotkey=Oculus teleport hotkey
+hud.text.click_to_change_the_oculus_triune_teleport_assist_hotkey=Click to change the Oculus / Triune teleport assist hotkey.
+hud.text.press_pestilence_oculus_teleport_hotkey=PRESS PESTILENCE OCULUS TELEPORT HOTKEY
+hud.text.pestilence_oculus_hotkey_capture_cancelled=PESTILENCE OCULUS HOTKEY CAPTURE CANCELLED
+hud.text.unsupported_pestilence_oculus_hotkey=UNSUPPORTED PESTILENCE OCULUS HOTKEY
+hud.pattern.pestilence_oculus_hotkey_set_to_arg0=PESTILENCE OCULUS HOTKEY SET TO {0}
+hud.pattern.pestilence_hotkeys_swapped_elite_arg0_oculus_arg1=PESTILENCE HOTKEYS SWAPPED: ELITE {0} / OCULUS {1}
+hud.text.zdh_helper_options_expanded=ZDH HELPER OPTIONS: EXPANDED
+hud.text.zdh_helper_options_collapsed=ZDH HELPER OPTIONS: COLLAPSED
+hud.pattern.zdh_helper_arg0=ZDH HELPER: {0}
+hud.pattern.zdh_helper_option_arg0=ZDH HELPER OPTION: {0}
+overlay.auto_loot.inventory_full=INVENTORY FULL {0}/{1}
+hud.visual.unscathed.title=Trash HP Bars
+hud.visual.unscathed.description=Health bars over unscathed trash for visibility.

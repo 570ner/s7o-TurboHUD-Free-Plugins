@@ -5,6 +5,15 @@
 # Keep button.* values short so compact controls remain readable.
 # Community review: pending
 
+# REV03: Paragon build sync and DHStrafe status text.
+overlay.paragon_helper.build_sync=巅峰配置：{0}
+overlay.dh.prompt_combat=战斗：{0} = 速度 | {1} = 停止
+overlay.dh.prompt_speed=速度：{0} = 战斗 | {1} = 停止
+overlay.dh.paused_zdh_cast=已暂停：ZDH 施法
+overlay.dh.paused_pylon_nearby=已暂停：附近有塔
+overlay.dh.prompt_paused_reason=已暂停：{0}
+overlay.dh.paused_portal_nearby=已暂停：附近有传送门
+
 common.status=状态：{0}
 common.on=开
 common.off=关
@@ -1692,7 +1701,6 @@ overlay.paragon_helper.primary=主属性
 overlay.paragon_helper.vitality=体能
 overlay.paragon_helper.movement=移动速度
 overlay.paragon_helper.resource=最大能量
-overlay.paragon_helper.build_sync=巅峰配置：{0}
 overlay.paragon_builds.current=当前配装
 overlay.paragon_builds.save_current_setup=保存当前配装
 overlay.paragon_builds.save_setup=保存到配装：“{0}”
@@ -1839,10 +1847,6 @@ overlay.dh.portal_failed=传送门 失败
 overlay.dh.prompt_paused=已暂停
 overlay.dh.prompt_attack=攻击: {0} = 移动 | {1} = 停止
 overlay.dh.prompt_move=移动: {0} = 攻击 | {1} = 停止
-overlay.dh.prompt_combat=战斗：{0} = 速度 | {1} = 停止
-overlay.dh.prompt_speed=速度：{0} = 战斗 | {1} = 停止
-overlay.dh.paused_zdh_cast=已暂停：ZDH 施法
-overlay.dh.paused_pylon_nearby=已暂停：附近有塔
 overlay.dh.prompt_strafe=扫射: {0} = 停止
 overlay.dh.prompt_start={0} = 扫射
 overlay.dangerous.in_wormhole=位于虫洞内
@@ -1950,11 +1954,6 @@ audio.pylon.speed_found=加速塔
 audio.pylon.speed_active=加速已激活
 audio.pylon.speed_lost=加速已结束
 
-hud.text.zdh_helper_options_expanded=ZDH 辅助工具选项：已展开
-hud.text.zdh_helper_options_collapsed=ZDH 辅助工具选项：已收起
-hud.text.zdh_helper_state=ZDH 辅助工具：{0}
-hud.text.zdh_helper_option_state=ZDH 辅助工具选项：{0}
-
 # ZDH Helper
 zdh.menu.title=ZDH 辅助工具
 zdh.menu.description=精英减益覆盖率与可选的辅助技能自动施放。
@@ -1978,3 +1977,19 @@ zdh.tooltip.iceblink=冰闪
 zdh.tooltip.odyssey=奥德赛
 zdh.tooltip.mark=标记
 zdh.tooltip.average=平均覆盖率
+hud.text.minimap_mouse_cursor=小地图鼠标光标
+hud.text.draw_the_mouse_cursor_marker_above_minimap_overlays=在小地图覆盖层上方绘制鼠标光标标记。
+hud.text.oculus_teleport_hotkey=魔眼传送快捷键
+hud.text.click_to_change_the_oculus_triune_teleport_assist_hotkey=点击更改魔眼 / 三元法阵传送辅助快捷键。
+hud.text.press_pestilence_oculus_teleport_hotkey=请按瘟疫魔眼传送快捷键
+hud.text.pestilence_oculus_hotkey_capture_cancelled=瘟疫魔眼快捷键设置已取消
+hud.text.unsupported_pestilence_oculus_hotkey=不支持的瘟疫魔眼快捷键
+hud.pattern.pestilence_oculus_hotkey_set_to_arg0=瘟疫魔眼快捷键已设为 {0}
+hud.pattern.pestilence_hotkeys_swapped_elite_arg0_oculus_arg1=瘟疫快捷键已互换：精英 {0} / 魔眼 {1}
+hud.text.zdh_helper_options_expanded=ZDH 助手选项：已展开
+hud.text.zdh_helper_options_collapsed=ZDH 助手选项：已折叠
+hud.pattern.zdh_helper_arg0=ZDH 助手：{0}
+hud.pattern.zdh_helper_option_arg0=ZDH 助手选项：{0}
+overlay.auto_loot.inventory_full=背包已满 {0}/{1}
+hud.visual.unscathed.title=普通怪物生命条
+hud.visual.unscathed.description=在未受伤的普通怪物上方显示生命条，使其更容易被看见。

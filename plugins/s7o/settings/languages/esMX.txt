@@ -5,6 +5,15 @@
 # Keep button.* values short so compact controls remain readable.
 # Community review: pending
 
+# REV03: Paragon build sync and DHStrafe status text.
+overlay.paragon_helper.build_sync=Configuración de Paragón: {0}
+overlay.dh.prompt_combat=Combate: {0} = Velocidad | {1} = Parar
+overlay.dh.prompt_speed=Velocidad: {0} = Combate | {1} = Parar
+overlay.dh.paused_zdh_cast=Pausado: lanzamiento ZDH
+overlay.dh.paused_pylon_nearby=Pausado: pilón cercano
+overlay.dh.prompt_paused_reason=Pausado: {0}
+overlay.dh.paused_portal_nearby=Pausado: portal cercano
+
 common.status=Estado: {0}
 common.on=SÍ
 common.off=NO
@@ -1692,7 +1701,6 @@ overlay.paragon_helper.primary=Atributo principal
 overlay.paragon_helper.vitality=Vitalidad
 overlay.paragon_helper.movement=Vel. de movimiento
 overlay.paragon_helper.resource=Recurso máximo
-overlay.paragon_helper.build_sync=Configuración de Paragón: {0}
 overlay.paragon_builds.current=configuración actual
 overlay.paragon_builds.save_current_setup=Guardar configuración actual
 overlay.paragon_builds.save_setup=Guardar configuración en: "{0}"
@@ -1839,10 +1847,6 @@ overlay.dh.portal_failed=portal falló
 overlay.dh.prompt_paused=Pausado
 overlay.dh.prompt_attack=Ataque: {0} = Mover | {1} = Parar
 overlay.dh.prompt_move=Mover: {0} = Ataque | {1} = Parar
-overlay.dh.prompt_combat=Combate: {0} = Velocidad | {1} = Parar
-overlay.dh.prompt_speed=Velocidad: {0} = Combate | {1} = Parar
-overlay.dh.paused_zdh_cast=Pausado: lanzamiento ZDH
-overlay.dh.paused_pylon_nearby=Pausado: pilón cercano
 overlay.dh.prompt_strafe=Strafe: {0} = Parar
 overlay.dh.prompt_start={0} = Disparo evasivo
 overlay.dangerous.in_wormhole=En agujero
@@ -1950,11 +1954,6 @@ audio.pylon.speed_found=Pilón de velocidad
 audio.pylon.speed_active=Velocidad activa
 audio.pylon.speed_lost=Velocidad terminada
 
-hud.text.zdh_helper_options_expanded=OPCIONES DEL AYUDANTE ZDH: ABIERTAS
-hud.text.zdh_helper_options_collapsed=OPCIONES DEL AYUDANTE ZDH: CERRADAS
-hud.text.zdh_helper_state=AYUDANTE ZDH: {0}
-hud.text.zdh_helper_option_state=OPCIÓN DEL AYUDANTE ZDH: {0}
-
 # ZDH Helper
 zdh.menu.title=Ayudante ZDH
 zdh.menu.description=Tiempo activo de perjuicios y lanzamientos de apoyo opcionales.
@@ -1978,3 +1977,21 @@ zdh.tooltip.iceblink=Iceblink
 zdh.tooltip.odyssey=Odisea
 zdh.tooltip.mark=Marca
 zdh.tooltip.average=Actividad promedio
+
+# v1.4.8 AutoLoot / HUD Menu
+hud.text.minimap_mouse_cursor=Cursor del mouse en el minimapa
+hud.text.draw_the_mouse_cursor_marker_above_minimap_overlays=Dibuja el marcador del mouse por encima de las capas del minimapa.
+hud.text.oculus_teleport_hotkey=Tecla de teletransporte de Oculus
+hud.text.click_to_change_the_oculus_triune_teleport_assist_hotkey=Haz clic para cambiar la tecla de ayuda de teletransporte de Oculus / Triune.
+hud.text.press_pestilence_oculus_teleport_hotkey=PRESIONA LA TECLA DE TELETRANSPORTE OCULUS DE PESTILENCE
+hud.text.pestilence_oculus_hotkey_capture_cancelled=CAPTURA DE LA TECLA OCULUS DE PESTILENCE CANCELADA
+hud.text.unsupported_pestilence_oculus_hotkey=TECLA OCULUS DE PESTILENCE NO COMPATIBLE
+hud.pattern.pestilence_oculus_hotkey_set_to_arg0=TECLA OCULUS DE PESTILENCE ASIGNADA A {0}
+hud.pattern.pestilence_hotkeys_swapped_elite_arg0_oculus_arg1=TECLAS DE PESTILENCE INTERCAMBIADAS: ÉLITE {0} / OCULUS {1}
+hud.text.zdh_helper_options_expanded=OPCIONES DEL AYUDANTE ZDH: ABIERTAS
+hud.text.zdh_helper_options_collapsed=OPCIONES DEL AYUDANTE ZDH: CERRADAS
+hud.pattern.zdh_helper_arg0=AYUDANTE ZDH: {0}
+hud.pattern.zdh_helper_option_arg0=OPCIÓN DEL AYUDANTE ZDH: {0}
+overlay.auto_loot.inventory_full=INVENTARIO LLENO {0}/{1}
+hud.visual.unscathed.title=Barras de vida de enemigos comunes
+hud.visual.unscathed.description=Barras de vida sobre enemigos comunes ilesos para verlos mejor.

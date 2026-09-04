@@ -5,6 +5,15 @@
 # Keep button.* values short so compact controls remain readable.
 # Community review: pending
 
+# REV03: Paragon build sync and DHStrafe status text.
+overlay.paragon_helper.build_sync=Профиль совершенствования: {0}
+overlay.dh.prompt_combat=Бой: {0} = Скорость | {1} = Стоп
+overlay.dh.prompt_speed=Скорость: {0} = Бой | {1} = Стоп
+overlay.dh.paused_zdh_cast=Пауза: применение ZDH
+overlay.dh.paused_pylon_nearby=Пауза: пилон рядом
+overlay.dh.prompt_paused_reason=Пауза: {0}
+overlay.dh.paused_portal_nearby=Пауза: портал рядом
+
 common.status=Статус: {0}
 common.on=ВКЛ
 common.off=ВЫКЛ
@@ -1692,7 +1701,6 @@ overlay.paragon_helper.primary=Основной параметр
 overlay.paragon_helper.vitality=Живучесть
 overlay.paragon_helper.movement=Скорость движения
 overlay.paragon_helper.resource=Макс. ресурс
-overlay.paragon_helper.build_sync=Профиль совершенствования: {0}
 overlay.paragon_builds.current=текущий комплект
 overlay.paragon_builds.save_current_setup=Сохранить текущий комплект
 overlay.paragon_builds.save_setup=Сохранить комплект для сборки: «{0}»
@@ -1839,10 +1847,6 @@ overlay.dh.portal_failed=портал ошибка
 overlay.dh.prompt_paused=Пауза
 overlay.dh.prompt_attack=Атака: {0} = Движение | {1} = Стоп
 overlay.dh.prompt_move=Движение: {0} = Атака | {1} = Стоп
-overlay.dh.prompt_combat=Бой: {0} = Скорость | {1} = Стоп
-overlay.dh.prompt_speed=Скорость: {0} = Бой | {1} = Стоп
-overlay.dh.paused_zdh_cast=Пауза: применение ZDH
-overlay.dh.paused_pylon_nearby=Пауза: пилон рядом
 overlay.dh.prompt_strafe=Strafe: {0} = Стоп
 overlay.dh.prompt_start={0} = Обстрел
 overlay.dangerous.in_wormhole=В червоточине
@@ -1950,11 +1954,6 @@ audio.pylon.speed_found=Пилон скорости
 audio.pylon.speed_active=Скорость активна
 audio.pylon.speed_lost=Скорость закончилась
 
-hud.text.zdh_helper_options_expanded=ПАРАМЕТРЫ ПОМОЩНИКА ZDH: РАЗВЁРНУТО
-hud.text.zdh_helper_options_collapsed=ПАРАМЕТРЫ ПОМОЩНИКА ZDH: СВЁРНУТО
-hud.text.zdh_helper_state=ПОМОЩНИК ZDH: {0}
-hud.text.zdh_helper_option_state=ПАРАМЕТР ПОМОЩНИКА ZDH: {0}
-
 # ZDH Helper
 zdh.menu.title=Помощник ZDH
 zdh.menu.description=Время действия ослаблений элит и дополнительные автоумения поддержки.
@@ -1978,3 +1977,19 @@ zdh.tooltip.iceblink=Iceblink
 zdh.tooltip.odyssey=Одиссея
 zdh.tooltip.mark=Метка
 zdh.tooltip.average=Среднее время действия
+hud.text.minimap_mouse_cursor=Курсор мыши на мини-карте
+hud.text.draw_the_mouse_cursor_marker_above_minimap_overlays=Отображает метку курсора мыши поверх элементов мини-карты.
+hud.text.oculus_teleport_hotkey=Клавиша телепортации Oculus
+hud.text.click_to_change_the_oculus_triune_teleport_assist_hotkey=Нажмите, чтобы изменить клавишу помощи телепортации Oculus / Триединства.
+hud.text.press_pestilence_oculus_teleport_hotkey=НАЖМИТЕ КЛАВИШУ ТЕЛЕПОРТАЦИИ OCULUS ДЛЯ PESTILENCE
+hud.text.pestilence_oculus_hotkey_capture_cancelled=НАЗНАЧЕНИЕ КЛАВИШИ OCULUS ДЛЯ PESTILENCE ОТМЕНЕНО
+hud.text.unsupported_pestilence_oculus_hotkey=НЕПОДДЕРЖИВАЕМАЯ КЛАВИША OCULUS ДЛЯ PESTILENCE
+hud.pattern.pestilence_oculus_hotkey_set_to_arg0=КЛАВИША OCULUS ДЛЯ PESTILENCE: {0}
+hud.pattern.pestilence_hotkeys_swapped_elite_arg0_oculus_arg1=КЛАВИШИ PESTILENCE ПОМЕНЯНЫ: ЭЛИТА {0} / OCULUS {1}
+hud.text.zdh_helper_options_expanded=Параметры ZDH Helper: развёрнуты
+hud.text.zdh_helper_options_collapsed=Параметры ZDH Helper: свёрнуты
+hud.pattern.zdh_helper_arg0=ZDH Helper: {0}
+hud.pattern.zdh_helper_option_arg0=Параметр ZDH Helper: {0}
+overlay.auto_loot.inventory_full=ИНВЕНТАРЬ ПОЛОН {0}/{1}
+hud.visual.unscathed.title=Полосы здоровья обычных монстров
+hud.visual.unscathed.description=Полосы здоровья над невредимыми обычными монстрами, чтобы их было легче заметить.

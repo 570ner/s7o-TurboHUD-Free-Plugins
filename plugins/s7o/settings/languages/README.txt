@@ -1,5 +1,13 @@
 s7o plugin-pack language files
 
+REV06 - September 4, 2026
+Updates Trash HP Bars title and description in all 13 catalogs for the
+simple ON/OFF row in HUD Menu REV06. Removes the unused cutoff label.
+All other translations, including Paragon Helper, DHStrafe, Pestilence
+and Map Cursor, are preserved from REV05. Keep your current TipsHelper.
+Extract these TXT files into plugins\s7o\settings\languages and restart
+FreeHUD. Preserve personal *.override.txt files.
+
 This folder contains the editable UTF-8 catalogs used by s7o HUD Menu and by
 s7o plugins that draw user-facing overlay text. The selected language is the
 same code used by FreeHUD in data\selected_language.txt.
