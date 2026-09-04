@@ -8,7 +8,7 @@ using Turbo.Plugins.Default;
 namespace Turbo.Plugins.s7o
 {
     // Commits to Urshi as soon as the established primary reward pile is clear.
-    public class s7o_AutoLoot : BasePlugin, IAfterCollectHandler, IItemPickedHandler, IItemLocationChangedHandler, INewAreaHandler
+    public class s7o_AutoLoot : BasePlugin, IAfterCollectHandler, IItemPickedHandler, IItemLocationChangedHandler, INewAreaHandler, IMonsterKilledHandler
     {
         public const int DefaultNormalPickupRangeYards = 10;
         public const int DefaultEventPickupRangeYards = 40;
@@ -18,12 +18,24 @@ namespace Turbo.Plugins.s7o
         public const int MaxEventPickupRangeYards = 120;
 
         private const int MovingPickupRangeCapYards = 5;
+        // GR rewards can remain visible while Zei-range positioning leaves the hero
+        // well outside the normal event radius. A direct item click lets Diablo's
+        // pathfinder approach the reward; this envelope is post-Rift-only.
+        private const int PostRiftApproachRangeYards = 80;
         private const int LootBurstMonsterBlockYards = 45;
         private const int LootBurstThreshold = 8;
         private const int LootBurstLatchMs = 5000;
+        // Confirm that the guardian reward set stays empty across delayed native
+        // drop frames before returning to ordinary pickup range.
+        private const int NephalemRiftRewardEmptyConfirmMs = 250;
         private const int NormalDelayMs = 80;
         private const int CursorRestoreDelayMs = 15;
         private const int CursorRestoreExpireMs = 250;
+        // Native pickup/location confirmation arrived within 183 ms in the
+        // validation logs. This is only a same-seed fallback watchdog; other
+        // candidates remain immediately available to the normal selector.
+        private const int PickupAcknowledgeMs = 200;
+        private const int HazardHoverMaxCollections = 8;
         private const int CleanupDelayMs = 25;
         private const int CleanupFarMoveDelayMs = 220;
         private const int SpecialCleanupDelayMs = 55;
@@ -85,6 +97,7 @@ namespace Turbo.Plugins.s7o
         private const int UrshiFallbackWindowMs = 2200;
         private const int UrshiFallbackMaxTries = 8;
         private const int AutoUrshiRewardSettleMs = 4000;
+        private const int AutoUrshiLegendaryRewardMinObserved = 10;
         private const int AutoUrshiTalkClickDelayMs = 700;
         private const int AutoUrshiTalkMaxAttempts = 12;
         private const int AutoUrshiTalkRetryCooldownMs = 8000;
@@ -94,15 +107,14 @@ namespace Turbo.Plugins.s7o
         private const int AutoUrshiTalkLootCancelRetryMs = 70;
         private const int AutoUrshiTalkLootCancelMaxAttempts = 3;
         private const float AutoUrshiFarLootRiskYards = 55f;
-        private const float AutoUrshiBreadcrumbStepYards = 12f;
-        private const float AutoUrshiReturnMinClickYards = 5f;
-        private const int AutoUrshiBreadcrumbMax = 8;
+        private const float AutoUrshiBreadcrumbStepYards = 4f;
+        private const float AutoUrshiReturnMinClickYards = 2f;
+        private const int AutoUrshiBreadcrumbMax = 64;
+        private const float AutoUrshiUnknownApproachMaxYards = 120f;
         private const int AutoUrshiReturnClickDelayMs = 120;
         private const int AutoUrshiReturnMaxClicks = 10;
         private const int AutoUrshiApproachStallMs = AutoUrshiTalkClickDelayMs * 2;
         private const float AutoUrshiApproachProgressYards = 1.0f;
-        private const float AutoUrshiTalkSafeEdgeMarginPx = 48f;
-        private const float AutoUrshiTalkSafeBottomMarginPx = 150f;
         private const int DroppedItemIgnoreMs = 20000;
         private const int DroppedItemVisibilityGraceMs = 500;
         private const int CleanupStuckIgnoreMs = 8000;
@@ -140,6 +152,7 @@ namespace Turbo.Plugins.s7o
 
         private readonly Dictionary<int, int> _attempts = new Dictionary<int, int>();
         private readonly Dictionary<int, long> _retryAfterMs = new Dictionary<int, long>();
+        private readonly Dictionary<int, long> _pickupAcknowledgeUntilMs = new Dictionary<int, long>();
         private readonly Dictionary<int, DropSuppress> _droppedSuppress = new Dictionary<int, DropSuppress>();
         private readonly Dictionary<int, long> _cleanupStuckIgnoreUntilMs = new Dictionary<int, long>();
         private readonly Dictionary<int, long> _stackedLootSkipUntilMs = new Dictionary<int, long>();
@@ -165,8 +178,8 @@ namespace Turbo.Plugins.s7o
         private long _nextUrshiSpaceMs;
         private int _lastClickSeed;
         private int _lootProgressSerial;
+        private long _lastLootProgressMs;
         private int _lastRetryRefreshSerial;
-        private int _lastCleanupIgnoreSerial;
         private int _lastVisibleEligibleLootCount;
         private int _urshiArmedSeed;
         private int _urshiSpaceAttempts;
@@ -201,7 +214,14 @@ namespace Turbo.Plugins.s7o
         private NativePoint _autoUrshiRestorePoint;
         private long _postRiftCleanupStartedMs;
         private long _autoUrshiRewardGateStartedMs;
+        private readonly HashSet<int> _autoUrshiObservedLegendarySeeds = new HashSet<int>();
+        private int _autoUrshiObservedLegendaryRewardCount;
         private readonly List<AutoUrshiReturnPoint> _autoUrshiReturnTrail = new List<AutoUrshiReturnPoint>(AutoUrshiBreadcrumbMax);
+        private uint _autoUrshiTrailWorldId;
+        private int _autoUrshiReturnProbeTick;
+        private int _autoUrshiReturnProbeX;
+        private int _autoUrshiReturnProbeY;
+        private long _autoUrshiReturnProbeMs;
         private bool _autoUrshiHasLastSeenWorld;
         private float _autoUrshiLastSeenX;
         private float _autoUrshiLastSeenY;
@@ -219,7 +239,14 @@ namespace Turbo.Plugins.s7o
         private float _autoUrshiApproachBestGoalDistance;
         private bool _autoUrshiApproachHasGoalDistance;
         private bool _cleanupLatched;
+        private bool _nephalemRiftRewardPending;
+        private bool _nephalemRiftRewardObserved;
+        private bool _nephalemRiftRewardLootSeen;
+        private long _nephalemRiftRewardEmptySinceMs;
+        private long _nephalemRiftRewardLastNewFloorItemMs;
+        private readonly HashSet<int> _nephalemRiftRewardSeenFloorSeeds = new HashSet<int>();
         private bool _lastCleanupClickFar;
+        private int _wideCleanupCommittedSeed;
         private bool _enabled;
         private bool _paused;
         private bool _talkToUrshiAfterLoot;
@@ -230,6 +257,7 @@ namespace Turbo.Plugins.s7o
         private bool _areaIsTown;
         private bool _goblinPackPaused;
         private long _goblinFreeSinceMs;
+        private readonly HashSet<uint> _unopenedProtectedRewardChestAnnIds = new HashSet<uint>();
         private long _lootBurstCleanupUntilMs;
         private long _lastMovementSampleMs;
         private float _lastPlayerX;
@@ -241,6 +269,25 @@ namespace Turbo.Plugins.s7o
         private NativePoint _pendingCursorPoint;
         private long _pendingCursorRestoreAtMs;
         private long _pendingCursorRestoreExpireMs;
+        private int _hazardHoverSeed;
+        private int _hazardHoverProbe;
+        private bool _hazardHoverHasRestorePoint;
+        private NativePoint _hazardHoverRestorePoint;
+        private int _materialHoverSeed;
+        private int _materialHoverX;
+        private int _materialHoverY;
+        private long _materialHoverExpireMs;
+        private bool _materialHoverHasRestorePoint;
+        private NativePoint _materialHoverRestorePoint;
+        private int _materialLiftFallbackSeed;
+        private int _materialProbeSeed, _materialProbeIndex, _materialProbeTick;
+        private int _materialOverlapSeed;
+        private int _materialOverlapChecks;
+        private bool _inventoryFullAlertActive;
+        private int _inventoryFullAlertUsed;
+        private int _inventoryFullAlertTotal;
+        private int _inventoryFullAlertWidth;
+        private int _inventoryFullAlertHeight;
 
         [DllImport("user32.dll")]
         private static extern bool SetCursorPos(int x, int y);
@@ -325,6 +372,7 @@ namespace Turbo.Plugins.s7o
         {
             _attempts.Clear();
             _retryAfterMs.Clear();
+            _pickupAcknowledgeUntilMs.Clear();
             _stackedLootSkipUntilMs.Clear();
             _lastStackedLootClickMs = 0;
             _lastStackedLootClickX = 0;
@@ -334,17 +382,36 @@ namespace Turbo.Plugins.s7o
             _cleanupStuckIgnoreUntilMs.Clear();
             _lastClickSeed = 0;
             _lootProgressSerial = 0;
+            _lastLootProgressMs = 0;
             _lastRetryRefreshSerial = 0;
-            _lastCleanupIgnoreSerial = 0;
             _lastVisibleEligibleLootCount = -1;
             _lastCleanupClickFar = false;
+            _wideCleanupCommittedSeed = 0;
             _cleanupLatched = false;
+            _nephalemRiftRewardPending = false;
+            _nephalemRiftRewardObserved = false;
+            _nephalemRiftRewardLootSeen = false;
+            _nephalemRiftRewardEmptySinceMs = 0;
+            _nephalemRiftRewardLastNewFloorItemMs = 0;
+            _nephalemRiftRewardSeenFloorSeeds.Clear();
             _goblinPackPaused = false;
             _goblinFreeSinceMs = 0;
+            _unopenedProtectedRewardChestAnnIds.Clear();
             _lootBurstCleanupUntilMs = 0;
             _lastMovementSampleMs = 0;
             _playerMoving = false;
             _pendingCursorRestore = false;
+            ClearHazardHoverState(false, 0);
+            ClearMaterialHoverState(true);
+            _materialLiftFallbackSeed = 0;
+            _materialProbeSeed = _materialProbeIndex = _materialProbeTick = 0;
+            _materialOverlapSeed = 0;
+            _materialOverlapChecks = 0;
+            _inventoryFullAlertActive = false;
+            _inventoryFullAlertUsed = 0;
+            _inventoryFullAlertTotal = 0;
+            _inventoryFullAlertWidth = 0;
+            _inventoryFullAlertHeight = 0;
             _urshiArmedUntilMs = 0;
             _nextUrshiRiskClickMs = 0;
             ClearUrshiRiskLootHover();
@@ -384,9 +451,16 @@ namespace Turbo.Plugins.s7o
                 MarkLootPickupProgress();
             _attempts.Remove(item.Seed);
             _retryAfterMs.Remove(item.Seed);
+            _pickupAcknowledgeUntilMs.Remove(item.Seed);
             if (_lastClickSeed == item.Seed) _lastClickSeed = 0;
+            if (_wideCleanupCommittedSeed == item.Seed) _wideCleanupCommittedSeed = 0;
             _droppedSuppress.Remove(item.Seed);
             _stackedLootSkipUntilMs.Remove(item.Seed);
+            if (_hazardHoverSeed == item.Seed)
+                ClearHazardHoverState(false, 0);
+            if (_materialHoverSeed == item.Seed)
+                ClearMaterialHoverState(false);
+            ClearMaterialFallback(item.Seed);
             _urshiMisclicksBySeed.Remove(item.Seed);
             _urshiFallbackTriesBySeed.Remove(item.Seed);
             if (_urshiFallbackSeed == item.Seed)
@@ -416,7 +490,16 @@ namespace Turbo.Plugins.s7o
                     ClearAccidentalUrshiRecoveryState();
             }
             if (to != ItemLocation.Floor)
+            {
+                _pickupAcknowledgeUntilMs.Remove(item.Seed);
                 _cleanupStuckIgnoreUntilMs.Remove(item.Seed);
+                if (_wideCleanupCommittedSeed == item.Seed) _wideCleanupCommittedSeed = 0;
+                if (_hazardHoverSeed == item.Seed)
+                    ClearHazardHoverState(false, 0);
+                if (_materialHoverSeed == item.Seed)
+                    ClearMaterialHoverState(false);
+                ClearMaterialFallback(item.Seed);
+            }
             if (from == ItemLocation.Inventory && to == ItemLocation.Floor)
             {
                 long now = Hud.Game.CurrentRealTimeMilliseconds;
@@ -434,6 +517,41 @@ namespace Turbo.Plugins.s7o
             }
 
             _areaIsTown = area != null && area.IsTown;
+        }
+
+        public void OnMonsterKilled(IMonster monster)
+        {
+            if (monster == null || monster.Rarity != ActorRarity.Boss)
+                return;
+
+            try
+            {
+                if (Hud.Game.RiftPercentage < 100.0d)
+                    return;
+
+                if (Hud.Game.SpecialArea == SpecialArea.GreaterRift)
+                {
+                    // Anchor the reward gate to the native guardian-death event. GR
+                    // progress can reach 100% several seconds before the boss dies.
+                    long now = Math.Max(1L, Hud.Game.CurrentRealTimeMilliseconds);
+                    _postRiftCleanupStartedMs = now;
+                    _autoUrshiHandoffCommitted = false;
+                    ResetAutoUrshiRewardBatch();
+                    _autoUrshiRewardGateStartedMs = now;
+                    return;
+                }
+
+                if (Hud.Game.SpecialArea != SpecialArea.Rift)
+                    return;
+
+                _nephalemRiftRewardPending = true;
+                _nephalemRiftRewardObserved = false;
+                _nephalemRiftRewardLootSeen = false;
+                _nephalemRiftRewardEmptySinceMs = 0;
+                _nephalemRiftRewardLastNewFloorItemMs = 0;
+                _nephalemRiftRewardSeenFloorSeeds.Clear();
+            }
+            catch { }
         }
 
         public void AfterCollect()
@@ -483,27 +601,45 @@ namespace Turbo.Plugins.s7o
             ProcessPendingCursorRestore(Hud.Game.CurrentRealTimeMilliseconds);
 
             if (!_enabled || _paused || Hud.Game.IsPaused || !Hud.Window.IsForeground)
+            {
+                ClearMaterialHoverState(true);
                 return;
+            }
 
             long now = Hud.Game.CurrentRealTimeMilliseconds;
             if (Hud.Game.IsLoading)
+            {
+                ClearMaterialHoverState(true);
                 return;
+            }
+
+            // Record the guardian-phase route even while stationary combat owns input.
+            // This observes travel only; it never clicks before the loot handoff.
+            TrackAutoUrshiReturnTrail();
 
             if (HandlePendingAccidentalUrshiRecovery(now, me))
+            {
+                ClearMaterialHoverState(true);
                 return;
+            }
 
             if (me.Powers == null || me.Powers.CantMove)
+            {
+                ClearMaterialHoverState(true);
                 return;
+            }
 
             if (area != null && sceneArea != null && area.IsTown != sceneArea.IsTown)
             {
                 _lootBurstCleanupUntilMs = 0;
+                ClearMaterialHoverState(true);
                 return;
             }
 
             if (ShouldPauseForGoblinPack(now))
             {
                 _lootBurstCleanupUntilMs = 0;
+                ClearMaterialHoverState(true);
                 return;
             }
 
@@ -518,41 +654,89 @@ namespace Turbo.Plugins.s7o
 
             // Urshi recovery must run before inventory/vendor UI early returns because Urshi opens UI layers.
             if (HandleAutoLootUrshiRecovery(now))
+            {
+                ClearMaterialHoverState(true);
                 return;
+            }
 
             // Recovery above intentionally owns Urshi conversation/gem UI. Outside that
             // lifecycle, never synthesize world clicks while a normal blocking UI is open.
             if (IsBlockingLootUiOpen())
+            {
+                ClearMaterialHoverState(true);
                 return;
+            }
+
+            var state = me.AnimationState;
+            bool combatAction = state == AcdAnimationState.Attacking || state == AcdAnimationState.Casting || state == AcdAnimationState.Channeling;
+            bool playerMoving = UpdatePlayerMovement(now);
+
+            if (state == AcdAnimationState.CastingPortal)
+            {
+                ClearMaterialHoverState(true);
+                return;
+            }
+            // Transform frames did not produce a single confirmed pickup in telemetry.
+            // Resume from the native state transition instead of burning retry attempts.
+            if (state == AcdAnimationState.Transform)
+            {
+                ClearMaterialHoverState(true);
+                return;
+            }
+            // Wide reward cleanup must not override a stationary attack/channel.
+            // Movement-compatible channels (for example Strafe/Whirlwind) continue
+            // through the existing native movement-state path.
+            if (combatAction && !playerMoving)
+            {
+                ClearMaterialHoverState(true);
+                return;
+            }
+
+            // Reward timers begin only when user-controlled stationary combat ends,
+            // so waiting for a channel does not consume the cleanup window.
+            TrackProtectedRewardChestOpen(now);
+            TrackNephalemRiftRewardWindow(now);
 
             IActor protectedChest = GetUnopenedProtectedChest();
             bool protectedChestBlocked = protectedChest != null;
             bool postRiftCleanup = !protectedChestBlocked && IsPostRiftCleanup();
             TrackPostRiftCleanupWindow(postRiftCleanup, now);
             bool lootBurstCleanup = !protectedChestBlocked && IsLootBurstCleanup(now);
-            bool wideCleanup = postRiftCleanup || lootBurstCleanup;
-            var state = me.AnimationState;
-            bool combatAction = state == AcdAnimationState.Attacking || state == AcdAnimationState.Casting || state == AcdAnimationState.Channeling;
-            bool playerMoving = UpdatePlayerMovement(now);
-
-            if (state == AcdAnimationState.CastingPortal)
-                return;
-            if (!wideCleanup && combatAction && !playerMoving)
-                return;
-
+            bool nephalemRiftRewardCleanup = !protectedChestBlocked && _nephalemRiftRewardObserved &&
+                (lootBurstCleanup || !HasNearbyAttackableMonster(LootBurstMonsterBlockYards));
+            bool wideCleanup = postRiftCleanup || lootBurstCleanup || nephalemRiftRewardCleanup;
+            if (!wideCleanup)
+                _wideCleanupCommittedSeed = 0;
             int normalRange = (state == AcdAnimationState.Running || (combatAction && playerMoving))
                 ? Math.Min(MovingPickupRangeCapYards, _normalPickupRangeYards)
                 : _normalPickupRangeYards;
-            int range = wideCleanup ? _eventPickupRangeYards : normalRange;
+            int range = postRiftCleanup || nephalemRiftRewardCleanup
+                ? PostRiftLootRangeYards()
+                : (lootBurstCleanup ? _eventPickupRangeYards : normalRange);
             int freeSlots = SafeFreeSlots();
             IActor urshi = GetUrshiActor();
             TrackAutoUrshiReturnState(postRiftCleanup, now, urshi);
             BeginAutoUrshiRewardBatch(postRiftCleanup, now, urshi != null);
-            var candidates = Hud.Game.Items
+            var visibleCandidates = Hud.Game.Items
                 .Where(i => i != null && i.Location == ItemLocation.Floor && i.IsOnScreen && !IsExcludedPickup(i) && !IsSuppressedDroppedItem(i, now) && !IsCleanupStuckIgnored(i, now) && !IsProtectedChestRisk(i, protectedChest) && i.CentralXyDistanceToMe <= range)
                 .Select(i => new LootCandidate(i, WantedPriority(i), IsUrshiRisk(i, urshi)))
-                .Where(c => c.Priority >= 0 && CanFit(c.Item, freeSlots) && IsAutoUrshiHandoffLoot(c.Item))
+                .Where(c => c.Priority >= 0 && IsAutoUrshiHandoffLoot(c.Item))
                 .ToList();
+            if (nephalemRiftRewardCleanup)
+            {
+                TrackNephalemRiftRewardFloorActivity(now);
+                UpdateNephalemRiftRewardCompletion(visibleCandidates.Count, now);
+            }
+            UpdateInventoryFullAlert(visibleCandidates, freeSlots);
+            var candidates = visibleCandidates
+                .Where(c => CanFit(c.Item, freeSlots))
+                .ToList();
+            if (_hazardHoverSeed != 0 && !candidates.Any(c => c.Item != null && c.Item.Seed == _hazardHoverSeed))
+                ClearHazardHoverState(true, now);
+            if (_materialHoverSeed != 0 && !candidates.Any(c => c.Item != null && c.Item.Seed == _materialHoverSeed))
+                ClearMaterialHoverState(true);
+            if (_materialLiftFallbackSeed != 0 && !candidates.Any(c => c.Item != null && c.Item.Seed == _materialLiftFallbackSeed))
+                ClearMaterialFallback(_materialLiftFallbackSeed);
 
             // Once the established gem/legendary pile is clear, commit before
             // ordinary late drops can hold the Urshi handoff open.
@@ -569,7 +753,7 @@ namespace Turbo.Plugins.s7o
             {
                 if (postRiftCleanup)
                 {
-                    if (_autoUrshiApproachAborted)
+                    if (_autoUrshiTalkDone || _autoUrshiApproachAborted)
                         return;
 
                     if (!TryCommitAutoUrshiHandoff(now))
@@ -583,7 +767,7 @@ namespace Turbo.Plugins.s7o
                     // that command with a breadcrumb click if on-screen state flickers.
                     if (_autoUrshiActorPathActive)
                     {
-                        if (IsAutoUrshiTalkActorClickable(urshi))
+                        if (!playerMoving && IsAutoUrshiTalkActorClickable(urshi))
                             TryTalkToUrshiAfterLoot(now, urshi);
                         return;
                     }
@@ -607,7 +791,9 @@ namespace Turbo.Plugins.s7o
             bool noSpacePickupOnScreen = candidates.Any(c => IsNoSpaceMaterialPickup(c.Item));
             int delay = postRiftCleanup
                 ? (_lastCleanupClickFar ? CleanupFarMoveDelayMs : CleanupDelayMs)
-                : (lootBurstCleanup ? (_lastCleanupClickFar ? SpecialCleanupFarMoveDelayMs : SpecialCleanupDelayMs) : NormalDelayMs);
+                : (lootBurstCleanup || nephalemRiftRewardCleanup
+                    ? (_lastCleanupClickFar ? SpecialCleanupFarMoveDelayMs : SpecialCleanupDelayMs)
+                    : NormalDelayMs);
             if ((stackedLoot || (postRiftCleanup && noSpacePickupOnScreen)) && delay > StackedLootDelayMs)
                 delay = StackedLootDelayMs;
             if (now - _lastClickMs < delay)
@@ -624,7 +810,15 @@ namespace Turbo.Plugins.s7o
             }
 
             bool farUrshiLootRisk = postRiftCleanup && HasAutoUrshiFarLootRisk(tryCandidates);
-            var target = SelectBestCandidate(tryCandidates, wideCleanup, now, stackedLoot, farUrshiLootRisk);
+            var target = _materialHoverSeed != 0
+                ? tryCandidates.FirstOrDefault(c => c.Item != null && c.Item.Seed == _materialHoverSeed)
+                : null;
+            if (target == null)
+                target = GetHazardHoverCandidate(tryCandidates);
+            if (target == null)
+                target = GetCommittedWideCleanupCandidate(tryCandidates, wideCleanup, stackedLoot);
+            if (target == null)
+                target = SelectBestCandidate(tryCandidates, wideCleanup, now, stackedLoot, farUrshiLootRisk);
             if (target == null && stackedLoot)
                 target = SelectBestCandidate(tryCandidates, wideCleanup, now, false, farUrshiLootRisk);
 
@@ -634,12 +828,28 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
-            ClickItem(target.Item, target.UrshiRisk && urshi != null, wideCleanup, stackedLoot && IsStackedWithAnother(target, candidates), now);
+            LootCandidate selectedMaterial = GetSelectedStackedMaterialCandidate(target, tryCandidates);
+            if (selectedMaterial != null)
+            {
+                // Keep the confirmed cursor/restore point; only the material identity changes.
+                target = selectedMaterial;
+                _materialHoverSeed = target.Item.Seed;
+            }
+
+            bool targetStacked = stackedLoot && IsStackedWithAnother(target, candidates);
+            if (wideCleanup && !targetStacked)
+                _wideCleanupCommittedSeed = target.Item.Seed;
+            else if (!wideCleanup || _wideCleanupCommittedSeed == target.Item.Seed)
+                _wideCleanupCommittedSeed = 0;
+
+            ClickItem(target.Item, target.UrshiRisk && urshi != null, wideCleanup, targetStacked, now);
         }
 
         private void MarkLootPickupProgress()
         {
             _lootProgressSerial = _lootProgressSerial == int.MaxValue ? 1 : _lootProgressSerial + 1;
+            try { _lastLootProgressMs = Hud.Game.CurrentRealTimeMilliseconds; }
+            catch { _lastLootProgressMs = 0; }
         }
 
         private void TrackPostRiftCleanupWindow(bool postRiftCleanup, long now)
@@ -658,21 +868,56 @@ namespace Turbo.Plugins.s7o
             _postRiftCleanupStartedMs = 0;
             _autoUrshiHandoffCommitted = false;
             ResetAutoUrshiRewardBatch();
-            ResetAutoUrshiReturnState();
+            if (Hud.Game.SpecialArea != SpecialArea.GreaterRift || Hud.Game.RiftPercentage < 100.0d)
+                ResetAutoUrshiReturnState();
         }
 
         private void ResetAutoUrshiRewardBatch()
         {
             _autoUrshiRewardGateStartedMs = 0;
+            _autoUrshiObservedLegendarySeeds.Clear();
+            _autoUrshiObservedLegendaryRewardCount = 0;
         }
 
         private void BeginAutoUrshiRewardBatch(bool postRiftCleanup, long now, bool urshiAvailable)
         {
-            if (!_talkToUrshiAfterLoot || !postRiftCleanup || _autoUrshiHandoffCommitted || !urshiAvailable)
+            if (!_talkToUrshiAfterLoot || !postRiftCleanup || _autoUrshiHandoffCommitted ||
+                (!urshiAvailable && _autoUrshiRewardGateStartedMs == 0))
                 return;
 
             if (_autoUrshiRewardGateStartedMs == 0)
                 _autoUrshiRewardGateStartedMs = now;
+
+            ObserveAutoUrshiLegendaryRewards(now);
+        }
+
+        private void ObserveAutoUrshiLegendaryRewards(long now)
+        {
+            try
+            {
+                if (Hud == null || Hud.Game == null || Hud.Game.Items == null)
+                    return;
+
+                IActor protectedChest = GetUnopenedProtectedChest();
+                int freeSlots = SafeFreeSlots();
+                int range = PostRiftLootRangeYards();
+
+                foreach (var item in Hud.Game.Items)
+                {
+                    if (item == null || item.Seed == 0 || item.Location != ItemLocation.Floor ||
+                        !item.IsOnScreen || !IsAutoUrshiCountedLegendaryReward(item))
+                        continue;
+                    if (IsExcludedPickup(item) || IsSuppressedDroppedItem(item, now) ||
+                        IsProtectedChestRisk(item, protectedChest) ||
+                        item.CentralXyDistanceToMe > range || WantedPriority(item) < 0 ||
+                        !CanFit(item, freeSlots))
+                        continue;
+
+                    if (_autoUrshiObservedLegendarySeeds.Add(item.Seed))
+                        _autoUrshiObservedLegendaryRewardCount = _autoUrshiObservedLegendarySeeds.Count;
+                }
+            }
+            catch { }
         }
 
         private void ClearGenericUrshiRecoveryState()
@@ -697,6 +942,9 @@ namespace Turbo.Plugins.s7o
         private void ResetAutoUrshiReturnState()
         {
             _autoUrshiReturnTrail.Clear();
+            _autoUrshiTrailWorldId = 0;
+            _autoUrshiReturnProbeTick = 0;
+            _autoUrshiReturnProbeMs = 0;
             _autoUrshiHasLastSeenWorld = false;
             _autoUrshiLastSeenX = 0f;
             _autoUrshiLastSeenY = 0f;
@@ -718,7 +966,7 @@ namespace Turbo.Plugins.s7o
 
             try
             {
-                if (urshi != null && urshi.FloorCoordinate != null)
+                if (urshi != null && urshi.FloorCoordinate != null && urshi.WorldId == Hud.Game.Me.WorldId)
                 {
                     _autoUrshiHasLastSeenWorld = true;
                     _autoUrshiLastSeenX = urshi.FloorCoordinate.X;
@@ -728,6 +976,7 @@ namespace Turbo.Plugins.s7o
 
                     if (IsAutoUrshiTalkActorClickable(urshi))
                     {
+                        _autoUrshiReturnProbeTick = 0;
                         _autoUrshiReturnClicks = 0;
                         _nextAutoUrshiReturnMs = 0;
                         if (_autoUrshiReturning)
@@ -739,32 +988,48 @@ namespace Turbo.Plugins.s7o
                     }
                 }
 
-                var me = Hud != null && Hud.Game != null ? Hud.Game.Me : null;
-                if (!_autoUrshiHasLastSeenWorld || me == null || me.FloorCoordinate == null)
-                    return;
-
-                if (_autoUrshiReturning)
-                    return;
-
-                float x = me.FloorCoordinate.X;
-                float y = me.FloorCoordinate.Y;
-                float z = me.FloorCoordinate.Z;
-
-                if (_autoUrshiReturnTrail.Count > 0)
-                {
-                    var last = _autoUrshiReturnTrail[_autoUrshiReturnTrail.Count - 1];
-                    float dx = x - last.X;
-                    float dy = y - last.Y;
-                    if ((dx * dx + dy * dy) < AutoUrshiBreadcrumbStepYards * AutoUrshiBreadcrumbStepYards)
-                        return;
-                }
-
-                _autoUrshiReturnTrail.Add(new AutoUrshiReturnPoint(x, y, z));
-
-                while (_autoUrshiReturnTrail.Count > AutoUrshiBreadcrumbMax)
-                    _autoUrshiReturnTrail.RemoveAt(0);
             }
             catch { }
+        }
+
+        private void TrackAutoUrshiReturnTrail()
+        {
+            if (!_talkToUrshiAfterLoot || Hud.Game.SpecialArea != SpecialArea.GreaterRift ||
+                Hud.Game.RiftPercentage < 100.0d)
+                return;
+
+            var me = Hud.Game.Me;
+            if (me == null || me.FloorCoordinate == null || !me.FloorCoordinate.IsValid)
+                return;
+            if (_autoUrshiTrailWorldId != me.WorldId)
+            {
+                ResetAutoUrshiReturnState();
+                _autoUrshiTrailWorldId = me.WorldId;
+            }
+            if (me.AnimationState == AcdAnimationState.Transform)
+            {
+                _autoUrshiReturnTrail.Clear(); // A teleport is not a traversed ground segment.
+                _autoUrshiReturnProbeTick = 0;
+                if (_autoUrshiReturning || _autoUrshiActorPathActive)
+                    AbortAutoUrshiApproach(Hud.Game.CurrentRealTimeMilliseconds);
+                return;
+            }
+            if (_autoUrshiReturning || _autoUrshiActorPathActive || _autoUrshiApproachAborted || _autoUrshiTalkDone)
+                return;
+
+            var position = me.FloorCoordinate;
+            if (_autoUrshiReturnTrail.Count > 0)
+            {
+                var last = _autoUrshiReturnTrail[_autoUrshiReturnTrail.Count - 1];
+                float distance = position.XYDistanceTo(last.X, last.Y);
+                if (distance < AutoUrshiBreadcrumbStepYards)
+                    return;
+                if (distance > 20f)
+                    _autoUrshiReturnTrail.Clear(); // Loading/jumps must not join disconnected paths.
+            }
+            _autoUrshiReturnTrail.Add(new AutoUrshiReturnPoint(position.X, position.Y, position.Z));
+            if (_autoUrshiReturnTrail.Count > AutoUrshiBreadcrumbMax)
+                _autoUrshiReturnTrail.RemoveAt(0);
         }
 
         private bool HasAutoUrshiFarLootRisk(List<LootCandidate> candidates)
@@ -808,9 +1073,24 @@ namespace Turbo.Plugins.s7o
 
             bool changed = false;
             bool hasUrshiRisk = false;
+            // Consume every progress serial, but refresh only a recently collapsed
+            // genuine stack near its last click. Unrelated items keep their cooldowns.
+            bool recentStackedProgress = _lastLootProgressMs > 0 &&
+                _lastStackedLootClickMs > 0 &&
+                now >= _lastLootProgressMs &&
+                now >= _lastStackedLootClickMs &&
+                _lastLootProgressMs >= _lastStackedLootClickMs &&
+                now - _lastLootProgressMs <= StackedLootRotationMemoryMs &&
+                now - _lastStackedLootClickMs <= StackedLootRotationMemoryMs;
+            double refreshRadius = StackedLootScreenRadiusPx * 2.0d;
+            double refreshRadiusSquared = refreshRadius * refreshRadius;
             foreach (var candidate in candidates)
             {
                 if (candidate == null || candidate.Item == null) continue;
+                if (!recentStackedProgress || candidate.Item.ScreenCoordinate == null ||
+                    StackedLootScreenDistanceSquared(candidate.Item) > refreshRadiusSquared)
+                    continue;
+
                 int seed = candidate.Item.Seed;
                 if (_retryAfterMs.Remove(seed)) changed = true;
                 if (_attempts.Remove(seed)) changed = true;
@@ -888,6 +1168,15 @@ namespace Turbo.Plugins.s7o
                 }
             }
 
+            if (_pickupAcknowledgeUntilMs.Count != 0)
+            {
+                foreach (var pair in _pickupAcknowledgeUntilMs.ToArray())
+                {
+                    if (now >= pair.Value || !IsVisibleFloorSeed(pair.Key))
+                        _pickupAcknowledgeUntilMs.Remove(pair.Key);
+                }
+            }
+
             if (_urshiFallbackSeed != 0 && (now > _urshiFallbackUntilMs || !IsVisibleFloorSeed(_urshiFallbackSeed)))
             {
                 _urshiFallbackSeed = 0;
@@ -949,11 +1238,22 @@ namespace Turbo.Plugins.s7o
         private bool CanTry(IItem item, bool riskyUrshi, long now)
         {
             int n;
+            long acknowledgeUntil;
+            if (_pickupAcknowledgeUntilMs.TryGetValue(item.Seed, out acknowledgeUntil))
+            {
+                if (now < acknowledgeUntil) return false;
+                _pickupAcknowledgeUntilMs.Remove(item.Seed);
+            }
+
             long retryAt;
             _attempts.TryGetValue(item.Seed, out n);
             if (_retryAfterMs.TryGetValue(item.Seed, out retryAt))
             {
-                if (now < retryAt) return false;
+                // Exact selection alone is not pickup progress: an automatic skill
+                // can leave an item selected while repeatedly canceling its click.
+                // A real movement transition still releases the cooldown immediately.
+                bool movedToSelectedItem = !riskyUrshi && _playerMoving && IsExactItemSelected(item);
+                if (now < retryAt && !movedToSelectedItem) return false;
                 _retryAfterMs.Remove(item.Seed);
             }
 
@@ -1038,6 +1338,74 @@ namespace Turbo.Plugins.s7o
                 .ThenBy(c => c.Item.CentralXyDistanceToMe)
                 .ThenBy(c => c.Priority)
                 .FirstOrDefault() ?? best;
+        }
+
+        private LootCandidate GetCommittedWideCleanupCandidate(List<LootCandidate> candidates, bool wideCleanup, bool stackedLoot)
+        {
+            if (!wideCleanup || _wideCleanupCommittedSeed == 0)
+            {
+                _wideCleanupCommittedSeed = 0;
+                return null;
+            }
+
+            LootCandidate committed = candidates.FirstOrDefault(c =>
+                c != null && c.Item != null && c.Item.Seed == _wideCleanupCommittedSeed);
+
+            // Stacked labels keep their proven rotation. A separated reward keeps the
+            // current native pathfinder destination until floor state or retry state
+            // proves that this seed is resolved or temporarily unavailable.
+            if (committed == null || (stackedLoot && IsStackedWithAnother(committed, candidates)))
+            {
+                _wideCleanupCommittedSeed = 0;
+                return null;
+            }
+
+            return committed;
+        }
+
+        private LootCandidate GetSelectedStackedMaterialCandidate(LootCandidate anchor, List<LootCandidate> candidates)
+        {
+            if (anchor == null || anchor.Item == null || anchor.UrshiRisk
+                || _materialHoverSeed != anchor.Item.Seed || !IsNoSpaceMaterialPickup(anchor.Item)
+                || Hud.Game.CurrentGameTick <= _materialProbeTick)
+                return null;
+
+            NativePoint cursor;
+            if (!GetCursorPos(out cursor) || !IsSafeSyntheticWorldClick(cursor.X, cursor.Y))
+                return null;
+            double dx = cursor.X - _materialHoverX;
+            double dy = cursor.Y - _materialHoverY;
+            double radius = Math.Max(3.0d, 4.0d * UiScale());
+            if (dx * dx + dy * dy > radius * radius)
+                return null;
+
+            // All entries already passed wanted/fit/range/retry guards. Clear a
+            // selectable material from the same pile instead of chasing its neighbor.
+            foreach (LootCandidate candidate in candidates)
+            {
+                if (candidate.Item == null || candidate.Item.Seed == anchor.Item.Seed
+                    || candidate.UrshiRisk || candidate.Priority > anchor.Priority
+                    || !IsNoSpaceMaterialPickup(candidate.Item)
+                    || !IsStackedLootPair(anchor.Item, candidate.Item))
+                    continue;
+                if (IsExactItemSelected(candidate.Item) && IsCursorNearMaterialBase(candidate.Item, cursor))
+                    return candidate;
+            }
+            return null;
+        }
+
+        private LootCandidate GetHazardHoverCandidate(List<LootCandidate> candidates)
+        {
+            if (_hazardHoverSeed == 0 || candidates == null)
+                return null;
+
+            LootCandidate pending = candidates.FirstOrDefault(c =>
+                c != null && c.Item != null && c.Item.Seed == _hazardHoverSeed);
+            if (pending != null)
+                return pending;
+
+            ClearHazardHoverState(true, Hud.Game.CurrentRealTimeMilliseconds);
+            return null;
         }
 
         private double StackedLootScreenDistanceSquared(IItem item)
@@ -1145,21 +1513,212 @@ namespace Turbo.Plugins.s7o
             if (riskyUrshi && HandleUrshiRiskLootHoverClick(item, tries, stackedLoot, now))
                 return;
 
+            if (IsNoSpaceMaterialPickup(item) &&
+                HandleMaterialConfirmedRetry(item, tries, cleanup, stackedLoot, now, old, restore))
+                return;
+
+            IActor selectedBeforeMove = GetSelectedActorSafe();
+            bool hazardHoverPending = _hazardHoverSeed == item.Seed;
+            int pointAttempt = tries + (hazardHoverPending ? _hazardHoverProbe : 0);
             int x, y;
-            if (!TryGetUiSafeItemClickPoint(item, tries, cleanup, stackedLoot || IsNoSpaceMaterialPickup(item), out x, out y)
-                || !TrySetCursorForWorldClick(x, y))
+            bool hasClickPoint = TryGetUiSafeItemClickPoint(item, pointAttempt, cleanup, stackedLoot, out x, out y);
+
+            if (!hasClickPoint || !TrySetCursorForWorldClick(x, y))
             {
+                if (hazardHoverPending)
+                    ClearHazardHoverState(true, now);
                 // Rotate away briefly instead of hammering a label that currently overlaps UI.
                 _retryAfterMs[item.Seed] = now + Math.Max(75, StackedLootSkipMs);
                 _lastClickMs = now;
                 return;
             }
 
+            if (hazardHoverPending)
+            {
+                if (IsHazardousSelectedInteractable(selectedBeforeMove))
+                {
+                    _hazardHoverProbe++;
+                    if (_hazardHoverProbe >= HazardHoverMaxCollections)
+                    {
+                        _retryAfterMs[item.Seed] = now + StackedLootSkipMs;
+                        ClearHazardHoverState(true, now);
+                    }
+                    return;
+                }
+
+                if (!cleanup && _hazardHoverHasRestorePoint)
+                {
+                    old = _hazardHoverRestorePoint;
+                    restore = true;
+                }
+                ClearHazardHoverState(false, now);
+            }
+            else if (IsHazardousSelectedInteractable(selectedBeforeMove))
+            {
+                _hazardHoverSeed = item.Seed;
+                _hazardHoverProbe = 1;
+                _hazardHoverHasRestorePoint = restore;
+                _hazardHoverRestorePoint = old;
+                return;
+            }
+
+            CommitItemClick(item, tries, cleanup, stackedLoot, now, old, restore);
+        }
+
+        private bool HandleMaterialConfirmedRetry(IItem item, int tries, bool cleanup, bool stackedLoot, long now, NativePoint old, bool restore)
+        {
+            int tick = Hud.Game.CurrentGameTick;
+            NativePoint cursor;
+            if (_materialHoverSeed == item.Seed)
+            {
+                bool haveCursor = GetCursorPos(out cursor);
+                double ownershipRadius = Math.Max(3.0d, 4.0d * UiScale());
+                double dx = haveCursor ? cursor.X - _materialHoverX : double.MaxValue;
+                double dy = haveCursor ? cursor.Y - _materialHoverY : double.MaxValue;
+                bool cursorOwned = haveCursor && dx * dx + dy * dy <= ownershipRadius * ownershipRadius;
+
+                // Native selection is the click authority. Check it before cursor
+                // ownership so harmless projection/movement drift cannot discard a
+                // confirmed material target between adjacent collection frames.
+                if (haveCursor && IsExactItemSelected(item) && IsCursorNearMaterialBase(item, cursor) &&
+                    IsSafeSyntheticWorldClick(cursor.X, cursor.Y))
+                {
+                    NativePoint restorePoint = _materialHoverRestorePoint;
+                    bool restoreAfterClick = _materialHoverHasRestorePoint;
+                    ClearMaterialHoverState(false);
+                    CommitItemClick(item, tries, cleanup, stackedLoot, now, restorePoint, restoreAfterClick);
+                    return true;
+                }
+
+                // A material label can share its zero-lift point with another item.
+                // Confirm that overlap twice, then use the ordinary proven label lift;
+                // the exact selected actor remains mandatory before any click.
+                if (cursorOwned && _materialProbeIndex == 0 && tick > _materialProbeTick
+                    && _materialLiftFallbackSeed != item.Seed && IsDifferentItemSelected(item))
+                {
+                    _materialProbeTick = tick;
+                    if (_materialOverlapSeed == item.Seed)
+                        _materialOverlapChecks++;
+                    else
+                    {
+                        _materialOverlapSeed = item.Seed;
+                        _materialOverlapChecks = 1;
+                    }
+
+                    if (_materialOverlapChecks >= 2)
+                    {
+                        _materialLiftFallbackSeed = item.Seed;
+                        _materialProbeIndex = 1;
+                        _materialProbeTick = tick;
+                        _materialHoverExpireMs = now + CursorRestoreExpireMs;
+                    }
+                }
+
+                // Never fight a manual cursor move or another plugin that has taken control.
+                if (!cursorOwned)
+                {
+                    ClearMaterialHoverState(false);
+                    _retryAfterMs[item.Seed] = now + StackedLootSkipMs;
+                    _lastClickMs = now;
+                    return true;
+                }
+
+                // Give native selection fresh ticks to acknowledge this point.
+                // Exact selection above still commits immediately; only misses advance.
+                if (tick < _materialProbeTick || tick - _materialProbeTick >= 2)
+                {
+                    _materialProbeIndex = (_materialProbeIndex + 1) % 8;
+                    _materialProbeTick = tick;
+                }
+
+                if (now >= _materialHoverExpireMs)
+                {
+                    ClearMaterialHoverState(true);
+                    _retryAfterMs[item.Seed] = now + StackedLootSkipMs;
+                    _lastClickMs = now;
+                    return true;
+                }
+            }
+            else
+            {
+                ClearMaterialHoverState(true);
+                _materialHoverSeed = item.Seed;
+                if (_materialProbeSeed != item.Seed)
+                {
+                    _materialProbeSeed = item.Seed;
+                    _materialProbeIndex = _materialLiftFallbackSeed == item.Seed ? 1 : 0;
+                }
+                _materialProbeTick = tick;
+                _materialHoverExpireMs = now + CursorRestoreExpireMs;
+                _materialHoverHasRestorePoint = restore;
+                _materialHoverRestorePoint = old;
+            }
+
+            int x, y;
+            GetMaterialHoverPoint(item, _materialProbeIndex, out x, out y);
+            if (!IsSafeSyntheticWorldClick(x, y) || !TrySetCursorForWorldClick(x, y))
+            {
+                ClearMaterialHoverState(true);
+                _retryAfterMs[item.Seed] = now + StackedLootSkipMs;
+                _lastClickMs = now;
+                return true;
+            }
+
+            _materialHoverX = x;
+            _materialHoverY = y;
+            return true;
+        }
+
+        private void GetMaterialHoverPoint(IItem item, int probe, out int x, out int y)
+        {
+            // Native zero lift and the proven ordinary lift precede gentle, existing
+            // fallback geometry. These are hover probes, never unconfirmed clicks.
+            if (probe < 2)
+            {
+                GetItemClickBase(item, probe == 0, out x, out y);
+                return;
+            }
+            int phase = probe == 2 ? 2 : probe == 3 ? 1 : probe < 6 ? probe - 1 : probe;
+            GetClickPoint(item, phase, true, out x, out y);
+            int baseX, baseY;
+            GetItemClickBase(item, true, out baseX, out baseY);
+            float scale = UiScale();
+            x = baseX + (int)Math.Round((x - baseX) * scale);
+            y = baseY + (int)Math.Round((y - baseY) * scale);
+        }
+
+        private bool IsDifferentItemSelected(IItem item)
+        {
+            if (item == null) return false;
+            try
+            {
+                IActor selected = GetSelectedActorSafe();
+                return selected != null && selected.GizmoType == GizmoType.Item && selected.AnnId != item.AnnId;
+            }
+            catch { return false; }
+        }
+
+        private void ClearMaterialFallback(int seed)
+        {
+            if (_materialProbeSeed == seed)
+                _materialProbeSeed = _materialProbeIndex = _materialProbeTick = 0;
+            if (_materialLiftFallbackSeed == seed)
+                _materialLiftFallbackSeed = 0;
+            if (_materialOverlapSeed == seed)
+            {
+                _materialOverlapSeed = 0;
+                _materialOverlapChecks = 0;
+            }
+        }
+
+        private void CommitItemClick(IItem item, int tries, bool cleanup, bool stackedLoot, long now, NativePoint old, bool restore)
+        {
             _attempts[item.Seed] = tries + 1;
             ClearUrshiArmedRecoveryState(true);
-
             ArmGenericUrshiPickupRecovery(item, cleanup, now);
             MouseLeftClick();
+            if (!stackedLoot)
+                _pickupAcknowledgeUntilMs[item.Seed] = now + PickupAcknowledgeMs;
             if (restore) ScheduleCursorRestore(old, now);
             _lastClickSeed = item.Seed;
             if (stackedLoot)
@@ -1169,6 +1728,70 @@ namespace Turbo.Plugins.s7o
             }
             _lastCleanupClickFar = cleanup && item.CentralXyDistanceToMe > _normalPickupRangeYards;
             _lastClickMs = now;
+        }
+
+        private void ClearMaterialHoverState(bool restoreCursor)
+        {
+            if (restoreCursor && _materialHoverHasRestorePoint)
+            {
+                NativePoint cursor;
+                double ownershipRadius = Math.Max(3.0d, 4.0d * UiScale());
+                if (GetCursorPos(out cursor))
+                {
+                    double dx = cursor.X - _materialHoverX;
+                    double dy = cursor.Y - _materialHoverY;
+                    if (dx * dx + dy * dy <= ownershipRadius * ownershipRadius)
+                        SetCursorPos(_materialHoverRestorePoint.X, _materialHoverRestorePoint.Y);
+                }
+            }
+
+            _materialHoverSeed = 0;
+            _materialHoverX = 0;
+            _materialHoverY = 0;
+            _materialHoverExpireMs = 0;
+            _materialHoverHasRestorePoint = false;
+            _materialHoverRestorePoint = new NativePoint();
+        }
+
+        private void ClearHazardHoverState(bool restoreCursor, long now)
+        {
+            if (restoreCursor && _hazardHoverHasRestorePoint)
+                ScheduleCursorRestore(_hazardHoverRestorePoint, now);
+
+            _hazardHoverSeed = 0;
+            _hazardHoverProbe = 0;
+            _hazardHoverHasRestorePoint = false;
+            _hazardHoverRestorePoint = new NativePoint();
+        }
+
+        private static bool IsHazardousSelectedInteractable(IActor actor)
+        {
+            if (actor == null)
+                return false;
+
+            try
+            {
+                switch (actor.GizmoType)
+                {
+                    case GizmoType.Chest:
+                    case GizmoType.BreakableChest:
+                    case GizmoType.LoreChest:
+                    case GizmoType.Portal:
+                    case GizmoType.TownPortal:
+                    case GizmoType.HearthPortal:
+                    case GizmoType.PortalDestination:
+                    case GizmoType.PageOfFatePortal:
+                    case GizmoType.SecretPortal:
+                    case GizmoType.BossPortal:
+                    case GizmoType.ReturnPointPortal:
+                    case GizmoType.DungeonPortal:
+                    case GizmoType.ReturnPortal:
+                        return true;
+                }
+            }
+            catch { }
+
+            return false;
         }
 
         private bool IsAnyEligibleLootSelectedNear(IItem anchor)
@@ -1203,12 +1826,15 @@ namespace Turbo.Plugins.s7o
                 long now = Hud.Game.CurrentRealTimeMilliseconds;
                 IActor protectedChest = GetUnopenedProtectedChest();
                 int freeSlots = SafeFreeSlots();
+                int range = _postRiftCleanupStartedMs != 0
+                    ? PostRiftLootRangeYards()
+                    : _eventPickupRangeYards;
 
                 foreach (var item in Hud.Game.Items)
                 {
                     if (item == null || item.Location != ItemLocation.Floor || !item.IsOnScreen) continue;
                     if (IsExcludedPickup(item) || IsSuppressedDroppedItem(item, now) || IsCleanupStuckIgnored(item, now)) continue;
-                    if (IsProtectedChestRisk(item, protectedChest) || item.CentralXyDistanceToMe > _eventPickupRangeYards) continue;
+                    if (IsProtectedChestRisk(item, protectedChest) || item.CentralXyDistanceToMe > range) continue;
                     if (WantedPriority(item) < 0 || !CanFit(item, freeSlots) || !IsAutoUrshiHandoffLoot(item)) continue;
                     return true;
                 }
@@ -1399,6 +2025,28 @@ namespace Turbo.Plugins.s7o
             }
         }
 
+        private void GetMaterialClickPoint(IItem item, int attempt, out int x, out int y)
+        {
+            // Telemetry shows the native zero-lift point becomes the exact selected
+            // material actor one or two collection frames after cursor movement.
+            // Keep every material attempt focused on that validated point.
+            GetItemClickBase(item, true, out x, out y);
+        }
+
+        private bool IsCursorNearMaterialBase(IItem item, NativePoint point)
+        {
+            try
+            {
+                int baseX, baseY;
+                GetItemClickBase(item, true, out baseX, out baseY);
+                double dx = point.X - baseX;
+                double dy = point.Y - baseY;
+                double radius = 36.0d * UiScale();
+                return dx * dx + dy * dy <= radius * radius;
+            }
+            catch { return false; }
+        }
+
         private void GetItemClickBase(IItem item, bool noSpaceMaterial, out int x, out int y)
         {
             x = (int)Math.Round((double)item.ScreenCoordinate.X + (double)Hud.Window.Offset.X);
@@ -1458,6 +2106,71 @@ namespace Turbo.Plugins.s7o
             int width = Math.Max(1, item.SnoItem.ItemWidth);
             int height = Math.Max(1, item.SnoItem.ItemHeight);
             return HasFreeInventoryFootprint(width, height);
+        }
+
+        private void UpdateInventoryFullAlert(List<LootCandidate> visibleCandidates, int freeSlots)
+        {
+            bool capacityBlocked = false;
+            int blockedWidth = 1;
+            int blockedHeight = 1;
+            if (visibleCandidates != null)
+            {
+                for (int i = 0; i < visibleCandidates.Count; i++)
+                {
+                    LootCandidate candidate = visibleCandidates[i];
+                    IItem item = candidate != null ? candidate.Item : null;
+                    if (item == null || IsNoSpacePickup(item) || HasMatchingStack(item))
+                        continue;
+                    if (item.AccountBound && !item.BoundToMyAccount)
+                        continue;
+                    if (!CanFit(item, freeSlots))
+                    {
+                        capacityBlocked = true;
+                        if (item.SnoItem != null)
+                        {
+                            blockedWidth = Math.Max(1, item.SnoItem.ItemWidth);
+                            blockedHeight = Math.Max(1, item.SnoItem.ItemHeight);
+                        }
+                        break;
+                    }
+                }
+            }
+
+            int total = 0;
+            try { total = Math.Max(0, Hud.Game.Me.InventorySpaceTotal); }
+            catch { }
+            int used = Math.Max(0, Math.Min(total, total - Math.Max(0, freeSlots)));
+
+            if (_inventoryFullAlertActive)
+            {
+                bool capacityRecovered = total != _inventoryFullAlertTotal ||
+                    HasFreeInventoryFootprint(Math.Max(1, _inventoryFullAlertWidth), Math.Max(1, _inventoryFullAlertHeight));
+                if (!capacityRecovered)
+                    return;
+
+                _inventoryFullAlertActive = false;
+                _inventoryFullAlertUsed = 0;
+                _inventoryFullAlertTotal = 0;
+                _inventoryFullAlertWidth = 0;
+                _inventoryFullAlertHeight = 0;
+            }
+
+            if (!capacityBlocked)
+                return;
+
+            _inventoryFullAlertActive = true;
+            _inventoryFullAlertUsed = used;
+            _inventoryFullAlertTotal = total;
+            _inventoryFullAlertWidth = blockedWidth;
+            _inventoryFullAlertHeight = blockedHeight;
+
+            try
+            {
+                s7o_TipsHelper tips = Hud.GetPlugin<s7o_TipsHelper>();
+                if (tips != null && tips.Enabled)
+                    tips.ShowInventoryFullAlert(used, total);
+            }
+            catch { }
         }
 
         private static bool IsPlan(IItem item)
@@ -1628,6 +2341,11 @@ namespace Turbo.Plugins.s7o
             return IsLegendaryLike(item);
         }
 
+        private static bool IsAutoUrshiCountedLegendaryReward(IItem item)
+        {
+            return item != null && !IsGem(item) && IsAutoUrshiPrimaryReward(item);
+        }
+
         private bool IsProtectedAutoUrshiLoot(IItem item)
         {
             return (item != null && item.AncientRank >= 1 && IsLegendaryLike(item))
@@ -1638,6 +2356,7 @@ namespace Turbo.Plugins.s7o
         {
             return !_talkToUrshiAfterLoot
                 || !_autoUrshiHandoffCommitted
+                || (IsGem(item) && !_autoUrshiTalkDone)
                 || IsProtectedAutoUrshiLoot(item);
         }
 
@@ -1729,35 +2448,155 @@ namespace Turbo.Plugins.s7o
             return false;
         }
 
+        private void TrackProtectedRewardChestOpen(long now)
+        {
+            try
+            {
+                foreach (var actor in Hud.Game.Actors)
+                {
+                    if (actor == null || actor.SnoActor == null || actor.AnnId == 0)
+                        continue;
+
+                    ActorSnoEnum sno = actor.SnoActor.Sno;
+                    if (sno != ActorSnoEnum._p76_chest && sno != ActorSnoEnum._p73_chestreward)
+                        continue;
+
+                    if (!actor.IsDisabled && !actor.IsOperated && (actor.IsClickable || actor.DisplayOnOverlay))
+                    {
+                        _unopenedProtectedRewardChestAnnIds.Add(actor.AnnId);
+                        continue;
+                    }
+
+                    if ((actor.IsDisabled || actor.IsOperated) && _unopenedProtectedRewardChestAnnIds.Remove(actor.AnnId))
+                        _lootBurstCleanupUntilMs = now + LootBurstLatchMs;
+                }
+            }
+            catch { }
+        }
+
+        private void TrackNephalemRiftRewardWindow(long now)
+        {
+            try
+            {
+                bool nephalemRift = Hud.Game.SpecialArea == SpecialArea.Rift && GetUrshiActor() == null;
+                if (!nephalemRift || Hud.Game.RiftPercentage < 100.0d)
+                {
+                    _nephalemRiftRewardPending = false;
+                    _nephalemRiftRewardObserved = false;
+                    _nephalemRiftRewardLootSeen = false;
+                    _nephalemRiftRewardEmptySinceMs = 0;
+                    _nephalemRiftRewardLastNewFloorItemMs = 0;
+                    _nephalemRiftRewardSeenFloorSeeds.Clear();
+                    return;
+                }
+
+                if (!_nephalemRiftRewardPending || _nephalemRiftRewardObserved)
+                    return;
+
+                // The native boss-killed event identifies the real guardian transition.
+                // If the player is still channeling, this remains pending until the
+                // ordinary combat gate allows collection again.
+                if (HasNearbyAttackableMonster(LootBurstMonsterBlockYards))
+                    return;
+
+                _nephalemRiftRewardPending = false;
+                _nephalemRiftRewardObserved = true;
+                _nephalemRiftRewardLootSeen = false;
+                _nephalemRiftRewardEmptySinceMs = 0;
+                _nephalemRiftRewardLastNewFloorItemMs = now;
+                _nephalemRiftRewardSeenFloorSeeds.Clear();
+                _lootBurstCleanupUntilMs = Math.Max(_lootBurstCleanupUntilMs, now + LootBurstLatchMs);
+            }
+            catch { }
+        }
+
+        private void TrackNephalemRiftRewardFloorActivity(long now)
+        {
+            try
+            {
+                int range = PostRiftLootRangeYards();
+                foreach (var item in Hud.Game.Items)
+                {
+                    if (item == null || item.Location != ItemLocation.Floor || !item.IsOnScreen ||
+                        item.CentralXyDistanceToMe > range)
+                        continue;
+
+                    if (_nephalemRiftRewardSeenFloorSeeds.Add(item.Seed))
+                        _nephalemRiftRewardLastNewFloorItemMs = now;
+                }
+            }
+            catch { }
+        }
+
+        private void UpdateNephalemRiftRewardCompletion(int visibleEligibleCount, long now)
+        {
+            if (!_nephalemRiftRewardObserved || Hud.Game.SpecialArea != SpecialArea.Rift)
+            {
+                _nephalemRiftRewardEmptySinceMs = 0;
+                return;
+            }
+
+            if (visibleEligibleCount > 0)
+            {
+                _nephalemRiftRewardLootSeen = true;
+                _nephalemRiftRewardEmptySinceMs = 0;
+                return;
+            }
+
+            if (!_nephalemRiftRewardLootSeen)
+            {
+                _nephalemRiftRewardEmptySinceMs = 0;
+                return;
+            }
+
+            // Guardian items can arrive a few native frames after the first pile
+            // clears. Require a short continuous empty state; this delays no pickup
+            // and still restores ordinary range immediately after the settled batch.
+            if (_nephalemRiftRewardEmptySinceMs == 0)
+            {
+                _nephalemRiftRewardEmptySinceMs = now;
+                return;
+            }
+
+            if (now - _nephalemRiftRewardEmptySinceMs >= NephalemRiftRewardEmptyConfirmMs &&
+                now - _nephalemRiftRewardLastNewFloorItemMs >= NephalemRiftRewardEmptyConfirmMs)
+            {
+                _lootBurstCleanupUntilMs = 0;
+                _nephalemRiftRewardObserved = false;
+                _nephalemRiftRewardLootSeen = false;
+                _nephalemRiftRewardEmptySinceMs = 0;
+                _nephalemRiftRewardLastNewFloorItemMs = 0;
+                _nephalemRiftRewardSeenFloorSeeds.Clear();
+            }
+        }
+
         private bool IsAutoUrshiTalkActorClickable(IActor urshi)
         {
             try
             {
-                if (!_talkToUrshiAfterLoot || _autoUrshiProbeFallbackPending ||
+                if (!_talkToUrshiAfterLoot || (_autoUrshiProbeFallbackPending && (urshi == null || !urshi.IsSelected)) ||
                     urshi == null || !urshi.IsOnScreen || urshi.ScreenCoordinate == null ||
                     Hud == null || Hud.Window == null)
                     return false;
 
-                float scale = UiScale();
-                double x = urshi.ScreenCoordinate.X + Hud.Window.Offset.X;
-                double y = urshi.ScreenCoordinate.Y + Hud.Window.Offset.Y;
-                double left = Hud.Window.Offset.X + AutoUrshiTalkSafeEdgeMarginPx * scale;
-                double top = Hud.Window.Offset.Y + AutoUrshiTalkSafeEdgeMarginPx * scale;
-                double right = Hud.Window.Offset.X + Hud.Window.Size.Width - AutoUrshiTalkSafeEdgeMarginPx * scale;
-                double bottom = Hud.Window.Offset.Y + Hud.Window.Size.Height - AutoUrshiTalkSafeBottomMarginPx * scale;
-
-                return x >= left && x <= right && y >= top && y <= bottom;
+                // Use the actual UI-safe probe envelope, including zoomed-out edge
+                // positions, rather than rejecting a whole strip of visible world.
+                int x, y;
+                return urshi.WorldId == Hud.Game.Me.WorldId &&
+                    TryGetAutoUrshiTalkPoint(urshi, _autoUrshiTalkAttempts, out x, out y);
             }
             catch { return false; }
         }
 
         private bool TryReturnTowardAutoUrshi(long now)
         {
-            if (!_talkToUrshiAfterLoot || !_autoUrshiHasLastSeenWorld ||
+            if (_autoUrshiTalkDone || !_talkToUrshiAfterLoot || !_autoUrshiHasLastSeenWorld ||
                 _autoUrshiActorPathActive || _autoUrshiApproachAborted)
                 return false;
 
-            if (_autoUrshiReturnTrail.Count == 0)
+            var me = Hud.Game.Me;
+            if (me == null || me.FloorCoordinate == null ||
+                me.FloorCoordinate.XYDistanceTo(_autoUrshiLastSeenX, _autoUrshiLastSeenY) > AutoUrshiUnknownApproachMaxYards)
                 return false;
 
             _autoUrshiReturning = true;
@@ -1775,11 +2614,35 @@ namespace Turbo.Plugins.s7o
                 return true;
 
             int x, y;
-            if (!TryGetAutoUrshiReturnPoint(out x, out y))
-                return false;
+            if (_autoUrshiReturnProbeTick == 0)
+            {
+                if (!TryGetAutoUrshiReturnPoint(out x, out y) || !TrySetCursorForWorldClick(x, y))
+                {
+                    AbortAutoUrshiApproach(now);
+                    return false;
+                }
+                _autoUrshiReturnProbeX = x;
+                _autoUrshiReturnProbeY = y;
+                _autoUrshiReturnProbeTick = Hud.Game.CurrentGameTick;
+                _autoUrshiReturnProbeMs = now;
+                return true;
+            }
+            if (Hud.Game.CurrentGameTick == _autoUrshiReturnProbeTick)
+                return true;
 
-            if (!TrySetCursorForWorldClick(x, y))
+            NativePoint cursor;
+            x = _autoUrshiReturnProbeX;
+            y = _autoUrshiReturnProbeY;
+            _autoUrshiReturnProbeTick = 0;
+            // Ground is only an approach fallback, never an item/portal/monster click.
+            if (now - _autoUrshiReturnProbeMs > CursorRestoreExpireMs || !GetCursorPos(out cursor) ||
+                Math.Abs(cursor.X - x) > 4 || Math.Abs(cursor.Y - y) > 4 ||
+                GetSelectedActorSafe() != null || Hud.Game.SelectedMonster2 != null ||
+                !TrySetCursorForWorldClick(x, y))
+            {
+                AbortAutoUrshiApproach(now);
                 return false;
+            }
 
             MouseLeftClick();
             BeginAutoUrshiApproach(now, false);
@@ -1798,6 +2661,7 @@ namespace Turbo.Plugins.s7o
                 _autoUrshiProbeFallbackPending = false;
                 _autoUrshiActorPathActive = true;
                 _autoUrshiReturning = false;
+                _autoUrshiReturnProbeTick = 0;
                 // Preserve the outbound trail so geometry-blind native-path failures
                 // can fall back to the known return route.
                 _autoUrshiReturnClicks = 0;
@@ -1866,13 +2730,8 @@ namespace Turbo.Plugins.s7o
                     if (now - _autoUrshiApproachSampleMs < AutoUrshiApproachStallMs)
                         return true;
 
-                    // Native actor navigation stalled. Prefer the preserved outbound
-                    // breadcrumbs before permanently abandoning the Urshi handoff.
-                    _autoUrshiActorPathActive = false;
-                    ResetAutoUrshiApproachSample();
-                    if (TryFallbackAutoUrshiTalkToBreadcrumb(now))
-                        return false;
-
+                    // Do not cancel the game's actor path with a blind ground click.
+                    // Genuine immobility yields control to the player.
                     AbortAutoUrshiApproach(now);
                     return false;
                 }
@@ -1940,6 +2799,7 @@ namespace Turbo.Plugins.s7o
         private void AbortAutoUrshiApproach(long now)
         {
             _autoUrshiApproachAborted = true;
+            _autoUrshiReturnProbeTick = 0;
             _autoUrshiActorPathActive = false;
             _autoUrshiReturning = false;
             _autoUrshiProbeFallbackPending = false;
@@ -1965,39 +2825,65 @@ namespace Turbo.Plugins.s7o
                 if (me == null || me.FloorCoordinate == null || Hud.Window == null)
                     return false;
 
-                while (_autoUrshiReturnTrail.Count > 0)
-                {
-                    int lastIndex = _autoUrshiReturnTrail.Count - 1;
-                    var last = _autoUrshiReturnTrail[lastIndex];
-
-                    if (me.FloorCoordinate.XYDistanceTo(last.X, last.Y) >= AutoUrshiReturnMinClickYards)
-                        break;
-
-                    _autoUrshiReturnTrail.RemoveAt(lastIndex);
-                }
-
-                for (int i = _autoUrshiReturnTrail.Count - 1; i >= 0; i--)
+                float goalDistance = me.FloorCoordinate.XYDistanceTo(_autoUrshiLastSeenX, _autoUrshiLastSeenY);
+                int goalIndex = -1;
+                float bestDistance = goalDistance - 0.1f;
+                for (int i = 0; i < _autoUrshiReturnTrail.Count; i++)
                 {
                     var point = _autoUrshiReturnTrail[i];
-                    var world = Hud.Window.CreateWorldCoordinate(point.X, point.Y, point.Z);
+                    float dx = point.X - _autoUrshiLastSeenX;
+                    float dy = point.Y - _autoUrshiLastSeenY;
+                    float distance = (float)Math.Sqrt(dx * dx + dy * dy);
+                    if (distance < bestDistance)
+                    {
+                        bestDistance = distance;
+                        goalIndex = i;
+                    }
+                }
+                if (goalIndex >= 0)
+                {
+                    while (_autoUrshiReturnTrail.Count > goalIndex)
+                    {
+                        int index = _autoUrshiReturnTrail.Count - 1;
+                        var point = _autoUrshiReturnTrail[index];
+                        if (me.FloorCoordinate.XYDistanceTo(point.X, point.Y) >= AutoUrshiReturnMinClickYards)
+                        {
+                            // Never skip an intermediate waypoint to cut across unseen geometry.
+                            return TryProjectAutoUrshiGroundPoint(point.X, point.Y, point.Z, out x, out y);
+                        }
+                        _autoUrshiReturnTrail.RemoveAt(index);
+                    }
+                }
 
-                    if (world == null || !world.IsOnScreen(0.8d))
-                        continue;
-
-                    var screen = world.ToScreenCoordinate(false, true);
-                    if (screen == null)
-                        continue;
-
-                    x = (int)Math.Round((double)screen.X + (double)Hud.Window.Offset.X);
-                    y = (int)Math.Round((double)screen.Y + (double)Hud.Window.Offset.Y);
-
-                    if (IsSafeSyntheticWorldClick(x, y))
+                if (goalDistance < AutoUrshiReturnMinClickYards || goalDistance > AutoUrshiUnknownApproachMaxYards)
+                    return false;
+                // No traversed segment leads closer. Take a short directional step;
+                // the existing movement watchdog stops if terrain prevents progress.
+                for (float step = Math.Min(18f, goalDistance); step >= AutoUrshiReturnMinClickYards; step -= 6f)
+                {
+                    float fraction = step / goalDistance;
+                    float wx = me.FloorCoordinate.X + (_autoUrshiLastSeenX - me.FloorCoordinate.X) * fraction;
+                    float wy = me.FloorCoordinate.Y + (_autoUrshiLastSeenY - me.FloorCoordinate.Y) * fraction;
+                    if (TryProjectAutoUrshiGroundPoint(wx, wy, me.FloorCoordinate.Z, out x, out y))
                         return true;
                 }
             }
             catch { }
 
             return false;
+        }
+
+        private bool TryProjectAutoUrshiGroundPoint(float wx, float wy, float wz, out int x, out int y)
+        {
+            x = y = 0;
+            var world = Hud.Window.CreateWorldCoordinate(wx, wy, wz);
+            if (world == null || !world.IsValid) return false;
+            var screen = world.ToScreenCoordinate(true, true);
+            if (screen == null || float.IsNaN(screen.X) || float.IsNaN(screen.Y) ||
+                float.IsInfinity(screen.X) || float.IsInfinity(screen.Y)) return false;
+            x = (int)Math.Round(screen.X + Hud.Window.Offset.X);
+            y = (int)Math.Round(screen.Y + Hud.Window.Offset.Y);
+            return IsSafeSyntheticWorldClick(x, y);
         }
 
         private void ResetAutoUrshiTalkReadyState()
@@ -2018,16 +2904,15 @@ namespace Turbo.Plugins.s7o
 
             long gateAge = now - _autoUrshiRewardGateStartedMs;
 
-            // GR rewards materialize in phases (normal gems can appear well before
-            // the legendary/set wave). Never let an early item-count threshold
-            // commit the Urshi handoff before the reward spawn window has settled.
-            if (gateAge < AutoUrshiRewardSettleMs)
-                return false;
-
             if (HasLiveAutoUrshiPrimaryReward())
                 return false;
 
-            return true;
+            // The final legendary/set rewards can materialize after the earlier wave.
+            // Once ten unique legendary/set rewards have actually been observed,
+            // native floor state is enough to hand off immediately. The old settle
+            // window remains only as a fallback for unusually small reward batches.
+            return _autoUrshiObservedLegendaryRewardCount >= AutoUrshiLegendaryRewardMinObserved ||
+                gateAge >= AutoUrshiRewardSettleMs;
         }
 
         private bool HasLiveAutoUrshiPrimaryReward()
@@ -2040,6 +2925,7 @@ namespace Turbo.Plugins.s7o
                 long now = Hud.Game.CurrentRealTimeMilliseconds;
                 IActor protectedChest = GetUnopenedProtectedChest();
                 int freeSlots = SafeFreeSlots();
+                int range = PostRiftLootRangeYards();
 
                 foreach (var item in Hud.Game.Items)
                 {
@@ -2049,7 +2935,7 @@ namespace Turbo.Plugins.s7o
                         IsSuppressedDroppedItem(item, now))
                         continue;
                     if (IsProtectedChestRisk(item, protectedChest) ||
-                        item.CentralXyDistanceToMe > _eventPickupRangeYards ||
+                        item.CentralXyDistanceToMe > range ||
                         WantedPriority(item) < 0 || !CanFit(item, freeSlots))
                         continue;
 
@@ -2069,6 +2955,11 @@ namespace Turbo.Plugins.s7o
             catch { }
 
             return false;
+        }
+
+        private int PostRiftLootRangeYards()
+        {
+            return Math.Max(_eventPickupRangeYards, PostRiftApproachRangeYards);
         }
 
         private bool TryCommitAutoUrshiHandoff(long now)
@@ -2116,6 +3007,7 @@ namespace Turbo.Plugins.s7o
         private void AbortAutoUrshiTalkForVisibleLoot(long now)
         {
             RestoreAutoUrshiTalkCursor(now);
+            _autoUrshiReturnProbeTick = 0;
             _autoUrshiActorPathActive = false;
             _autoUrshiReturning = false;
             _autoUrshiProbeFallbackPending = false;
@@ -2223,6 +3115,7 @@ namespace Turbo.Plugins.s7o
 
             ClearAutoUrshiTalkHover();
             _autoUrshiReturning = false;
+            _autoUrshiReturnProbeTick = 0;
             _autoUrshiReturnClicks = 0;
             _nextAutoUrshiReturnMs = 0;
             _autoUrshiProbeFallbackPending = true;
@@ -2313,12 +3206,15 @@ namespace Turbo.Plugins.s7o
             y = 0;
             if (item == null || item.ScreenCoordinate == null) return false;
 
-            int variants = stacked ? 12 : 8;
+            bool material = IsNoSpaceMaterialPickup(item);
+            int variants = material ? 1 : (stacked ? 12 : 8);
             for (int i = 0; i < variants; i++)
             {
                 int phase = Math.Max(0, startAttempt) + i;
                 int candidateX, candidateY;
-                if (stacked)
+                if (material)
+                    GetMaterialClickPoint(item, phase, out candidateX, out candidateY);
+                else if (stacked)
                     GetStackedLootClickPoint(item, phase, cleanup, out candidateX, out candidateY);
                 else
                     GetClickPoint(item, phase, true, out candidateX, out candidateY);
@@ -2462,13 +3358,17 @@ namespace Turbo.Plugins.s7o
         {
             try
             {
+                IActor urshi = GetUrshiActor();
+                bool greaterRift = Hud.Game.SpecialArea == SpecialArea.GreaterRift;
+                if (!greaterRift && urshi == null)
+                {
+                    _cleanupLatched = false;
+                    return false;
+                }
+
                 if (HasNearbyAttackableMonster(CleanupMonsterBlockYards)) return false;
                 if (_cleanupLatched) return true;
 
-                IActor urshi = GetUrshiActor();
-                bool riftArea = Hud.Game.SpecialArea == SpecialArea.GreaterRift ||
-                    Hud.Game.SpecialArea == SpecialArea.Rift;
-                if (!riftArea && urshi == null) return false;
                 if (Hud.Game.RiftPercentage < 100.0d && urshi == null) return false;
 
                 _cleanupLatched = true;
@@ -3308,6 +4208,21 @@ namespace Turbo.Plugins.s7o
                 return Hud != null && Hud.Game != null ? Hud.Game.SelectedActor : null;
             }
             catch { return null; }
+        }
+
+        private bool IsExactItemSelected(IItem item)
+        {
+            if (item == null) return false;
+            try
+            {
+                IActor selectedActor = GetSelectedActorSafe();
+                if (selectedActor != null)
+                    return selectedActor.GizmoType == GizmoType.Item &&
+                        selectedActor.AnnId == item.AnnId;
+
+                return item.IsSelected;
+            }
+            catch { return false; }
         }
 
         private bool IsUrshiSelected(IActor urshi, IActor selectedActor)
