@@ -54,7 +54,7 @@ namespace Turbo.Plugins.s7o
         {
             get
             {
-                return _zdhMacroRunning && _zdhHighFrequencyMode && IsEntanglingPrimaryForZdh
+                return _zdhMacroRunning && IsEntanglingPrimaryForZdh
                     && s7o_ZDH_HelperState.Enabled
                     && s7o_DHStrafePrimaryInput.IsVirtualKeyDown(0x11); // VK_CONTROL
             }
