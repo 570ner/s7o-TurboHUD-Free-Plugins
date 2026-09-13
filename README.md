@@ -44,7 +44,7 @@ Use the HUD Menu to toggle plugins, change visual options, manage TTS alerts, se
 | **s7o_ExitArchon**             | Wizard Archon cancel helper. Default hotkey: **Space**.                                                                                                                 |
 | **s7o_Inarius_RGK**            | Close-range Inarius RGK targeting and Siphon Blood stack assistant with range, target-cycle and visual controls.                                                        |
 | **s7o_InventoryMOD**           | Extra inventory/material display, auto storage for stackables/primals/ancients, and merchant/shop helper for selling Gifts/Screams/gems.                                |
-| **s7o_ItemSalvage**            | Salvage helper with item protections, repair/fallback handling, and speed settings.                                                                                     |
+| **s7o_ItemSalvage**            | Salvage helper with item protections, repair/fallback handling, and fast adaptive processing.                                                                                     |
 | **s7o_KadalaHelper**           | Kadala gambling helper. Hover a Kadala item and press **F2** to mark/unmark it, then press **F3** to spend shards on saved targets.                                     |
 | **s7o_KanaiCube**              | Kanai helper for common cube tasks like reforge, upgrade rare, and material conversion.                                                                                 |
 | **s7o_Localization**           | Shared localization helper for the HUD Menu and supported plugin overlays, with editable language files and persistent personal translation overrides.                 |
