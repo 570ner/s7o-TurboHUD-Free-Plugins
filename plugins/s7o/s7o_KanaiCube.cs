@@ -1,3 +1,4 @@
+// REV29 - stop on failed Fill or Transmute input; successful timing unchanged.
 namespace Turbo.Plugins.s7o
 {
     using System;
@@ -128,7 +129,6 @@ namespace Turbo.Plugins.s7o
     ///   page-N→N+1 bounce re-enters AfterCollect with a wrong page; validating
     ///   first was flipping TurnedOn=false prematurely.
     ///   Once page-right is clicked, page repair runs even if TurnedOn was cleared.
-    ///   _p is frozen at run start so mid-run UI speed changes have no effect.
     ///   Skip recovery: after the snapshot queue finishes, a live cleanup pass
     ///   re-queries inventory and processes any items the queue pass missed.
     ///   Page 3 confirms target insertion from the occupied Cube slot, fills
@@ -150,54 +150,36 @@ namespace Turbo.Plugins.s7o
 
         private const int NoTick = int.MinValue;
 
-        // ── Speed 1 base — intentionally slow/LightningMod-style normal speed ─
+        // ── Universal production timing — validated REV26 baseline ──
         public int MaxPageNavigationClicks    { get; set; } = 12;
         public int ToggleDebounceMs           { get; set; } = 750;
 
-        // These Speed 1 values come from the former non-turbo/safe profile.
-        // Speed 10 still uses the existing fastest profile floors below.
-        public int BaseGlobalSleepMs              { get; set; } = 60;
-        public int BasePostTransmuteExtraMs       { get; set; } = 125;
-        public int BasePageArrowReadyTimeoutMs    { get; set; } = 220;
-        public int BasePageRightConfirmTimeoutMs  { get; set; } = 360; // fixed — not lerped
-        public int BasePageRightToLeftMinWaitMs   { get; set; } = 120;
-        public int BasePageReturnConfirmTimeoutMs { get; set; } = 650; // fixed — not lerped
-        public int BasePageReturnRetryWaitMs      { get; set; } = 90;
-        public int BasePageReturnMaxRetries       { get; set; } = 4;
-        public int BasePageArrowMouseDownMs       { get; set; } = 35;
-        public int BasePageArrowPostClickMs       { get; set; } = 20;
-        public int BasePageOpenClickWaitMs        { get; set; } = 100;
-
-        // ── Speed Floors — Speed 10 (raise a floor if that timing fails) ────
-        // Speed 10 keeps the previously-tested fastest timing floors.
-        public int MinGlobalSleepMs           { get; set; } = 15; // log showed 29% skip rate at 5ms — right-click needs ~15ms before fill registers
-        public int MinPostTransmuteExtraMs    { get; set; } = 8;
-        public int MinPageArrowReadyTimeoutMs { get; set; } = 105; // observed slot-clear up to 88ms; 105 gives safe margin
-        public int MinPageRightConfirmTimeoutMs  { get; set; } = 220;
-        public int MinPageRightToLeftMs       { get; set; } = 0;
-        public int MinPageReturnConfirmTimeoutMs { get; set; } = 330;
-        public int MinPageReturnRetryWaitMs   { get; set; } = 5;
-        public int MinPageArrowMouseDownMs    { get; set; } = 0;
-        public int MinPageArrowPostClickMs    { get; set; } = 0;
-        public int MinPageOpenClickWaitMs     { get; set; } = 5;
+        // Successful state changes advance immediately; these values are watchdog
+        // ceilings or callback pacing, not unconditional transaction delays.
+        private const int ActionSettleMs = 15;
+        private const int PageArrowReadyTimeoutMs = 120;
+        private const int PageNextConfirmTimeoutMs = 45;
+        private const int PageReturnConfirmTimeoutMs = 45;
+        private const int MaxPageReturnRetries = 4;
+        private const int PageArrowMouseDownMs = 0;
+        private const int PageArrowPostClickMs = 0;
+        private const int PageOpenRetryMs = 5;
+        private const int Page3FailureConfirmMs = 120;
+        private const int Page3FailureSampleMs = 30;
 
         // ── Kanai Cube UI ─────────────────────────────────────────────────────
-        public int   SpeedLevel               { get; set; } = 10;     // 1–10
-        public bool  ShowSpeedControl          { get; set; } = true;
 
         // ── Kanai Cube fixed header UI ───────────────────────────────────────────────
-        // Default is F3, but this is saved independently from ItemSalvage.
-        // New file path: plugins\s7o\settings\s7o_KanaiCube.ini. Old s7o_TurboCube settings are migrated.
+        // Default is F3; only the hotkey is persisted.
+        // New file path: plugins\s7o\settings\s7o_KanaiCube.ini. Old settings are read only to migrate the hotkey.
         public Key KanaiCubeHotkey = Key.F3;
 
         public bool PersistUserSettings = true;
         public bool UseRoundedGeometryButtons = true;
 
-        // Fixed pane-relative layout. These values target the screenshot layout:
-        // left: KANAI CUBE + hotkey; right: speed control.
+        // Fixed pane-relative layout for the KANAI CUBE / hotkey control.
         public float HeaderLeftOffset = 82.0f;
         public float HeaderTopOffset = 38.0f;
-        public float HeaderRightOffset = 74.0f;
 
         // Lower title/status text starts near the left margin of the cube pane.
         // This is intentionally separate from HeaderLeftOffset, which controls only
@@ -208,14 +190,8 @@ namespace Turbo.Plugins.s7o
         public float HotkeyButtonWidth = 42.0f;
         public float HotkeyButtonHeight = 18.0f;
 
-        public float SpeedControlWidth = 112.0f;
-        public float SpeedControlHeight = 20.0f;
-        public float SpeedSideButtonWidth = 28.0f;
-
         // Header/status offset below the controls.
         public float OverlayTextTopGap = 44.0f;
-
-        public int ButtonFlashMs = 90;
 
         // ── Behavior ─────────────────────────────────────────────────────────
         public int  MaxTransmutesPerRun          { get; set; } = 250;
@@ -237,64 +213,22 @@ namespace Turbo.Plugins.s7o
         private const int UpgradeFailureConfirmSamples = 3;
         private const int UpgradeRetryDelayMs = 35;
 
-        // Page 3 timing endpoints. Speed 10 uses the validated gated fast path;
-        // lower speed levels interpolate linearly toward the conservative Speed 1
-        // values so the control remains predictable and natural.
-        public int BasePage3InsertConfirmPollMs { get; set; } = 30;
-        public int MinPage3InsertConfirmPollMs { get; set; } = 0;
-        public int BasePage3PostInsertSettleMs { get; set; } = 60;
-        public int MinPage3PostInsertSettleMs { get; set; } = 0;
-        public int BasePage3PostFillSettleMs { get; set; } = 90;
-        public int MinPage3PostFillSettleMs { get; set; } = 0;
-        public int BasePage3TransmuteToRepairMs { get; set; } = 120;
-        public int MinPage3TransmuteToRepairMs { get; set; } = 0;
-        public int BasePage3FailureConfirmMs { get; set; } = 240;
-        public int MinPage3FailureConfirmMs { get; set; } = 120;
-        public int BasePage3FailureSampleMs { get; set; } = 70;
-        public int MinPage3FailureSampleMs { get; set; } = 30;
-        public int BasePage3SuccessSettleMs { get; set; } = 20;
-        public int MinPage3SuccessSettleMs { get; set; } = 0;
-
         private const int Page3TransmutePollMs = 15;
         private const int Page3TransmuteConfirmTimeoutMs = 900;
         private const int Page3TransmuteRetryDelayMs = 35;
         private const int MaxPage3TransmuteClicksPerCycle = 2;
         private const int Page3TransmuteReadyAnimState = 54;
         private const int Page3TransmuteAcceptedAnimState = 51;
-        private const int Page3NativeGatePollMs = 15;
-        private const int Page3NativeGateMinTimeoutMs = 250;
-        private const int Page3NativeGateMaxTimeoutMs = 900;
+        private const int NativeStatePollMs = 15;
+        private const int NativeReadyTimeoutMs = 250;
+        private const int PreFillReadyTimeoutMs = 180;
+        private const int FillCollapseConfirmMs = 30;
+        private const int TransactionAckTimeoutMs = 900;
+        private const int ReforgeHighQualityRestartBlockMs = 1000;
 
-        // ── Diagnostics ───────────────────────────────────────────────────────
-        public bool   DebugLogEnabled             { get; set; } = false;
-        public bool   VerboseDebugLogging         { get; set; } = false; // gates per-click detail logs
-        public bool   DebugLogManualClicks        { get; set; } = false;
-        public bool   DebugLogUiRectsOnPageClicks { get; set; } = false;
-        public bool   ShowCycleTimingOverlay      { get; set; } = false;
-        public string DebugLogFileName            { get; set; } = "KanaiCubeDebug.log";
-
-        // ── Private — Active timing snapshot (frozen per run) ────────────────
-        private struct TimingProfile
-        {
-            public string Label;
-            public int Sleep, PostTrans, ArrowReady, RightConfirm, RightToLeft;
-            public int ReturnConfirm, RetryWait, MaxRetries, ArrowDown, PostClick, OpenWait;
-            public int P3InsertPoll, P3InsertToFill, P3FillToTransmute;
-            public int P3TransmuteToRepair, P3FailureConfirm, P3FailureSample, P3SuccessSettle;
-            public override string ToString() =>
-                Label + "{sleep=" + Sleep + ",postTrans=" + PostTrans
-                + ",arrowReady=" + ArrowReady + ",rightToLeft=" + RightToLeft
-                + ",retryWait=" + RetryWait + ",arrowDown=" + ArrowDown
-                + ",postClick=" + PostClick
-                + ",p3=" + P3InsertPoll + "/" + P3InsertToFill + "/"
-                + P3FillToTransmute + "/" + P3TransmuteToRepair + "}";
-        }
-
+        // ── Private runtime state ───────────────────────────────────────────
         private class Slot { public RectangleF Rect; public int X, Y, Seed; public uint AcdId, Sno; public ItemQuality Quality; public string Uid; }
 
-        private TimingProfile _p;
-        private int  _runId, _cycleId;
-        private bool _sessionLogged;
         private string _settingsPath;
         private string _legacySettingsPath;
         private string _oldSettingsPath;
@@ -305,12 +239,9 @@ namespace Turbo.Plugins.s7o
         private readonly List<string> _startAncientIds = new List<string>();
         private List<RectangleF> _lastHighlightRects = new List<RectangleF>();
         private int _toggleTick;
+        private int _reforgeRestartBlockedUntilTick = NoTick;
 
         private RectangleF _hotkeyButtonRect = RectangleF.Empty;
-        private RectangleF _speedMinusRect = RectangleF.Empty;
-        private RectangleF _speedPlusRect = RectangleF.Empty;
-        private RectangleF _speedValueRect = RectangleF.Empty;
-        private RectangleF _speedControlRect = RectangleF.Empty;
 
         private IFont _yellowFont;
         private IFont _buttonFont;
@@ -320,7 +251,6 @@ namespace Turbo.Plugins.s7o
         private IBrush _pillGreenBrush;
         private IBrush _pillGreenLightBrush;
         private IBrush _pillOrangeBorderBrush;
-        private IBrush _pillOrangeSeparatorBrush;
 
         private IBrush _ineligibleOutlineBrush;
         private IBrush _ineligibleBodyBrush;
@@ -329,13 +259,10 @@ namespace Turbo.Plugins.s7o
         private bool _capturingHotkey;
         private bool _overlayControlsVisible;
         private bool _geometryDrawFailed;
-        private bool _geometryDrawFailureLogged;
 
-        private int _minusFlashUntilTick = NoTick;
-        private int _plusFlashUntilTick = NoTick;
 
         private string _header, _info, _noItem, _running, _lockMissing;
-        private enum CubeStage { Idle, EnsurePage, AcquireTarget, InsertTarget, ConfirmInsert, Fill1, Fill2, WaitPage3TransmuteReady, Transmute, ConfirmPage3Transmute, FlipWaitReadyNext, FlipClickNext, FlipWaitNextConfirm, FlipRightToLeftDelay, FlipWaitReadyPrev, FlipClickPrev, FlipWaitPrevConfirm, OpenPageRecovery, PostCycleEvaluate, Finish, PageArrowDown, PageArrowUp }
+        private enum CubeStage { Idle, EnsurePage, AcquireTarget, InsertTarget, ConfirmInsert, Fill1, Fill2, WaitPage3TransmuteReady, Transmute, ConfirmPage3Transmute, FlipWaitReadyNext, FlipClickNext, FlipWaitNextConfirm, FlipWaitReadyPrev, FlipClickPrev, FlipWaitPrevConfirm, OpenPageRecovery, PostCycleEvaluate, Finish, PageArrowDown, PageArrowUp }
 
         private enum UpgradeRareEligibility
         {
@@ -351,13 +278,11 @@ namespace Turbo.Plugins.s7o
         private int _nextOverlayCacheRefreshTick = NoTick;
         private bool _repairingPageAfterNext;
         private IUiElement _pendingArrowButton;
-        private string _pendingArrowLabel, _cachedStatusText = string.Empty;
-        private int _cycleStartTick, _lastCycleElapsedMs;
+        private string _cachedStatusText = string.Empty;
         private CubeTarget _target;
         private List<Slot> _snapshotQueue;
         private System.Collections.Generic.HashSet<string> _skippedThisRun;
         private Dictionary<string, int> _upgradeFailuresThisRun;
-        private HashSet<string> _eligibilityLoggedThisRun;
 
         private int _insertAttemptsForTarget;
 
@@ -368,6 +293,7 @@ namespace Turbo.Plugins.s7o
         private bool _page3ReadyEdgeSeen;
         private bool _page3TransmuteAccepted;
         private int _page3AnimBeforeInsert = int.MinValue;
+        private int _inputEmptySinceTick = NoTick;
         private bool _page3PreflightChecked;
         private CubeStage _pageRepairResumeStage = CubeStage.PostCycleEvaluate;
         private long _page3BeforeDeathsBreath;
@@ -399,7 +325,6 @@ namespace Turbo.Plugins.s7o
             _pillGreenBrush = Hud.Render.CreateBrush(255, 0, 170, 60, 0);
             _pillGreenLightBrush = Hud.Render.CreateBrush(90, 120, 255, 150, 0);
             _pillOrangeBorderBrush = Hud.Render.CreateBrush(225, 105, 55, 10, 0);
-            _pillOrangeSeparatorBrush = Hud.Render.CreateBrush(190, 120, 65, 15, 1);
 
             _ineligibleOutlineBrush = Hud.Render.CreateBrush(245, 0, 0, 0, 6.0f);
             _ineligibleBodyBrush = Hud.Render.CreateBrush(245, 165, 24, 24, 3.6f);
@@ -430,14 +355,8 @@ namespace Turbo.Plugins.s7o
                 _oldTurboRootSettingsPath = System.IO.Path.Combine(System.AppDomain.CurrentDomain.BaseDirectory, "s7o_Turbo.Kanai.Cube.settings.txt");
             }
             LoadSettings();
-            _p = CurrentProfile();
             ToggleKeyEvent = Hud.Input.CreateKeyEvent(true, KanaiCubeHotkey, false, false, false);
 
-            Log("LOAD hotkey=" + KanaiCubeHotkey
-                + " verbose=" + VerboseDebugLogging
-                + " speed=" + SpeedLevel
-                + " settings=" + _settingsPath
-                + " profile=" + _p);
         }
 
         // =========================================================
@@ -454,7 +373,6 @@ namespace Turbo.Plugins.s7o
                 if (keyEvent.Key == Key.Escape)
                 {
                     _capturingHotkey = false;
-                    Log("Hotkey capture cancelled.");
                     return;
                 }
 
@@ -463,39 +381,37 @@ namespace Turbo.Plugins.s7o
                 _capturingHotkey = false;
                 SaveSettings();
 
-                Log("Kanai Cube hotkey changed to " + KanaiCubeHotkey);
                 return;
             }
 
             if (ToggleKeyEvent == null || !ToggleKeyEvent.Matches(keyEvent))
                 return;
 
-            Log("KEY " + (ToggleKeyEvent?.ToString() ?? "?")
-                + " Running=" + Running
-                + " TurnedOn=" + TurnedOn
-                + " page=" + PageNum());
 
             if (Running)
             {
                 TurnedOn = false;
                 ReleaseMouseButtons();
-                Log("KEY stop requested");
+                return;
+            }
+
+            var page = PageNumDirect();
+
+            if (!TurnedOn && !SupportedPage(page))
+            {
+                return;
+            }
+
+            if (!TurnedOn && page == 2 &&
+                TickIsFuture(Environment.TickCount, _reforgeRestartBlockedUntilTick))
+            {
                 return;
             }
 
             if (!Debounce(ref _toggleTick, ToggleDebounceMs))
                 return;
 
-            var page = PageNumDirect();
-
-            if (!TurnedOn && !SupportedPage(page))
-            {
-                Log("KEY ignored: unsupported page=" + page);
-                return;
-            }
-
             TurnedOn = !TurnedOn;
-            Log("KEY TurnedOn=" + TurnedOn + " page=" + page);
 
             if (TurnedOn && page == 2)
                 SnapshotAncients();
@@ -551,7 +467,6 @@ namespace Turbo.Plugins.s7o
             }
 
             DrawHeaderHotkey();
-            DrawHeaderSpeedControl();
 
             int page = visiblePage;
 
@@ -718,6 +633,12 @@ namespace Turbo.Plugins.s7o
 
         public void AfterCollect()
         {
+            AfterCollectCore();
+        }
+
+
+        private void AfterCollectCore()
+        {
             int now = Environment.TickCount;
 
             if (_capturingHotkey && (transmuteDialog == null || !IsVisible(transmuteDialog) || !Hud.Window.IsForeground))
@@ -791,16 +712,15 @@ namespace Turbo.Plugins.s7o
 
         private bool PageArrowReadyOrTimedOut(int now)
         {
-            EnsureDeadline(now, _p.ArrowReady);
+            EnsureDeadline(now, PageArrowReadyTimeoutMs);
             return SlotsClear() || DeadlineExpired(now);
         }
 
         private void BeginRun(int page, int now)
         {
-            _p = CurrentProfile();
+            _transactionPending = false;
+            _transmuteReadySince = NoTick;
             Running = true;
-            _runId++;
-            _cycleId = 0;
 
             _runPage = page;
             _doneThisRun = 0;
@@ -815,14 +735,12 @@ namespace Turbo.Plugins.s7o
             _snapshotQueue = null;
             _skippedThisRun = new System.Collections.Generic.HashSet<string>();
             _upgradeFailuresThisRun = new Dictionary<string, int>();
-            _eligibilityLoggedThisRun = new HashSet<string>();
 
             _insertAttemptsForTarget = 0;
             ResetPage3TransactionState();
             ResetPostFailureConfirmation();
 
             _pendingArrowButton = null;
-            _pendingArrowLabel = null;
             _afterArrowStage = CubeStage.Idle;
             _afterArrowDelayMs = 0;
 
@@ -852,18 +770,14 @@ namespace Turbo.Plugins.s7o
                 if (MaxTransmutesPerRun > 0 && MaxTransmutesPerRun < _snapshotLimit)
                     _snapshotLimit = MaxTransmutesPerRun;
 
-                Log("QUEUE page=" + page
-                    + " planned=" + _snapshotQueue.Count
-                    + " limit=" + _snapshotLimit);
             }
 
             _stage = CubeStage.EnsurePage;
             Delay(now, 0);
 
-            Log("RUN #" + _runId + " start page=" + page + " profile=" + _p);
         }
 
-        private void EndRun(string reason)
+        private void EndRun()
         {
             ReleaseMouseButtons();
             RestoreCursor(_savedCursorX, _savedCursorY);
@@ -875,13 +789,11 @@ namespace Turbo.Plugins.s7o
             _snapshotQueue = null;
             _skippedThisRun = null;
             _upgradeFailuresThisRun = null;
-            _eligibilityLoggedThisRun = null;
             _insertAttemptsForTarget = 0;
             ResetPage3TransactionState();
             ResetPostFailureConfirmation();
 
             _pendingArrowButton = null;
-            _pendingArrowLabel = null;
             _afterArrowStage = CubeStage.Idle;
 
             _repairingPageAfterNext = false;
@@ -894,7 +806,6 @@ namespace Turbo.Plugins.s7o
             Running = false;
             _stage = CubeStage.Idle;
 
-            Log("RUN #" + _runId + " done: " + reason);
         }
 
         private void ResetRuntimeStateForInterruptedRun(bool releaseOwnedMouseButtons)
@@ -910,13 +821,11 @@ namespace Turbo.Plugins.s7o
             _snapshotQueue = null;
             _skippedThisRun = null;
             _upgradeFailuresThisRun = null;
-            _eligibilityLoggedThisRun = null;
             _insertAttemptsForTarget = 0;
             ResetPage3TransactionState();
             ResetPostFailureConfirmation();
 
             _pendingArrowButton = null;
-            _pendingArrowLabel = null;
             _afterArrowStage = CubeStage.Idle;
 
             _repairingPageAfterNext = false;
@@ -963,7 +872,7 @@ namespace Turbo.Plugins.s7o
             {
                 if (Running)
                 {
-                    EndRun("disabled");
+                    EndRun();
                     return;
                 }
 
@@ -972,48 +881,143 @@ namespace Turbo.Plugins.s7o
             catch { }
         }
 
-        private bool IsValidCubeAutomationContext(out string reason)
+        private bool IsValidCubeAutomationContext()
         {
-            reason = null;
-
-            if (!Enabled) { reason = "plugin disabled"; return false; }
-            if (Hud == null || Hud.Game == null || Hud.Window == null || Hud.Inventory == null) { reason = "hud unavailable"; return false; }
-            if (!Hud.Game.IsInGame) { reason = "not in game"; return false; }
-            if (Hud.Game.IsLoading) { reason = "loading"; return false; }
-            if (Hud.Game.IsPaused) { reason = "paused"; return false; }
-            if (Hud.Game.Me == null) { reason = "player unavailable"; return false; }
-            if (!Hud.Window.IsForeground) { reason = "window not foreground"; return false; }
+            if (!Enabled) { return false; }
+            if (Hud == null || Hud.Game == null || Hud.Window == null || Hud.Inventory == null) { return false; }
+            if (!Hud.Game.IsInGame) { return false; }
+            if (Hud.Game.IsLoading) { return false; }
+            if (Hud.Game.IsPaused) { return false; }
+            if (Hud.Game.Me == null) { return false; }
+            if (!Hud.Window.IsForeground) { return false; }
 
             if (transmuteDialog == null || !IsVisible(transmuteDialog))
-            {
-                reason = "cube dialog hidden";
-                return false;
+            { return false;
             }
 
             if (pageNumber == null || !IsVisible(pageNumber))
-            {
-                reason = "page number hidden";
-                return false;
+            { return false;
             }
 
             return true;
         }
 
+        private int _transmuteReadySince = NoTick;
+        private long[] _transactionMaterials;
+        private int _transactionTick;
+        private bool _transactionPending;
+
+        private long[] TransactionMaterials()
+        {
+            var m = Hud.Game.Me.Materials;
+            if (_runPage == 2) return new long[] { m.ForgottenSoul, m.KhanduranRune, m.CaldeumNightShade, m.ArreatWarTapestry, m.CorruptedAngelFlesh, m.WestmarchHolyWater };
+            if (_runPage == 3) return new long[] { m.DeathsBreath, m.ReusableParts, m.ArcaneDust, m.VeiledCrystal };
+            return new long[] { m.DeathsBreath, MatAmt(_runPage) };
+        }
+
+        private bool TransactionSpent()
+        {
+            var current = TransactionMaterials();
+            for (int i = 0; i < current.Length; i++)
+            {
+                int cost = _runPage == 2 ? (i == 0 ? 50 : 5)
+                    : _runPage == 3 ? (i == 0 ? 25 : 50) : (i == 0 ? 1 : 100);
+                if (current[i] > _transactionMaterials[i] - cost) return false;
+            }
+            return true;
+        }
+
+        private static bool UsesNativeTransactionGate(int page)
+        {
+            return page == 2 ||
+                page == 3 ||
+                (page >= 7 && page <= 9);
+        }
+
+        private bool CubeReadyForFill()
+        {
+            return !SlotsClear() &&
+                ReadUiAnimState(transmuteButton) ==
+                    Page3TransmuteReadyAnimState;
+        }
+
+        private bool WaitForTransactionSettlement(int now)
+        {
+            if (!_transactionPending)
+                return true;
+
+            if (TransactionSpent())
+            {
+                _transactionPending = false;
+                return true;
+            }
+
+            if (unchecked(now - _transactionTick) >=
+                TransactionAckTimeoutMs)
+            {
+                EndRun();
+                return false;
+            }
+
+            Delay(now, NativeStatePollMs);
+            return false;
+        }
+
         private void AdvanceRun(int now)
+        {
+            for (int step = 0; step < 10; step++)
+            {
+                CubeStage previous = _stage;
+                AdvanceRunStep(now);
+
+                if (!Running || previous == _stage)
+                    return;
+
+                bool readyHandoff =
+                    _runPage == 3 &&
+                    ((previous == CubeStage.ConfirmInsert &&
+                      _stage == CubeStage.Fill1) ||
+                     (previous == CubeStage.WaitPage3TransmuteReady &&
+                      _stage == CubeStage.Transmute));
+
+                bool navigationHandoff =
+                    (previous == CubeStage.FlipWaitReadyNext &&
+                     _stage == CubeStage.FlipClickNext) ||
+                    (previous == CubeStage.FlipClickNext &&
+                     _stage == CubeStage.PageArrowDown) ||
+                    (previous == CubeStage.FlipWaitNextConfirm &&
+                     _stage == CubeStage.FlipWaitReadyPrev) ||
+                    (previous == CubeStage.FlipWaitReadyPrev &&
+                     _stage == CubeStage.FlipClickPrev) ||
+                    (previous == CubeStage.FlipClickPrev &&
+                     _stage == CubeStage.PageArrowDown) ||
+                    (previous == CubeStage.FlipWaitPrevConfirm &&
+                     _stage == CubeStage.PostCycleEvaluate);
+
+                if (!readyHandoff && !navigationHandoff)
+                    return;
+
+                now = Environment.TickCount;
+                if (!TickReached(now, _nextActionTick))
+                    return;
+
+            }
+        }
+
+        private void AdvanceRunStep(int now)
         {
             if (!TickReached(now, _nextActionTick))
                 return;
 
             if (!TurnedOn && !_repairingPageAfterNext)
             {
-                EndRun("stopped");
+                EndRun();
                 return;
             }
 
-            string reason;
-            if (!IsValidCubeAutomationContext(out reason))
+            if (!IsValidCubeAutomationContext())
             {
-                EndRun(reason);
+                EndRun();
                 return;
             }
 
@@ -1022,7 +1026,7 @@ namespace Turbo.Plugins.s7o
             switch (_stage)
             {
                 case CubeStage.Idle:
-                    EndRun("idle");
+                    EndRun();
                     return;
 
                 case CubeStage.EnsurePage:
@@ -1042,9 +1046,20 @@ namespace Turbo.Plugins.s7o
                     return;
 
                 case CubeStage.Fill1:
-                    if (!ClickUi(fillButton, "FILL"))
+                    // All supported transactional recipes share one native
+                    // pre-FILL gate. Never let a fixed delay authorize FILL.
+                    if (UsesNativeTransactionGate(_runPage) &&
+                        !CubeReadyForFill())
                     {
-                        Delay(now, 30);
+                        ClearDeadline();
+                        _stage = CubeStage.ConfirmInsert;
+                        Delay(now, 0);
+                        return;
+                    }
+
+                    if (!ClickUi(fillButton))
+                    {
+                        EndRun();
                         return;
                     }
 
@@ -1052,7 +1067,7 @@ namespace Turbo.Plugins.s7o
                     {
                         ClearDeadline();
                         _stage = CubeStage.WaitPage3TransmuteReady;
-                        Delay(now, _p.P3FillToTransmute);
+                        Delay(now, 0);
                     }
                     else if (DoubleClickFillButton)
                     {
@@ -1062,19 +1077,19 @@ namespace Turbo.Plugins.s7o
                     else
                     {
                         _stage = CubeStage.Transmute;
-                        Delay(now, _p.Sleep);
+                        Delay(now, ActionSettleMs);
                     }
                     return;
 
                 case CubeStage.Fill2:
-                    if (!ClickUi(fillButton, "FILL2"))
+                    if (!ClickUi(fillButton))
                     {
-                        Delay(now, 30);
+                        EndRun();
                         return;
                     }
 
                     _stage = CubeStage.Transmute;
-                    Delay(now, _p.Sleep);
+                    Delay(now, ActionSettleMs);
                     return;
 
                 case CubeStage.WaitPage3TransmuteReady:
@@ -1082,10 +1097,60 @@ namespace Turbo.Plugins.s7o
                     return;
 
                 case CubeStage.Transmute:
+                    if (_runPage != 3)
+                    {
+                        int buttonState = ReadUiAnimState(transmuteButton);
+
+                        // Reforge and material-conversion pages share the same
+                        // collapse guard: if FILL empties the Cube before a valid
+                        // Transmute, confirm briefly, then reset/reinsert once.
+                        if (UsesNativeTransactionGate(_runPage) &&
+                            SlotsClear())
+                        {
+                            if (_inputEmptySinceTick == NoTick)
+                                _inputEmptySinceTick = now;
+
+                            if (unchecked(now - _inputEmptySinceTick) <
+                                FillCollapseConfirmMs)
+                            {
+                                Delay(now, NativeStatePollMs);
+                                return;
+                            }
+
+                            ClearDeadline();
+                            if (_insertAttemptsForTarget <
+                                    MaxInsertAttemptsPerTarget)
+                            {
+                                BeginPageRepair(CubeStage.InsertTarget, now);
+                            }
+                            else
+                            {
+                                EndRun();
+                            }
+                            return;
+                        }
+
+                        _inputEmptySinceTick = NoTick;
+
+                        if (buttonState != Page3TransmuteReadyAnimState)
+                        {
+                            if (_transmuteReadySince == NoTick)
+                            {
+                                _transmuteReadySince = now;
+                            }
+                            if (unchecked(now - _transmuteReadySince) >= NativeReadyTimeoutMs)
+                                EndRun();
+                            else Delay(now, 0);
+                            return;
+                        }
+                        if (_transmuteReadySince != NoTick)
+                        _transmuteReadySince = NoTick;
+                    }
                     if (_runPage == 3)
                     {
                         if (ReadUiAnimState(transmuteButton) !=
-                            Page3TransmuteReadyAnimState)
+                                Page3TransmuteReadyAnimState ||
+                            SlotsClear())
                         {
                             ClearDeadline();
                             _stage = CubeStage.WaitPage3TransmuteReady;
@@ -1096,12 +1161,21 @@ namespace Turbo.Plugins.s7o
                         SnapshotPage3Materials();
                     }
 
-                    if (!ClickUi(transmuteButton, "TRANSMUTE"))
+                    if (_transactionPending)
                     {
-                        Delay(now, 30);
+                        EndRun();
+                        return;
+                    }
+                    _transactionMaterials = TransactionMaterials();
+                    if (!ClickUi(transmuteButton))
+                    {
+                        // Input failure can follow mouse-down; do not replay a consuming click.
+                        EndRun();
                         return;
                     }
 
+                    _transactionPending = true;
+                    _transactionTick = Environment.TickCount;
                     ClearDeadline();
 
                     if (_runPage == 3)
@@ -1128,12 +1202,12 @@ namespace Turbo.Plugins.s7o
                     else if (UsePageFlipReset)
                     {
                         _stage = CubeStage.FlipWaitReadyNext;
-                        Delay(now, _p.Sleep + _p.PostTrans);
+                        Delay(now, ActionSettleMs);
                     }
                     else
                     {
                         _stage = CubeStage.OpenPageRecovery;
-                        Delay(now, _p.Sleep + _p.PostTrans);
+                        Delay(now, ActionSettleMs);
                     }
                     return;
 
@@ -1153,27 +1227,27 @@ namespace Turbo.Plugins.s7o
                 case CubeStage.FlipClickNext:
                     _repairingPageAfterNext = true;
                     ClearDeadline();
-                    StartPageArrowClick(nextButton, "NEXT", CubeStage.FlipWaitNextConfirm, _p.PostClick);
+                    StartPageArrowClick(nextButton, CubeStage.FlipWaitNextConfirm, PageArrowPostClickMs);
                     Delay(now, 0);
                     return;
 
                 case CubeStage.FlipWaitNextConfirm:
                 {
-                    EnsureDeadline(now, _p.RightConfirm);
+                    EnsureDeadline(now, PageNextConfirmTimeoutMs);
 
                     var p = ReadPage();
                     if (p > 0 && p != _runPage)
                     {
                         ClearDeadline();
-                        _stage = CubeStage.FlipRightToLeftDelay;
-                        Delay(now, _p.RightToLeft);
+                        _flipPrevAttempts = 0;
+                        _stage = CubeStage.FlipWaitReadyPrev;
+                        Delay(now, 0);
                         return;
                     }
 
                     if (DeadlineExpired(now))
                     {
                         ClearDeadline();
-                        Log("FLIP NEXT not confirmed; using OpenPage recovery");
                         _stage = CubeStage.OpenPageRecovery;
                         _openPageClicks = 0;
                         Delay(now, 0);
@@ -1181,14 +1255,15 @@ namespace Turbo.Plugins.s7o
                     return;
                 }
 
-                case CubeStage.FlipRightToLeftDelay:
-                    _flipPrevAttempts = 0;
-                    ClearDeadline();
-                    _stage = CubeStage.FlipWaitReadyPrev;
-                    Delay(now, 0);
-                    return;
-
                 case CubeStage.FlipWaitReadyPrev:
+                    // A successful transaction may expose the adjacent page
+                    // before the server material spend is authoritative. Stay
+                    // off the recipe page until settlement, then return once.
+                    // Recovery-only page flips have no pending transaction and
+                    // pass through immediately.
+                    if (!WaitForTransactionSettlement(now))
+                        return;
+
                     if (PageArrowReadyOrTimedOut(now))
                     {
                         ClearDeadline();
@@ -1198,10 +1273,31 @@ namespace Turbo.Plugins.s7o
                     return;
 
                 case CubeStage.FlipClickPrev:
-                    if (_flipPrevAttempts >= _p.MaxRetries)
+                {
+                    // A delayed previous PREV may have completed after its
+                    // watchdog expired. Re-read the page before every retry so
+                    // we never click from the correct page into an overshoot.
+                    var currentPage = ReadPage();
+                    if (currentPage == _runPage)
                     {
                         ClearDeadline();
-                        Log("FLIP retries exhausted; using OpenPage recovery");
+                        _repairingPageAfterNext = false;
+                        ResumeAfterPageRepair(now);
+                        return;
+                    }
+
+                    if (currentPage > 0 && currentPage < _runPage)
+                    {
+                        ClearDeadline();
+                        _stage = CubeStage.OpenPageRecovery;
+                        _openPageClicks = 0;
+                        Delay(now, 0);
+                        return;
+                    }
+
+                    if (_flipPrevAttempts >= MaxPageReturnRetries)
+                    {
+                        ClearDeadline();
                         _stage = CubeStage.OpenPageRecovery;
                         _openPageClicks = 0;
                         Delay(now, 0);
@@ -1210,13 +1306,14 @@ namespace Turbo.Plugins.s7o
 
                     _flipPrevAttempts++;
                     ClearDeadline();
-                    StartPageArrowClick(prevButton, "PREV#" + _flipPrevAttempts, CubeStage.FlipWaitPrevConfirm, _p.PostClick);
+                    StartPageArrowClick(prevButton, CubeStage.FlipWaitPrevConfirm, PageArrowPostClickMs);
                     Delay(now, 0);
                     return;
+                }
 
                 case CubeStage.FlipWaitPrevConfirm:
                 {
-                    EnsureDeadline(now, _p.ReturnConfirm);
+                    EnsureDeadline(now, PageReturnConfirmTimeoutMs);
 
                     var p = ReadPage();
                     if (p == _runPage)
@@ -1226,7 +1323,7 @@ namespace Turbo.Plugins.s7o
 
                         if (!TurnedOn)
                         {
-                            EndRun("stopped after page repair");
+                            EndRun();
                             return;
                         }
 
@@ -1241,7 +1338,6 @@ namespace Turbo.Plugins.s7o
                         var vis = ReadPage();
                         if (vis > 0 && vis < _runPage)
                         {
-                            Log("FLIP overshot; using OpenPage recovery");
                             _stage = CubeStage.OpenPageRecovery;
                             _openPageClicks = 0;
                             Delay(now, 0);
@@ -1249,7 +1345,7 @@ namespace Turbo.Plugins.s7o
                         }
 
                         _stage = CubeStage.FlipWaitReadyPrev;
-                        Delay(now, _p.RetryWait);
+                        Delay(now, 0);
                     }
                     return;
                 }
@@ -1271,7 +1367,7 @@ namespace Turbo.Plugins.s7o
                     return;
 
                 case CubeStage.Finish:
-                    EndRun("finished");
+                    EndRun();
                     return;
             }
         }
@@ -1280,7 +1376,7 @@ namespace Turbo.Plugins.s7o
         {
             if (!IsVisible(pageNumber))
             {
-                Delay(now, _p.OpenWait);
+                Delay(now, PageOpenRetryMs);
                 return;
             }
 
@@ -1297,13 +1393,13 @@ namespace Turbo.Plugins.s7o
 
             if (_openPageClicks >= MaxPageNavigationClicks)
             {
-                EndRun("cannot open page " + _runPage);
+                EndRun();
                 return;
             }
 
             if (cur <= 0)
             {
-                Delay(now, _p.OpenWait);
+                Delay(now, PageOpenRetryMs);
                 return;
             }
 
@@ -1314,7 +1410,7 @@ namespace Turbo.Plugins.s7o
             _openPageClicks++;
 
             var forward = cur < _runPage;
-            StartPageArrowClick(forward ? nextButton : prevButton, forward ? "NEXT" : "PREV", CubeStage.EnsurePage, _p.OpenWait);
+            StartPageArrowClick(forward ? nextButton : prevButton, CubeStage.EnsurePage, PageOpenRetryMs);
             Delay(now, 0);
         }
 
@@ -1324,7 +1420,7 @@ namespace Turbo.Plugins.s7o
 
             if (!IsVisible(pageNumber))
             {
-                Delay(now, _p.OpenWait);
+                Delay(now, PageOpenRetryMs);
                 return;
             }
 
@@ -1337,7 +1433,7 @@ namespace Turbo.Plugins.s7o
 
                 if (!TurnedOn)
                 {
-                    EndRun("stopped after page recovery");
+                    EndRun();
                     return;
                 }
 
@@ -1348,13 +1444,13 @@ namespace Turbo.Plugins.s7o
 
             if (_openPageClicks >= MaxPageNavigationClicks)
             {
-                EndRun("page recovery failed");
+                EndRun();
                 return;
             }
 
             if (cur <= 0)
             {
-                Delay(now, _p.OpenWait);
+                Delay(now, PageOpenRetryMs);
                 return;
             }
 
@@ -1365,14 +1461,13 @@ namespace Turbo.Plugins.s7o
             _openPageClicks++;
 
             var forward = cur < _runPage;
-            StartPageArrowClick(forward ? nextButton : prevButton, forward ? "NEXT" : "PREV", CubeStage.OpenPageRecovery, _p.OpenWait);
+            StartPageArrowClick(forward ? nextButton : prevButton, CubeStage.OpenPageRecovery, PageOpenRetryMs);
             Delay(now, 0);
         }
 
-        private void StartPageArrowClick(IUiElement button, string label, CubeStage afterArrowStage, int afterArrowDelayMs)
+        private void StartPageArrowClick(IUiElement button, CubeStage afterArrowStage, int afterArrowDelayMs)
         {
             _pendingArrowButton = button;
-            _pendingArrowLabel = label;
             _afterArrowStage = afterArrowStage;
             _afterArrowDelayMs = Math.Max(0, afterArrowDelayMs);
             _stage = CubeStage.PageArrowDown;
@@ -1407,14 +1502,12 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
-            if (_p.ArrowDown <= 0)
+            if (PageArrowMouseDownMs <= 0)
             {
                 s7o_KanaiCubeInput.MouseUp(MouseButtons.Left);
-                LogV("PAGECLK " + _pendingArrowLabel);
 
                 _pendingArrowButton = null;
-                _pendingArrowLabel = null;
-
+    
                 var next = _afterArrowStage;
                 var delay = _afterArrowDelayMs;
 
@@ -1425,7 +1518,7 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
-            Delay(now, _p.ArrowDown);
+            Delay(now, PageArrowMouseDownMs);
             _stage = CubeStage.PageArrowUp;
         }
 
@@ -1433,10 +1526,8 @@ namespace Turbo.Plugins.s7o
         {
             s7o_KanaiCubeInput.MouseUp(MouseButtons.Left);
 
-            LogV("PAGECLK " + _pendingArrowLabel);
 
             _pendingArrowButton = null;
-            _pendingArrowLabel = null;
 
             var next = _afterArrowStage;
             var delay = _afterArrowDelayMs;
@@ -1453,7 +1544,7 @@ namespace Turbo.Plugins.s7o
 
             if (!ValidateTurnedOn(_runPage))
             {
-                EndRun("validation failed");
+                EndRun();
                 return;
             }
 
@@ -1470,26 +1561,22 @@ namespace Turbo.Plugins.s7o
                 _page3PreflightChecked = true;
 
                 if (UsePageFlipReset &&
-                    (!SlotsClear() ||
-                     ReadUiAnimState(transmuteButton) == Page3TransmuteReadyAnimState))
+                    (ReadUiAnimState(transmuteButton) == Page3TransmuteReadyAnimState))
                 {
-                    BeginPage3PageRepair(
-                        CubeStage.AcquireTarget,
-                        now,
-                        "preflight-stale-cube-state");
+                    BeginPageRepair(CubeStage.AcquireTarget, now);
                     return;
                 }
             }
 
             if (MaxTransmutesPerRun > 0 && _doneThisRun >= MaxTransmutesPerRun)
             {
-                EndRun("max transmutes reached");
+                EndRun();
                 return;
             }
 
             if (!HasMaterials(_runPage))
             {
-                EndRun("materials exhausted");
+                EndRun();
                 return;
             }
 
@@ -1508,44 +1595,24 @@ namespace Turbo.Plugins.s7o
                         continue;
                     }
 
-                    string resolvePath = "stable";
                     IItem liveItem =
                         _runPage >= 7 && _runPage <= 9
-                            ? FindSnapshotItem(slot, out resolvePath)
+                            ? FindSnapshotItem(slot)
                             : FindInventoryItemByStableKey(queuedKey);
 
                     if (liveItem == null)
                     {
-                        LogV(
-                            "QUEUE resolve miss index=" +
-                            (_snapshotIndex - 1) +
-                            " slot=" + slot.X + "," + slot.Y +
-                            " acd=" + slot.AcdId);
                         continue;
                     }
 
                     string key =
                         StableItemKey(liveItem.ItemUniqueId);
 
-                    if (_runPage >= 7 && _runPage <= 9)
-                    {
-                        LogV(
-                            "QUEUE resolve index=" +
-                            (_snapshotIndex - 1) +
-                            " path=" + resolvePath +
-                            " expected=" + slot.X + "," + slot.Y +
-                            " actual=" + liveItem.InventoryX + "," + liveItem.InventoryY +
-                            " acd=" + liveItem.AcdId);
-                    }
-
                     if (_runPage == 3 &&
                         !IsUpgradeRareEligible(liveItem))
                     {
                         // Static preflight rejection. Do not click and do not
                         // add this item to the runtime retry mechanism.
-                        LogUpgradeEligibilityOnce(
-                            liveItem,
-                            key);
 
                         continue;
                     }
@@ -1579,7 +1646,7 @@ namespace Turbo.Plugins.s7o
 
                     if (remaining.Count <= 0)
                     {
-                        EndRun("snapshot queue complete");
+                        EndRun();
                         return;
                     }
 
@@ -1596,7 +1663,7 @@ namespace Turbo.Plugins.s7o
 
                 if (items.Count <= 0)
                 {
-                    EndRun("no candidates");
+                    EndRun();
                     return;
                 }
 
@@ -1656,19 +1723,7 @@ namespace Turbo.Plugins.s7o
                 if (eligibility !=
                     UpgradeRareEligibility.Eligible)
                 {
-                    LogUpgradeEligibilityOnce(
-                        liveItem,
-                        _target.Key);
 
-                    Log(
-                        "UPGRADE preflight skip key=" +
-                        _target.Key +
-                        " result=" +
-                        eligibility +
-                        " level=" +
-                        detectedLevel +
-                        " source=" +
-                        levelSource);
 
                     // Static ineligibility receives zero insertion attempts.
                     // Unknown data also fails closed rather than being clicked.
@@ -1724,16 +1779,17 @@ namespace Turbo.Plugins.s7o
             if (_runPage == 3)
             {
                 _page3AnimBeforeInsert = ReadUiAnimState(transmuteButton);
+                _page3SawOccupiedSlot = false;
                 _page3SawNotReadySinceInsert =
                     _page3AnimBeforeInsert != Page3TransmuteReadyAnimState;
                 _page3ReadyEdgeSeen = false;
                 _page3TransmuteAccepted = false;
             }
 
-            _cycleId++;
-            _cycleStartTick = now;
+            _inputEmptySinceTick = NoTick;
 
-            if (!ClickRect(MouseButtons.Right, rect, "item"))
+
+            if (!ClickRect(MouseButtons.Right, rect))
             {
                 Delay(now, 30);
                 return;
@@ -1741,10 +1797,10 @@ namespace Turbo.Plugins.s7o
 
             _lastProcessedRect = rect;
 
-            if (_runPage != 3)
+            if (!UsesNativeTransactionGate(_runPage))
             {
                 _stage = CubeStage.Fill1;
-                Delay(now, _p.Sleep);
+                Delay(now, ActionSettleMs);
                 return;
             }
 
@@ -1752,71 +1808,106 @@ namespace Turbo.Plugins.s7o
             ClearDeadline();
 
             _stage = CubeStage.ConfirmInsert;
-            Delay(now, _p.P3InsertPoll);
+            Delay(now, 0);
         }
 
         private void AdvanceConfirmInsert(int now)
         {
-            if (_target == null ||
-                string.IsNullOrEmpty(_target.Key))
+            if (!UsesNativeTransactionGate(_runPage))
             {
-                _stage = CubeStage.AcquireTarget;
+                ClearDeadline();
+                _stage = CubeStage.Fill1;
                 Delay(now, 0);
                 return;
             }
 
             int anim = ReadUiAnimState(transmuteButton);
+            bool occupied = !SlotsClear();
 
-            if (anim != Page3TransmuteReadyAnimState)
-                _page3SawNotReadySinceInsert = true;
-
-            if (_page3SawNotReadySinceInsert &&
-                anim == Page3TransmuteReadyAnimState)
-            {
-                _page3ReadyEdgeSeen = true;
-            }
-
-            if (!SlotsClear())
-            {
+            if (_runPage == 3 && occupied)
                 _page3SawOccupiedSlot = true;
-                ClearDeadline();
 
-                // Slot occupancy is the native insertion arbiter. Do not wait
-                // for 51→54 before Fill: the supplied runtime log proved that
-                // some valid insertions remain at 51 until Fill is clicked.
-                _stage = CubeStage.Fill1;
-                Delay(now, _p.P3InsertToFill);
-                return;
-            }
-
-            if (_page3SawOccupiedSlot)
+            // Shared native arbiter for Reforge, Upgrade Rare and all three
+            // material conversions. Fixed time never authorizes FILL: advance
+            // as soon as the input is present and Transmute is natively ready.
+            if (CubeReadyForFill())
             {
-                BeginPage3PageRepair(
-                    CubeStage.PostCycleEvaluate,
-                    now,
-                    "cube-slots-cleared-before-ready");
+                ClearDeadline();
+                _inputEmptySinceTick = NoTick;
+                _stage = CubeStage.Fill1;
+                Delay(now, 0);
                 return;
             }
 
-            EnsureDeadline(now, InsertConfirmTimeoutMs);
+            EnsureDeadline(now, PreFillReadyTimeoutMs);
 
             if (!DeadlineExpired(now))
             {
-                Delay(now, 30);
+                Delay(now, NativeStatePollMs);
                 return;
             }
 
             ClearDeadline();
 
+            if (!occupied)
+            {
+                // A missed right-click does not need a page reset. Retry the
+                // insertion once; page repair is reserved for an actually
+                // occupied Cube whose native ready state remains stale.
+                if (_runPage == 3)
+                {
+                    RetryUnconfirmedInsertion(now);
+                    return;
+                }
+
+                if (_insertAttemptsForTarget <
+                        MaxInsertAttemptsPerTarget)
+                {
+
+                    _stage = CubeStage.InsertTarget;
+                    Delay(now, InsertRetryDelayMs);
+                    return;
+                }
+
+                EndRun();
+                return;
+            }
+
+            if (_insertAttemptsForTarget <
+                    MaxInsertAttemptsPerTarget &&
+                UsePageFlipReset)
+            {
+                BeginPageRepair(CubeStage.InsertTarget, now);
+                return;
+            }
+
+            if (_runPage == 3)
+            {
+                RetryUnconfirmedInsertion(now);
+                return;
+            }
+
+            EndRun();
+        }
+
+        private void RetryUnconfirmedInsertion(int now)
+        {
+            ClearDeadline();
+            if (_transactionPending || _page3TransmuteClicks != 0)
+            {
+                EndRun();
+                return;
+            }
+            if (_target == null)
+            {
+                _stage = CubeStage.AcquireTarget;
+                Delay(now, 0);
+                return;
+            }
             if (_insertAttemptsForTarget <
                     MaxInsertAttemptsPerTarget &&
                 RefreshUpgradeTarget(_target.Key))
             {
-                Log(
-                    "UPGRADE insert not confirmed; retrying key=" +
-                    _target.Key +
-                    " attempt=" +
-                    (_insertAttemptsForTarget + 1));
 
                 _stage = CubeStage.InsertTarget;
                 Delay(now, InsertRetryDelayMs);
@@ -1828,9 +1919,6 @@ namespace Turbo.Plugins.s7o
             if (_skippedThisRun != null)
                 _skippedThisRun.Add(failedKey);
 
-            Log(
-                "UPGRADE insert failed; skipping for this run key=" +
-                failedKey);
 
             _target = null;
             _insertAttemptsForTarget = 0;
@@ -1849,6 +1937,7 @@ namespace Turbo.Plugins.s7o
             _page3ReadyEdgeSeen = false;
             _page3TransmuteAccepted = false;
             _page3AnimBeforeInsert = int.MinValue;
+            _inputEmptySinceTick = NoTick;
             _page3BeforeDeathsBreath = -1;
             _page3BeforeReusableParts = -1;
             _page3BeforeArcaneDust = -1;
@@ -1873,53 +1962,26 @@ namespace Turbo.Plugins.s7o
             }
         }
 
-        private int Page3NativeGateTimeoutMs()
-        {
-            double latency = 0.0d;
-
-            try
-            {
-                latency = Math.Max(
-                    Hud.Game.CurrentLatency,
-                    Hud.Game.AverageLatency);
-            }
-            catch
-            {
-            }
-
-            if (double.IsNaN(latency) ||
-                double.IsInfinity(latency) ||
-                latency < 0.0d)
-            {
-                latency = 0.0d;
-            }
-
-            int timeout =
-                (int)Math.Ceiling(latency * 2.0d + 120.0d);
-
-            return Math.Max(
-                Page3NativeGateMinTimeoutMs,
-                Math.Min(Page3NativeGateMaxTimeoutMs, timeout));
-        }
-
-        private void BeginPage3PageRepair(
+        private void BeginPageRepair(
             CubeStage resumeStage,
-            int now,
-            string reason)
+            int now)
         {
-            Log(
-                "UPGRADE native arbiter reset key=" +
-                (_target == null ? "?" : _target.Key) +
-                " reason=" + reason +
-                " animBeforeInsert=" + _page3AnimBeforeInsert +
-                " animNow=" + ReadUiAnimState(transmuteButton));
 
             ClearDeadline();
 
             if (UsePageFlipReset)
             {
                 _pageRepairResumeStage = resumeStage;
-                _stage = CubeStage.FlipWaitReadyNext;
+
+                // Before any consuming Transmute click, there is nothing to
+                // settle. Reset the page immediately instead of burning the
+                // post-transaction arrow watchdog on a known stale UI state.
+                _stage =
+                    !_transactionPending &&
+                    _page3TransmuteClicks == 0
+                        ? CubeStage.FlipClickNext
+                        : CubeStage.FlipWaitReadyNext;
+
                 Delay(now, 0);
                 return;
             }
@@ -1969,16 +2031,11 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
-            if (SlotsClear())
-            {
-                BeginPage3PageRepair(
-                    CubeStage.PostCycleEvaluate,
-                    now,
-                    "cube-slots-cleared-before-transmute");
-                return;
-            }
-
             int anim = ReadUiAnimState(transmuteButton);
+            bool occupied = !SlotsClear();
+
+            if (occupied)
+                _page3SawOccupiedSlot = true;
 
             if (anim != Page3TransmuteReadyAnimState)
                 _page3SawNotReadySinceInsert = true;
@@ -1989,7 +2046,11 @@ namespace Turbo.Plugins.s7o
                 _page3ReadyEdgeSeen = true;
             }
 
-            if (anim == Page3TransmuteReadyAnimState)
+            // Ready animation alone is not sufficient: the Cube can report 54
+            // after a failed Fill while its input slots are already empty.
+            if (anim == Page3TransmuteReadyAnimState &&
+                occupied &&
+                _page3SawOccupiedSlot)
             {
                 ClearDeadline();
                 _stage = CubeStage.Transmute;
@@ -1997,18 +2058,44 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
-            EnsureDeadline(now, Page3NativeGateTimeoutMs());
-
-            if (!DeadlineExpired(now))
+            // A single empty observation can be a transient UI frame. Require
+            // the Cube to remain empty briefly before treating FILL as collapsed.
+            if (_page3SawOccupiedSlot && !occupied)
             {
-                Delay(now, Page3NativeGatePollMs);
+                if (_inputEmptySinceTick == NoTick)
+                    _inputEmptySinceTick = now;
+
+                if (unchecked(now - _inputEmptySinceTick) <
+                    FillCollapseConfirmMs)
+                {
+                    Delay(now, NativeStatePollMs);
+                    return;
+                }
+
+                ClearDeadline();
+
+                if (_insertAttemptsForTarget < MaxInsertAttemptsPerTarget)
+                {
+                    BeginPageRepair(CubeStage.InsertTarget, now);
+                    return;
+                }
+
+                RetryUnconfirmedInsertion(now);
                 return;
             }
 
-            BeginPage3PageRepair(
-                CubeStage.PostCycleEvaluate,
-                now,
-                "transmute-ready-lost-after-fill");
+            if (occupied)
+                _inputEmptySinceTick = NoTick;
+
+            EnsureDeadline(now, NativeReadyTimeoutMs);
+
+            if (!DeadlineExpired(now))
+            {
+                Delay(now, NativeStatePollMs);
+                return;
+            }
+
+            RetryUnconfirmedInsertion(now);
         }
 
         private void SnapshotPage3Materials()
@@ -2095,25 +2182,18 @@ namespace Turbo.Plugins.s7o
                 now,
                 out evidence))
             {
-                Log(
-                    "UPGRADE transmute confirmed key=" +
-                    _target.Key +
-                    " evidence=" +
-                    evidence +
-                    " clicks=" +
-                    _page3TransmuteClicks);
 
                 ClearDeadline();
 
                 if (UsePageFlipReset)
                 {
                     _stage = CubeStage.FlipWaitReadyNext;
-                    Delay(now, _p.P3SuccessSettle);
+                    Delay(now, 0);
                 }
                 else
                 {
                     _stage = CubeStage.OpenPageRecovery;
-                    Delay(now, _p.P3SuccessSettle);
+                    Delay(now, 0);
                 }
 
                 return;
@@ -2127,19 +2207,14 @@ namespace Turbo.Plugins.s7o
                 {
                     _page3TransmuteAccepted = true;
                     ClearDeadline();
-                    LogV(
-                        "UPGRADE transmute accepted key=" +
-                        _target.Key +
-                        " click=" +
-                        _page3TransmuteClicks);
                 }
                 else
                 {
-                    EnsureDeadline(now, Page3NativeGateTimeoutMs());
+                    EnsureDeadline(now, NativeReadyTimeoutMs);
 
                     if (!DeadlineExpired(now))
                     {
-                        Delay(now, Page3NativeGatePollMs);
+                        Delay(now, NativeStatePollMs);
                         return;
                     }
 
@@ -2150,21 +2225,13 @@ namespace Turbo.Plugins.s7o
                         anim == Page3TransmuteReadyAnimState &&
                         !SlotsClear())
                     {
-                        Log(
-                            "UPGRADE transmute click not accepted; retrying key=" +
-                            _target.Key +
-                            " click=" +
-                            (_page3TransmuteClicks + 1));
 
                         _stage = CubeStage.Transmute;
                         Delay(now, Page3TransmuteRetryDelayMs);
                         return;
                     }
 
-                    BeginPage3PageRepair(
-                        CubeStage.PostCycleEvaluate,
-                        now,
-                        "transmute-accept-timeout");
+                    BeginPageRepair(CubeStage.PostCycleEvaluate, now);
                     return;
                 }
             }
@@ -2175,7 +2242,7 @@ namespace Turbo.Plugins.s7o
                 _page3TransmuteClickTick != NoTick &&
                 unchecked(
                     now - _page3TransmuteClickTick) >=
-                    _p.P3TransmuteToRepair)
+                    0)
             {
                 ClearDeadline();
                 _stage = CubeStage.FlipWaitReadyNext;
@@ -2199,24 +2266,12 @@ namespace Turbo.Plugins.s7o
                     MaxPage3TransmuteClicksPerCycle &&
                 !SlotsClear())
             {
-                Log(
-                    "UPGRADE transmute not confirmed; retrying Fill/Transmute key=" +
-                    _target.Key +
-                    " click=" +
-                    (_page3TransmuteClicks + 1));
 
                 _stage = CubeStage.Fill1;
                 Delay(now, Page3TransmuteRetryDelayMs);
                 return;
             }
 
-            Log(
-                "UPGRADE transmute not confirmed; repairing page before final evaluation key=" +
-                _target.Key +
-                " clicks=" +
-                _page3TransmuteClicks +
-                " slotsClear=" +
-                SlotsClear());
 
             if (UsePageFlipReset)
             {
@@ -2265,11 +2320,13 @@ namespace Turbo.Plugins.s7o
                 _postFailureSinceTick != NoTick &&
                 unchecked(
                     now - _postFailureSinceTick) >=
-                    _p.P3FailureConfirm;
+                    Page3FailureConfirmMs;
         }
 
         private void AdvancePostCycleEvaluate(int now)
         {
+            if (!WaitForTransactionSettlement(now))
+                return;
             string page3Evidence = string.Empty;
             bool page3Succeeded =
                 _target != null &&
@@ -2294,7 +2351,7 @@ namespace Turbo.Plugins.s7o
                 {
                     Delay(
                         now,
-                        _p.P3FailureSample);
+                        Page3FailureSampleMs);
 
                     return;
                 }
@@ -2313,13 +2370,6 @@ namespace Turbo.Plugins.s7o
                     _upgradeFailuresThisRun[failedKey] =
                         failures;
 
-                Log(
-                    "CYCLE #" +
-                    _cycleId +
-                    " upgrade attempt failed; key=" +
-                    failedKey +
-                    " failures=" +
-                    failures);
 
                 ResetPostFailureConfirmation();
 
@@ -2340,11 +2390,6 @@ namespace Turbo.Plugins.s7o
                 if (_skippedThisRun != null)
                     _skippedThisRun.Add(failedKey);
 
-                Log(
-                    "UPGRADE skipped for current run after " +
-                    failures +
-                    " failed attempts; key=" +
-                    failedKey);
 
                 // Never add an X here. The item remains recipe-eligible even if
                 // the automation failed to process it.
@@ -2364,6 +2409,7 @@ namespace Turbo.Plugins.s7o
             if (_runPage == 2 &&
                 _target != null)
             {
+                ArmReforgeRestartGuardIfHighQualityResult(now);
                 _startAncientIds.Remove(
                     _target.Uid);
             }
@@ -2374,35 +2420,6 @@ namespace Turbo.Plugins.s7o
             {
                 _upgradeFailuresThisRun.Remove(
                     _target.Key);
-            }
-
-            if (_cycleId == 1 ||
-                _cycleId % 5 == 0)
-            {
-                Log(
-                    "CYCLE #" +
-                    _cycleId +
-                    " ok");
-            }
-
-            if (_cycleStartTick != 0)
-            {
-                _lastCycleElapsedMs =
-                    unchecked(
-                        now - _cycleStartTick);
-
-                if (DebugLogEnabled &&
-                    (_cycleId == 1 ||
-                     _cycleId % 10 == 0))
-                {
-                    Log(
-                        "CYCLE #" +
-                        _cycleId +
-                        " elapsed=" +
-                        _lastCycleElapsedMs +
-                        "ms profile=" +
-                        _p);
-                }
             }
 
             _target = null;
@@ -2432,11 +2449,8 @@ namespace Turbo.Plugins.s7o
             return null;
         }
 
-        private IItem FindSnapshotItem(
-            Slot slot,
-            out string resolvePath)
+        private IItem FindSnapshotItem(Slot slot)
         {
-            resolvePath = "none";
 
             if (slot == null)
                 return null;
@@ -2454,7 +2468,6 @@ namespace Turbo.Plugins.s7o
                 if (slot.AcdId != 0 &&
                     item.AcdId == slot.AcdId)
                 {
-                    resolvePath = "acd";
                     return item;
                 }
 
@@ -2492,19 +2505,16 @@ namespace Turbo.Plugins.s7o
 
             if (slotMatch != null)
             {
-                resolvePath = "slot";
                 return slotMatch;
             }
 
             if (uidMatch != null)
             {
-                resolvePath = "uid";
                 return uidMatch;
             }
 
             if (stableMatch != null)
             {
-                resolvePath = "stable";
                 return stableMatch;
             }
 
@@ -2549,45 +2559,6 @@ namespace Turbo.Plugins.s7o
             return true;
         }
 
-        private void LogUpgradeEligibilityOnce(
-            IItem item,
-            string key)
-        {
-            if (!DebugLogEnabled ||
-                item == null ||
-                item.SnoItem == null ||
-                string.IsNullOrEmpty(key) ||
-                _eligibilityLoggedThisRun == null ||
-                !_eligibilityLoggedThisRun.Add(key))
-            {
-                return;
-            }
-
-            int level;
-            string source;
-
-            UpgradeRareEligibility result =
-                GetUpgradeRareEligibility(
-                    item,
-                    out level,
-                    out source);
-
-            Log(
-                "UPGRADE eligibility key=" +
-                key +
-                " name=" +
-                (item.FullNameEnglish ?? "?") +
-                " result=" +
-                result +
-                " detectedLevel=" +
-                level +
-                " source=" +
-                source +
-                " snoLevel=" +
-                item.SnoItem.Level +
-                " requiredLevel=" +
-                item.SnoItem.RequiredLevel);
-        }
 
         private bool StableKeyExistsInInventory(string key)
         {
@@ -2632,63 +2603,15 @@ namespace Turbo.Plugins.s7o
 
             int x = Hud.Window.CursorX;
             int y = Hud.Window.CursorY;
-            int now = Environment.TickCount;
 
-            bool hitMinus = PointInRect(_speedMinusRect, x, y);
-            bool hitPlus = PointInRect(_speedPlusRect, x, y);
-            bool hitHotkey = PointInRect(_hotkeyButtonRect, x, y);
-
-            if (!hitMinus && !hitPlus && !hitHotkey)
-                return false;
-
-            if (hitMinus)
+            if (PointInRect(_hotkeyButtonRect, x, y))
             {
                 if (Running)
                 {
-                    Log("SPEED minus ignored; running");
-                    return true;
-                }
-
-                int old = Clamp(SpeedLevel);
-                SpeedLevel = Clamp(old - 1);
-                _minusFlashUntilTick = unchecked(now + Math.Max(30, ButtonFlashMs));
-
-                if (SpeedLevel != old)
-                    SaveSettings();
-
-                Log("SPEED " + old + " -> " + SpeedLevel + " profile=" + CurrentProfile());
-                return true;
-            }
-
-            if (hitPlus)
-            {
-                if (Running)
-                {
-                    Log("SPEED plus ignored; running");
-                    return true;
-                }
-
-                int old = Clamp(SpeedLevel);
-                SpeedLevel = Clamp(old + 1);
-                _plusFlashUntilTick = unchecked(now + Math.Max(30, ButtonFlashMs));
-
-                if (SpeedLevel != old)
-                    SaveSettings();
-
-                Log("SPEED " + old + " -> " + SpeedLevel + " profile=" + CurrentProfile());
-                return true;
-            }
-
-            if (hitHotkey)
-            {
-                if (Running)
-                {
-                    Log("Hotkey capture ignored; running");
                     return true;
                 }
 
                 _capturingHotkey = true;
-                Log("Hotkey capture started.");
                 return true;
             }
 
@@ -2701,16 +2624,9 @@ namespace Turbo.Plugins.s7o
         }
 
 
-
-
-
-
         // =========================================================
         // UI Drawing — pill-style controls
         // =========================================================
-
-
-
 
 
         // =========================================================
@@ -2720,10 +2636,6 @@ namespace Turbo.Plugins.s7o
         private bool UpdateOverlayLayoutRects()
         {
             _hotkeyButtonRect = RectangleF.Empty;
-            _speedMinusRect = RectangleF.Empty;
-            _speedPlusRect = RectangleF.Empty;
-            _speedValueRect = RectangleF.Empty;
-            _speedControlRect = RectangleF.Empty;
 
             if (!ShowOverlay || vendorPage == null || transmuteDialog == null)
                 return false;
@@ -2748,24 +2660,6 @@ namespace Turbo.Plugins.s7o
                 HotkeyButtonWidth,
                 HotkeyButtonHeight);
 
-            // Right group: segmented speed control.
-            float groupWidth = SpeedControlWidth;
-            float rightX = pane.X + pane.Width - HeaderRightOffset - groupWidth;
-            float minRightX = pane.X + 12.0f;
-            float maxRightX = pane.X + pane.Width - groupWidth - 12.0f;
-            rightX = Math.Max(minRightX, Math.Min(maxRightX, rightX));
-
-            float speedX = rightX;
-            float speedY = topY + 18.0f;
-
-            float sideWidth = Math.Max(1.0f, SpeedSideButtonWidth);
-            float centerWidth = Math.Max(1.0f, SpeedControlWidth - sideWidth * 2.0f);
-
-            _speedMinusRect = new RectangleF(speedX, speedY, sideWidth, SpeedControlHeight);
-            _speedValueRect = new RectangleF(speedX + sideWidth, speedY, centerWidth, SpeedControlHeight);
-            _speedPlusRect = new RectangleF(speedX + sideWidth + centerWidth, speedY, sideWidth, SpeedControlHeight);
-            _speedControlRect = new RectangleF(speedX, speedY, SpeedControlWidth, SpeedControlHeight);
-
             return true;
         }
 
@@ -2787,50 +2681,6 @@ namespace Turbo.Plugins.s7o
         }
 
 
-        private void DrawHeaderSpeedControl()
-        {
-            if (!ShowSpeedControl)
-                return;
-
-            int now = Environment.TickCount;
-
-            DrawSpeedLabel();
-
-            DrawSegmentedPillBase(_speedControlRect);
-
-            if (TickIsFuture(now, _minusFlashUntilTick))
-                DrawPillSegment(_speedMinusRect, true, false, true);
-
-            if (TickIsFuture(now, _plusFlashUntilTick))
-                DrawPillSegment(_speedPlusRect, false, true, true);
-
-            if (_pillOrangeSeparatorBrush != null)
-            {
-                float y1 = _speedControlRect.Y + 3.0f;
-                float y2 = _speedControlRect.Y + _speedControlRect.Height - 3.0f;
-                float div1 = _speedMinusRect.Right;
-                float div2 = _speedValueRect.Right;
-
-                _pillOrangeSeparatorBrush.DrawLine(div1, y1, div1, y2);
-                _pillOrangeSeparatorBrush.DrawLine(div2, y1, div2, y2);
-            }
-
-            DrawCenteredText(_speedMinusRect, "-");
-            DrawCenteredText(_speedValueRect, Clamp(SpeedLevel).ToString());
-            DrawCenteredText(_speedPlusRect, "+");
-        }
-
-        private void DrawSpeedLabel()
-        {
-            if (_yellowFont == null || _speedControlRect.Width <= 0 || _speedControlRect.Height <= 0)
-                return;
-
-            var layout = _yellowFont.GetTextLayout(s7o_Localization.Get("overlay.kanai.speed", "SPEED"));
-            float x = _speedControlRect.X + _speedControlRect.Width * 0.5f - layout.Metrics.Width * 0.5f;
-            float y = _speedControlRect.Y - SpeedControlHeight + 2.0f;
-            _yellowFont.DrawText(layout, x, y);
-        }
-
         private void DrawPillButton(RectangleF rect, string text, bool green)
         {
             float radius = rect.Height * 0.5f;
@@ -2849,43 +2699,6 @@ namespace Turbo.Plugins.s7o
             DrawRoundedRect(highlight, highlight.Height * 0.5f, green ? _pillGreenLightBrush : _pillLightBrush);
 
             DrawCenteredText(rect, text);
-        }
-
-        private void DrawSegmentedPillBase(RectangleF rect)
-        {
-            float radius = rect.Height * 0.5f;
-
-            DrawRoundedRect(rect, radius, _pillOrangeBorderBrush);
-
-            var inner = InsetRect(rect, 1.0f);
-            DrawRoundedRect(inner, inner.Height * 0.5f, _pillDarkBrush);
-
-            var highlight = new RectangleF(
-                inner.X + 1.0f,
-                inner.Y + 1.0f,
-                Math.Max(0.0f, inner.Width - 2.0f),
-                inner.Height * 0.42f);
-
-            DrawRoundedRect(highlight, highlight.Height * 0.5f, _pillLightBrush);
-        }
-
-        private void DrawPillSegment(RectangleF rect, bool leftRounded, bool rightRounded, bool green)
-        {
-            if (!green)
-                return;
-
-            var inner = InsetRect(rect, 1.0f);
-            float radius = inner.Height * 0.5f;
-
-            DrawRoundedSegment(inner, radius, leftRounded, rightRounded, _pillGreenBrush);
-
-            var highlight = new RectangleF(
-                inner.X + 1.0f,
-                inner.Y + 1.0f,
-                Math.Max(0.0f, inner.Width - 2.0f),
-                inner.Height * 0.42f);
-
-            DrawRoundedSegment(highlight, highlight.Height * 0.5f, leftRounded, rightRounded, _pillGreenLightBrush);
         }
 
         private static RectangleF InsetRect(RectangleF rect, float amount)
@@ -2923,55 +2736,9 @@ namespace Turbo.Plugins.s7o
                     brush.DrawGeometry(pg);
                 }
             }
-            catch (Exception ex)
+            catch
             {
                 _geometryDrawFailed = true;
-
-                if (!_geometryDrawFailureLogged)
-                {
-                    _geometryDrawFailureLogged = true;
-                    Log("Rounded geometry drawing failed. Falling back to rectangles. " + ex);
-                }
-
-                brush.DrawRectangle(rect);
-            }
-        }
-
-        private void DrawRoundedSegment(RectangleF rect, float radius, bool roundLeft, bool roundRight, IBrush brush)
-        {
-            if (brush == null) return;
-            if (rect.Width <= 0 || rect.Height <= 0) return;
-
-            if (!UseRoundedGeometryButtons || _geometryDrawFailed)
-            {
-                brush.DrawRectangle(rect);
-                return;
-            }
-
-            try
-            {
-                radius = Math.Max(0.0f, Math.Min(radius, Math.Min(rect.Width, rect.Height) * 0.5f));
-
-                using (var pg = Hud.Render.CreateGeometry())
-                {
-                    using (var gs = pg.Open())
-                    {
-                        BeginRoundedRectFigure(gs, rect, radius, roundLeft, roundRight, roundRight, roundLeft);
-                        gs.Close();
-                    }
-
-                    brush.DrawGeometry(pg);
-                }
-            }
-            catch (Exception ex)
-            {
-                _geometryDrawFailed = true;
-
-                if (!_geometryDrawFailureLogged)
-                {
-                    _geometryDrawFailureLogged = true;
-                    Log("Rounded segment drawing failed. Falling back to rectangles. " + ex);
-                }
 
                 brush.DrawRectangle(rect);
             }
@@ -3049,58 +2816,6 @@ namespace Turbo.Plugins.s7o
         {
             return rect.Width > 0 && rect.Height > 0 && rect.Contains(x, y);
         }
-
-        // =========================================================
-        // Timing Profile — lerp from LightningMod-style Speed 1 to fastest Speed 10
-        //
-        // Timings interpolate linearly from Speed 1 to Speed 10:
-        //   timing       | spd1 | spd10
-        //   Sleep        |  60  |  15
-        //   PostTrans    | 125  |   8
-        //   ArrowReady   | 220  | 105
-        //   RightConfirm | 360  | 220
-        //   RightToLeft  | 120  |   0
-        //   ReturnConf   | 650  | 330
-        //   RetryWait    |  90  |   5
-        //   ArrowDown    |  35  |   0
-        //   PostClick    |  20  |   0
-        //   Page 3 action floors at Speed 10 are zero; the native slot-clear
-        //   gate and 105 ms ArrowReady timeout remain the transaction barrier.
-        //   Page 3 failure confirmation scales from 240 ms to 120 ms.
-        // =========================================================
-
-        private TimingProfile CurrentProfile() =>
-            SpeedProfile(Clamp(SpeedLevel));
-
-        private TimingProfile SpeedProfile(int level)
-        {
-            var t = (level - 1) / 9.0; // 0.0 at Speed 1, 1.0 at Speed 10
-            return new TimingProfile
-            {
-                Label         = "SPEED " + level + "/10",
-                Sleep         = Lerp(BaseGlobalSleepMs,           MinGlobalSleepMs,           t),
-                PostTrans     = Lerp(BasePostTransmuteExtraMs,     MinPostTransmuteExtraMs,    t),
-                ArrowReady    = Lerp(BasePageArrowReadyTimeoutMs,  MinPageArrowReadyTimeoutMs, t),
-                RightConfirm  = Lerp(BasePageRightConfirmTimeoutMs, MinPageRightConfirmTimeoutMs, t),
-                RightToLeft   = Lerp(BasePageRightToLeftMinWaitMs, MinPageRightToLeftMs,       t),
-                ReturnConfirm = Lerp(BasePageReturnConfirmTimeoutMs, MinPageReturnConfirmTimeoutMs, t),
-                RetryWait     = Lerp(BasePageReturnRetryWaitMs,    MinPageReturnRetryWaitMs,   t),
-                MaxRetries    = BasePageReturnMaxRetries,
-                ArrowDown     = Lerp(BasePageArrowMouseDownMs,     MinPageArrowMouseDownMs,    t),
-                PostClick     = Lerp(BasePageArrowPostClickMs,     MinPageArrowPostClickMs,    t),
-                OpenWait      = Lerp(BasePageOpenClickWaitMs,      MinPageOpenClickWaitMs,     t),
-                P3InsertPoll = Lerp(BasePage3InsertConfirmPollMs, MinPage3InsertConfirmPollMs, t),
-                P3InsertToFill = Lerp(BasePage3PostInsertSettleMs, MinPage3PostInsertSettleMs, t),
-                P3FillToTransmute = Lerp(BasePage3PostFillSettleMs, MinPage3PostFillSettleMs, t),
-                P3TransmuteToRepair = Lerp(BasePage3TransmuteToRepairMs, MinPage3TransmuteToRepairMs, t),
-                P3FailureConfirm = Lerp(BasePage3FailureConfirmMs, MinPage3FailureConfirmMs, t),
-                P3FailureSample = Lerp(BasePage3FailureSampleMs, MinPage3FailureSampleMs, t),
-                P3SuccessSettle = Lerp(BasePage3SuccessSettleMs, MinPage3SuccessSettleMs, t),
-            };
-        }
-
-        private static int Lerp(int from, int to, double t) =>
-            Math.Max(0, (int)Math.Round(from + (to - from) * t));
 
         // =========================================================
         // Guards
@@ -3506,27 +3221,13 @@ namespace Turbo.Plugins.s7o
 
         private void SortItems(int page, List<IItem> items)
         {
-            // Material conversion is order-insensitive, so use the normal visual
-            // inventory sweep: left-to-right across each row, then top-to-bottom.
-            if (page >= 7 && page <= 9)
-                items.Sort(InvRowMajor);
-            else
-                items.Sort(InvOrd);
-        }
-
-        private static int InvOrd(IItem a, IItem b)
-        {
-            int x = a.InventoryX.CompareTo(b.InventoryX);
-            return x != 0 ? x : a.InventoryY.CompareTo(b.InventoryY);
-        }
-
-        private static int InvRowMajor(IItem a, IItem b)
-        {
-            int y = a.InventoryY.CompareTo(b.InventoryY);
-            if (y != 0) return y;
-
-            int x = a.InventoryX.CompareTo(b.InventoryX);
-            return x != 0 ? x : CompareInventoryIdentity(a, b);
+            items.Sort((a, b) =>
+            {
+                int order = page >= 7 && page <= 9 ? a.Quality.CompareTo(b.Quality) : 0;
+                if (order == 0) order = a.InventoryX.CompareTo(b.InventoryX);
+                if (order == 0) order = a.InventoryY.CompareTo(b.InventoryY);
+                return order != 0 ? order : CompareInventoryIdentity(a, b);
+            });
         }
 
         private static int CompareInventoryIdentity(IItem a, IItem b)
@@ -3542,6 +3243,29 @@ namespace Turbo.Plugins.s7o
                 StringComparison.Ordinal);
         }
 
+        private void ArmReforgeRestartGuardIfHighQualityResult(int now)
+        {
+            if (_target == null || _target.Item == null)
+                return;
+
+            int x = _target.Item.InventoryX;
+            int y = _target.Item.InventoryY;
+
+            foreach (var item in Hud.Inventory.ItemsInInventory)
+            {
+                if (item == null || item.Location != ItemLocation.Inventory ||
+                    item.InventoryX != x || item.InventoryY != y ||
+                    item.SnoItem == null || !IsReforgable(item))
+                    continue;
+
+                if (item.AncientRank > 0)
+                    _reforgeRestartBlockedUntilTick =
+                        now + ReforgeHighQualityRestartBlockMs;
+
+                return;
+            }
+        }
+
         private void SnapshotAncients()
         {
             _startAncientIds.Clear();
@@ -3555,37 +3279,42 @@ namespace Turbo.Plugins.s7o
         // Click Helpers
         // =========================================================
         private void ReleaseMouseButtons() { try { s7o_KanaiCubeInput.MouseUp(MouseButtons.Left); } catch { } try { s7o_KanaiCubeInput.MouseUp(MouseButtons.Right); } catch { } }
-        private bool ClickUi(IUiElement e, string lbl)
+        private bool ClickUi(IUiElement e)
         {
             if (e == null)
             {
-                LogV("CLICKUI " + lbl + " null");
                 return false;
             }
 
             if (!IsVisible(e))
             {
-                LogV("CLICKUI " + lbl + " hidden");
                 return false;
             }
 
             var r = e.Rectangle;
             if (r.Width <= 0 || r.Height <= 0)
             {
-                LogV("CLICKUI " + lbl + " invalid " + Rf(r));
                 return false;
             }
 
-            LogV("CLICKUI " + lbl + " rect=" + Rf(r));
 
             ReleaseMouseButtons();
-            return s7o_KanaiCubeInput.ClickRect(r, MouseButtons.Left, Hud.Window.Offset.X, Hud.Window.Offset.Y);
+            return s7o_KanaiCubeInput.ClickRect(
+                r, MouseButtons.Left, Hud.Window.Offset.X, Hud.Window.Offset.Y);
         }
-        private bool ClickRect(MouseButtons btn, RectangleF rect, string lbl) { if (rect.Width <= 0 || rect.Height <= 0) { LogV("CLICKRECT " + lbl + " invalid " + Rf(rect)); return false; } LogV("CLICKRECT " + lbl + " " + Rf(rect)); ReleaseMouseButtons(); return s7o_KanaiCubeInput.ClickRect(rect, btn, Hud.Window.Offset.X, Hud.Window.Offset.Y); }
-        private void InsertByDrag(IItem item) { if (item == null) return; var r = Hud.Inventory.GetItemRect(item); ClickRect(MouseButtons.Right, r, "item-rightclick-fallback"); }
+        private bool ClickRect(MouseButtons btn, RectangleF rect)
+        {
+            if (rect.Width <= 0 || rect.Height <= 0)
+                return false;
+
+            ReleaseMouseButtons();
+            return s7o_KanaiCubeInput.ClickRect(
+                rect, btn, Hud.Window.Offset.X, Hud.Window.Offset.Y);
+        }
+        private void InsertByDrag(IItem item) { if (item == null) return; var r = Hud.Inventory.GetItemRect(item); ClickRect(MouseButtons.Right, r); }
 
         // =========================================================
-        // Settings Persistence — SpeedLevel and KanaiCubeHotkey survive HUD restarts.
+        // Settings Persistence — KanaiCubeHotkey survives HUD restarts.
         // New FREEHUD path: plugins\s7o\settings\s7o_KanaiCube.ini.
         // Old s7o_TurboCube paths are migrated once when found.
         // This is intentionally independent from ItemSalvage settings. File errors silently fall back to defaults.
@@ -3650,14 +3379,7 @@ namespace Turbo.Plugins.s7o
                     string key = line.Substring(0, split).Trim();
                     string value = line.Substring(split + 1).Trim();
 
-                    if (string.Equals(key, "SpeedLevel", StringComparison.OrdinalIgnoreCase)
-                        || string.Equals(key, "TurboSpeedLevel", StringComparison.OrdinalIgnoreCase))
-                    {
-                        int n;
-                        if (int.TryParse(value, out n))
-                            SpeedLevel = Clamp(n);
-                    }
-                    else if (string.Equals(key, "KanaiCubeHotkey", StringComparison.OrdinalIgnoreCase)
+                    if (string.Equals(key, "KanaiCubeHotkey", StringComparison.OrdinalIgnoreCase)
                         || string.Equals(key, "TurboCubeHotkey", StringComparison.OrdinalIgnoreCase)
                         || string.Equals(key, "Hotkey", StringComparison.OrdinalIgnoreCase))
                     {
@@ -3698,7 +3420,6 @@ namespace Turbo.Plugins.s7o
                     "# s7o_KanaiCube user settings" + Environment.NewLine
                     + "# This file is intentionally separate from s7o_ItemSalvage settings." + Environment.NewLine
                     + Environment.NewLine
-                    + "SpeedLevel=" + Clamp(SpeedLevel) + Environment.NewLine
                     + "KanaiCubeHotkey=" + KanaiCubeHotkey + Environment.NewLine;
 
                 System.IO.File.WriteAllText(_settingsPath, content);
@@ -3756,32 +3477,11 @@ namespace Turbo.Plugins.s7o
                 _lastHighlightRects = rects;
 
             _cachedStatusText = Running
-                ? _running + (ShowCycleTimingOverlay && _lastCycleElapsedMs > 0 ? "\r\nlast cycle: " + _lastCycleElapsedMs + "ms" : "")
+                ? _running
                 : items.Count > 0
                     ? _info
                     : _noItem;
         }
-
-        // =========================================================
-        // Logging
-        // =========================================================
-
-        private void Log(string msg)
-        {
-            if (!DebugLogEnabled) return;
-            try
-            {
-                if (!_sessionLogged)
-                {
-                    _sessionLogged = true;
-                    Hud.TextLog.Log(DebugLogFileName, "=== Session " + DateTime.Now.ToString("yyyy.MM.dd HH:mm:ss") + " ===");
-                }
-                Hud.TextLog.Log(DebugLogFileName, msg);
-            }
-            catch { } // logging must never break automation
-        }
-
-        private void LogV(string msg) { if (VerboseDebugLogging) Log(msg); }
 
         // =========================================================
         // Helpers
@@ -3810,28 +3510,27 @@ namespace Turbo.Plugins.s7o
             if (page == 2)
             {
                 _header = Mode == 0 ? "【Reforge to Ancient/Primal】" : "【Reforge to Primal】";
-                _info = "press " + k + " to start\r\nclick hotkey button to change key; +/- adjusts speed";
+                _info = "press " + k + " to start\r\nclick hotkey button to change key";
                 _noItem = "no legendary items";
                 _running = "reforging...\r\npress " + k + " to stop";
             }
             else if (page == 3)
             {
                 _header = "【Upgrade Rare】";
-                _info = "press " + k + " to start\r\nclick hotkey button to change key; +/- adjusts speed";
+                _info = "press " + k + " to start\r\nclick hotkey button to change key";
                 _noItem = "no rare items";
                 _running = "upgrading...\r\npress " + k + " to stop";
             }
             else
             {
                 _header = "【Convert Materials】";
-                _info = "press " + k + " to start\r\nclick hotkey button to change key; +/- adjusts speed";
+                _info = "press " + k + " to start\r\nclick hotkey button to change key";
                 _noItem = "no items to convert";
                 _running = "converting...\r\npress " + k + " to stop";
             }
         }
 
         private bool SupportedPage(int p) => PageIndexes.Contains(p) && (p != 2 || EnableReforgePage2);
-        private int  Clamp(int v)          => v < 1 ? 1 : v > 10 ? 10 : v;
 
         // TurboHUD's ItemUniqueId for inventory items can encode slot position in the prefix:
         //   "Inventory{position_prefix}-{stable_game_actor_id}"
@@ -3849,8 +3548,6 @@ namespace Turbo.Plugins.s7o
         private int ReadPage() { return pageNumber == null || !IsVisible(pageNumber) ? -1 : PageNumDirect(); }
         private int PageNumDirect() { try { return GetPageNum(); } catch { return -1; } }
         private int PageNum() { try { return pageNumber == null || !IsVisible(pageNumber) ? -1 : GetPageNum(); } catch { return -1; } }
-        private string Cursor()            => "(" + Hud.Window.CursorX + "," + Hud.Window.CursorY + ")";
-        private string Rf(RectangleF r)    => "[" + (int)r.X + "," + (int)r.Y + " " + (int)r.Width + "x" + (int)r.Height + "]";
         private static int Div(long v, int d) { if (d <= 0 || v <= 0) return 0; var r = v / d; return r > int.MaxValue ? int.MaxValue : (int)r; }
         private static int Min4(int a, int b, int c, int dd) { var m = a < b ? a : b; if (c < m) m = c; if (dd < m) m = dd; return m; }
     }
@@ -3864,18 +3561,10 @@ namespace Turbo.Plugins.s7o
         public void Customize()
         {
             var p = Hud.GetPlugin<s7o_KanaiCube>(); if (p == null) return;
-            // Do not assign ToggleKeyEvent here.
-            // KanaiCubeHotkey is loaded from plugins\s7o\settings\s7o_KanaiCube.ini in Load(),
-            // then ToggleKeyEvent is created from that saved/default key.
-            // This keeps Kanai Cube independent from ItemSalvage even if both default to F3.
+            // Do not assign ToggleKeyEvent here. Load() restores the independent
+            // Kanai Cube hotkey; automation timing uses the validated production profile.
             p.MaxPageNavigationClicks = 12; p.ToggleDebounceMs = 750;
-            p.BaseGlobalSleepMs = 60; p.BasePostTransmuteExtraMs = 125; p.BasePageArrowReadyTimeoutMs = 220; p.BasePageRightConfirmTimeoutMs = 360; p.BasePageRightToLeftMinWaitMs = 120; p.BasePageReturnConfirmTimeoutMs = 650; p.BasePageReturnRetryWaitMs = 90; p.BasePageReturnMaxRetries = 4; p.BasePageArrowMouseDownMs = 35; p.BasePageArrowPostClickMs = 20; p.BasePageOpenClickWaitMs = 100;
-            p.MinGlobalSleepMs = 15; p.MinPostTransmuteExtraMs = 8; p.MinPageArrowReadyTimeoutMs = 105; p.MinPageRightConfirmTimeoutMs = 220; p.MinPageRightToLeftMs = 0; p.MinPageReturnConfirmTimeoutMs = 330; p.MinPageReturnRetryWaitMs = 5; p.MinPageArrowMouseDownMs = 0; p.MinPageArrowPostClickMs = 0; p.MinPageOpenClickWaitMs = 5;
-            p.ShowSpeedControl = true;
             p.MaxTransmutesPerRun = 250; p.UseRightClickInsert = true; p.UsePageFlipReset = true; p.DoubleClickFillButton = false; p.UseSnapshotQueueForFastPages = true; p.EnableReforgePage2 = true; p.Mode = 0; p.RestoreCursorAfterRun = true;
-            p.DebugLogEnabled = false; p.VerboseDebugLogging = false; p.DebugLogManualClicks = false; p.DebugLogUiRectsOnPageClicks = false; p.ShowCycleTimingOverlay = false; p.DebugLogFileName = "KanaiCubeDebug.log";
         }
-        private static bool IsReservedFallbackHotkey(IKeyEvent key) { if (key == null) return false; try { var s = key.ToString(); if (string.IsNullOrEmpty(s)) return false; var u = s.ToUpperInvariant(); return u.Contains("F12") || u.Contains("F8"); } catch { return false; } }
-        private static IKeyEvent NonReservedFallbackHotkey(IKeyEvent key) { return IsReservedFallbackHotkey(key) ? null : key; }
     }
 }
