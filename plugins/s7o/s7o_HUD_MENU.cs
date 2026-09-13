@@ -12550,6 +12550,11 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 T("zdh.menu.auto_mfd.description", "Place Valley of Death for weighted elite coverage and replace it only when coverage meaningfully improves."), 3);
             AddZdhHelperChildItem(items, favoriteDisplay, T("zdh.menu.auto_sentry", "Auto Guardian Sentry"),
                 T("zdh.menu.auto_sentry.description", "Build a spaced Guardian Turret field around a stable elite fight and protect uncovered DPS players."), 4);
+            AddZdhHelperChildItem(items, favoriteDisplay, "RG — " + T("hud.text.automation", "Automation"),
+                T("zdh.menu.auto_entangle", "Auto Entangle") + " / " +
+                T("zdh.menu.auto_multishot", "Auto Multishot") + " / " +
+                T("zdh.menu.auto_mfd", "Auto Valley of Death") + " / " +
+                T("zdh.menu.auto_sentry", "Auto Guardian Sentry"), 7);
             AddZdhHelperChildItem(items, favoriteDisplay, T("zdh.menu.labels", "Elite Labels"),
                 T("zdh.menu.labels.description", "Show compact IB, DMG, and MFD status below eligible elite health bars."), 5);
             AddZdhHelperChildItem(items, favoriteDisplay, T("zdh.menu.uptime", "Uptime Stats"),
@@ -12606,6 +12611,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 case 4: return s7o_ZDH_HelperState.AutoSentry;
                 case 5: return s7o_ZDH_HelperState.ShowEliteDebuffs;
                 case 6: return s7o_ZDH_HelperState.TrackUptime;
+                case 7: return s7o_ZDH_HelperState.BossAssist;
                 default: return false;
             }
         }
@@ -12642,6 +12648,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 case 4: s7o_ZDH_HelperState.AutoSentry = !s7o_ZDH_HelperState.AutoSentry; break;
                 case 5: s7o_ZDH_HelperState.ShowEliteDebuffs = !s7o_ZDH_HelperState.ShowEliteDebuffs; break;
                 case 6: s7o_ZDH_HelperState.TrackUptime = !s7o_ZDH_HelperState.TrackUptime; break;
+                case 7: s7o_ZDH_HelperState.BossAssist = !s7o_ZDH_HelperState.BossAssist; break;
                 default: return;
             }
             _macroToggleFlashTicks["zdh_helper_plugin"] = now;
