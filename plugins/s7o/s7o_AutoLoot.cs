@@ -1,3 +1,4 @@
+// REV19 - preserve Urshi no-progress limits across actor/ground handoffs.
 using System;
 using System.Collections.Generic;
 using System.Drawing;
@@ -7,7 +8,7 @@ using Turbo.Plugins.Default;
 
 namespace Turbo.Plugins.s7o
 {
-    // Commits to Urshi as soon as the established primary reward pile is clear.
+    // GR reward handoff: native count/shard cues win first, with the proven 4s fallback retained for missed observations.
     public class s7o_AutoLoot : BasePlugin, IAfterCollectHandler, IItemPickedHandler, IItemLocationChangedHandler, INewAreaHandler, IMonsterKilledHandler
     {
         public const int DefaultNormalPickupRangeYards = 10;
@@ -66,6 +67,17 @@ namespace Turbo.Plugins.s7o
         private const float MovementThresholdYards = 0.22f;
         private const int MaxAttempts = 8;
         private const int StuckRetryCooldownMs = 6000;
+        private const int StuckResyncMoveMinMs = 180;
+        private const int StuckResyncMoveMaxMs = 650;
+        private const int StuckResyncPickupHoldMs = 200;
+        private const int StuckResyncVerifyMs = 260;
+        private const int MaterialSelectionMissesBeforeResync = 2;
+        private const int UiSafeClickMissesBeforeResync = 2;
+        private const float UiSafeClickResyncStepYards = 6.0f;
+        private const float StuckResyncApproachStepYards = 3.25f;
+        private const float StuckResyncOvershootYards = 1.75f;
+        private const float StuckResyncSideYards = 0.9f;
+        private const float StuckResyncHazardYards = 8f;
         private const int NoSpacePickupRetryCooldownMs = 1800;
         private const int ProtectedChestBlockYards = 45;
         private const int ProtectedChestRiskYards = 16;
@@ -96,13 +108,15 @@ namespace Turbo.Plugins.s7o
         private const int UrshiFallbackRetryDelayMs = 70;
         private const int UrshiFallbackWindowMs = 2200;
         private const int UrshiFallbackMaxTries = 8;
-        private const int AutoUrshiRewardSettleMs = 4000;
+        private const int AutoUrshiHandoffFallbackMs = 4000;
         private const int AutoUrshiLegendaryRewardMinObserved = 10;
+        private const int AutoUrshiLegendaryRewardMinRank = 90;
         private const int AutoUrshiTalkClickDelayMs = 700;
         private const int AutoUrshiTalkMaxAttempts = 12;
         private const int AutoUrshiTalkRetryCooldownMs = 8000;
         private const int AutoUrshiTalkHoverSettleMs = 70;
         private const int AutoUrshiTalkProbeRetryMs = 20;
+        private const float AutoUrshiClickClearancePx = 32f;
         private const int AutoUrshiRecentTalkLootCancelWindowMs = 1800;
         private const int AutoUrshiTalkLootCancelRetryMs = 70;
         private const int AutoUrshiTalkLootCancelMaxAttempts = 3;
@@ -156,6 +170,19 @@ namespace Turbo.Plugins.s7o
         private readonly Dictionary<int, DropSuppress> _droppedSuppress = new Dictionary<int, DropSuppress>();
         private readonly Dictionary<int, long> _cleanupStuckIgnoreUntilMs = new Dictionary<int, long>();
         private readonly Dictionary<int, long> _stackedLootSkipUntilMs = new Dictionary<int, long>();
+        private enum StuckResyncPhase : byte { None, WaitForIdle, HoldPickup, Verify }
+
+        private readonly HashSet<int> _stuckResyncUsedSeeds = new HashSet<int>();
+        private int _pendingStuckResyncSeed;
+        private bool _pendingStuckResyncSelectionRetry;
+        private bool _pendingStuckResyncUiBlocked;
+        private int _stuckResyncActiveSeed;
+        private bool _stuckResyncSelectionRetry;
+        private StuckResyncPhase _stuckResyncPhase;
+        private long _stuckResyncReadyMs;
+        private long _stuckResyncDeadlineMs;
+        private bool _stuckResyncHasRestorePoint;
+        private NativePoint _stuckResyncRestorePoint;
         private long _lastStackedLootClickMs;
         private int _lastStackedLootClickX;
         private int _lastStackedLootClickY;
@@ -180,6 +207,13 @@ namespace Turbo.Plugins.s7o
         private int _lootProgressSerial;
         private long _lastLootProgressMs;
         private int _lastRetryRefreshSerial;
+        private int _materialSelectionMisses;
+        private int _materialSelectionMissProgressSerial = -1;
+        private int _materialResyncProgressSerial = -1;
+        private long _lastMaterialSelectionMissMs;
+        private int _uiBlockedSeed;
+        private int _uiBlockedMisses;
+        private long _lastUiBlockedMissMs;
         private int _lastVisibleEligibleLootCount;
         private int _urshiArmedSeed;
         private int _urshiSpaceAttempts;
@@ -216,6 +250,8 @@ namespace Turbo.Plugins.s7o
         private long _autoUrshiRewardGateStartedMs;
         private readonly HashSet<int> _autoUrshiObservedLegendarySeeds = new HashSet<int>();
         private int _autoUrshiObservedLegendaryRewardCount;
+        private bool _autoUrshiBloodShardRewardObserved;
+        private int _autoUrshiGreaterRiftRank;
         private readonly List<AutoUrshiReturnPoint> _autoUrshiReturnTrail = new List<AutoUrshiReturnPoint>(AutoUrshiBreadcrumbMax);
         private uint _autoUrshiTrailWorldId;
         private int _autoUrshiReturnProbeTick;
@@ -232,8 +268,8 @@ namespace Turbo.Plugins.s7o
         private bool _autoUrshiReturning;
         private bool _autoUrshiActorPathActive;
         private bool _autoUrshiApproachAborted;
-        private bool _autoUrshiProbeFallbackPending;
         private long _autoUrshiApproachSampleMs;
+        private bool _autoUrshiStallFallbackUsed;
         private float _autoUrshiApproachSampleX;
         private float _autoUrshiApproachSampleY;
         private float _autoUrshiApproachBestGoalDistance;
@@ -370,10 +406,15 @@ namespace Turbo.Plugins.s7o
 
         private void ResetRuntimeState(bool keepDroppedSuppress = false)
         {
+            ClearActiveStuckPickupResync(true);
             _attempts.Clear();
             _retryAfterMs.Clear();
             _pickupAcknowledgeUntilMs.Clear();
             _stackedLootSkipUntilMs.Clear();
+            _stuckResyncUsedSeeds.Clear();
+            _pendingStuckResyncSeed = 0;
+            _pendingStuckResyncSelectionRetry = false;
+            _pendingStuckResyncUiBlocked = false;
             _lastStackedLootClickMs = 0;
             _lastStackedLootClickX = 0;
             _lastStackedLootClickY = 0;
@@ -384,6 +425,11 @@ namespace Turbo.Plugins.s7o
             _lootProgressSerial = 0;
             _lastLootProgressMs = 0;
             _lastRetryRefreshSerial = 0;
+            _materialSelectionMisses = 0;
+            _materialSelectionMissProgressSerial = -1;
+            _materialResyncProgressSerial = -1;
+            _lastMaterialSelectionMissMs = 0;
+            ClearUiBlockedMisses();
             _lastVisibleEligibleLootCount = -1;
             _lastCleanupClickFar = false;
             _wideCleanupCommittedSeed = 0;
@@ -440,6 +486,7 @@ namespace Turbo.Plugins.s7o
             _autoUrshiHasRestorePoint = false;
             _autoUrshiRestorePoint = new NativePoint();
             _postRiftCleanupStartedMs = 0;
+            _autoUrshiGreaterRiftRank = 0;
             ResetAutoUrshiRewardBatch();
             ResetAutoUrshiReturnState();
         }
@@ -456,6 +503,15 @@ namespace Turbo.Plugins.s7o
             if (_wideCleanupCommittedSeed == item.Seed) _wideCleanupCommittedSeed = 0;
             _droppedSuppress.Remove(item.Seed);
             _stackedLootSkipUntilMs.Remove(item.Seed);
+            _stuckResyncUsedSeeds.Remove(item.Seed);
+            if (_pendingStuckResyncSeed == item.Seed)
+            {
+                _pendingStuckResyncSeed = 0;
+                _pendingStuckResyncSelectionRetry = false;
+                _pendingStuckResyncUiBlocked = false;
+            }
+            ClearUiBlockedMisses(item.Seed);
+            if (_stuckResyncActiveSeed == item.Seed) ClearActiveStuckPickupResync(true);
             if (_hazardHoverSeed == item.Seed)
                 ClearHazardHoverState(false, 0);
             if (_materialHoverSeed == item.Seed)
@@ -493,6 +549,15 @@ namespace Turbo.Plugins.s7o
             {
                 _pickupAcknowledgeUntilMs.Remove(item.Seed);
                 _cleanupStuckIgnoreUntilMs.Remove(item.Seed);
+                if (_pendingStuckResyncSeed == item.Seed)
+                {
+                    _pendingStuckResyncSeed = 0;
+                    _pendingStuckResyncSelectionRetry = false;
+                    _pendingStuckResyncUiBlocked = false;
+                }
+                ClearUiBlockedMisses(item.Seed);
+                if (_stuckResyncActiveSeed == item.Seed)
+                    ClearActiveStuckPickupResync(true);
                 if (_wideCleanupCommittedSeed == item.Seed) _wideCleanupCommittedSeed = 0;
                 if (_hazardHoverSeed == item.Seed)
                     ClearHazardHoverState(false, 0);
@@ -531,6 +596,8 @@ namespace Turbo.Plugins.s7o
 
                 if (Hud.Game.SpecialArea == SpecialArea.GreaterRift)
                 {
+                    TrackAutoUrshiGreaterRiftRank(Hud.Game.Me);
+
                     // Anchor the reward gate to the native guardian-death event. GR
                     // progress can reach 100% several seconds before the boss dies.
                     long now = Math.Max(1L, Hud.Game.CurrentRealTimeMilliseconds);
@@ -563,7 +630,10 @@ namespace Turbo.Plugins.s7o
             if (me == null)
                 return;
 
-            if (me.IsDead || me.IsDeadSafeCheck)
+            TrackAutoUrshiGreaterRiftRank(me);
+
+            bool deathOrGhostSuspended = me.IsDead || me.IsDeadSafeCheck || IsLocalGhosted();
+            if (deathOrGhostSuspended)
             {
                 if (!_deathSuspended)
                 {
@@ -573,7 +643,12 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
-            _deathSuspended = false;
+            if (_deathSuspended)
+            {
+                // Start the revived hero with a clean pickup/recovery budget.
+                ResetRuntimeState(true);
+                _deathSuspended = false;
+            }
 
             ISnoArea area = me.SnoArea;
             uint areaSno = area != null ? area.Sno : 0;
@@ -602,6 +677,7 @@ namespace Turbo.Plugins.s7o
 
             if (!_enabled || _paused || Hud.Game.IsPaused || !Hud.Window.IsForeground)
             {
+                ClearActiveStuckPickupResync(true);
                 ClearMaterialHoverState(true);
                 return;
             }
@@ -609,9 +685,13 @@ namespace Turbo.Plugins.s7o
             long now = Hud.Game.CurrentRealTimeMilliseconds;
             if (Hud.Game.IsLoading)
             {
+                ClearActiveStuckPickupResync(true);
                 ClearMaterialHoverState(true);
                 return;
             }
+
+            if (HandleActiveStuckPickupResync(now))
+                return;
 
             // Record the guardian-phase route even while stationary combat owns input.
             // This observes travel only; it never clicks before the loot handoff.
@@ -772,7 +852,20 @@ namespace Turbo.Plugins.s7o
                         return;
                     }
 
-                    if (IsAutoUrshiTalkActorClickable(urshi))
+                    if (_autoUrshiReturning)
+                    {
+                        // Never pause the known return route merely because Urshi projects
+                        // on-screen. Issue the next breadcrumb/direct command normally, then
+                        // use the idle interval before the next ground click for a hover probe.
+                        TryReturnTowardAutoUrshi(now);
+                        bool hoverPending = _autoUrshiHoverClickAtMs != 0;
+                        if (!_autoUrshiApproachAborted &&
+                            (hoverPending || (_autoUrshiReturnProbeTick == 0 &&
+                            now + AutoUrshiTalkHoverSettleMs < _nextAutoUrshiReturnMs &&
+                            IsAutoUrshiTalkActorClickable(urshi))))
+                            TryTalkToUrshiAfterLoot(now, urshi);
+                    }
+                    else if (IsAutoUrshiTalkActorClickable(urshi))
                         TryTalkToUrshiAfterLoot(now, urshi);
                     else
                         TryReturnTowardAutoUrshi(now);
@@ -800,6 +893,11 @@ namespace Turbo.Plugins.s7o
                 return;
 
             var tryCandidates = candidates.Where(c => CanTry(c.Item, c.UrshiRisk, now)).ToList();
+            if (_pendingStuckResyncSeed != 0)
+            {
+                ExecutePendingStuckPickupResync(candidates, now);
+                return;
+            }
             if (tryCandidates.Count == 0 && RefreshRetryStateAfterLootProgress(candidates, now))
                 tryCandidates = candidates.Where(c => CanTry(c.Item, c.UrshiRisk, now)).ToList();
 
@@ -848,6 +946,7 @@ namespace Turbo.Plugins.s7o
         private void MarkLootPickupProgress()
         {
             _lootProgressSerial = _lootProgressSerial == int.MaxValue ? 1 : _lootProgressSerial + 1;
+            ResetMaterialSelectionMisses();
             try { _lastLootProgressMs = Hud.Game.CurrentRealTimeMilliseconds; }
             catch { _lastLootProgressMs = 0; }
         }
@@ -877,6 +976,7 @@ namespace Turbo.Plugins.s7o
             _autoUrshiRewardGateStartedMs = 0;
             _autoUrshiObservedLegendarySeeds.Clear();
             _autoUrshiObservedLegendaryRewardCount = 0;
+            _autoUrshiBloodShardRewardObserved = false;
         }
 
         private void BeginAutoUrshiRewardBatch(bool postRiftCleanup, long now, bool urshiAvailable)
@@ -889,6 +989,70 @@ namespace Turbo.Plugins.s7o
                 _autoUrshiRewardGateStartedMs = now;
 
             ObserveAutoUrshiLegendaryRewards(now);
+            ObserveAutoUrshiBloodShardRewardCue();
+        }
+
+        private void ObserveAutoUrshiBloodShardRewardCue()
+        {
+            if (_autoUrshiBloodShardRewardObserved)
+                return;
+
+            try
+            {
+                if (Hud == null || Hud.Game == null || Hud.Game.Items == null)
+                    return;
+
+                foreach (var item in Hud.Game.Items)
+                {
+                    if (item == null || item.Location != ItemLocation.Floor || !IsBloodShard(item))
+                        continue;
+
+                    // GR Blood Shards are guardian rewards and cannot be player-dropped.
+                    // Their first floor appearance is a native reward-sequence cue even when
+                    // the pile is off-screen or the player is shard-capped.
+                    _autoUrshiBloodShardRewardObserved = true;
+                    return;
+                }
+            }
+            catch { }
+        }
+
+        private void TrackAutoUrshiGreaterRiftRank(IPlayer me)
+        {
+            try
+            {
+                if (me == null) return;
+                uint rank = me.InGreaterRiftRank;
+                if (rank > 0)
+                    _autoUrshiGreaterRiftRank = rank > (uint)int.MaxValue ? int.MaxValue : (int)rank;
+            }
+            catch { }
+        }
+
+        private int AutoUrshiGreaterRiftRank()
+        {
+            if (_autoUrshiGreaterRiftRank > 0)
+                return _autoUrshiGreaterRiftRank;
+
+            try
+            {
+                IPlayer me = Hud != null && Hud.Game != null ? Hud.Game.Me : null;
+                if (me != null)
+                {
+                    uint rank = me.InGreaterRiftRank;
+                    if (rank > 0)
+                        return rank > (uint)int.MaxValue ? int.MaxValue : (int)rank;
+                }
+            }
+            catch { }
+
+            return 0;
+        }
+
+        private bool IsBelowLegendaryRewardMinimumRank()
+        {
+            int rank = AutoUrshiGreaterRiftRank();
+            return rank > 0 && rank < AutoUrshiLegendaryRewardMinRank;
         }
 
         private void ObserveAutoUrshiLegendaryRewards(long now)
@@ -955,7 +1119,6 @@ namespace Turbo.Plugins.s7o
             _autoUrshiReturning = false;
             _autoUrshiActorPathActive = false;
             _autoUrshiApproachAborted = false;
-            _autoUrshiProbeFallbackPending = false;
             ResetAutoUrshiApproachSample();
         }
 
@@ -973,19 +1136,9 @@ namespace Turbo.Plugins.s7o
                     _autoUrshiLastSeenY = urshi.FloorCoordinate.Y;
                     _autoUrshiLastSeenZ = urshi.FloorCoordinate.Z;
                     _autoUrshiLastSeenMs = now;
-
-                    if (IsAutoUrshiTalkActorClickable(urshi))
-                    {
-                        _autoUrshiReturnProbeTick = 0;
-                        _autoUrshiReturnClicks = 0;
-                        _nextAutoUrshiReturnMs = 0;
-                        if (_autoUrshiReturning)
-                        {
-                            ResetAutoUrshiApproachSample();
-                            ResetAutoUrshiTalkProbesAfterReturn();
-                        }
-                        _autoUrshiReturning = false;
-                    }
+                    // Projection alone never owns movement. Keep the breadcrumb/direct
+                    // approach alive until a UI-safe hover actually selects Urshi and
+                    // the actor click is issued.
                 }
 
             }
@@ -1296,7 +1449,281 @@ namespace Turbo.Plugins.s7o
                 return true;
 
             _attempts[item.Seed] = 0;
-            _retryAfterMs[item.Seed] = now + (IsNoSpaceMaterialPickup(item) ? NoSpacePickupRetryCooldownMs : StuckRetryCooldownMs);
+            if (IsNoSpaceMaterialPickup(item))
+            {
+                _retryAfterMs[item.Seed] = now + NoSpacePickupRetryCooldownMs;
+                return false;
+            }
+
+            // One bounded positional resync before the legacy long cooldown. This is
+            // intentionally outside the normal pickup path and only exists for an item
+            // that survived all eight attempts plus the final acknowledgement window.
+            if (_pendingStuckResyncSeed == 0 && _stuckResyncUsedSeeds.Add(item.Seed))
+            {
+                _pendingStuckResyncSeed = item.Seed;
+                _pendingStuckResyncSelectionRetry = false;
+                _pendingStuckResyncUiBlocked = false;
+                return false;
+            }
+
+            _retryAfterMs[item.Seed] = now + StuckRetryCooldownMs;
+            return false;
+        }
+
+        private void ExecutePendingStuckPickupResync(List<LootCandidate> candidates, long now)
+        {
+            int seed = _pendingStuckResyncSeed;
+            bool selectionRetry = _pendingStuckResyncSelectionRetry;
+            bool uiBlocked = _pendingStuckResyncUiBlocked;
+            _pendingStuckResyncSeed = 0;
+            _pendingStuckResyncSelectionRetry = false;
+            _pendingStuckResyncUiBlocked = false;
+            if (seed == 0) return;
+
+            IItem item = candidates
+                .Where(c => c != null && c.Item != null && c.Item.Seed == seed && !c.UrshiRisk)
+                .Select(c => c.Item)
+                .FirstOrDefault();
+            if (!CanStartStuckPickupResync(item))
+            {
+                _retryAfterMs[seed] = now + StuckRetryCooldownMs;
+                return;
+            }
+
+            var me = Hud.Game.Me.FloorCoordinate;
+            float dx = item.FloorCoordinate.X - me.X;
+            float dy = item.FloorCoordinate.Y - me.Y;
+            float dist = (float)Math.Sqrt(dx * dx + dy * dy);
+            if (dist < 0.05f)
+            {
+                dx = 1f;
+                dy = 0f;
+                dist = 1f;
+            }
+
+            float ux = dx / dist;
+            float uy = dy / dist;
+            float wx, wy;
+            if (dist <= 6.0f)
+            {
+                // Cross the apparent item position and finish slightly to one side.
+                // This makes the client send a materially different world position
+                // instead of another tiny correction inside the same desynced spot.
+                float side = (seed & 1) == 0 ? StuckResyncSideYards : -StuckResyncSideYards;
+                wx = item.FloorCoordinate.X + ux * StuckResyncOvershootYards - uy * side;
+                wy = item.FloorCoordinate.Y + uy * StuckResyncOvershootYards + ux * side;
+            }
+            else
+            {
+                float step = uiBlocked ? UiSafeClickResyncStepYards : StuckResyncApproachStepYards;
+                wx = me.X + ux * Math.Min(step, Math.Max(2.5f, dist - 2.0f));
+                wy = me.Y + uy * Math.Min(step, Math.Max(2.5f, dist - 2.0f));
+            }
+
+            int x, y;
+            if (!TryProjectAutoUrshiGroundPoint(wx, wy, me.Z, out x, out y))
+            {
+                _retryAfterMs[seed] = now + StuckRetryCooldownMs;
+                return;
+            }
+
+            NativePoint old = new NativePoint();
+            bool restore = GetCursorPos(out old);
+            if (!TrySetCursorForWorldClick(x, y))
+            {
+                _retryAfterMs[seed] = now + StuckRetryCooldownMs;
+                return;
+            }
+
+            PauseDhStrafeForPickup();
+            MouseLeftClick();
+            if (restore) ScheduleCursorRestore(old, now);
+
+            _stuckResyncActiveSeed = seed;
+            _stuckResyncSelectionRetry = selectionRetry;
+            _stuckResyncPhase = StuckResyncPhase.WaitForIdle;
+            _stuckResyncReadyMs = now + StuckResyncMoveMinMs;
+            _stuckResyncDeadlineMs = now + StuckResyncMoveMaxMs;
+            _stuckResyncHasRestorePoint = false;
+            _attempts[seed] = 0;
+            _pickupAcknowledgeUntilMs.Remove(seed);
+            _retryAfterMs.Remove(seed);
+            _lastClickMs = now;
+        }
+
+        private bool HandleActiveStuckPickupResync(long now)
+        {
+            int seed = _stuckResyncActiveSeed;
+            if (seed == 0 || _stuckResyncPhase == StuckResyncPhase.None)
+                return false;
+
+            IItem item = FindFloorItemBySeed(seed);
+            if (item == null)
+            {
+                ClearActiveStuckPickupResync(true);
+                return false;
+            }
+
+            if (Hud == null || Hud.Game == null || Hud.Game.Me == null || Hud.Window == null ||
+                !Hud.Window.IsForeground || Hud.Game.IsPaused || Hud.Game.IsLoading ||
+                Hud.Game.Me.Powers == null || Hud.Game.Me.Powers.CantMove ||
+                IsBlockingLootUiOpen() || item.Location != ItemLocation.Floor || !item.IsOnScreen ||
+                item.FloorCoordinate == null || !item.FloorCoordinate.IsValid ||
+                Hud.Game.Me.FloorCoordinate == null || !Hud.Game.Me.FloorCoordinate.IsValid ||
+                IsUrshiRisk(item, GetUrshiActor()) || HasStuckResyncHazardNear(item, StuckResyncHazardYards))
+            {
+                FailActiveStuckPickupResync(seed, now);
+                return true;
+            }
+
+            if (_stuckResyncPhase == StuckResyncPhase.WaitForIdle)
+            {
+                if (now < _stuckResyncReadyMs)
+                    return true;
+
+                if (Hud.Game.Me.AnimationState != AcdAnimationState.Idle)
+                {
+                    if (now < _stuckResyncDeadlineMs)
+                        return true;
+                    FailActiveStuckPickupResync(seed, now);
+                    return true;
+                }
+
+                // Material hover recovery only needs a fresh client position. After
+                // movement settles, return to the normal exact-selection path rather
+                // than issuing an unconfirmed held click into a crowded loot pile.
+                if (_stuckResyncSelectionRetry)
+                {
+                    ClearActiveStuckPickupResync(false);
+                    ClearMaterialHoverState(true);
+                    _retryAfterMs.Remove(seed);
+                    return false;
+                }
+
+                int x, y;
+                NativePoint restorePoint = new NativePoint();
+                bool restore = GetCursorPos(out restorePoint);
+                if (!TryGetUiSafeItemClickPoint(item, 0, false, false, out x, out y) ||
+                    !TrySetCursorForWorldClick(x, y))
+                {
+                    FailActiveStuckPickupResync(seed, now);
+                    return true;
+                }
+
+                PauseDhStrafeForPickup();
+                _stuckResyncRestorePoint = restorePoint;
+                _stuckResyncHasRestorePoint = restore;
+                MouseLeftDown();
+                _stuckResyncPhase = StuckResyncPhase.HoldPickup;
+                _stuckResyncDeadlineMs = now + StuckResyncPickupHoldMs;
+                _lastClickSeed = seed;
+                _lastClickMs = now;
+                return true;
+            }
+
+            if (_stuckResyncPhase == StuckResyncPhase.HoldPickup)
+            {
+                if (now < _stuckResyncDeadlineMs)
+                    return true;
+
+                MouseLeftUp();
+                if (_stuckResyncHasRestorePoint)
+                    ScheduleCursorRestore(_stuckResyncRestorePoint, now);
+                _stuckResyncHasRestorePoint = false;
+                _stuckResyncPhase = StuckResyncPhase.Verify;
+                _stuckResyncDeadlineMs = now + StuckResyncVerifyMs;
+                return true;
+            }
+
+            if (_stuckResyncPhase == StuckResyncPhase.Verify)
+            {
+                if (item.Location != ItemLocation.Floor || !item.IsOnScreen)
+                {
+                    ClearActiveStuckPickupResync(false);
+                    return false;
+                }
+
+                if (now < _stuckResyncDeadlineMs)
+                    return true;
+
+                FailActiveStuckPickupResync(seed, now);
+                return true;
+            }
+
+            FailActiveStuckPickupResync(seed, now);
+            return true;
+        }
+
+        private bool CanStartStuckPickupResync(IItem item)
+        {
+            return item != null && item.Location == ItemLocation.Floor && item.IsOnScreen &&
+                item.FloorCoordinate != null && item.FloorCoordinate.IsValid &&
+                Hud != null && Hud.Game != null && Hud.Game.Me != null &&
+                Hud.Game.Me.FloorCoordinate != null && Hud.Game.Me.FloorCoordinate.IsValid &&
+                !IsUrshiRisk(item, GetUrshiActor()) &&
+                !HasStuckResyncHazardNear(item, StuckResyncHazardYards);
+        }
+
+        private IItem FindFloorItemBySeed(int seed)
+        {
+            if (seed == 0 || Hud == null || Hud.Game == null || Hud.Game.Items == null)
+                return null;
+            try
+            {
+                return Hud.Game.Items.FirstOrDefault(i => i != null && i.Seed == seed && i.Location == ItemLocation.Floor);
+            }
+            catch { return null; }
+        }
+
+        private void FailActiveStuckPickupResync(int seed, long now)
+        {
+            ClearActiveStuckPickupResync(true);
+            if (seed != 0)
+            {
+                _attempts[seed] = 0;
+                _pickupAcknowledgeUntilMs.Remove(seed);
+                _retryAfterMs[seed] = now + StuckRetryCooldownMs;
+            }
+        }
+
+        private void ClearActiveStuckPickupResync(bool releaseMouse)
+        {
+            if (releaseMouse && _stuckResyncPhase == StuckResyncPhase.HoldPickup)
+                MouseLeftUp();
+            if (releaseMouse && _stuckResyncHasRestorePoint)
+            {
+                try
+                {
+                    if (Hud != null && Hud.Window != null && Hud.Window.IsForeground)
+                        SetCursorPos(_stuckResyncRestorePoint.X, _stuckResyncRestorePoint.Y);
+                }
+                catch { }
+            }
+
+            _stuckResyncActiveSeed = 0;
+            _stuckResyncSelectionRetry = false;
+            _stuckResyncPhase = StuckResyncPhase.None;
+            _stuckResyncReadyMs = 0;
+            _stuckResyncDeadlineMs = 0;
+            _stuckResyncHasRestorePoint = false;
+            _stuckResyncRestorePoint = new NativePoint();
+        }
+
+        private bool HasStuckResyncHazardNear(IItem item, float yards)
+        {
+            if (item == null || item.FloorCoordinate == null) return true;
+            try
+            {
+                foreach (IActor actor in Hud.Game.Actors)
+                {
+                    if (actor == null || actor.FloorCoordinate == null || !actor.FloorCoordinate.IsValid ||
+                        !IsHazardousSelectedInteractable(actor))
+                        continue;
+                    if (item.FloorCoordinate.XYDistanceTo(actor.FloorCoordinate.X, actor.FloorCoordinate.Y) <= yards)
+                        return true;
+                }
+            }
+            catch { return true; }
             return false;
         }
 
@@ -1523,11 +1950,22 @@ namespace Turbo.Plugins.s7o
             int x, y;
             bool hasClickPoint = TryGetUiSafeItemClickPoint(item, pointAttempt, cleanup, stackedLoot, out x, out y);
 
-            if (!hasClickPoint || !TrySetCursorForWorldClick(x, y))
+            if (!hasClickPoint)
             {
                 if (hazardHoverPending)
                     ClearHazardHoverState(true, now);
                 // Rotate away briefly instead of hammering a label that currently overlaps UI.
+                _retryAfterMs[item.Seed] = now + Math.Max(75, StackedLootSkipMs);
+                RegisterUiBlockedMiss(item, now);
+                _lastClickMs = now;
+                return;
+            }
+
+            if (!TrySetCursorForWorldClick(x, y))
+            {
+                if (hazardHoverPending)
+                    ClearHazardHoverState(true, now);
+                ClearUiBlockedMisses(item.Seed);
                 _retryAfterMs[item.Seed] = now + Math.Max(75, StackedLootSkipMs);
                 _lastClickMs = now;
                 return;
@@ -1618,6 +2056,7 @@ namespace Turbo.Plugins.s7o
                 if (!cursorOwned)
                 {
                     ClearMaterialHoverState(false);
+                    ResetMaterialSelectionMisses();
                     _retryAfterMs[item.Seed] = now + StackedLootSkipMs;
                     _lastClickMs = now;
                     return true;
@@ -1635,6 +2074,7 @@ namespace Turbo.Plugins.s7o
                 {
                     ClearMaterialHoverState(true);
                     _retryAfterMs[item.Seed] = now + StackedLootSkipMs;
+                    RegisterMaterialSelectionMiss(item, now);
                     _lastClickMs = now;
                     return true;
                 }
@@ -1659,6 +2099,7 @@ namespace Turbo.Plugins.s7o
             if (!IsSafeSyntheticWorldClick(x, y) || !TrySetCursorForWorldClick(x, y))
             {
                 ClearMaterialHoverState(true);
+                ResetMaterialSelectionMisses();
                 _retryAfterMs[item.Seed] = now + StackedLootSkipMs;
                 _lastClickMs = now;
                 return true;
@@ -1711,13 +2152,98 @@ namespace Turbo.Plugins.s7o
             }
         }
 
+        private void RegisterMaterialSelectionMiss(IItem item, long now)
+        {
+            if (item == null) return;
+
+            if (_materialSelectionMissProgressSerial != _lootProgressSerial ||
+                _lastMaterialSelectionMissMs == 0 || now - _lastMaterialSelectionMissMs > CursorRestoreExpireMs * 4)
+            {
+                _materialSelectionMissProgressSerial = _lootProgressSerial;
+                _materialSelectionMisses = 0;
+            }
+            _lastMaterialSelectionMissMs = now;
+
+            if (++_materialSelectionMisses < MaterialSelectionMissesBeforeResync)
+                return;
+
+            _materialSelectionMisses = 0;
+            if (_pendingStuckResyncSeed != 0 || _stuckResyncActiveSeed != 0)
+                return;
+
+            // One reposition is allowed until any real pickup progress occurs. If
+            // selection still cannot be acquired, rotate this seed out temporarily.
+            if (_materialResyncProgressSerial == _lootProgressSerial ||
+                !_stuckResyncUsedSeeds.Add(item.Seed))
+            {
+                _retryAfterMs[item.Seed] = now + StuckRetryCooldownMs;
+                return;
+            }
+
+            _materialResyncProgressSerial = _lootProgressSerial;
+            _pendingStuckResyncSeed = item.Seed;
+            _pendingStuckResyncSelectionRetry = true;
+            _pendingStuckResyncUiBlocked = false;
+        }
+
+        private void ResetMaterialSelectionMisses()
+        {
+            _materialSelectionMisses = 0;
+            _materialSelectionMissProgressSerial = _lootProgressSerial;
+            _lastMaterialSelectionMissMs = 0;
+        }
+
+        private void RegisterUiBlockedMiss(IItem item, long now)
+        {
+            if (item == null) return;
+
+            if (_uiBlockedSeed != item.Seed || _lastUiBlockedMissMs == 0 ||
+                now - _lastUiBlockedMissMs > CursorRestoreExpireMs * 4)
+            {
+                _uiBlockedSeed = item.Seed;
+                _uiBlockedMisses = 0;
+            }
+            _lastUiBlockedMissMs = now;
+
+            if (++_uiBlockedMisses < UiSafeClickMissesBeforeResync)
+                return;
+
+            ClearUiBlockedMisses();
+            if (_pendingStuckResyncSeed != 0 || _stuckResyncActiveSeed != 0)
+                return;
+
+            if (!_stuckResyncUsedSeeds.Add(item.Seed))
+            {
+                _retryAfterMs[item.Seed] = now + StuckRetryCooldownMs;
+                return;
+            }
+
+            _pendingStuckResyncSeed = item.Seed;
+            _pendingStuckResyncSelectionRetry = true;
+            _pendingStuckResyncUiBlocked = true;
+        }
+
+        private void ClearUiBlockedMisses(int seed = 0)
+        {
+            if (seed != 0 && _uiBlockedSeed != seed) return;
+            _uiBlockedSeed = 0;
+            _uiBlockedMisses = 0;
+            _lastUiBlockedMissMs = 0;
+        }
+
         private void CommitItemClick(IItem item, int tries, bool cleanup, bool stackedLoot, long now, NativePoint old, bool restore)
         {
+            ClearUiBlockedMisses(item.Seed);
+            if (IsNoSpaceMaterialPickup(item))
+                ResetMaterialSelectionMisses();
             _attempts[item.Seed] = tries + 1;
             ClearUrshiArmedRecoveryState(true);
             ArmGenericUrshiPickupRecovery(item, cleanup, now);
             MouseLeftClick();
-            if (!stackedLoot)
+            // Preserve REV05 cadence. Stacked loot stays fully rapid through attempt 8;
+            // only the final click gets the existing acknowledgement window so it
+            // cannot be declared stuck while that click is still resolving.
+            if (!stackedLoot || tries + 1 >= MaxAttempts)
                 _pickupAcknowledgeUntilMs[item.Seed] = now + PickupAcknowledgeMs;
             if (restore) ScheduleCursorRestore(old, now);
             _lastClickSeed = item.Seed;
@@ -2001,6 +2527,8 @@ namespace Turbo.Plugins.s7o
                     if (cleanup && TryGetFloorClickPoint(item, out x, out y)) return;
                     break;
             }
+            x = baseX;
+            y = baseY;
         }
 
         private void GetClickPoint(IItem item, int attempt, bool allowAlternate, out int x, out int y)
@@ -2023,6 +2551,8 @@ namespace Turbo.Plugins.s7o
                 case 6: x = baseX - 24; y = baseY + 10; return;
                 case 7: x = baseX + 24; y = baseY + 10; return;
             }
+            x = baseX;
+            y = baseY;
         }
 
         private void GetMaterialClickPoint(IItem item, int attempt, out int x, out int y)
@@ -2061,8 +2591,11 @@ namespace Turbo.Plugins.s7o
             try
             {
                 if (item == null || item.FloorCoordinate == null) return false;
-                var screen = item.FloorCoordinate.ToScreenCoordinate(false, true);
-                if (screen == null) return false;
+                var screen = item.FloorCoordinate.ToScreenCoordinate(true, true);
+                if (screen == null || float.IsNaN(screen.X) || float.IsInfinity(screen.X) ||
+                    float.IsNaN(screen.Y) || float.IsInfinity(screen.Y) ||
+                    screen.X < 0 || screen.Y < 0 ||
+                    screen.X >= Hud.Window.Size.Width || screen.Y >= Hud.Window.Size.Height) return false;
                 x = (int)Math.Round(screen.X + Hud.Window.Offset.X);
                 y = (int)Math.Round(screen.Y + Hud.Window.Offset.Y);
                 return true;
@@ -2375,6 +2908,17 @@ namespace Turbo.Plugins.s7o
             catch { return false; }
         }
 
+        private bool IsLocalGhosted()
+        {
+            try
+            {
+                return Hud != null && Hud.Game != null && Hud.Game.Me != null
+                    && Hud.Game.Me.Powers != null
+                    && Hud.Game.Me.Powers.BuffIsActive(Hud.Sno.SnoPowers.Generic_ActorGhostedBuff.Sno);
+            }
+            catch { return false; }
+        }
+
         private int SafeFreeSlots()
         {
             try { return Hud.Game.Me.InventorySpaceTotal - Hud.Game.InventorySpaceUsed; }
@@ -2570,17 +3114,50 @@ namespace Turbo.Plugins.s7o
             }
         }
 
-        private bool IsAutoUrshiTalkActorClickable(IActor urshi)
+        private bool IsAutoUrshiProjectedInViewport(IActor urshi)
         {
             try
             {
-                if (!_talkToUrshiAfterLoot || (_autoUrshiProbeFallbackPending && (urshi == null || !urshi.IsSelected)) ||
-                    urshi == null || !urshi.IsOnScreen || urshi.ScreenCoordinate == null ||
+                if (urshi == null || urshi.FloorCoordinate == null || !urshi.FloorCoordinate.IsValid ||
                     Hud == null || Hud.Window == null)
                     return false;
 
-                // Use the actual UI-safe probe envelope, including zoomed-out edge
-                // positions, rather than rejecting a whole strip of visible world.
+                var screen = urshi.FloorCoordinate.ToScreenCoordinate(true, true);
+                if (screen == null || float.IsNaN(screen.X) || float.IsInfinity(screen.X) ||
+                    float.IsNaN(screen.Y) || float.IsInfinity(screen.Y))
+                    return false;
+
+                var size = Hud.Window.Size;
+                return size.Width > 0 && size.Height > 0 &&
+                    screen.X >= 0f && screen.X <= size.Width &&
+                    screen.Y >= 0f && screen.Y <= size.Height;
+            }
+            catch
+            {
+                try { return urshi != null && urshi.IsOnScreen; }
+                catch { return false; }
+            }
+        }
+
+        private bool IsAutoUrshiTalkActorClickable(IActor urshi)
+        {
+            if (_autoUrshiReturning && _autoUrshiStallFallbackUsed) return false;
+            try
+            {
+                if (!_talkToUrshiAfterLoot || urshi == null ||
+                    !IsAutoUrshiProjectedInViewport(urshi) || urshi.ScreenCoordinate == null ||
+                    Hud == null || Hud.Window == null)
+                    return false;
+
+                // Do not treat an actor whose own projected center is masked by HUD UI
+                // as clickable merely because an offset probe happens to fall outside it.
+                // Approach first; once Urshi is safely inside the world viewport, the
+                // normal offset probes can select the actor without UI-edge jitter.
+                int centerX = (int)Math.Round((double)urshi.ScreenCoordinate.X + Hud.Window.Offset.X);
+                int centerY = (int)Math.Round((double)urshi.ScreenCoordinate.Y + Hud.Window.Offset.Y);
+                if (!IsAutoUrshiTalkPointClear(centerX, centerY))
+                    return false;
+
                 int x, y;
                 return urshi.WorldId == Hud.Game.Me.WorldId &&
                     TryGetAutoUrshiTalkPoint(urshi, _autoUrshiTalkAttempts, out x, out y);
@@ -2600,9 +3177,6 @@ namespace Turbo.Plugins.s7o
                 return false;
 
             _autoUrshiReturning = true;
-
-            if (_autoUrshiProbeFallbackPending && _autoUrshiReturnClicks > 0)
-                return true;
 
             if (_autoUrshiReturnClicks >= AutoUrshiReturnMaxClicks)
             {
@@ -2658,15 +3232,11 @@ namespace Turbo.Plugins.s7o
         {
             if (actorPath && !_autoUrshiActorPathActive)
             {
-                _autoUrshiProbeFallbackPending = false;
                 _autoUrshiActorPathActive = true;
                 _autoUrshiReturning = false;
                 _autoUrshiReturnProbeTick = 0;
-                // Preserve the outbound trail so geometry-blind native-path failures
-                // can fall back to the known return route.
-                _autoUrshiReturnClicks = 0;
+                // A new actor click is not movement: preserve the no-progress budget.
                 _nextAutoUrshiReturnMs = 0;
-                ResetAutoUrshiApproachSample();
             }
 
             if (_autoUrshiApproachSampleMs != 0)
@@ -2730,10 +3300,23 @@ namespace Turbo.Plugins.s7o
                     if (now - _autoUrshiApproachSampleMs < AutoUrshiApproachStallMs)
                         return true;
 
-                    // Do not cancel the game's actor path with a blind ground click.
-                    // Genuine immobility yields control to the player.
-                    AbortAutoUrshiApproach(now);
-                    return false;
+                    // A hover-confirmed actor click can still be swallowed by a UI mask or
+                    // fail to start native pathing. Preserve the known outbound trail and
+                    // demote to the existing breadcrumb/direct approach instead of dead-ending.
+                    if (_autoUrshiStallFallbackUsed)
+                    {
+                        AbortAutoUrshiApproach(now);
+                        return false;
+                    }
+                    _autoUrshiStallFallbackUsed = true;
+                    _autoUrshiApproachSampleMs = now;
+                    _autoUrshiActorPathActive = false;
+                    _autoUrshiReturning = false;
+                    _autoUrshiReturnProbeTick = 0;
+                    _autoUrshiTalkAttempts = 0;
+                    _autoUrshiTalkCooldownUntilMs = 0;
+                    _nextAutoUrshiTalkMs = 0;
+                    return TryReturnTowardAutoUrshi(now);
                 }
 
                 float dx = x - _autoUrshiApproachSampleX;
@@ -2742,17 +3325,6 @@ namespace Turbo.Plugins.s7o
                 if (dx * dx + dy * dy >=
                     AutoUrshiApproachProgressYards * AutoUrshiApproachProgressYards)
                 {
-                    if (_autoUrshiProbeFallbackPending)
-                    {
-                        _autoUrshiProbeFallbackPending = false;
-                        _autoUrshiReturning = false;
-                        _autoUrshiReturnClicks = 0;
-                        _nextAutoUrshiReturnMs = 0;
-                        ResetAutoUrshiApproachSample();
-                        ResetAutoUrshiTalkProbesAfterReturn();
-                        return true;
-                    }
-
                     _autoUrshiReturnClicks = 0;
                     SeedAutoUrshiApproachSample(now, x, y);
                     return true;
@@ -2772,6 +3344,8 @@ namespace Turbo.Plugins.s7o
 
         private void SeedAutoUrshiApproachSample(long now, float x, float y)
         {
+            _autoUrshiStallFallbackUsed = false;
+            _autoUrshiReturnClicks = 0;
             _autoUrshiApproachSampleMs = now;
             _autoUrshiApproachSampleX = x;
             _autoUrshiApproachSampleY = y;
@@ -2789,6 +3363,7 @@ namespace Turbo.Plugins.s7o
 
         private void ResetAutoUrshiApproachSample()
         {
+            _autoUrshiStallFallbackUsed = false;
             _autoUrshiApproachSampleMs = 0;
             _autoUrshiApproachSampleX = 0f;
             _autoUrshiApproachSampleY = 0f;
@@ -2802,7 +3377,6 @@ namespace Turbo.Plugins.s7o
             _autoUrshiReturnProbeTick = 0;
             _autoUrshiActorPathActive = false;
             _autoUrshiReturning = false;
-            _autoUrshiProbeFallbackPending = false;
             _autoUrshiReturnTrail.Clear();
             _autoUrshiReturnClicks = 0;
             _nextAutoUrshiReturnMs = 0;
@@ -2826,39 +3400,35 @@ namespace Turbo.Plugins.s7o
                     return false;
 
                 float goalDistance = me.FloorCoordinate.XYDistanceTo(_autoUrshiLastSeenX, _autoUrshiLastSeenY);
-                int goalIndex = -1;
-                float bestDistance = goalDistance - 0.1f;
-                for (int i = 0; i < _autoUrshiReturnTrail.Count; i++)
+                if (_autoUrshiReturnTrail.Count > 0)
                 {
-                    var point = _autoUrshiReturnTrail[i];
-                    float dx = point.X - _autoUrshiLastSeenX;
-                    float dy = point.Y - _autoUrshiLastSeenY;
-                    float distance = (float)Math.Sqrt(dx * dx + dy * dy);
-                    if (distance < bestDistance)
+                    // Trust the known route only when its retained origin ultimately lies
+                    // on the Urshi side of the current position. Once selected, replay
+                    // every waypoint in reverse; valid obstacle routes may temporarily
+                    // move sideways or farther from Urshi.
+                    var root = _autoUrshiReturnTrail[0];
+                    float rootDx = root.X - _autoUrshiLastSeenX;
+                    float rootDy = root.Y - _autoUrshiLastSeenY;
+                    float rootDistance = (float)Math.Sqrt(rootDx * rootDx + rootDy * rootDy);
+                    if (rootDistance < goalDistance - 0.1f)
                     {
-                        bestDistance = distance;
-                        goalIndex = i;
-                    }
-                }
-                if (goalIndex >= 0)
-                {
-                    while (_autoUrshiReturnTrail.Count > goalIndex)
-                    {
-                        int index = _autoUrshiReturnTrail.Count - 1;
-                        var point = _autoUrshiReturnTrail[index];
-                        if (me.FloorCoordinate.XYDistanceTo(point.X, point.Y) >= AutoUrshiReturnMinClickYards)
+                        while (_autoUrshiReturnTrail.Count > 0)
                         {
-                            // Never skip an intermediate waypoint to cut across unseen geometry.
-                            return TryProjectAutoUrshiGroundPoint(point.X, point.Y, point.Z, out x, out y);
+                            int index = _autoUrshiReturnTrail.Count - 1;
+                            var point = _autoUrshiReturnTrail[index];
+                            if (me.FloorCoordinate.XYDistanceTo(point.X, point.Y) >= AutoUrshiReturnMinClickYards)
+                                return TryProjectAutoUrshiGroundPoint(point.X, point.Y, point.Z, out x, out y);
+                            _autoUrshiReturnTrail.RemoveAt(index);
                         }
-                        _autoUrshiReturnTrail.RemoveAt(index);
                     }
                 }
 
                 if (goalDistance < AutoUrshiReturnMinClickYards || goalDistance > AutoUrshiUnknownApproachMaxYards)
                     return false;
-                // No traversed segment leads closer. Take a short directional step;
-                // the existing movement watchdog stops if terrain prevents progress.
+
+                // No usable known route points toward Urshi. Take a short directional
+                // step instead; the existing ground probe and movement watchdog abort
+                // if an actor or obstacle blocks progress.
                 for (float step = Math.Min(18f, goalDistance); step >= AutoUrshiReturnMinClickYards; step -= 6f)
                 {
                     float fraction = step / goalDistance;
@@ -2904,15 +3474,28 @@ namespace Turbo.Plugins.s7o
 
             long gateAge = now - _autoUrshiRewardGateStartedMs;
 
+            // Sub-GR90 reward batches do not contain the ten legendary/set items used
+            // by the high-GR fast path. The Blood Shard wave arrives at the end of the
+            // native reward sequence, so once it is visible the handoff can commit and
+            // the existing post-commit filter will retain only protected late loot
+            // (ancient/primal and the established gem safeguards).
+            if (IsBelowLegendaryRewardMinimumRank() && _autoUrshiBloodShardRewardObserved)
+                return true;
+
             if (HasLiveAutoUrshiPrimaryReward())
                 return false;
 
-            // The final legendary/set rewards can materialize after the earlier wave.
-            // Once ten unique legendary/set rewards have actually been observed,
-            // native floor state is enough to hand off immediately. The old settle
-            // window remains only as a fallback for unusually small reward batches.
-            return _autoUrshiObservedLegendaryRewardCount >= AutoUrshiLegendaryRewardMinObserved ||
-                gateAge >= AutoUrshiRewardSettleMs;
+            // GR90+ keeps the proven ten-legendary fast path. Blood Shards are a
+            // second native completion cue when counting cannot establish the batch.
+            // Live primary rewards still block this path so late legendary/Ancient/Primal
+            // cleanup is never abandoned just because the shard wave appeared.
+            if (_autoUrshiObservedLegendaryRewardCount >= AutoUrshiLegendaryRewardMinObserved ||
+                _autoUrshiBloodShardRewardObserved)
+                return true;
+
+            // Preserve the proven bounded fallback for missed/late observations.
+            // Count/shard cues normally win first; this path prevents a stalled handoff.
+            return gateAge >= AutoUrshiHandoffFallbackMs;
         }
 
         private bool HasLiveAutoUrshiPrimaryReward()
@@ -2988,14 +3571,6 @@ namespace Turbo.Plugins.s7o
             _autoUrshiHoverY = 0;
         }
 
-        private void ResetAutoUrshiTalkProbesAfterReturn()
-        {
-            _autoUrshiTalkAttempts = 0;
-            _autoUrshiTalkCooldownUntilMs = 0;
-            _nextAutoUrshiTalkMs = 0;
-            ClearAutoUrshiTalkHover();
-        }
-
         private void RestoreAutoUrshiTalkCursor(long now)
         {
             if (!_autoUrshiHasRestorePoint) return;
@@ -3010,7 +3585,6 @@ namespace Turbo.Plugins.s7o
             _autoUrshiReturnProbeTick = 0;
             _autoUrshiActorPathActive = false;
             _autoUrshiReturning = false;
-            _autoUrshiProbeFallbackPending = false;
             ResetAutoUrshiApproachSample();
             _nextAutoUrshiTalkMs = 0;
             _autoUrshiTalkAttempts = 0;
@@ -3036,8 +3610,9 @@ namespace Turbo.Plugins.s7o
 
         private bool TryTalkToUrshiAfterLoot(long now, IActor urshi)
         {
+            if (_autoUrshiReturning && _autoUrshiStallFallbackUsed) return false;
             if (_autoUrshiTalkDone || !_talkToUrshiAfterLoot || _autoUrshiApproachAborted ||
-                urshi == null || !urshi.IsOnScreen || urshi.ScreenCoordinate == null)
+                urshi == null || !IsAutoUrshiProjectedInViewport(urshi) || urshi.ScreenCoordinate == null)
             {
                 ResetAutoUrshiTalkReadyState();
                 return false;
@@ -3071,7 +3646,7 @@ namespace Turbo.Plugins.s7o
                 if (now < _autoUrshiHoverClickAtMs)
                     return true;
 
-                if (urshi.IsSelected && IsSafeSyntheticWorldClick(_autoUrshiHoverX, _autoUrshiHoverY)
+                if (urshi.IsSelected && IsAutoUrshiTalkPointClear(_autoUrshiHoverX, _autoUrshiHoverY)
                     && TrySetCursorForWorldClick(_autoUrshiHoverX, _autoUrshiHoverY))
                 {
                     ResetAutoUrshiGemHandoffWatch();
@@ -3096,39 +3671,30 @@ namespace Turbo.Plugins.s7o
 
             if (_autoUrshiTalkAttempts >= AutoUrshiTalkMaxAttempts)
             {
-                if (TryFallbackAutoUrshiTalkToBreadcrumb(now))
-                    return true;
+                RestoreAutoUrshiTalkCursor(now);
+                _autoUrshiTalkAttempts = 0;
+                _nextAutoUrshiTalkMs = now + AutoUrshiTalkProbeRetryMs;
+
+                if (_autoUrshiReturning)
+                {
+                    // Geometry keeps changing while breadcrumbs advance. Recycle the
+                    // bounded probe budget without interrupting the known return route.
+                    return false;
+                }
+
+                // Projection plus a UI-safe offset only proves that a probe point exists.
+                // If a full hover budget cannot select Urshi (for example because his
+                // projected actor is masked by the skill bar/portrait UI), approach until
+                // the geometry changes instead of jittering here behind an 8s cooldown.
+                _autoUrshiTalkCooldownUntilMs = 0;
+                if (TryReturnTowardAutoUrshi(now))
+                    return false;
 
                 _autoUrshiTalkCooldownUntilMs = now + AutoUrshiTalkRetryCooldownMs;
-                RestoreAutoUrshiTalkCursor(now);
                 return false;
             }
 
             return BeginAutoUrshiTalkHoverProbe(now, urshi);
-        }
-
-        private bool TryFallbackAutoUrshiTalkToBreadcrumb(long now)
-        {
-            if (_autoUrshiActorPathActive || _autoUrshiApproachAborted ||
-                _autoUrshiReturnTrail.Count == 0)
-                return false;
-
-            ClearAutoUrshiTalkHover();
-            _autoUrshiReturning = false;
-            _autoUrshiReturnProbeTick = 0;
-            _autoUrshiReturnClicks = 0;
-            _nextAutoUrshiReturnMs = 0;
-            _autoUrshiProbeFallbackPending = true;
-            ResetAutoUrshiApproachSample();
-
-            if (!TryReturnTowardAutoUrshi(now))
-            {
-                _autoUrshiProbeFallbackPending = false;
-                return false;
-            }
-
-            RestoreAutoUrshiTalkCursor(now);
-            return true;
         }
 
         private bool BeginAutoUrshiTalkHoverProbe(long now, IActor urshi)
@@ -3189,7 +3755,7 @@ namespace Turbo.Plugins.s7o
 
                 int candidateX = (int)Math.Round((double)urshi.ScreenCoordinate.X + (double)Hud.Window.Offset.X + (double)(ox * scale));
                 int candidateY = (int)Math.Round((double)urshi.ScreenCoordinate.Y + (double)Hud.Window.Offset.Y + (double)(oy * scale));
-                if (!IsSafeSyntheticWorldClick(candidateX, candidateY))
+                if (!IsAutoUrshiTalkPointClear(candidateX, candidateY))
                     continue;
 
                 x = candidateX;
@@ -3198,6 +3764,45 @@ namespace Turbo.Plugins.s7o
             }
 
             return false;
+        }
+
+        private bool IsAutoUrshiTalkPointClear(int screenX, int screenY)
+        {
+            if (!IsSafeSyntheticWorldClick(screenX, screenY) || Hud == null || Hud.Window == null)
+                return false;
+
+            try
+            {
+                var size = Hud.Window.Size;
+                float scale = UiScale();
+                float margin = AutoUrshiClickClearancePx * scale;
+                float x = screenX - Hud.Window.Offset.X;
+                float y = screenY - Hud.Window.Offset.Y;
+                if (x < margin || y < margin || x > size.Width - margin || y > size.Height - margin)
+                    return false;
+
+                for (int i = 0; i < ClickGuardRects1920x1080.Length; i++)
+                {
+                    RectangleF r = ScaleClickGuardRect(ClickGuardRects1920x1080[i], size);
+                    r.Inflate(margin, margin);
+                    if (r.Contains(x, y))
+                        return false;
+                }
+
+                foreach (IPlayer player in Hud.Game.Players)
+                {
+                    if (player == null || !player.IsInGame || player.PortraitUiElement == null ||
+                        !player.PortraitUiElement.Visible)
+                        continue;
+                    RectangleF r = player.PortraitUiElement.Rectangle;
+                    r.Inflate(margin, margin);
+                    if (r.Contains(x, y))
+                        return false;
+                }
+            }
+            catch { return false; }
+
+            return true;
         }
 
         private bool TryGetUiSafeItemClickPoint(IItem item, int startAttempt, bool cleanup, bool stacked, out int x, out int y)
@@ -3773,7 +4378,7 @@ namespace Turbo.Plugins.s7o
         private void CacheAccidentalUrshiClickPoint(IActor urshi)
         {
             int x, y;
-            if (urshi == null || !urshi.IsOnScreen || urshi.ScreenCoordinate == null
+            if (urshi == null || !IsAutoUrshiProjectedInViewport(urshi) || urshi.ScreenCoordinate == null
                 || !TryGetAutoUrshiTalkPoint(urshi, 0, out x, out y))
                 return;
 
@@ -3792,7 +4397,7 @@ namespace Turbo.Plugins.s7o
                     urshi = selectedActor;
             }
 
-            if (urshi != null && urshi.IsOnScreen && urshi.ScreenCoordinate != null
+            if (urshi != null && IsAutoUrshiProjectedInViewport(urshi) && urshi.ScreenCoordinate != null
                 && TryGetAutoUrshiTalkPoint(urshi, attempt, out x, out y))
             {
                 _accidentalUrshiClickX = x;
@@ -4254,6 +4859,16 @@ namespace Turbo.Plugins.s7o
         private static void MouseLeftClick()
         {
             mouse_event(6U, 0, 0, 0U, IntPtr.Zero);
+        }
+
+        private static void MouseLeftDown()
+        {
+            mouse_event(2U, 0, 0, 0U, IntPtr.Zero);
+        }
+
+        private static void MouseLeftUp()
+        {
+            mouse_event(4U, 0, 0, 0U, IntPtr.Zero);
         }
 
 
