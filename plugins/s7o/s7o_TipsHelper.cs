@@ -575,6 +575,9 @@ namespace Turbo.Plugins.s7o
             if (item == null)
                 return;
 
+            if (from == ItemLocation.Floor && to == ItemLocation.Inventory)
+                RemovePickedItemMarker(item);
+
             string key = GetDropKeySafe(item);
             if (to != ItemLocation.Floor)
             {
@@ -693,7 +696,6 @@ namespace Turbo.Plugins.s7o
             PaintPoolDirectionArrows();
             PaintItemScreenEdgeArrows();
             PaintItemAlerts();
-            PaintInventoryFullAlert();
             PaintPlayerPortraitMarkers();
             DrawBloodIsPowerTracker();
         }
@@ -3865,67 +3867,58 @@ namespace Turbo.Plugins.s7o
 
         private void PaintItemAlerts()
         {
-            if ((!ShowItemAlertText && !ShowItemAlertDirectionArrow) || ItemAlertTextMaxLines <= 0)
-                return;
+            long inventoryElapsed;
+            int inventoryAlpha;
+            bool inventoryFull = TryGetInventoryFullAlertState(out inventoryElapsed, out inventoryAlpha);
 
-            var alerts = GetActiveAlerts();
-            if (alerts.Count == 0)
+            List<ItemAlert> alerts;
+            if ((ShowItemAlertText || ShowItemAlertDirectionArrow) && ItemAlertTextMaxLines > 0)
+                alerts = GetActiveAlerts();
+            else
+                alerts = new List<ItemAlert>();
+
+            if (alerts.Count == 0 && !inventoryFull)
                 return;
 
             if (ShowItemAlertTextAbovePlayer)
-                DrawAbovePlayerAlerts(alerts);
+                DrawAbovePlayerAlerts(alerts, inventoryFull, inventoryElapsed, inventoryAlpha);
 
             if (ShowItemAlertText && ShowItemAlertTextNearMinimap)
-                DrawMinimapAlerts(alerts.Where(a => IsRankTextEnabled(a.Marker.Rank)).ToList());
+                DrawMinimapAlerts(
+                    alerts.Where(a => IsRankTextEnabled(a.Marker.Rank)).ToList(),
+                    inventoryFull, inventoryElapsed, inventoryAlpha);
         }
 
-        private void PaintInventoryFullAlert()
+        private bool TryGetInventoryFullAlertState(out long elapsed, out int alpha)
         {
+            elapsed = 0;
+            alpha = 0;
             if (!ShowItemAlertText || string.IsNullOrEmpty(_inventoryFullAlertText) || _inventoryFullAlertStartMs <= 0)
-                return;
+                return false;
 
-            long elapsed = Hud.Game.CurrentRealTimeMilliseconds - _inventoryFullAlertStartMs;
-            int alpha = GetAlertAlphaBucket(PrimalRank, elapsed);
-            if (elapsed < 0 || alpha <= 0)
-            {
-                if (elapsed >= 0)
-                {
-                    _inventoryFullAlertText = string.Empty;
-                    _inventoryFullAlertStartMs = 0;
-                }
-                return;
-            }
+            elapsed = Hud.Game.CurrentRealTimeMilliseconds - _inventoryFullAlertStartMs;
+            alpha = GetAlertAlphaBucket(PrimalRank, elapsed);
+            if (elapsed >= 0 && alpha > 0)
+                return true;
 
-            if (ShowItemAlertTextAbovePlayer)
+            if (elapsed >= 0)
             {
-                float x = Hud.Window.Size.Width * 0.5f + ItemAlertPlayerXOffset;
-                float y = Hud.Window.Size.Height * 0.5f + Lerp(ItemAlertPlayerStartYOffset, ItemAlertPlayerSettledYOffset, GetTravelProgress(elapsed))
-                    - ItemAlertTextLineHeight - 4.0f;
-                DrawInventoryFullAlertLine(x, y, elapsed, alpha, false);
+                _inventoryFullAlertText = string.Empty;
+                _inventoryFullAlertStartMs = 0;
             }
-
-            if (ShowItemAlertTextNearMinimap && Hud.Render.MinimapUiElement != null && Hud.Render.MinimapUiElement.Visible)
-            {
-                var rect = Hud.Render.MinimapUiElement.Rectangle;
-                if (rect.Width > 0 && rect.Height > 0)
-                {
-                    float startY = rect.Y + rect.Height * ItemAlertMinimapStartYFrac;
-                    float settledY = rect.Y + Math.Max(ItemAlertMinimapSettledYOffset, rect.Height * Clamp(ItemAlertMinimapSettledYFrac, 0.0f, 1.0f));
-                    float y = Lerp(startY, settledY, GetTravelProgress(elapsed)) - ItemAlertTextLineHeight - 4.0f;
-                    DrawInventoryFullAlertLine(rect.X + rect.Width * 0.5f + ItemAlertMinimapXOffset, y, elapsed, alpha, true);
-                }
-            }
+            return false;
         }
 
-        private void DrawInventoryFullAlertLine(float centerX, float y, long elapsed, int alpha, bool minimap)
+        private float DrawInventoryFullAlertLine(float centerX, float y, long elapsed, int alpha, bool minimap)
         {
             IFont font = GetAlertFont(PrimalRank, elapsed, alpha, false, minimap);
             IFont outline = GetAlertFont(PrimalRank, elapsed, alpha, true, minimap);
             if (font == null)
-                return;
+                return ItemAlertTextLineHeight;
 
             var layout = font.GetTextLayout(_inventoryFullAlertText);
             DrawOutlinedText(_inventoryFullAlertText, centerX - layout.Metrics.Width * 0.5f, y, font, outline);
+            return Math.Max(ItemAlertTextLineHeight, layout.Metrics.Height);
         }
 
         private List<ItemAlert> GetActiveAlerts()
@@ -3989,31 +3982,62 @@ namespace Turbo.Plugins.s7o
             return fade[alphaBucket];
         }
 
-        private void DrawAbovePlayerAlerts(List<ItemAlert> alerts)
+        private void DrawAbovePlayerAlerts(List<ItemAlert> alerts, bool inventoryFull, long inventoryElapsed, int inventoryAlpha)
         {
-            if (alerts == null || alerts.Count == 0)
+            if ((alerts == null || alerts.Count == 0) && !inventoryFull)
                 return;
 
-            // Match the inventory toast's fixed window anchor; hero projection jitters during movement.
             float x = Hud.Window.Size.Width * 0.5f + ItemAlertPlayerXOffset;
-            float y = Hud.Window.Size.Height * 0.5f + Lerp(ItemAlertPlayerStartYOffset, ItemAlertPlayerSettledYOffset, GetTravelProgress(alerts[0].ElapsedMs));
-            float newestY = y;
-            float newestHeight = 0.0f;
+
+            if (inventoryFull)
+            {
+                // Keep Inventory Full at its original safe anchor. When loot alerts
+                // coexist, reserve this first row and cascade those alerts downward
+                // so Inventory Full never climbs into the teleport progress bar.
+                float y = Hud.Window.Size.Height * 0.5f +
+                    Lerp(ItemAlertPlayerStartYOffset, ItemAlertPlayerSettledYOffset, GetTravelProgress(inventoryElapsed));
+                y += DrawInventoryFullAlertLine(x, y, inventoryElapsed, inventoryAlpha, false) + 2.0f;
+
+                float newestY = y;
+                float newestHeight = 0.0f;
+                if (alerts != null)
+                {
+                    for (int i = 0; i < alerts.Count; i++)
+                    {
+                        float lineHeight = DrawAlertLine(alerts[i], x, y, true, false);
+                        if (i == 0)
+                        {
+                            newestY = y;
+                            newestHeight = lineHeight;
+                        }
+                        y += lineHeight + 2.0f;
+                    }
+                }
+
+                if (alerts != null && alerts.Count > 0)
+                    DrawAlertDirectionArrow(alerts[0], x, newestY + newestHeight + ItemAlertArrowYOffset);
+                return;
+            }
+
+            long travelElapsed = alerts[0].ElapsedMs;
+            float normalY = Hud.Window.Size.Height * 0.5f +
+                Lerp(ItemAlertPlayerStartYOffset, ItemAlertPlayerSettledYOffset, GetTravelProgress(travelElapsed));
+            float normalNewestY = normalY;
+            float normalNewestHeight = 0.0f;
 
             for (int i = 0; i < alerts.Count; i++)
             {
-                float lineHeight = DrawAlertLine(alerts[i], x, y, true, false);
+                float lineHeight = DrawAlertLine(alerts[i], x, normalY, true, false);
                 if (i == 0)
-                    newestHeight = lineHeight;
-                y -= lineHeight + 2.0f;
+                    normalNewestHeight = lineHeight;
+                normalY -= lineHeight + 2.0f;
             }
 
-            DrawAlertDirectionArrow(alerts[0], x, newestY + newestHeight + ItemAlertArrowYOffset);
+            DrawAlertDirectionArrow(alerts[0], x, normalNewestY + normalNewestHeight + ItemAlertArrowYOffset);
         }
-
-        private void DrawMinimapAlerts(List<ItemAlert> alerts)
+        private void DrawMinimapAlerts(List<ItemAlert> alerts, bool inventoryFull, long inventoryElapsed, int inventoryAlpha)
         {
-            if (alerts == null || alerts.Count == 0)
+            if ((alerts == null || alerts.Count == 0) && !inventoryFull)
                 return;
 
             if (Hud.Render.MinimapUiElement == null || !Hud.Render.MinimapUiElement.Visible)
@@ -4023,14 +4047,21 @@ namespace Turbo.Plugins.s7o
             if (rect.Width <= 0 || rect.Height <= 0)
                 return;
 
+            long travelElapsed = inventoryFull
+                ? inventoryElapsed
+                : alerts[0].ElapsedMs;
             var startY = rect.Y + (rect.Height * ItemAlertMinimapStartYFrac);
             var settledY = rect.Y + Math.Max(ItemAlertMinimapSettledYOffset, rect.Height * Clamp(ItemAlertMinimapSettledYFrac, 0.0f, 1.0f));
-            var y = Lerp(startY, settledY, GetTravelProgress(alerts[0].ElapsedMs));
+            var y = Lerp(startY, settledY, GetTravelProgress(travelElapsed));
             var x = rect.X + (rect.Width * 0.5f) + ItemAlertMinimapXOffset;
 
-            foreach (var alert in alerts)
+            if (inventoryFull)
+                y += DrawInventoryFullAlertLine(x, y, inventoryElapsed, inventoryAlpha, true) + 2.0f;
+
+            if (alerts != null)
             {
-                y += DrawAlertLine(alert, x, y, true, false, true);
+                foreach (var alert in alerts)
+                    y += DrawAlertLine(alert, x, y, true, false, true);
             }
         }
 
@@ -4145,6 +4176,43 @@ namespace Turbo.Plugins.s7o
             }
 
             PurgeMissingItems(live, now);
+        }
+
+        private void RemovePickedItemMarker(IItem item)
+        {
+            if (item == null || _items.Count == 0)
+                return;
+
+            string liveKey;
+            try
+            {
+                // Creation ticks can collide; leave weak identities to normal expiry.
+                if (string.IsNullOrEmpty(item.ItemUniqueId) && item.AnnId == 0 && item.AcdId == 0) return;
+                liveKey = GetLiveKey(item);
+            }
+            catch { return; }
+
+            if (string.IsNullOrEmpty(liveKey))
+                return;
+
+            string markerKey = null;
+            foreach (var pair in _items)
+            {
+                var marker = pair.Value;
+                if (marker != null && string.Equals(marker.LiveKey, liveKey, StringComparison.Ordinal))
+                {
+                    markerKey = pair.Key;
+                    break;
+                }
+            }
+
+            if (string.IsNullOrEmpty(markerKey))
+                return;
+
+            _items.Remove(markerKey);
+            _townSeenKeys.Remove(markerKey);
+            _townFreshKeys.Remove(markerKey);
+            _townRearmKeys.Remove(markerKey);
         }
 
         private ItemMarker NewMarker(long now)
