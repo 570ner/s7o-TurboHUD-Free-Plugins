@@ -1,4 +1,5 @@
-// REV19 - preserve Urshi no-progress limits across actor/ground handoffs.
+// Confirm ultrawide stacked-loot selection on a fresh game tick before clicking.
+// Preserve Urshi no-progress limits across actor/ground handoffs.
 using System;
 using System.Collections.Generic;
 using System.Drawing;
@@ -8,6 +9,14 @@ using Turbo.Plugins.Default;
 
 namespace Turbo.Plugins.s7o
 {
+    // Optional input owners yield before a wanted pickup takes the cursor.
+    // AutoLoot has no dependency on any module implementing this contract.
+    public interface IS7oAutoLootInputHandoff
+    {
+        void PauseForAutoLootPickup();
+        void StopForAutoLootUrshiHandoff();
+    }
+
     // GR reward handoff: native count/shard cues win first, with the proven 4s fallback retained for missed observations.
     public class s7o_AutoLoot : BasePlugin, IAfterCollectHandler, IItemPickedHandler, IItemLocationChangedHandler, INewAreaHandler, IMonsterKilledHandler
     {
@@ -44,6 +53,8 @@ namespace Turbo.Plugins.s7o
         private const int StackedLootDelayMs = 22;
         private const int StackedLootSkipMs = 75;
         private const int StackedLootRotationMemoryMs = 650;
+        private const int StackedHoverMaxProbes = 8;
+        private const int StackedHoverExpireMs = 250;
         private const float StackedLootScreenRadiusPx = 22f;
         private const float StackedLootWorldRadiusYards = 1.8f;
 
@@ -319,6 +330,12 @@ namespace Turbo.Plugins.s7o
         private int _materialProbeSeed, _materialProbeIndex, _materialProbeTick;
         private int _materialOverlapSeed;
         private int _materialOverlapChecks;
+        private int _ultrawideStackedHoverSeed;
+        private int _ultrawideStackedHoverX;
+        private int _ultrawideStackedHoverY;
+        private int _ultrawideStackedHoverProbe;
+        private int _ultrawideStackedHoverTick;
+        private long _ultrawideStackedHoverExpireMs;
         private bool _inventoryFullAlertActive;
         private int _inventoryFullAlertUsed;
         private int _inventoryFullAlertTotal;
@@ -449,6 +466,7 @@ namespace Turbo.Plugins.s7o
             _pendingCursorRestore = false;
             ClearHazardHoverState(false, 0);
             ClearMaterialHoverState(true);
+            ClearUltrawideStackedHoverState();
             _materialLiftFallbackSeed = 0;
             _materialProbeSeed = _materialProbeIndex = _materialProbeTick = 0;
             _materialOverlapSeed = 0;
@@ -516,6 +534,8 @@ namespace Turbo.Plugins.s7o
                 ClearHazardHoverState(false, 0);
             if (_materialHoverSeed == item.Seed)
                 ClearMaterialHoverState(false);
+            if (_ultrawideStackedHoverSeed == item.Seed)
+                ClearUltrawideStackedHoverState();
             ClearMaterialFallback(item.Seed);
             _urshiMisclicksBySeed.Remove(item.Seed);
             _urshiFallbackTriesBySeed.Remove(item.Seed);
@@ -563,6 +583,8 @@ namespace Turbo.Plugins.s7o
                     ClearHazardHoverState(false, 0);
                 if (_materialHoverSeed == item.Seed)
                     ClearMaterialHoverState(false);
+                if (_ultrawideStackedHoverSeed == item.Seed)
+                    ClearUltrawideStackedHoverState();
                 ClearMaterialFallback(item.Seed);
             }
             if (from == ItemLocation.Inventory && to == ItemLocation.Floor)
@@ -815,6 +837,8 @@ namespace Turbo.Plugins.s7o
                 ClearHazardHoverState(true, now);
             if (_materialHoverSeed != 0 && !candidates.Any(c => c.Item != null && c.Item.Seed == _materialHoverSeed))
                 ClearMaterialHoverState(true);
+            if (_ultrawideStackedHoverSeed != 0 && !candidates.Any(c => c.Item != null && c.Item.Seed == _ultrawideStackedHoverSeed))
+                ClearUltrawideStackedHoverState();
             if (_materialLiftFallbackSeed != 0 && !candidates.Any(c => c.Item != null && c.Item.Seed == _materialLiftFallbackSeed))
                 ClearMaterialFallback(_materialLiftFallbackSeed);
 
@@ -908,7 +932,11 @@ namespace Turbo.Plugins.s7o
             }
 
             bool farUrshiLootRisk = postRiftCleanup && HasAutoUrshiFarLootRisk(tryCandidates);
-            var target = _materialHoverSeed != 0
+            var target = _ultrawideStackedHoverSeed != 0
+                ? tryCandidates.FirstOrDefault(c => c.Item != null && c.Item.Seed == _ultrawideStackedHoverSeed)
+                : null;
+            if (target == null)
+                target = _materialHoverSeed != 0
                 ? tryCandidates.FirstOrDefault(c => c.Item != null && c.Item.Seed == _materialHoverSeed)
                 : null;
             if (target == null)
@@ -1527,6 +1555,7 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
+            PauseDhStrafeForPickup();
             NativePoint old = new NativePoint();
             bool restore = GetCursorPos(out old);
             if (!TrySetCursorForWorldClick(x, y))
@@ -1535,7 +1564,6 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
-            PauseDhStrafeForPickup();
             MouseLeftClick();
             if (restore) ScheduleCursorRestore(old, now);
 
@@ -1601,16 +1629,21 @@ namespace Turbo.Plugins.s7o
                 }
 
                 int x, y;
-                NativePoint restorePoint = new NativePoint();
-                bool restore = GetCursorPos(out restorePoint);
-                if (!TryGetUiSafeItemClickPoint(item, 0, false, false, out x, out y) ||
-                    !TrySetCursorForWorldClick(x, y))
+                if (!TryGetUiSafeItemClickPoint(item, 0, false, false, out x, out y))
                 {
                     FailActiveStuckPickupResync(seed, now);
                     return true;
                 }
 
                 PauseDhStrafeForPickup();
+                NativePoint restorePoint = new NativePoint();
+                bool restore = GetCursorPos(out restorePoint);
+                if (!TrySetCursorForWorldClick(x, y))
+                {
+                    FailActiveStuckPickupResync(seed, now);
+                    return true;
+                }
+
                 _stuckResyncRestorePoint = restorePoint;
                 _stuckResyncHasRestorePoint = restore;
                 MouseLeftDown();
@@ -1915,6 +1948,7 @@ namespace Turbo.Plugins.s7o
                     strafe.PauseForAutoLootPickup();
             }
             catch { }
+            NotifyOptionalInputOwners(false);
         }
 
         private void StopDhStrafeForUrshiHandoff()
@@ -1926,6 +1960,22 @@ namespace Turbo.Plugins.s7o
                     strafe.StopForAutoLootUrshiHandoff();
             }
             catch { }
+            NotifyOptionalInputOwners(true);
+        }
+
+        private void NotifyOptionalInputOwners(bool stopForUrshi)
+        {
+            foreach (var plugin in Hud.AllPlugins)
+            {
+                var handoff = plugin as IS7oAutoLootInputHandoff;
+                if (handoff == null) continue;
+                try
+                {
+                    if (stopForUrshi) handoff.StopForAutoLootUrshiHandoff();
+                    else if (plugin.Enabled) handoff.PauseForAutoLootPickup();
+                }
+                catch { } // One optional module must not block other recipients.
+            }
         }
 
         private void ClickItem(IItem item, bool riskyUrshi, bool cleanup, bool stackedLoot, long now)
@@ -1937,11 +1987,18 @@ namespace Turbo.Plugins.s7o
             int tries = 0;
             _attempts.TryGetValue(item.Seed, out tries);
 
+            if (riskyUrshi && _ultrawideStackedHoverSeed != 0)
+                ClearUltrawideStackedHoverState();
+
             if (riskyUrshi && HandleUrshiRiskLootHoverClick(item, tries, stackedLoot, now))
                 return;
 
             if (IsNoSpaceMaterialPickup(item) &&
                 HandleMaterialConfirmedRetry(item, tries, cleanup, stackedLoot, now, old, restore))
+                return;
+
+            if (!riskyUrshi &&
+                HandleUltrawideStackedConfirmedClick(item, tries, cleanup, stackedLoot, now, old, restore))
                 return;
 
             IActor selectedBeforeMove = GetSelectedActorSafe();
@@ -2001,6 +2058,106 @@ namespace Turbo.Plugins.s7o
             }
 
             CommitItemClick(item, tries, cleanup, stackedLoot, now, old, restore);
+        }
+
+        private bool HandleUltrawideStackedConfirmedClick(IItem item, int tries, bool cleanup, bool stackedLoot,
+            long now, NativePoint old, bool restore)
+        {
+            if (!cleanup || !stackedLoot || !UseUltrawideStackedSelectionConfirmation() ||
+                item == null || IsNoSpaceMaterialPickup(item))
+            {
+                if (_ultrawideStackedHoverSeed != 0)
+                    ClearUltrawideStackedHoverState();
+                return false;
+            }
+
+            int tick = Hud.Game.CurrentGameTick;
+            if (_ultrawideStackedHoverSeed != 0 && _ultrawideStackedHoverSeed != item.Seed)
+                ClearUltrawideStackedHoverState();
+
+            if (_ultrawideStackedHoverSeed == item.Seed)
+            {
+                NativePoint cursor;
+                bool haveCursor = GetCursorPos(out cursor);
+                double ownershipRadius = Math.Max(3.0d, 4.0d * UiScale());
+                double dx = haveCursor ? cursor.X - _ultrawideStackedHoverX : double.MaxValue;
+                double dy = haveCursor ? cursor.Y - _ultrawideStackedHoverY : double.MaxValue;
+                bool cursorOwned = haveCursor && dx * dx + dy * dy <= ownershipRadius * ownershipRadius;
+
+                // A fresh game tick must recognize this exact item before LMB is sent.
+                if (cursorOwned && tick > _ultrawideStackedHoverTick && IsExactItemSelected(item) &&
+                    IsSafeSyntheticWorldClick(cursor.X, cursor.Y))
+                {
+                    ClearUltrawideStackedHoverState();
+                    CommitItemClick(item, tries, cleanup, stackedLoot, now, old, restore);
+                    _pickupAcknowledgeUntilMs[item.Seed] = now + PickupAcknowledgeMs;
+                    return true;
+                }
+
+                // A manual cursor move immediately yields control without clicking.
+                if (!cursorOwned)
+                {
+                    ClearUltrawideStackedHoverState();
+                    _retryAfterMs[item.Seed] = now + StackedLootSkipMs;
+                    _lastClickMs = now;
+                    return true;
+                }
+
+                if (tick <= _ultrawideStackedHoverTick)
+                    return true;
+
+                if (now >= _ultrawideStackedHoverExpireMs ||
+                    _ultrawideStackedHoverProbe + 1 >= StackedHoverMaxProbes)
+                {
+                    ClearUltrawideStackedHoverState();
+                    _retryAfterMs[item.Seed] = now + StackedLootSkipMs;
+                    _lastClickMs = now;
+                    return true;
+                }
+
+                _ultrawideStackedHoverProbe++;
+            }
+            else
+            {
+                _ultrawideStackedHoverSeed = item.Seed;
+                _ultrawideStackedHoverProbe = 0;
+                _ultrawideStackedHoverExpireMs = now + StackedHoverExpireMs;
+            }
+
+            int x, y;
+            int pointAttempt = Math.Max(0, tries) + _ultrawideStackedHoverProbe;
+            if (!TryGetUiSafeItemClickPoint(item, pointAttempt, cleanup, true, out x, out y))
+            {
+                ClearUltrawideStackedHoverState();
+                _retryAfterMs[item.Seed] = now + Math.Max(75, StackedLootSkipMs);
+                RegisterUiBlockedMiss(item, now);
+                _lastClickMs = now;
+                return true;
+            }
+
+            if (!TrySetCursorForWorldClick(x, y))
+            {
+                ClearUltrawideStackedHoverState();
+                ClearUiBlockedMisses(item.Seed);
+                _retryAfterMs[item.Seed] = now + Math.Max(75, StackedLootSkipMs);
+                _lastClickMs = now;
+                return true;
+            }
+
+            _ultrawideStackedHoverX = x;
+            _ultrawideStackedHoverY = y;
+            _ultrawideStackedHoverTick = tick;
+            return true;
+        }
+
+        private void ClearUltrawideStackedHoverState()
+        {
+            _ultrawideStackedHoverSeed = 0;
+            _ultrawideStackedHoverX = 0;
+            _ultrawideStackedHoverY = 0;
+            _ultrawideStackedHoverProbe = 0;
+            _ultrawideStackedHoverTick = 0;
+            _ultrawideStackedHoverExpireMs = 0;
         }
 
         private bool HandleMaterialConfirmedRetry(IItem item, int tries, bool cleanup, bool stackedLoot, long now, NativePoint old, bool restore)
@@ -2240,7 +2397,7 @@ namespace Turbo.Plugins.s7o
             ClearUrshiArmedRecoveryState(true);
             ArmGenericUrshiPickupRecovery(item, cleanup, now);
             MouseLeftClick();
-            // Preserve REV05 cadence. Stacked loot stays fully rapid through attempt 8;
+            // Preserve the validated cadence. Stacked loot stays fully rapid through attempt 8;
             // only the final click gets the existing acknowledgement window so it
             // cannot be declared stuck while that click is still resolving.
             if (!stackedLoot || tries + 1 >= MaxAttempts)
@@ -2502,6 +2659,21 @@ namespace Turbo.Plugins.s7o
                 return;
 
             SetCursorPos(_pendingCursorPoint.X, _pendingCursorPoint.Y);
+        }
+
+        private bool UseUltrawideStackedSelectionConfirmation()
+        {
+            try
+            {
+                if (Hud == null || Hud.Window == null || Hud.Window.Size.Height <= 0)
+                    return false;
+
+                return Hud.Window.Size.Width / (float)Hud.Window.Size.Height >= 2.0f;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private void GetStackedLootClickPoint(IItem item, int phase, bool cleanup, out int x, out int y)
