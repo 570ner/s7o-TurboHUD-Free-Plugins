@@ -21,9 +21,15 @@ namespace Turbo.Plugins.s7o
         private const uint NecromancerDevourPowerSno = 460757u;
         private const uint NecromancerSimulacrumPowerSno = 465350u;
         private const uint HauntedVisionsPowerSno = 484309u;
+        private const uint ShadowsMantleSetSno = 916931u;
         private const uint MasqueradeOfTheBurningCarnival2PBuffSno = 484301u;
         private const uint NecromancerLandOfTheDeadPowerSno = 465839u;
         private const int HealSlotIndex = 6;
+        private const uint MonkHealingShieldBuffSno = 373154u;
+        private const int MonkHealingShieldIcon = 1;
+        private const int MonkHealingRetryGraceMs = 150;
+        private const int MonkHealingDamageRecastMs = 450;
+        private const double MonkHealingRefreshSeconds = 0.40;
         private const ushort RiftEntryDialogVirtualKey = 0x20; // Space
         private const int RiftEntryDialogStableMs = 30;
         private const int RiftEntryDialogWindowMs = 12000;
@@ -113,6 +119,8 @@ namespace Turbo.Plugins.s7o
         private readonly Dictionary<string, int> _lastConditionalProfileCastTickByCode = new Dictionary<string, int>();
         private readonly HashSet<uint> _channelingPowerSnos = new HashSet<uint>();
         private int _lastNayrsSiphonBloodCueTick;
+        private float _lastMonkHealingShieldAmount = -1f;
+        private int _lastMonkHealingShieldSampleTick;
 
         private int _nextSkillCacheRefreshTick;
         private int _nextBuffCheckTick;
@@ -286,6 +294,8 @@ namespace Turbo.Plugins.s7o
             _nextConditionalProfileCheckTick = 0;
             _lastConditionalProfileCastTickByCode.Clear();
             _lastNayrsSiphonBloodCueTick = 0;
+            _lastMonkHealingShieldAmount = -1f;
+            _lastMonkHealingShieldSampleTick = 0;
             _entryBuffBurstPending = true;
             _entryBuffBurstStartTick = 0;
             _lastActMapVisibleTick = 0;
@@ -334,6 +344,10 @@ namespace Turbo.Plugins.s7o
 
         public void AfterCollect()
         {
+            // Shared recovery also runs when either companion plugin is disabled.
+            if (Hud != null && Hud.Window != null && Hud.Window.IsForeground)
+                s7o_InputReleaseArbiter.RetryPending(Environment.TickCount);
+
             int now = Environment.TickCount;
             if (PauseWhileWindowsKeyHeld && IsWindowsKeyDown())
             {
@@ -1654,17 +1668,14 @@ namespace Turbo.Plugins.s7o
                 ctx =>
                 {
                     if (!SkillBuffMissing(ctx.Skill)) return false;
+                    if (HasEffectiveSetBonus(ShadowsMantleSetSno, 4)) return true;
                     if (HealthPctBelow(65)) return true;
                     if (Hud.Game.IsEliteOnScreen && HealthPctBelow(75)) return true;
                     return false;
                 }, ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
 
-            AddConditionalProfile(Hud.Sno.SnoPowers.DemonHunter_ShadowPower, 130830, "DH_ShadowPower_ElusiveRing", "Shadow Power: Elusive Ring", "Demon Hunter", "Defense", "Best-effort Elusive Ring upkeep using Shadow Power when enemies are nearby.", true,
-                ctx =>
-                {
-                    if (!IsEliteOrBossNearby(40, true) && CountAliveMonstersWithin(40) < 1) return false;
-                    return SkillBuffRemainingBelow(ctx.Skill, 30, 100);
-                }, ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
+            AddConditionalProfile(Hud.Sno.SnoPowers.DemonHunter_ShadowPower, 130830, "DH_ShadowPower_ElusiveRing", "Shadow Power: Elusive Ring", "Demon Hunter", "Defense", "Keeps Elusive Ring active with Shadow Power.", true,
+                ShouldCastShadowPowerForElusiveRing, 500, 750, 100);
         }
 
         private void BuildBarbarianConditionalProfiles()
@@ -1693,11 +1704,70 @@ namespace Turbo.Plugins.s7o
         {
             AddConditionalProfile(Hud.Sno.SnoPowers.Monk_Epiphany, 312307, "Monk_Epiphany_Combat", "Epiphany: Combat", "Monk", "Cooldown", "Casts Epiphany when elite/boss or density is nearby.", true, ctx => (IsEliteOrBossNearby(80, true) || CountAliveMonstersWithin(60) >= 8) && SkillBuffRemainingBelow(ctx.Skill, 50, 100), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
             AddConditionalProfile(Hud.Sno.SnoPowers.Monk_SweepingWind, 96090, "Monk_SweepingWind_KeepUp", "Sweeping Wind: Keep Up", "Monk", "Buff", "Keeps Sweeping Wind active near enemies.", true, ctx => CountAliveMonstersWithin(60) > 0 && SkillBuffRemainingBelow(ctx.Skill, 1000, 2000), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
-            AddConditionalProfile(Hud.Sno.SnoPowers.Monk_MantraOfConviction, 375088, "Monk_MantraConviction_Elite", "Mantra of Conviction: Elite", "Monk", "Mantra", "Activates Mantra of Conviction near elites or density.", true, ctx => IsEliteOrBossNearby(50, true) || CountAliveMonstersWithin(35) >= 5, ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
-            AddConditionalProfile(Hud.Sno.SnoPowers.Monk_MantraOfSalvation, 375049, "Monk_MantraSalvation_Defensive", "Mantra of Salvation: Defensive", "Monk", "Mantra", "Activates Mantra of Salvation when health is low or elites are nearby.", true, ctx => HealthPctBelow(70) || IsEliteOrBossNearby(45, true), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
-            AddConditionalProfile(Hud.Sno.SnoPowers.Monk_MantraOfHealing, 373143, "Monk_MantraHealing_Defensive", "Mantra of Healing: Defensive", "Monk", "Mantra", "Activates Mantra of Healing when health is low.", true, ctx => HealthPctBelow(75), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Monk_MantraOfConviction, 375088, "Monk_MantraConviction_Elite", "Mantra of Conviction: Elite", "Monk", "Mantra", "Refreshes the 3-second Conviction active only while attacking nearby enemies.", true, ctx => IsMonkAttackingEnemies() && ShouldRefreshMonkMantra(ctx), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Monk_MantraOfSalvation, 375049, "Monk_MantraSalvation_Defensive", "Mantra of Salvation: Defensive", "Monk", "Mantra", "Refreshes the 3-second Salvation active near danger without repeating casts.", true, ctx => (HealthPctBelow(70) || IsEliteOrBossNearby(45, true)) && ShouldRefreshMonkMantra(ctx), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Monk_MantraOfHealing, 373143, "Monk_MantraHealing_Defensive", "Mantra of Healing: Defensive", "Monk", "Mantra", "Maintains the three-second shield while attacking or below 75% health; recasts when shield strength drops.", true, ctx => (HealthPctBelow(75) || IsMonkAttackingEnemies()) && ShouldCastHealingMantra(ctx), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
             AddConditionalProfile(Hud.Sno.SnoPowers.Monk_MysticAlly, 362102, "Monk_MysticAlly_ResourceOrElite", "Mystic Ally: Resource/Elite", "Monk", "Resource", "Casts Mystic Ally when spirit is low or elite/boss is nearby.", true, ctx => PrimaryResourcePctBelow(35) || IsEliteOrBossNearby(50, true), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
             AddConditionalProfile(Hud.Sno.SnoPowers.Monk_Serenity, 96215, "Monk_Serenity_Defensive", "Serenity: Defensive", "Monk", "Defense", "Casts Serenity when health is low or elites are close.", true, ctx => (HealthPctBelow(55) || IsEliteOrBossNearby(30, true)) && SkillBuffRemainingBelow(ctx.Skill, 50, 100), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
+        }
+
+        private bool IsMonkAttackingEnemies()
+        {
+            try
+            {
+                if (CountAliveMonstersWithin(35) == 0) return false;
+                var state = Hud.Game.Me.AnimationState;
+                return state == AcdAnimationState.Attacking || state == AcdAnimationState.Channeling;
+            }
+            catch { return false; }
+        }
+
+        private bool ShouldRefreshMonkMantra(ConditionalCastContext ctx)
+        {
+            int lastCast;
+            if (ctx == null || ctx.Profile == null
+                || !_lastConditionalProfileCastTickByCode.TryGetValue(ctx.Profile.Code, out lastCast))
+                return true;
+            return (uint)(ctx.Now - lastCast) >= 2700u;
+        }
+
+        private bool ShouldCastHealingMantra(ConditionalCastContext ctx)
+        {
+            if (ctx == null || ctx.Profile == null) return false;
+            int lastCast;
+            bool hasCast = _lastConditionalProfileCastTickByCode.TryGetValue(ctx.Profile.Code, out lastCast);
+            uint sinceCast = hasCast ? (uint)(ctx.Now - lastCast) : uint.MaxValue;
+            try
+            {
+                var me = Hud.Game.Me;
+                var powers = me.Powers;
+                if (powers == null) return false;
+
+                // CurShield measures the shield itself; health can stay full
+                // after a hit that weakens the shield.
+                float shieldAmount = me.Defense.CurShield;
+                bool shieldWeakened = _lastMonkHealingShieldAmount > 0f
+                    && (uint)(ctx.Now - _lastMonkHealingShieldSampleTick) <= 500u
+                    && shieldAmount < _lastMonkHealingShieldAmount
+                        - Math.Max(1f, _lastMonkHealingShieldAmount * 0.005f);
+                _lastMonkHealingShieldAmount = shieldAmount;
+                _lastMonkHealingShieldSampleTick = ctx.Now;
+
+                bool active = powers.BuffIsActive(MonkHealingShieldBuffSno, MonkHealingShieldIcon);
+                if (!active) return sinceCast >= MonkHealingRetryGraceMs;
+
+                var shield = powers.GetBuff(MonkHealingShieldBuffSno);
+                double remaining = shield != null && shield.TimeLeftSeconds != null
+                    && shield.TimeLeftSeconds.Length > MonkHealingShieldIcon
+                    ? shield.TimeLeftSeconds[MonkHealingShieldIcon] : -1;
+                if (shieldWeakened && sinceCast >= MonkHealingDamageRecastMs) return true;
+                if (remaining >= 0) return remaining <= MonkHealingRefreshSeconds
+                    && sinceCast >= MonkHealingDamageRecastMs;
+                // If the HUD exposes the shield as active but omits its timer,
+                // retain a three-second cadence instead of spamming it.
+                return sinceCast >= 2700u;
+            }
+            catch { return false; }
         }
 
         private void BuildNecromancerConditionalProfiles()
@@ -1983,6 +2053,52 @@ namespace Turbo.Plugins.s7o
             catch { return false; }
         }
 
+        private bool HasEffectiveSetBonus(uint setSno, int requiredPieces)
+        {
+            try
+            {
+                if (Hud == null || Hud.Game == null || Hud.Game.Me == null) return false;
+
+                int equippedPieces = Hud.Game.Me.GetSetItemCount(setSno);
+                if (equippedPieces >= requiredPieces) return true;
+                if (equippedPieces != requiredPieces - 1) return false;
+
+                return HasRingOfRoyalGrandeur();
+            }
+            catch { return false; }
+        }
+
+        private bool HasRingOfRoyalGrandeur()
+        {
+            try
+            {
+                var me = Hud.Game.Me;
+                if (me == null || Hud.Sno == null || Hud.Sno.SnoItems == null) return false;
+
+                var legacy = Hud.Sno.SnoItems.Unique_Ring_107_x1;
+                var current = Hud.Sno.SnoItems.P3_Unique_Ring_107;
+
+                if ((legacy != null && me.IsCubed(legacy)) ||
+                    (current != null && me.IsCubed(current)))
+                    return true;
+
+                if (Hud.Game.Items == null) return false;
+                foreach (var item in Hud.Game.Items)
+                {
+                    if (item == null || item.SnoItem == null) continue;
+                    if (item.Location != ItemLocation.LeftRing && item.Location != ItemLocation.RightRing) continue;
+
+                    uint sno = item.SnoItem.Sno;
+                    if ((legacy != null && sno == legacy.Sno) ||
+                        (current != null && sno == current.Sno))
+                        return true;
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
         private bool HasUsedSkill(ISnoPower power)
         {
             try
@@ -1997,6 +2113,36 @@ namespace Turbo.Plugins.s7o
         {
             try { return skill == null || skill.SnoPower == null || !IsOwnBuffActive(skill.SnoPower.Sno); }
             catch { return true; }
+        }
+
+        private bool ShouldCastShadowPowerForElusiveRing(ConditionalCastContext ctx)
+        {
+            try
+            {
+                if (ctx == null || ctx.Skill == null || ctx.Skill.Player == null || ctx.Skill.Player.Powers == null)
+                    return false;
+
+                if (!IsEliteOrBossNearby(40, true) && CountAliveMonstersWithin(40) < 1)
+                    return false;
+
+                var powers = ctx.Skill.Player.Powers;
+                var equipped = powers.UsedLegendaryPowers == null ? null : powers.UsedLegendaryPowers.ElusiveRing;
+                if (equipped == null || !equipped.Active)
+                    return false;
+
+                var buff = powers.GetBuff(Hud.Sno.SnoPowers.ElusiveRing.Sno);
+                if (buff == null || !buff.Active)
+                    return true;
+
+                var timers = buff.TimeLeftSeconds;
+                if (timers == null || timers.Length <= 1 || timers[1] <= 0)
+                    return false;
+
+                int thresholdMs = GetRandomizedDelay(
+                    "conditional_shadow_power_elusive_refresh", 250, 500, BuffRefreshJitterChangeMs);
+                return timers[1] <= thresholdMs / 1000.0d;
+            }
+            catch { return false; }
         }
 
         private bool SkillBuffRemainingBelow(IPlayerSkill skill, int minMs, int maxMs, int iconIndex = -1)
@@ -2990,48 +3136,39 @@ namespace Turbo.Plugins.s7o
 
             try
             {
-                if (shouldStandStill && !userAlreadyHolding)
-                    SendKeyDown(ForceStandstillVirtualKey);
+                if (shouldStandStill && !userAlreadyHolding
+                    && !SendKeyDown(ForceStandstillVirtualKey)) return false;
 
                 bool result = false;
 
                 switch (actionKey)
                 {
                     case ActionKey.LeftSkill:
-                        SendMouse(LeftDown);
-                        SendMouse(LeftUp);
-                        result = true;
+                        result = SendMouse(LeftDown) && SendMouse(LeftUp);
                         break;
 
                     case ActionKey.RightSkill:
-                        SendMouse(RightDown);
-                        SendMouse(RightUp);
-                        result = true;
+                        result = SendMouse(RightDown) && SendMouse(RightUp);
                         break;
 
                     case ActionKey.Skill1:
-                        PressKey(Skill1VirtualKey);
-                        result = true;
+                        result = PressKey(Skill1VirtualKey);
                         break;
 
                     case ActionKey.Skill2:
-                        PressKey(Skill2VirtualKey);
-                        result = true;
+                        result = PressKey(Skill2VirtualKey);
                         break;
 
                     case ActionKey.Skill3:
-                        PressKey(Skill3VirtualKey);
-                        result = true;
+                        result = PressKey(Skill3VirtualKey);
                         break;
 
                     case ActionKey.Skill4:
-                        PressKey(Skill4VirtualKey);
-                        result = true;
+                        result = PressKey(Skill4VirtualKey);
                         break;
 
                     case ActionKey.Heal:
-                        PressKey(HealVirtualKey);
-                        result = true;
+                        result = PressKey(HealVirtualKey);
                         break;
                 }
 
@@ -3068,45 +3205,47 @@ namespace Turbo.Plugins.s7o
             }
         }
 
-        private static void PressKey(ushort virtualKey)
+        private static bool PressKey(ushort virtualKey)
         {
-            if (virtualKey == 0)
-                return;
-
-            SendKeyDown(virtualKey);
-            SendKeyUp(virtualKey);
+            if (virtualKey == 0) return false;
+            return SendKeyDown(virtualKey) && SendKeyUp(virtualKey);
         }
 
-        private static void SendKeyDown(ushort virtualKey)
+        private static bool SendKeyDown(ushort virtualKey)
         {
-            SendKey(virtualKey, false);
+            return SendKey(virtualKey, false);
         }
 
-        private static void SendKeyUp(ushort virtualKey)
+        private static bool SendKeyUp(ushort virtualKey)
         {
-            SendKey(virtualKey, true);
+            return SendKey(virtualKey, true);
         }
 
-        private static void SendKey(ushort virtualKey, bool keyUp)
+        private static bool SendKey(ushort virtualKey, bool keyUp)
         {
-            if (virtualKey == 0)
-                return;
+            if (virtualKey == 0) return false;
 
             var input = new Input[1];
             input[0].Type = InputKeyboard;
             input[0].U.Keyboard.VirtualKey = virtualKey;
             input[0].U.Keyboard.Flags = keyUp ? KeyUp : 0;
 
-            SendInput(1, input, Marshal.SizeOf(typeof(Input)));
+            Func<bool> send = () => SendInput(1, input, Marshal.SizeOf(typeof(Input))) == 1;
+            return keyUp ? s7o_InputReleaseArbiter.Up("AutoSkill", virtualKey, send)
+                : s7o_InputReleaseArbiter.Down("AutoSkill", virtualKey, send);
         }
 
-        private static void SendMouse(uint flags)
+        private static bool SendMouse(uint flags)
         {
             var input = new Input[1];
             input[0].Type = InputMouse;
             input[0].U.Mouse.Flags = flags;
 
-            SendInput(1, input, Marshal.SizeOf(typeof(Input)));
+            int code = (flags == LeftDown || flags == LeftUp) ? 0x10001 : 0x10002;
+            Func<bool> send = () => SendInput(1, input, Marshal.SizeOf(typeof(Input))) == 1;
+            return (flags == LeftUp || flags == RightUp)
+                ? s7o_InputReleaseArbiter.Up("AutoSkill", code, send)
+                : s7o_InputReleaseArbiter.Down("AutoSkill", code, send);
         }
 
         #endregion
@@ -3886,4 +4025,54 @@ namespace Turbo.Plugins.s7o
 
         #endregion
     }
+
+    // Shared synthetic-input safety for s7o automation plugins. No polling hooks or logging.
+    // Ownership survives a caller resetting its own cast/macro state after a failed UP.
+    // Keep this utility independent of the AutoSkill plugin instance so other plugins can reuse it.
+    internal static class s7o_InputReleaseArbiter
+    {
+        private sealed class Held
+        {
+            public string Owner;
+            public Func<bool> Retry;
+        }
+        private static readonly Dictionary<int, Held> HeldInputs = new Dictionary<int, Held>();
+        private static int _lastRetryTick = int.MinValue;
+        public static bool HasPendingRelease
+        {
+            get { foreach (var entry in HeldInputs.Values) if (entry.Retry != null) return true; return false; }
+        }
+        public static bool Down(string owner, int code, Func<bool> send)
+        {
+            if (HasPendingRelease) return false;
+            Held held;
+            if (HeldInputs.TryGetValue(code, out held) && held.Owner != owner) return false;
+            if (!send()) return false;
+            if (held == null) HeldInputs[code] = new Held { Owner = owner };
+            return true;
+        }
+        public static bool Up(string owner, int code, Func<bool> send)
+        {
+            Held held;
+            // A rejected DOWN must never be followed by an UP of another producer's input.
+            if (!HeldInputs.TryGetValue(code, out held)) return true;
+            if (held.Owner != owner) return false;
+            held.Retry = send;
+            if (!send()) return false;
+            HeldInputs.Remove(code);
+            return true;
+        }
+        public static void RetryPending(int now)
+        {
+            if (!HasPendingRelease || (_lastRetryTick != int.MinValue && unchecked(now - _lastRetryTick) < 50)) return;
+            _lastRetryTick = now;
+            var codes = new List<int>(HeldInputs.Keys);
+            foreach (int code in codes)
+            {
+                Held held = HeldInputs[code];
+                if (held.Retry != null && held.Retry()) HeldInputs.Remove(code);
+            }
+        }
+    }
+
 }
