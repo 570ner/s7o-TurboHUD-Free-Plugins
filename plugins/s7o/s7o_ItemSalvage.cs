@@ -1,4 +1,4 @@
-// REV30 - production cleanup; retain tab/anvil readiness and monitor-coordinate fixes.
+// Production cleanup retains tab/anvil readiness and monitor-coordinate fixes.
 using System;
 using System.Collections.Generic;
 using System.Drawing;
@@ -32,6 +32,7 @@ namespace Turbo.Plugins.s7o
         // UI hotkey changes are saved to plugins/s7o/settings/s7o_ItemSalvage.ini when PersistUserSettings is true.
         // To change it in script, edit this line, for example: Key.F4, Key.X, Key.Comma.
         public Key SalvageHotkey = Key.F3;
+        public Key SafeSlotsHotkey = Key.F2;
 
         // Salvage now has one universal adaptive speed; there is no user speed selector.
         public bool PersistUserSettings = true;
@@ -128,6 +129,11 @@ namespace Turbo.Plugins.s7o
         // Universal adaptive scheduling replaces the old 1-10 speed tables.
 
         private IKeyEvent _salvageKeyEvent;
+        private IKeyEvent _safeSlotsKeyEvent;
+        private readonly HashSet<int> _safeSlots = new HashSet<int>();
+        private bool _safeSelecting;
+        private int _safeSelectionStart = -1;
+        private int _safeSelectionEnd = -1;
 
         private IUiElement _vendorPage;
         private IUiElement _salvageDialog;
@@ -141,6 +147,9 @@ namespace Turbo.Plugins.s7o
         private IUiElement _chatEditLine;
 
         private IFont _yellowFont;
+        private IFont _cyanFont;
+        private IBrush _safeSlotBrush;
+        private IBrush _safePreviewBrush;
         private IFont _buttonFont;
         private IBrush _pillDarkBrush;
         private IBrush _pillLightBrush;
@@ -151,6 +160,8 @@ namespace Turbo.Plugins.s7o
         private IFont _salvageProtectionMarkerFont;
 
         private RectangleF _hotkeyButtonRect = RectangleF.Empty;
+        private RectangleF _safeHotkeyButtonRect = RectangleF.Empty;
+        private bool _capturingSafeHotkey;
         private bool _overlayControlsVisible;
         private bool _capturingHotkey;
         private const int NoTick = int.MinValue;
@@ -214,14 +225,6 @@ namespace Turbo.Plugins.s7o
         private bool _parkCursorOnCompletionPending;
         private bool _finalCursorParked;
 
-        // ============================================================
-
-        // ============================================================
-
-        // ============================================================================
-
-        // Test-only hooks: deleting the diagnostics companion erases calls and argument evaluation.
-
         private enum State
         {
             Idle,
@@ -262,6 +265,7 @@ namespace Turbo.Plugins.s7o
                 SaveUserSettings();
 
             _salvageKeyEvent = Hud.Input.CreateKeyEvent(true, SalvageHotkey, false, false, false);
+            _safeSlotsKeyEvent = Hud.Input.CreateKeyEvent(true, SafeSlotsHotkey, false, false, false);
 
             _vendorPage = Hud.Render.RegisterUiElement(
                 "Root.NormalLayer.vendor_dialog_mainPage",
@@ -321,6 +325,9 @@ namespace Turbo.Plugins.s7o
             }
 
             _yellowFont = Hud.Render.CreateFont("tahoma", 8.5f, 255, 255, 220, 0, true, false, 255, 0, 0, 0, true);
+            _cyanFont = Hud.Render.CreateFont("tahoma", 8.5f, 255, 60, 225, 245, true, false, 255, 0, 0, 0, true);
+            _safeSlotBrush = Hud.Render.CreateBrush(230, 0, 210, 235, -2f);
+            _safePreviewBrush = Hud.Render.CreateBrush(255, 160, 245, 255, -2.5f);
             _buttonFont = Hud.Render.CreateFont("tahoma", 8.0f, 255, 235, 235, 235, true, false, 255, 0, 0, 0, true);
 
             _pillDarkBrush = Hud.Render.CreateBrush(255, 48, 48, 48, 0);
@@ -366,6 +373,8 @@ namespace Turbo.Plugins.s7o
         {
 
             ResetBlacksmithContextCache();
+            _safeSelecting = false;
+            _capturingSafeHotkey = false;
             CancelRun(false, false);
         }
 
@@ -391,6 +400,33 @@ namespace Turbo.Plugins.s7o
         {
             if (!Enabled || keyEvent == null || !keyEvent.IsPressed) return;
 
+            if (_capturingSafeHotkey)
+            {
+                _capturingSafeHotkey = false;
+                if (keyEvent.Key != Key.Escape && keyEvent.Key != SalvageHotkey
+                    && CanTrackSafeHotkey(keyEvent.Key))
+                {
+                    SafeSlotsHotkey = keyEvent.Key;
+                    _safeSlotsKeyEvent = Hud.Input.CreateKeyEvent(true, SafeSlotsHotkey, false, false, false);
+                    SaveUserSettings();
+                }
+                return;
+            }
+
+            if (_safeSlotsKeyEvent != null && _safeSlotsKeyEvent.Matches(keyEvent))
+            {
+                int slot;
+                if (!_safeSelecting && _state == State.Idle && IsBlacksmithPaneVisible()
+                    && IsInventoryVisibleForMarkers() && !IsChatEntryOpen()
+                    && TryGetHoveredSafeSlot(out slot))
+                {
+                    _safeSelecting = true;
+                    _safeSelectionStart = slot;
+                    _safeSelectionEnd = slot;
+                }
+                return;
+            }
+
             if (_capturingHotkey)
             {
                 if (keyEvent.Key == Key.Escape)
@@ -400,6 +436,7 @@ namespace Turbo.Plugins.s7o
                     return;
                 }
 
+                if (keyEvent.Key == SafeSlotsHotkey) { _capturingHotkey = false; return; }
                 SalvageHotkey = keyEvent.Key;
                 _salvageKeyEvent = Hud.Input.CreateKeyEvent(true, SalvageHotkey, false, false, false);
                 _capturingHotkey = false;
@@ -461,6 +498,7 @@ namespace Turbo.Plugins.s7o
         {
             int now = Environment.TickCount;
             UpdateBlacksmithActorLatch(now);
+            UpdateSafeSlotSelection();
 
             if (_state == State.Idle) return;
 
@@ -1108,8 +1146,15 @@ namespace Turbo.Plugins.s7o
                 if (_adaptivePendingSinceTick.ContainsKey(key))
                     continue;
 
-                if (!TryRegisterItemClickAttempt(key, item))
+                if (!CanSalvage(item) || !TryRegisterItemClickAttempt(key, item))
                     continue;
+
+                // Recheck the item's current cells at the destructive input boundary.
+                if (!CanSalvage(item))
+                {
+                    _turboItemClickAttempts.Remove(key);
+                    continue;
+                }
 
                 int clickTick = Environment.TickCount;
 
@@ -1422,7 +1467,22 @@ namespace Turbo.Plugins.s7o
                     string key = line.Substring(0, split).Trim();
                     string value = line.Substring(split + 1).Trim();
 
-                    if (EqualsText(key, "SalvageHotkey"))
+                    if (EqualsText(key, "SafeSlotsHotkey"))
+                    {
+                        try { SafeSlotsHotkey = (Key)Enum.Parse(typeof(Key), value, true); }
+                        catch { }
+                    }
+                    else if (EqualsText(key, "SafeSlots"))
+                    {
+                        _safeSlots.Clear();
+                        foreach (string part in value.Split(','))
+                        {
+                            int slot;
+                            if (int.TryParse(part, out slot) && slot >= 0 && slot < 60)
+                                _safeSlots.Add(slot);
+                        }
+                    }
+                    else if (EqualsText(key, "SalvageHotkey"))
                     {
                         try
                         {
@@ -1465,10 +1525,12 @@ namespace Turbo.Plugins.s7o
 
                 string content =
                     "# s7o_ItemSalvage user settings" + Environment.NewLine
-                    + "# This file is written by the plugin when you change the salvage hotkey." + Environment.NewLine
+                    + "# This file is written by the plugin when you change hotkeys or Safe Slots." + Environment.NewLine
                     + "# Salvage uses one universal adaptive speed; legacy SalvageSpeed entries are ignored." + Environment.NewLine
                     + Environment.NewLine
-                    + "SalvageHotkey=" + SalvageHotkey + Environment.NewLine;
+                    + "SalvageHotkey=" + SalvageHotkey + Environment.NewLine
+                    + "SafeSlotsHotkey=" + SafeSlotsHotkey + Environment.NewLine
+                    + "SafeSlots=" + string.Join(",", _safeSlots.OrderBy(x => x).Select(x => x.ToString()).ToArray()) + Environment.NewLine;
 
                 string dir = Path.GetDirectoryName(_settingsPath);
                 if (!string.IsNullOrEmpty(dir))
@@ -1512,7 +1574,10 @@ namespace Turbo.Plugins.s7o
             _overlayControlsVisible = overlayVisible;
 
             if (overlayVisible)
+            {
                 DrawHeaderHotkey();
+                DrawSafeSlotOutlines();
+            }
 
             // Armory dots must show during normal inventory/stash browsing,
             // even when the blacksmith/salvage panel is closed.
@@ -1539,6 +1604,13 @@ namespace Turbo.Plugins.s7o
             int y = Hud.Window.CursorY;
 
             bool hitHotkey = PointInRect(_hotkeyButtonRect, x, y);
+            bool hitSafeHotkey = PointInRect(_safeHotkeyButtonRect, x, y);
+            if (hitSafeHotkey && _state == State.Idle)
+            {
+                _capturingSafeHotkey = true;
+                _capturingHotkey = false;
+                return true;
+            }
 
             if (!hitHotkey)
                 return false;
@@ -1969,6 +2041,113 @@ namespace Turbo.Plugins.s7o
             return GetSalvageBlockReason(item) == null;
         }
 
+        private bool IsItemInSafeSlot(IItem item)
+        {
+            if (item == null || item.SnoItem == null || item.InventoryX < 0 || item.InventoryY < 0)
+                return false;
+            int width = Math.Max(1, item.SnoItem.ItemWidth);
+            int height = Math.Max(1, item.SnoItem.ItemHeight);
+            for (int y = 0; y < height; y++)
+                for (int x = 0; x < width; x++)
+                    if (_safeSlots.Contains((item.InventoryY + y) * 10 + item.InventoryX + x))
+                        return true;
+            return false;
+        }
+
+        private bool TryGetHoveredSafeSlot(out int slot)
+        {
+            slot = -1;
+            if (Hud == null || Hud.Game == null || Hud.Game.Me == null
+                || Hud.Inventory == null || Hud.Window == null || !Hud.Window.IsForeground)
+                return false;
+            int rows = Math.Min(6, Math.Max(0, (Hud.Game.Me.InventorySpaceTotal + 9) / 10));
+            int cursorX = Hud.Window.CursorX;
+            int cursorY = Hud.Window.CursorY;
+            for (int y = 0; y < rows; y++)
+            {
+                for (int x = 0; x < 10; x++)
+                {
+                    RectangleF rect = Hud.Inventory.GetRectInInventory(x, y, 1, 1);
+                    if (!PointInRect(rect, cursorX, cursorY)) continue;
+                    slot = y * 10 + x;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static bool CanTrackSafeHotkey(Key key)
+        {
+            try { Enum.Parse(typeof(Keys), key.ToString(), true); return true; }
+            catch { return false; }
+        }
+
+        private bool IsSafeHotkeyDown()
+        {
+            try
+            {
+                Keys key = (Keys)Enum.Parse(typeof(Keys), SafeSlotsHotkey.ToString(), true);
+                return (GetAsyncKeyState((int)key) & 0x8000) != 0;
+            }
+            catch { return false; }
+        }
+
+        private void UpdateSafeSlotSelection()
+        {
+            if (!_safeSelecting) return;
+            if (!IsBlacksmithPaneVisible() || !IsInventoryVisibleForMarkers()
+                || !Hud.Window.IsForeground || _state != State.Idle)
+            {
+                _safeSelecting = false;
+                return;
+            }
+
+            int hovered;
+            if (TryGetHoveredSafeSlot(out hovered))
+                _safeSelectionEnd = hovered;
+            if (IsSafeHotkeyDown()) return;
+
+            if (_safeSelectionStart < 0 || _safeSelectionEnd < 0)
+            {
+                _safeSelecting = false;
+                return;
+            }
+            bool remove = _safeSlots.Contains(_safeSelectionStart);
+            int minX = Math.Min(_safeSelectionStart % 10, _safeSelectionEnd % 10);
+            int maxX = Math.Max(_safeSelectionStart % 10, _safeSelectionEnd % 10);
+            int minY = Math.Min(_safeSelectionStart / 10, _safeSelectionEnd / 10);
+            int maxY = Math.Max(_safeSelectionStart / 10, _safeSelectionEnd / 10);
+            for (int y = minY; y <= maxY; y++)
+                for (int x = minX; x <= maxX; x++)
+                {
+                    int cell = y * 10 + x;
+                    if (remove) _safeSlots.Remove(cell);
+                    else _safeSlots.Add(cell);
+                }
+            _safeSelecting = false;
+            SaveUserSettings();
+        }
+
+        private void DrawSafeSlotOutlines()
+        {
+            if (_safeSlotBrush == null || Hud == null || Hud.Inventory == null
+                || !IsInventoryVisibleForMarkers())
+                return;
+            for (int slot = 0; slot < 60; slot++)
+            {
+                bool preview = _safeSelecting && _safeSelectionStart >= 0 && _safeSelectionEnd >= 0
+                    && slot % 10 >= Math.Min(_safeSelectionStart % 10, _safeSelectionEnd % 10)
+                    && slot % 10 <= Math.Max(_safeSelectionStart % 10, _safeSelectionEnd % 10)
+                    && slot / 10 >= Math.Min(_safeSelectionStart / 10, _safeSelectionEnd / 10)
+                    && slot / 10 <= Math.Max(_safeSelectionStart / 10, _safeSelectionEnd / 10);
+                if (!preview && !_safeSlots.Contains(slot)) continue;
+                RectangleF rect = Hud.Inventory.GetRectInInventory(slot % 10, slot / 10, 1, 1);
+                if (rect.Width <= 0 || rect.Height <= 0) continue;
+                (preview ? _safePreviewBrush : _safeSlotBrush).DrawRectangle(
+                    rect.X, rect.Y, rect.Width, rect.Height);
+            }
+        }
+
         private string GetSalvageBlockReason(IItem item)
         {
             if (item == null) return "null item";
@@ -1977,6 +2156,7 @@ namespace Turbo.Plugins.s7o
             if (item.SnoItem.Kind != ItemKind.loot && item.SnoItem.Kind != ItemKind.potion) return "not loot/potion";
             if (item.VendorBought) return "vendor bought";
             if (UseInventoryLock && item.IsInventoryLocked) return "inventory locked";
+            if (IsItemInSafeSlot(item)) return "safe slot";
             if (HasOccupiedSocket(item)) return "occupied socket";
             if (item.EnchantedAffixCounter != 0) return "enchanted";
             if (UseAddedSocketProtection && HasAddedSocketEnhancement(item)) return "added socket enhancement";
@@ -2151,6 +2331,7 @@ namespace Turbo.Plugins.s7o
         private bool UpdateOverlayLayoutRects()
         {
             _hotkeyButtonRect = RectangleF.Empty;
+            _safeHotkeyButtonRect = RectangleF.Empty;
 
             if (!IsOverlayContextVisible()) return false;
             if (_vendorPage == null) return false;
@@ -2166,6 +2347,10 @@ namespace Turbo.Plugins.s7o
             float hotkeyButtonY = topY + 18.0f;
 
             _hotkeyButtonRect = new RectangleF(hotkeyButtonX, hotkeyButtonY, HotkeyButtonWidth, HotkeyButtonHeight);
+            float safeGroupX = pane.Right - HeaderRightOffset - HeaderHotkeyGroupWidth;
+            _safeHotkeyButtonRect = new RectangleF(
+                safeGroupX + (HeaderHotkeyGroupWidth - HotkeyButtonWidth) * 0.5f,
+                hotkeyButtonY, HotkeyButtonWidth, HotkeyButtonHeight);
 
             return true;
         }
@@ -2184,6 +2369,14 @@ namespace Turbo.Plugins.s7o
             _yellowFont.DrawText(layout, labelX, topY);
 
             DrawPillButton(_hotkeyButtonRect, _capturingHotkey ? "..." : SalvageHotkey.ToString(), _capturingHotkey);
+
+            float safeGroupX = pane.Right - HeaderRightOffset - HeaderHotkeyGroupWidth;
+            string safeLabel = s7o_Localization.Get("overlay.salvage.safe_slots", "SAFE SLOTS");
+            var safeLayout = _yellowFont.GetTextLayout(safeLabel);
+            _yellowFont.DrawText(safeLayout,
+                safeGroupX + HeaderHotkeyGroupWidth * 0.5f - safeLayout.Metrics.Width * 0.5f, topY);
+            DrawPillButton(_safeHotkeyButtonRect,
+                _capturingSafeHotkey ? "..." : SafeSlotsHotkey.ToString(), _capturingSafeHotkey);
         }
 
         private void DrawProtectedDots()
@@ -2638,6 +2831,9 @@ namespace Turbo.Plugins.s7o
             input[0].U.Keyboard.Flags = keyUp ? KeyUp : 0;
             return SendInput(1, input, Marshal.SizeOf(typeof(Input))) == 1;
         }
+
+        [DllImport("user32.dll")]
+        private static extern short GetAsyncKeyState(int virtualKey);
 
         [DllImport("user32.dll")]
         private static extern bool SetCursorPos(int x, int y);
