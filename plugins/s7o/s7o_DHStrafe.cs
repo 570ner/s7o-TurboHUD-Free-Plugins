@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -565,7 +566,9 @@ namespace Turbo.Plugins.s7o
 
             if (_fireModeKeyEvent != null && _fireModeKeyEvent.Matches(keyEvent))
             {
-                if (GetEffectiveSetItemCount() >= 4)
+                // Forge inventory controls own F2 while town is stable.
+                if (IsStableTownContext()) return;
+                if (HasGoD4ForMacro())
                 {
                     // F2 is an explicit control handoff. Do not let a Primary/Shift transaction
                     // started under the previous mode delay emergency Speed movement or the next
@@ -584,6 +587,10 @@ namespace Turbo.Plugins.s7o
 
         public void AfterCollect()
         {
+            // Shared recovery also runs when either companion plugin is disabled.
+            if (Hud != null && Hud.Window != null && Hud.Window.IsForeground)
+                s7o_InputReleaseArbiter.RetryPending(Environment.TickCount);
+
             int now = Environment.TickCount;
             UpdateTownDepartureState();
             // Returning to town definitively ends the current rift-entry context. Re-entering
@@ -781,15 +788,14 @@ namespace Turbo.Plugins.s7o
             if (_temporarilyPaused || (!string.IsNullOrEmpty(_lastStatus) && _lastStatus.StartsWith("paused:", StringComparison.OrdinalIgnoreCase)))
             {
                 _temporarilyPaused = false;
-                _lastStatus = GetEffectiveSetItemCount() >= 4
-                    ? (_highFrequencyMode ? "running fast attack" : "running movement")
-                    : "running strafe only";
+                _lastStatus = _highFrequencyMode ? "running fast attack" : "running movement";
             }
 
             string buildStopReason;
             if (ShouldStopForBuildChange(out buildStopReason))
             {
-                if (IsFastTransitionStartWindowActive(now) && IsCachedSkillValid(now))
+                if (buildStopReason != "GoD 4-piece required"
+                    && IsFastTransitionStartWindowActive(now) && IsCachedSkillValid(now))
                 {
                     _lastStatus = "initializing skills";
                 }
@@ -866,6 +872,11 @@ namespace Turbo.Plugins.s7o
             if (RequireStrafeEquipped && !HasEffectiveStrafe())
                 return;
 
+            // DHStrafe advertises F3 only when this plugin can actually own it.
+            // Shadow Impale has its own optional module and status painter.
+            if (!HasGoD4ForMacro() || !HasEffectivePrimary())
+                return;
+
             string text;
             IFont font;
 
@@ -876,19 +887,14 @@ namespace Turbo.Plugins.s7o
             }
             else if (_running)
             {
-                if (GetEffectiveSetItemCount() >= 4 && _highFrequencyMode)
+                if (_highFrequencyMode)
                 {
                     text = "Combat: " + FireModeHotkey + " = Speed | " + ToggleHotkey + " = Stop";
                     font = _highFont;
                 }
-                else if (GetEffectiveSetItemCount() >= 4)
-                {
-                    text = "Speed: " + FireModeHotkey + " = Combat | " + ToggleHotkey + " = Stop";
-                    font = _runningFont;
-                }
                 else
                 {
-                    text = "Strafe: " + ToggleHotkey + " = Stop";
+                    text = "Speed: " + FireModeHotkey + " = Combat | " + ToggleHotkey + " = Stop";
                     font = _runningFont;
                 }
             }
@@ -1038,6 +1044,14 @@ namespace Turbo.Plugins.s7o
                 && (_currentAreaIsTown || (Hud != null && Hud.Game != null && Hud.Game.IsInTown));
         }
 
+        // Require the live GoD bonus before taking F3 ownership. The cached set count
+        // remains useful for transition display, but can survive a gear swap.
+        private bool HasGoD4ForMacro()
+        {
+            try { return Hud.Game.Me != null && Hud.Game.Me.GetSetItemCount(791249) >= 4; }
+            catch { return false; }
+        }
+
         private bool CanMaintainTownDepartureStrafe(out string reason)
         {
             reason = null;
@@ -1058,6 +1072,12 @@ namespace Turbo.Plugins.s7o
                 reason = "not Demon Hunter";
                 return false;
             }
+            if (!HasGoD4ForMacro())
+            {
+                reason = "GoD 4-piece required";
+                return false;
+            }
+
             if (RequireStrafeEquipped && GetStrafeActionKey() == ActionKey.Unknown)
             {
                 reason = "Strafe not equipped";
@@ -1104,9 +1124,7 @@ namespace Turbo.Plugins.s7o
             _zdhCombatMomentumRefreshDue = false;
             _zdhCombatMomentumRefreshInputDue = false;
             ResetZdhPrimaryTransactionState();
-            _lastStatus = GetEffectiveSetItemCount() >= 4
-                ? (_highFrequencyMode ? "running fast attack" : "running movement")
-                : "running strafe only";
+            _lastStatus = _highFrequencyMode ? "running fast attack" : "running movement";
         }
 
         private bool TryStartMacro()
@@ -1399,6 +1417,12 @@ namespace Turbo.Plugins.s7o
                 return true;
             }
 
+            if (!HasGoD4ForMacro())
+            {
+                reason = "GoD 4-piece required";
+                return true;
+            }
+
             if (RequireStrafeEquipped && !HasEffectiveStrafe())
             {
                 reason = "Strafe not equipped";
@@ -1430,6 +1454,12 @@ namespace Turbo.Plugins.s7o
             if (RequireDemonHunter && (Hud.Game.Me.HeroClassDefinition == null || Hud.Game.Me.HeroClassDefinition.HeroClass != HeroClass.DemonHunter))
             {
                 reason = "not Demon Hunter";
+                return false;
+            }
+
+            if (!HasGoD4ForMacro())
+            {
+                reason = "GoD 4-piece required";
                 return false;
             }
 
@@ -1594,6 +1624,12 @@ namespace Turbo.Plugins.s7o
             if (RequireDemonHunter && (Hud.Game.Me.HeroClassDefinition == null || Hud.Game.Me.HeroClassDefinition.HeroClass != HeroClass.DemonHunter))
             {
                 reason = "not Demon Hunter";
+                return false;
+            }
+
+            if (!HasGoD4ForMacro())
+            {
+                reason = "GoD 4-piece required";
                 return false;
             }
 
@@ -2886,7 +2922,9 @@ namespace Turbo.Plugins.s7o
             input[0].U.Keyboard.Time = 0;
             input[0].U.Keyboard.ExtraInfo = IntPtr.Zero;
 
-            return SendInput(1, input, Marshal.SizeOf(typeof(Input))) == 1;
+            Func<bool> send = () => SendInput(1, input, Marshal.SizeOf(typeof(Input))) == 1;
+            return keyUp ? s7o_InputReleaseArbiter.Up("DHStrafe", virtualKey, send)
+                : s7o_InputReleaseArbiter.Down("DHStrafe", virtualKey, send);
         }
 
         private static bool SendMouse(uint flags)
@@ -2900,7 +2938,11 @@ namespace Turbo.Plugins.s7o
             input[0].U.Mouse.Time = 0;
             input[0].U.Mouse.ExtraInfo = IntPtr.Zero;
 
-            return SendInput(1, input, Marshal.SizeOf(typeof(Input))) == 1;
+            int code = (flags == MouseLeftDown || flags == MouseLeftUp) ? 0x10001 : 0x10002;
+            Func<bool> send = () => SendInput(1, input, Marshal.SizeOf(typeof(Input))) == 1;
+            return (flags == MouseLeftUp || flags == MouseRightUp)
+                ? s7o_InputReleaseArbiter.Up("DHStrafe", code, send)
+                : s7o_InputReleaseArbiter.Down("DHStrafe", code, send);
         }
     }
 
@@ -2976,4 +3018,6 @@ namespace Turbo.Plugins.s7o
             p.ForceStandstillVirtualKey = 0x10;
         }
     }
+
+
 }
