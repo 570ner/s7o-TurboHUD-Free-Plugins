@@ -253,6 +253,8 @@ namespace Turbo.Plugins.s7o
         private bool _zbarbAutoSnapHotkeyCapture = false;
         private bool _zbarbAutoSnapExpanded = false;
         private bool _zdhHelperExpanded = false;
+        private bool _genMonkExpanded = false;
+        private bool _genMonkMeleeHotkeyCapture = false;
         private int _zbarbAutoSnapConeDegrees = 30;
         private const int ZBarbAutoSnapConeMin = 8;
         private const int ZBarbAutoSnapConeMax = 45;
@@ -713,6 +715,33 @@ namespace Turbo.Plugins.s7o
         private int _nextStartupPluginRefreshTick = int.MinValue;
         private string _status = "READY";
         private bool _resourcesReady = false;
+        // Independent XP tracker: the local player's raw cumulative Paragon XP is the
+        // only XP source; rate and elapsed time are owned entirely by this resettable tracker.
+        // Sampling is intentionally low-rate and persistence is batched.
+        private const int XpSampleIntervalMs = 250;
+        private const int XpPersistIntervalMs = 60000;
+        // Retain each source's high-water mark across same-hero transitions. Lower
+        // stale samples cannot manufacture XP when corrected, and combat needs no quiet window.
+        private bool _xpTrackerEnabled = true;
+        private bool _xpTrackerExpanded = false;
+        private bool _xpTrackerPersist = true;
+        private double _xpAllGained, _xpAllSeconds, _xpGrGained, _xpGrSeconds;
+        private double _xpLastAll = -1d, _xpLastGr = -1d;
+        private uint _xpSourceHeroId;
+        private long _xpLastWallTicks;
+        private bool _xpAllSourceSettling = true;
+        private int _xpAllStableSinceTick = int.MinValue;
+        private bool _xpAllContextKnown;
+        private uint _xpAllAreaSno;
+        private bool _xpAllWasInTown;
+        private int _xpNextSampleTick = int.MinValue;
+        private int _xpGrStartTick = int.MinValue;
+        private int _xpGrLastGameTick = int.MinValue;
+        private bool _xpGrComplete;
+        private bool _xpDirty;
+        private int _xpLastSaveTick = int.MinValue;
+        private IBrush _xpPanelBrush, _xpPanelBorder, _xpRowBrush, _xpResetBrush;
+        private IFont _xpLabelFont, _xpValueFont, _xpResetFont;
         private bool _capturingHotkey = false;
         private bool _debugLogging = false;
         private int _lastHotkeyTick = int.MinValue;
@@ -1170,6 +1199,7 @@ namespace Turbo.Plugins.s7o
             BuildLocalizedPowerNameCache();
             ResetTurboHudLogsDirectory();
             LoadSettings();
+            LoadXpTracker();
             RefreshHudLanguageAvailability();
             RefreshHudLanguageSetting();
             ApplyGlobalTtsSettings();
@@ -1212,6 +1242,7 @@ namespace Turbo.Plugins.s7o
         public void AfterCollect()
         {
             int now = Environment.TickCount;
+            SampleXpTracker(now);
 
             ProcessPendingProfileClose();
             ProcessPendingOverlayHideAfterProfileClose();
@@ -1581,6 +1612,31 @@ namespace Turbo.Plugins.s7o
             }
 
 
+            if (_genMonkMeleeHotkeyCapture)
+            {
+                IPlugin monk = FindPluginByTypeName("s7o_GenMonk");
+                ushort vk = 0;
+                bool cancelled = IsCaptureCancelKey(keyEvent.Key);
+                bool valid = !cancelled && TryGetVirtualKeyFromDirectInputKey(keyEvent.Key, out vk);
+                _genMonkMeleeHotkeyCapture = false;
+                try
+                {
+                    if (monk != null)
+                    {
+                        if (valid)
+                        {
+                            monk.GetType().GetMethod("SetMeleeAssistVirtualKey").Invoke(monk, new object[] { vk });
+                        }
+                        monk.GetType().GetMethod("SetMeleeAssistCapture").Invoke(monk, new object[] { false });
+                    }
+                }
+                catch { }
+                _status = cancelled ? "GEN MONK HOTKEY CAPTURE CANCELLED"
+                    : valid ? "GEN MONK HOTKEY SET TO " + CaptureKeyLabel(keyEvent.Key)
+                    : "UNSUPPORTED GEN MONK HOTKEY";
+                return;
+            }
+
             if (_pestilenceRgkJuggerHotkeyCapture)
             {
                 if (IsCaptureCancelKey(keyEvent.Key))
@@ -1898,6 +1954,28 @@ namespace Turbo.Plugins.s7o
             _menuConsumedLeftMouseDown = false;
         }
 
+        // Generic overlay hit-test for synthetic LMB producers. No optional-module dependency.
+        public bool IsAutomationLeftClickBlocked(float x, float y)
+        {
+            if (!Enabled) return false;
+            try
+            {
+                if (_visible) return true; // Give the open manager exclusive left-click interaction.
+                var layout = GetLayout();
+                RectangleF button = layout.Dot;
+                button.Inflate(2f, 2f);
+                if (_showDot && Contains(button, x, y)) return true;
+                if (_autoLootEnabled && GetAutoLootPlugin() != null)
+                {
+                    RectangleF indicator = GetAutoLootIndicatorRect();
+                    indicator.Inflate(5f, 5f); // Matches its real MouseDown hit rectangle.
+                    if (Contains(indicator, x, y)) return true;
+                }
+                return ShowXpTracker() && Contains(GetXpTrackerRect(), x, y);
+            }
+            catch { return true; }
+        }
+
         public bool MouseDown(MouseButtons button)
         {
             if (button != MouseButtons.Left) return false;
@@ -1940,6 +2018,9 @@ namespace Turbo.Plugins.s7o
                 }
                 return ConsumeLeftMouseDown();
             }
+
+            if (TryHandleXpTrackerClick(x, y))
+                return ConsumeLeftMouseDown();
 
             if (TryHandleAutoLootRuntimeIndicatorClick(x, y))
                 return ConsumeLeftMouseDown();
@@ -2112,6 +2193,7 @@ namespace Turbo.Plugins.s7o
             catch { }
 
             try { DrawAutoLootRuntimeIndicator(); } catch { }
+            try { DrawXpTracker(); } catch { }
 
             var layout = GetLayout();
 
@@ -2724,6 +2806,27 @@ namespace Turbo.Plugins.s7o
                 return ok;
             }
 
+            if (action == "sanctifiedimpale:bolasaim")
+            {
+                IPlugin plugin = FindPluginByTypeName("s7o_Impale");
+                try
+                {
+                    if (plugin != null)
+                    {
+                        var setter = plugin.GetType().GetMethod("SetAutoAimBolas");
+                        if (setter != null) setter.Invoke(plugin,
+                            new object[] { !GetOptionalMacroBool(plugin, "AutoAimBolas", true) });
+                    }
+                }
+                catch { }
+                return true;
+            }
+
+            if (action == "toggles:plugin:sanctifiedimpale")
+                return TogglePluginByTypeName("IMPALE", "s7o_Impale");
+
+            if (action == "toggles:plugin:sanctifiedmonk")
+                return TogglePluginByTypeName("GEN MONK", "s7o_GenMonk");
             if (action == "main:plugin:dhstrafe" || action == "toggles:plugin:dhstrafe")
                 return TogglePluginByTypeName("DH STRAFE", "s7o_DHStrafePrimaryPlugin", "s7o_DHStrafe");
 
@@ -3261,6 +3364,13 @@ namespace Turbo.Plugins.s7o
             {
                 _zbarbAutoSnapHotkeyCapture = true;
                 _status = "PRESS Z-BARB AUTOSNAP HOTKEY";
+                return;
+            }
+
+            if (action.Equals("sanctifiedmonk:expand", StringComparison.OrdinalIgnoreCase)
+                || action.StartsWith("sanctifiedmonk:option:", StringComparison.OrdinalIgnoreCase))
+            {
+                HandleGenMonkOptionAction(action);
                 return;
             }
 
@@ -8437,6 +8547,404 @@ namespace Turbo.Plugins.s7o
         // VISUAL TOP-SCREEN OVERLAYS (PaintTopInGame)
         // ════════════════════════════════════════════════════════════════════════
 
+        private string XpTrackerPath()
+        {
+            return Path.Combine(S7oSettingsDirectory(), "s7o_XP_Tracker.ini");
+        }
+
+        private void LoadXpTracker()
+        {
+            if (!_xpTrackerPersist)
+            {
+                ClearXpTrackerPersistence();
+                return;
+            }
+
+            try
+            {
+                string path = XpTrackerPath();
+                if (!File.Exists(path)) return;
+                foreach (string raw in File.ReadAllLines(path))
+                {
+                    int eq = raw.IndexOf('=');
+                    if (eq < 1) continue;
+                    string key = raw.Substring(0, eq).Trim();
+                    double value;
+                    if (!double.TryParse(raw.Substring(eq + 1), NumberStyles.Float,
+                        CultureInfo.InvariantCulture, out value)
+                        || double.IsNaN(value) || double.IsInfinity(value) || value < 0d)
+                        continue;
+                    if (key == "ALL_XP") _xpAllGained = value;
+                    else if (key == "ALL_SECONDS") _xpAllSeconds = value;
+                    else if (key == "GR_XP") _xpGrGained = value;
+                    else if (key == "GR_SECONDS") _xpGrSeconds = value;
+                }
+            }
+            catch { }
+        }
+
+        private void SaveXpTracker(int now)
+        {
+            if (!_xpTrackerPersist) return;
+
+            try
+            {
+                string path = XpTrackerPath();
+                string dir = Path.GetDirectoryName(path);
+                if (!string.IsNullOrWhiteSpace(dir)) Directory.CreateDirectory(dir);
+                File.WriteAllText(path,
+                    "ALL_XP=" + _xpAllGained.ToString("R", CultureInfo.InvariantCulture) + Environment.NewLine
+                    + "ALL_SECONDS=" + _xpAllSeconds.ToString("R", CultureInfo.InvariantCulture) + Environment.NewLine
+                    + "GR_XP=" + _xpGrGained.ToString("R", CultureInfo.InvariantCulture) + Environment.NewLine
+                    + "GR_SECONDS=" + _xpGrSeconds.ToString("R", CultureInfo.InvariantCulture) + Environment.NewLine);
+                _xpDirty = false;
+                _xpLastSaveTick = now;
+            }
+            catch { }
+        }
+
+        private void ClearXpTrackerPersistence()
+        {
+            try
+            {
+                string path = XpTrackerPath();
+                if (File.Exists(path)) File.Delete(path);
+            }
+            catch { }
+        }
+
+        private bool TryGetIndependentExperience(out double xp, out uint heroId)
+        {
+            xp = 0d;
+            heroId = 0u;
+            try
+            {
+                if (Hud == null || Hud.Game == null || Hud.Game.Me == null)
+                    return false;
+
+                heroId = Hud.Game.Me.HeroId;
+                if (heroId == 0u || !Hud.Game.Me.HasValidActor) return false;
+
+                // A zero total on an established Paragon character is an unpublished
+                // source, not an earned-XP baseline. Keep the last valid total instead.
+                long total = Hud.Game.Me.ParagonTotalExp;
+                if (total < 0L || (total == 0L && Hud.Game.Me.CurrentLevelParagon > 0u)) return false;
+                xp = total;
+                return true;
+            }
+            catch { return false; }
+        }
+
+        private uint XpGreaterRiftStep()
+        {
+            try
+            {
+                if (Hud.Game.Quests == null) return 0u;
+                uint fallback = 0u;
+                foreach (var quest in Hud.Game.Quests)
+                {
+                    if (quest == null || quest.SnoQuest == null) continue;
+                    if (quest.SnoQuest.Sno == 382695) return quest.QuestStepId;
+                    if (quest.SnoQuest.Sno == 337492) fallback = quest.QuestStepId;
+                }
+                return fallback;
+            }
+            catch { return 0u; }
+        }
+
+        private static bool XpTickPending(int now, int due)
+        {
+            return due != int.MinValue && unchecked(now - due) < 0;
+        }
+
+        private void SampleXpTracker(int now)
+        {
+            try
+            {
+                if (Hud == null || Hud.Game == null || !Hud.Game.IsInGame
+                    || Hud.Game.IsLoading || Hud.Game.Me == null)
+                {
+                    _xpLastWallTicks = 0L;
+                    // Loading can republish a lower XP total. Do not forget a valid
+                    // same-hero baseline and later count its correction as earnings.
+                    _xpAllSourceSettling = _xpLastAll < 0d;
+                    _xpAllContextKnown = false;
+                    _xpAllAreaSno = 0u;
+                    _xpAllWasInTown = false;
+                    _xpGrLastGameTick = int.MinValue;
+                    _xpNextSampleTick = int.MinValue;
+                    if (_xpDirty && _xpTrackerPersist) SaveXpTracker(now);
+                    return;
+                }
+
+                if (XpTickPending(now, _xpNextSampleTick)) return;
+                _xpNextSampleTick = unchecked(now + XpSampleIntervalMs);
+
+                long wallTicks = DateTime.UtcNow.Ticks;
+                if (_xpLastWallTicks > 0L && wallTicks > _xpLastWallTicks)
+                {
+                    _xpAllSeconds += (wallTicks - _xpLastWallTicks) / (double)TimeSpan.TicksPerSecond;
+                    _xpDirty = true;
+                }
+                _xpLastWallTicks = wallTicks;
+
+                double xp;
+                uint heroId;
+                bool xpValid = TryGetIndependentExperience(out xp, out heroId);
+                if (xpValid)
+                {
+                    bool inTown = false;
+                    uint areaSno = 0u;
+                    try
+                    {
+                        inTown = Hud.Game.Me.IsInTown;
+                        if (Hud.Game.Me.SnoArea != null) areaSno = Hud.Game.Me.SnoArea.Sno;
+                    }
+                    catch { }
+
+                    bool heroChanged = _xpSourceHeroId != heroId;
+                    bool contextChanged = !_xpAllContextKnown
+                        || areaSno != _xpAllAreaSno
+                        || inTown != _xpAllWasInTown;
+
+                    if (heroChanged)
+                    {
+                        // Hero switches are a baseline handoff, never earned XP.
+                        _xpSourceHeroId = heroId;
+                        _xpLastAll = xp;
+                        _xpLastGr = xp;
+                        _xpAllSourceSettling = false;
+                        _xpAllStableSinceTick = now;
+                        _xpGrStartTick = int.MinValue;
+                        _xpGrLastGameTick = int.MinValue;
+                        _xpGrComplete = false;
+                    }
+
+                    if (contextChanged)
+                    {
+                        // Context changes update metadata only. The same hero's cumulative
+                        // XP baseline remains monotonic through floors, town and loading.
+                        _xpAllContextKnown = true;
+                        _xpAllAreaSno = areaSno;
+                        _xpAllWasInTown = inTown;
+                    }
+
+                    if (_xpLastAll >= 0d)
+                    {
+                        if (xp >= _xpLastAll)
+                        {
+                            if (xp > _xpLastAll)
+                            {
+                                _xpAllGained += xp - _xpLastAll;
+                                _xpDirty = true;
+                            }
+                            _xpLastAll = xp;
+                        }
+                        // Ignore lower samples even after a context change. Correcting
+                        // back to the high-water mark is not newly earned experience.
+                        _xpAllSourceSettling = false;
+                    }
+                    else
+                    {
+                        _xpLastAll = xp;
+                        _xpAllSourceSettling = false;
+                        _xpAllStableSinceTick = now;
+                    }
+                }
+
+                bool inGr = Hud.Game.Me.InGreaterRift
+                    && Hud.Game.SpecialArea == SpecialArea.GreaterRift;
+                if (inGr)
+                {
+                    int startTick = Hud.Game.CurrentTimedEventStartTick;
+                    int gameTick = Hud.Game.CurrentGameTick;
+                    if (_xpGrStartTick != startTick
+                        || (_xpGrComplete && Hud.Game.RiftPercentage < 100d)
+                        || (_xpGrLastGameTick != int.MinValue
+                            && gameTick < _xpGrLastGameTick))
+                    {
+                        _xpGrStartTick = startTick;
+                        _xpGrComplete = false;
+                        _xpGrLastGameTick = int.MinValue;
+                    }
+
+                    uint step = XpGreaterRiftStep();
+                    bool dead = step == 5u || step == 10u || step == 34u || step == 46u;
+                    if (!_xpGrComplete)
+                    {
+                        if (_xpGrLastGameTick != int.MinValue && gameTick >= _xpGrLastGameTick)
+                        {
+                            _xpGrSeconds += (gameTick - _xpGrLastGameTick) / 60d;
+                            _xpDirty = true;
+                        }
+
+                        if (xpValid && _xpLastGr >= 0d)
+                        {
+                            if (xp >= _xpLastGr)
+                            {
+                                if (xp > _xpLastGr)
+                                {
+                                    _xpGrGained += xp - _xpLastGr;
+                                    _xpDirty = true;
+                                }
+                                _xpLastGr = xp;
+                            }
+                        }
+                        if (dead) _xpGrComplete = true;
+                    }
+                    _xpGrLastGameTick = _xpGrComplete ? int.MinValue : gameTick;
+                }
+                else
+                {
+                    _xpGrLastGameTick = int.MinValue;
+                }
+
+                if (xpValid && (_xpLastGr < 0d || xp > _xpLastGr)) _xpLastGr = xp;
+
+                if (_xpDirty && _xpTrackerPersist
+                    && (_xpLastSaveTick == int.MinValue
+                        || unchecked(now - _xpLastSaveTick) >= XpPersistIntervalMs))
+                    SaveXpTracker(now);
+            }
+            catch { }
+        }
+
+        private void ResetXpTracker(bool gr)
+        {
+            int now = Environment.TickCount;
+            double xp;
+            uint heroId;
+            bool xpValid = TryGetIndependentExperience(out xp, out heroId);
+            bool sameHero = xpValid && _xpSourceHeroId == heroId;
+            if (xpValid && !sameHero)
+            {
+                // Resetting one counter after a hero switch must also hand off the
+                // other counter's source without charging it another hero's total XP.
+                _xpSourceHeroId = heroId;
+                _xpLastAll = xp;
+                _xpLastGr = xp;
+                _xpGrStartTick = int.MinValue;
+                _xpGrLastGameTick = int.MinValue;
+                _xpGrComplete = false;
+            }
+            if (gr)
+            {
+                _xpGrGained = 0d;
+                _xpGrSeconds = 0d;
+                _xpLastGr = xpValid
+                    ? (sameHero && _xpLastGr > xp ? _xpLastGr : xp)
+                    : _xpLastGr;
+                try
+                {
+                    _xpGrLastGameTick = Hud.Game.Me.InGreaterRift && !_xpGrComplete
+                        ? Hud.Game.CurrentGameTick : int.MinValue;
+                }
+                catch { _xpGrLastGameTick = int.MinValue; }
+            }
+            else
+            {
+                _xpAllGained = 0d;
+                _xpAllSeconds = 0d;
+                _xpLastAll = xpValid
+                    ? (sameHero && _xpLastAll > xp ? _xpLastAll : xp)
+                    : _xpLastAll;
+                _xpAllSourceSettling = _xpLastAll < 0d;
+                _xpAllStableSinceTick = now;
+                _xpAllContextKnown = false;
+                _xpAllAreaSno = 0u;
+                _xpAllWasInTown = false;
+                try
+                {
+                    _xpAllWasInTown = Hud.Game.Me.IsInTown;
+                    if (Hud.Game.Me.SnoArea != null) _xpAllAreaSno = Hud.Game.Me.SnoArea.Sno;
+                    _xpAllContextKnown = true;
+                }
+                catch { }
+                _xpLastWallTicks = DateTime.UtcNow.Ticks;
+            }
+            _xpDirty = true;
+            SaveXpTracker(now);
+        }
+
+        private bool ShowXpTracker()
+        {
+            try
+            {
+                return _xpTrackerEnabled && !_visible && Hud.Window.IsForeground
+                    && Hud.Game.IsInGame && Hud.Inventory != null
+                    && Hud.Inventory.InventoryMainUiElement != null
+                    && Hud.Inventory.InventoryMainUiElement.Visible;
+            }
+            catch { return false; }
+        }
+
+        private RectangleF GetXpTrackerRect()
+        {
+            var size = Hud.Window.Size;
+            float scale = Math.Max(0.78f, Math.Min(1.05f, size.Height / 1080f));
+            float width = 150f * scale;
+            float height = 44f * scale;
+            RectangleF inventory = Hud.Inventory.InventoryMainUiElement.Rectangle;
+
+            // Keep the compact panel in the empty lower-inventory strip, left of the
+            // native bottom-right controls while keeping reset clicks safely on inventory UI.
+            float x = inventory.Right - width - 166f * scale;
+            float y = inventory.Bottom - height - 25f * scale;
+            x = Math.Max(inventory.Left + 6f * scale, x);
+            y = Math.Max(inventory.Top + 6f * scale, y);
+            x = Math.Max(6f, Math.Min(size.Width - width - 6f, x));
+            y = Math.Max(6f, Math.Min(size.Height - height - 6f, y));
+            return new RectangleF(x, y, width, height);
+        }
+
+        private RectangleF XpResetRect(RectangleF panel, bool gr)
+        {
+            float scale = panel.Height / 44f;
+            return new RectangleF(panel.Left + 4f * scale,
+                panel.Top + (gr ? 25f : 5f) * scale, 11f * scale, 11f * scale);
+        }
+
+        private bool TryHandleXpTrackerClick(float x, float y)
+        {
+            if (!ShowXpTracker()) return false;
+            RectangleF panel = GetXpTrackerRect();
+            if (!Contains(panel, x, y)) return false;
+            if (Contains(XpResetRect(panel, false), x, y)) ResetXpTracker(false);
+            else if (Contains(XpResetRect(panel, true), x, y)) ResetXpTracker(true);
+            return true;
+        }
+
+        private void DrawXpTracker()
+        {
+            if (!ShowXpTracker()) return;
+            RectangleF panel = GetXpTrackerRect();
+            float scale = panel.Height / 44f;
+            _xpPanelBrush.DrawRectangle(panel.Left, panel.Top, panel.Width, panel.Height);
+            _xpPanelBorder.DrawRectangle(panel.Left, panel.Top, panel.Width, panel.Height);
+            _xpRowBrush.DrawRectangle(panel.Left + 2f * scale, panel.Top + 22f * scale,
+                panel.Width - 4f * scale, 20f * scale);
+            for (int i = 0; i < 2; i++)
+            {
+                bool gr = i == 1;
+                RectangleF reset = XpResetRect(panel, gr);
+                _xpResetBrush.DrawRectangle(reset.Left, reset.Top, reset.Width, reset.Height);
+                var resetLayout = _xpResetFont.GetTextLayout("X");
+                _xpResetFont.DrawText(resetLayout,
+                    reset.Left + (reset.Width - resetLayout.Metrics.Width) * 0.5f,
+                    reset.Top + (reset.Height - resetLayout.Metrics.Height) * 0.5f);
+                string label = gr ? T("xp.tracker.gr", "XP/HR GR")
+                    : T("xp.tracker.all", "XP/HR");
+                double gained = gr ? _xpGrGained : _xpAllGained;
+                double seconds = gr ? _xpGrSeconds : _xpAllSeconds;
+                double rate = seconds > 0d ? gained * 3600d / seconds : 0d;
+                string value = ValueToString(rate, ValueFormat.ShortNumber);
+                float textY = panel.Top + (gr ? 25f : 5f) * scale;
+                _xpLabelFont.DrawText(label, panel.Left + 22f * scale, textY);
+                var layout = _xpValueFont.GetTextLayout(value);
+                _xpValueFont.DrawText(layout, panel.Right - 5f * scale - layout.Metrics.Width, textY);
+            }
+        }
+
         private void DrawAutoLootRuntimeIndicator()
         {
             if (!_autoLootEnabled || GetAutoLootPlugin() == null)
@@ -9236,6 +9744,16 @@ namespace Turbo.Plugins.s7o
             if (cmd == "elitehp") { HandleEliteHpVisualAction(p); return; }
             if (cmd == "simhp") { HandleSimHpVisualAction(p); return; }
             if (cmd == "playercoe") { HandlePlayerCoeVisualAction(p); return; }
+            if (cmd == "xppersist")
+            {
+                _xpTrackerPersist = !_xpTrackerPersist;
+                _xpDirty = true;
+                if (_xpTrackerPersist) SaveXpTracker(Environment.TickCount);
+                else ClearXpTrackerPersistence();
+                _status = _xpTrackerPersist ? "XP TRACKER PERSISTENCE ON" : "XP TRACKER PERSISTENCE OFF";
+                SaveSettings();
+                return;
+            }
             if (cmd == "toggle") { ToggleVisualFeature(feature); ApplyTipsHelperSettingsToPlugin(); ApplyMinimapCursorSettingsToPlugin(); SaveSettings(); return; }
             if (cmd == "expand") { ToggleVisualExpanded(feature); SaveSettings(); return; }
             if (cmd == "tipstoggle") { ToggleTipsHelperOption(feature); ApplyTipsHelperSettingsToPlugin(); ApplyMinimapCursorSettingsToPlugin(); SaveSettings(); return; }
@@ -9390,6 +9908,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
         private void ToggleVisualFeature(string feature)
         {
+            if (feature == "xptracker")
+            {
+                _xpTrackerEnabled = !_xpTrackerEnabled;
+                _status = _xpTrackerEnabled ? "XP TRACKER ON" : "XP TRACKER OFF";
+                return;
+            }
             if (feature == "playercoe")
             {
                 if (GetPartyInspectorPlugin() == null)
@@ -9576,6 +10100,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             if (feature == "hudlanguage")
             {
                 _hudLanguageExpanded = !_hudLanguageExpanded;
+                return;
+            }
+
+            if (feature == "xptracker")
+            {
+                _xpTrackerExpanded = !_xpTrackerExpanded;
                 return;
             }
 
@@ -10173,7 +10703,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
                 private static bool IsCustomVisualFeature(string feature)
         {
-            return feature == "hudlanguage" || feature == "playercoe" || feature == "tipshelper" || feature == "dangeraffixes" || feature == "elitehp" || feature == "elitecircles" || feature == "simhp" || feature == "menubutton" || feature == "partyinspector";
+            return feature == "hudlanguage" || feature == "xptracker" || feature == "playercoe" || feature == "tipshelper" || feature == "dangeraffixes" || feature == "elitehp" || feature == "elitecircles" || feature == "simhp" || feature == "menubutton" || feature == "partyinspector";
         }
 
 
@@ -10181,6 +10711,9 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
         {
             if (feature == "hudlanguage")
                 return HudLanguageCodes.Length;
+
+            if (feature == "xptracker")
+                return 1;
 
             if (feature == "playercoe")
                 return 5;
@@ -11307,6 +11840,19 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 return;
             }
 
+            if (feature == "xptracker")
+            {
+                DrawSingleToggleOptionRow(
+                    r,
+                    rowIdx,
+                    T("xp.tracker.persist.title", "Persist Tracker"),
+                    T("xp.tracker.persist.description", "Keep XP counters across HUD restarts; saves are batched to reduce disk writes."),
+                    _xpTrackerPersist,
+                    "visual:xppersist:toggle",
+                    null);
+                return;
+            }
+
             if (feature == "tipshelper")
             {
                 DrawTipsHelperOptionsRow(r, rowIdx, part);
@@ -11508,6 +12054,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             string[] feats =
             {
                 "hudlanguage",
+                "xptracker",
                 "playercoe",
                 "tipshelper",
                 "dangeraffixes",
@@ -11531,6 +12078,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             string[] ftitles =
             {
                 "HUD Language",
+                T("xp.tracker.title", "XP Tracker"),
                 "Player CoE Overlay",
                 "Visual Helpers",
                 "Elite/Dangerous Affix Visuals",
@@ -11554,6 +12102,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             string[] fdescs =
             {
                 "Changes FreeHUD localized text. Restart HUD after selecting a language.",
+                T("xp.tracker.description", "Inventory-only XP rates; reset each counter with its X."),
                 T("hud.indirect.player_coe_party_overlays", "Movable Convention of Elements overlays for party members.") + "\n" +
                     T("hud.indirect.player_coe_adjustments", "Adjust transparency, size, placement, and damage element."),
                 "Ancient/primal alerts, globe dots, and party markers.",
@@ -11578,6 +12127,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             bool[] fenabled =
             {
                 true,
+                _xpTrackerEnabled,
                 IsPlayerCoeOverlayEnabled(),
                 _visTipsHelperEnabled,
                 _visDangerousAffixVisualsEnabled,
@@ -11601,6 +12151,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             bool[] fexpanded =
             {
                 _hudLanguageExpanded,
+                _xpTrackerExpanded,
                 _visPlayerCoeExpanded,
                 _visTipsHelperExpanded,
                 _visDangerousAffixVisualsExpanded,
@@ -11630,6 +12181,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 0,
                 0,
                 0,
+                0,
                 _visGuardianSentryColorIdx,
                 _visValleyOfDeathColorIdx,
                 0,
@@ -11646,6 +12198,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             int[] ftone =
             {
+                0,
                 0,
                 0,
                 0,
@@ -11904,6 +12457,10 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             public bool   IsZBarbSelector;
             public bool   IsZBarbChild;
             public int    ZBarbOptionKind;
+            public bool   IsImpaleAimOption;
+            public bool   IsGenMonkSelector;
+            public bool   IsGenMonkChild;
+            public int    GenMonkOptionKind;
             public bool   IsZdhHelperSelector;
             public bool   IsZdhHelperChild;
             public int    ZdhHelperOptionKind;
@@ -12011,7 +12568,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             if (item.Entry.IsZBarbChild)
                 return ZBarbConeChildSlotH;
 
-            if (item.Entry.IsZdhHelperChild)
+            if (item.Entry.IsZdhHelperChild || item.Entry.IsGenMonkChild || item.Entry.IsImpaleAimOption)
                 return ZdhHelperChildSlotH;
 
             return MacroListSlotH;
@@ -12051,6 +12608,18 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             if (entry.IsZBarbChild)
             {
                 DrawZBarbAutoSnapChildRow(slot, entry, rowIdx);
+                return;
+            }
+
+            if (entry.IsImpaleAimOption)
+            {
+                DrawImpaleAimOptionRow(slot, entry);
+                return;
+            }
+
+            if (entry.IsGenMonkChild)
+            {
+                DrawGenMonkChildRow(slot, entry, rowIdx);
                 return;
             }
 
@@ -12152,7 +12721,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             RectangleF stateR = new RectangleF(rr.Right - stateW - 8f, rr.Top + 6f, stateW, rr.Height - 12f);
             RectangleF expandR = RectangleF.Empty;
-            if (entry.IsPestilenceSelector || entry.IsInariusSelector || entry.IsAutoLootSelector || entry.IsInventoryDropSelector || entry.IsZBarbSelector || entry.IsZdhHelperSelector)
+            if (entry.IsPestilenceSelector || entry.IsInariusSelector || entry.IsAutoLootSelector || entry.IsInventoryDropSelector || entry.IsZBarbSelector || entry.IsZdhHelperSelector || entry.IsGenMonkSelector)
             {
                 expandR = new RectangleF(stateR.Left - 34f - buttonGap, rr.Top + 6f, 34f, rr.Height - 12f);
             }
@@ -12160,14 +12729,14 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             RectangleF hotkeyR = RectangleF.Empty;
             if (entry.HasHotkeyButton)
             {
-                float hotkeyLeft = ((entry.IsPestilenceSelector || entry.IsInariusSelector || entry.IsAutoLootSelector || entry.IsInventoryDropSelector || entry.IsZBarbSelector || entry.IsZdhHelperSelector) && expandR != RectangleF.Empty)
+                float hotkeyLeft = ((entry.IsPestilenceSelector || entry.IsInariusSelector || entry.IsAutoLootSelector || entry.IsInventoryDropSelector || entry.IsZBarbSelector || entry.IsZdhHelperSelector || entry.IsGenMonkSelector) && expandR != RectangleF.Empty)
                     ? (expandR.Left - hotkeyW - hotkeyExpandGap)
                     : (stateR.Left - hotkeyW - buttonGap);
                 hotkeyR = new RectangleF(hotkeyLeft, rr.Top + 6f, hotkeyW, rr.Height - 12f);
             }
 
             float textX = starR.Right + 10f;
-            float textRight = entry.HasHotkeyButton ? hotkeyR.Left - 10f : ((entry.IsPestilenceSelector || entry.IsInariusSelector || entry.IsAutoLootSelector || entry.IsInventoryDropSelector || entry.IsZdhHelperSelector) ? expandR.Left - 10f : stateR.Left - 10f);
+            float textRight = entry.HasHotkeyButton ? hotkeyR.Left - 10f : ((entry.IsPestilenceSelector || entry.IsInariusSelector || entry.IsAutoLootSelector || entry.IsInventoryDropSelector || entry.IsZdhHelperSelector || entry.IsGenMonkSelector) ? expandR.Left - 10f : stateR.Left - 10f);
             float textW = Math.Max(40f, textRight - textX);
 
             string localizedTitle = GetMacroTitleDisplay(entry);
@@ -12254,6 +12823,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 RegisterToggleHit("inventorydrop:expand", expandR);
             }
 
+            if (entry.IsGenMonkSelector)
+            {
+                DrawGlossButton(expandR, _genMonkExpanded ? "-" : "+", _genMonkExpanded, false, false);
+                RegisterToggleHit("sanctifiedmonk:expand", expandR);
+            }
+
             if (entry.IsZdhHelperSelector)
             {
                 DrawGlossButton(expandR, _zdhHelperExpanded ? "-" : "+", _zdhHelperExpanded, false, false);
@@ -12325,7 +12900,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 entry.IsPestilenceSelector || entry.IsPestilenceChild ||
                 entry.IsInariusSelector || entry.IsInariusChild ||
                 entry.IsZBarbSelector || entry.IsZBarbChild ||
-                entry.IsZdhHelperSelector || entry.IsZdhHelperChild)
+                entry.IsZdhHelperSelector || entry.IsZdhHelperChild ||
+                entry.IsGenMonkSelector || entry.IsGenMonkChild || entry.IsImpaleAimOption)
             {
                 return translated;
             }
@@ -12452,6 +13028,10 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     {
                         AddZdhHelperChildItems(items, true);
                     }
+                    if (entry.IsGenMonkSelector && _genMonkExpanded)
+                    {
+                        AddGenMonkChildItems(items, true);
+                    }
 
                     if (entry.IsAutoLootSelector && _autoLootExpanded)
                     {
@@ -12522,6 +13102,10 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     {
                         AddZdhHelperChildItems(items, false);
                     }
+                    if (entry.IsGenMonkSelector && _genMonkExpanded)
+                    {
+                        AddGenMonkChildItems(items, false);
+                    }
 
                     if (entry.IsPestilenceSelector && _pestilenceRgkExpanded)
                     {
@@ -12539,6 +13123,125 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
         }
 
 
+
+        private void AddGenMonkChildItems(List<MacroListItem> items, bool favoriteDisplay)
+        {
+            items.Add(new MacroListItem {
+                Kind = MacroListItemKind.Entry,
+                Entry = new MacroEntry {
+                    Title = T("sanctified.monk.auto_dash", "Auto Dash"),
+                    Description = T("sanctified.monk.auto_dash.description", "While attacking, refresh Radiance around 3.5 seconds or other Dash runes around 5.5 seconds."),
+                    Code = "sanctified_monk_auto_dash", IsGenMonkChild = true,
+                    GenMonkOptionKind = 1 }, IsFavoriteDisplay = favoriteDisplay });
+            items.Add(new MacroListItem {
+                Kind = MacroListItemKind.Entry,
+                Entry = new MacroEntry {
+                    Title = T("sanctified.monk.self_dash", "Self-Dash"),
+                    Description = T("sanctified.monk.self_dash.description", "Manual attacks: Shift uses Self-Dash; unshifted LMB uses the attacked melee target when known. Off: Dash toward your aim. Melee assist always Dashes to its target."),
+                    Code = "sanctified_monk_self_dash", IsGenMonkChild = true,
+                    GenMonkOptionKind = 2 }, IsFavoriteDisplay = favoriteDisplay });
+            IPlugin monk = FindPluginByTypeName("s7o_GenMonk");
+            if (monk != null && monk.GetType().GetField("MeleeAssistEnabled") != null)
+                items.Add(new MacroListItem {
+                    Kind = MacroListItemKind.Entry,
+                    Entry = new MacroEntry {
+                        Title = T("sanctified.monk.melee_assist", "Melee Target Assist"),
+                        Description = T("sanctified.monk.melee_assist.description", "Hold to acquire the nearest eligible elite, then minion, then trash. Keep the target while eligible; switch when it dies, becomes invalid, or a higher priority appears. Dash to the target for approach or refresh; release to stop."),
+                        Code = "sanctified_monk_melee_assist", IsGenMonkChild = true,
+                        GenMonkOptionKind = 3 }, IsFavoriteDisplay = favoriteDisplay });
+        }
+
+        private void DrawImpaleAimOptionRow(RectangleF r, MacroEntry entry)
+        {
+            _bRow.DrawRectangle(r.Left, r.Top, r.Width, r.Height);
+            IPlugin plugin = FindPluginByTypeName("s7o_Impale");
+            bool on = GetOptionalMacroBool(plugin, "AutoAimBolas", true);
+            RectangleF state = new RectangleF(r.Right - 128f, r.Top + 9f, 120f, r.Height - 18f);
+            float x = r.Left + 44f;
+            float width = Math.Max(40f, state.Left - x - 10f);
+            DrawOutlinedFittedText(_fRowText, _fRowTextShadow, _fSmall, _fSmallShadow,
+                GetMacroTitleDisplay(entry), x, r.Top + 7f, width);
+            string[] lines = WrapTextApprox(GetMacroDescriptionDisplay(entry), ApproxCharsForToggleDescription(width), 2);
+            if (lines.Length > 0) DrawOutlinedTextAtRaw(_fSmall, _fSmallShadow, lines[0], x, r.Top + 28f);
+            if (lines.Length > 1) DrawOutlinedTextAtRaw(_fSmall, _fSmallShadow, lines[1], x, r.Top + 44f);
+            DrawGlossButton(state, on ? "ON" : "OFF", on, false, false);
+            if (plugin != null) RegisterToggleHit("sanctifiedimpale:bolasaim", state);
+        }
+
+        private bool GetOptionalMacroBool(IPlugin plugin, string name, bool fallback)
+        {
+            try { return plugin != null ? (bool)plugin.GetType().GetField(name).GetValue(plugin) : fallback; }
+            catch { return fallback; }
+        }
+
+        private void DrawGenMonkChildRow(RectangleF r, MacroEntry entry, int rowIdx)
+        {
+            (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
+            IPlugin plugin = FindPluginByTypeName("s7o_GenMonk");
+            bool autoDash = GetOptionalMacroBool(plugin, "AutoDash", true);
+            bool selfDash = GetOptionalMacroBool(plugin, "SelfDash", true);
+            bool available = plugin != null && (entry.GenMonkOptionKind != 2 || autoDash);
+            bool on = entry.GenMonkOptionKind == 1 ? autoDash : entry.GenMonkOptionKind == 2
+                ? selfDash : GetOptionalMacroBool(plugin, "MeleeAssistEnabled", true);
+            const float stateW = 120f;
+            RectangleF stateR = new RectangleF(r.Right - stateW - 8f, r.Top + 9f, stateW, r.Height - 18f);
+            float textX = r.Left + 44f;
+            RectangleF hotkeyR = entry.GenMonkOptionKind == 3
+                ? new RectangleF(stateR.Left - 112f, stateR.Top, 104f, stateR.Height) : RectangleF.Empty;
+            float textW = Math.Max(40f, (hotkeyR != RectangleF.Empty ? hotkeyR.Left : stateR.Left) - textX - 10f);
+            DrawOutlinedFittedText(_fRowText, _fRowTextShadow, _fSmall, _fSmallShadow,
+                "• " + GetMacroTitleDisplay(entry), textX, r.Top + 7f, textW);
+            string[] lines = WrapTextApprox(GetMacroDescriptionDisplay(entry),
+                ApproxCharsForToggleDescription(textW), 2);
+            if (lines.Length > 0) DrawOutlinedTextAtRaw(_fSmall, _fSmallShadow, lines[0], textX, r.Top + 28f);
+            if (lines.Length > 1) DrawOutlinedTextAtRaw(_fSmall, _fSmallShadow, lines[1], textX, r.Top + 44f);
+            DrawGlossButton(stateR, plugin == null ? "NOT INSTALLED" : !available ? "LOCKED" : on ? "ON" : "OFF",
+                available && on, false, false);
+            if (available)
+                RegisterToggleHit("sanctifiedmonk:option:" + entry.GenMonkOptionKind.ToString(CultureInfo.InvariantCulture), stateR);
+            if (hotkeyR != RectangleF.Empty)
+            {
+                ushort hotkey = 0x20;
+                try { hotkey = (ushort)plugin.GetType().GetField("MeleeAssistVirtualKey").GetValue(plugin); }
+                catch { }
+                DrawGlossButton(hotkeyR, _genMonkMeleeHotkeyCapture ? "PRESS" : AutoSkillVirtualKeyLabel(hotkey),
+                    _genMonkMeleeHotkeyCapture, false, true);
+                if (available) RegisterToggleHit("sanctifiedmonk:option:hotkey", hotkeyR);
+            }
+        }
+
+        private void HandleGenMonkOptionAction(string action)
+        {
+            if (string.Equals(action, "sanctifiedmonk:expand", StringComparison.OrdinalIgnoreCase))
+            {
+                _genMonkExpanded = !_genMonkExpanded;
+                _status = _genMonkExpanded ? "MONK OPTIONS: EXPANDED" : "MONK OPTIONS: COLLAPSED";
+                SaveSettings();
+                return;
+            }
+            IPlugin plugin = FindPluginByTypeName("s7o_GenMonk");
+            if (plugin == null) return;
+            bool autoDash = GetOptionalMacroBool(plugin, "AutoDash", true);
+            try
+            {
+                if (string.Equals(action, "sanctifiedmonk:option:hotkey", StringComparison.OrdinalIgnoreCase))
+                {
+                    plugin.GetType().GetMethod("SetMeleeAssistCapture").Invoke(plugin, new object[] { true });
+                    _genMonkMeleeHotkeyCapture = true;
+                    _status = "PRESS GEN MONK MELEE ASSIST HOTKEY (ESC to cancel)";
+                    return;
+                }
+                if (string.Equals(action, "sanctifiedmonk:option:1", StringComparison.OrdinalIgnoreCase))
+                    plugin.GetType().GetMethod("SetAutoDash").Invoke(plugin, new object[] { !autoDash });
+                else if (autoDash && string.Equals(action, "sanctifiedmonk:option:2", StringComparison.OrdinalIgnoreCase))
+                    plugin.GetType().GetMethod("SetSelfDash").Invoke(plugin,
+                        new object[] { !GetOptionalMacroBool(plugin, "SelfDash", true) });
+                else if (string.Equals(action, "sanctifiedmonk:option:3", StringComparison.OrdinalIgnoreCase))
+                    plugin.GetType().GetMethod("SetMeleeAssistEnabled").Invoke(plugin,
+                        new object[] { !GetOptionalMacroBool(plugin, "MeleeAssistEnabled", true) });
+            }
+            catch { }
+        }
 
         private void AddZdhHelperChildItems(List<MacroListItem> items, bool favoriteDisplay)
         {
@@ -13368,9 +14071,9 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 // ── Monk ──────────────────────────────────────────────────────
                 new MacroEntry { Title="Epiphany",             Description="Casts Epiphany near elites or high density for spirit regen.",       Code="Monk_Epiphany_Combat",              IsBuff=false },
                 new MacroEntry { Title="Sweeping Wind",        Description="Keeps Sweeping Wind active near enemies.",                           Code="Monk_SweepingWind_KeepUp",          IsBuff=false },
-                new MacroEntry { Title="Mantra of Conviction", Description="Activates Mantra of Conviction near elites or density.",             Code="Monk_MantraConviction_Elite",       IsBuff=false },
-                new MacroEntry { Title="Mantra of Salvation",  Description="Activates Mantra of Salvation when health is low or elites near.",   Code="Monk_MantraSalvation_Defensive",    IsBuff=false },
-                new MacroEntry { Title="Mantra of Healing",    Description="Activates Mantra of Healing when health drops below threshold.",     Code="Monk_MantraHealing_Defensive",      IsBuff=false },
+                new MacroEntry { Title="Mantra of Conviction", Description="Refreshes the 3-second Conviction active only while attacking nearby enemies.",             Code="Monk_MantraConviction_Elite",       IsBuff=false },
+                new MacroEntry { Title="Mantra of Salvation",  Description="Refreshes the 3-second Salvation active near danger without repeating casts.",   Code="Monk_MantraSalvation_Defensive",    IsBuff=false },
+                new MacroEntry { Title="Mantra of Healing",    Description="While attacking or below 75% health, refreshes the 3-second Healing shield and recasts if its strength drops.",     Code="Monk_MantraHealing_Defensive",      IsBuff=false },
                 new MacroEntry { Title="Mystic Ally",          Description="Casts Mystic Ally when spirit is low or elite/boss is nearby.",      Code="Monk_MysticAlly_ResourceOrElite",   IsBuff=false },
                 new MacroEntry { Title="Serenity",             Description="Panic-button invulnerability when health is low or elites close.",   Code="Monk_Serenity_Defensive",           IsBuff=false },
                 // ── Necromancer ───────────────────────────────────────────────
@@ -13422,6 +14125,46 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             int witchDoctorStart = necromancerStart + 8;
             int wizardStart = witchDoctorStart + 7;
 
+            // Optional seasonal rows are discovered by type. Removing either module removes
+            // only its own row/options; HUD Menu has no compile-time seasonal dependency.
+            // Legacy action/code keys are retained so existing favorites/settings still resolve.
+            if (FindPluginByTypeName("s7o_Impale") != null)
+            {
+                allEntries.Insert(monkStart, new MacroEntry {
+                    Title="Sanctified Impale Strafe",
+                    Description="F3 toggles Shadow Strafe; Impale is primed for Sanctified autocasts while F2 switches the generator cadence between Speed and Combat.",
+                    Code="sanctified_impale_plugin", IsPlugin=true,
+                    PluginTypeNames=new[]{"s7o_Impale"},
+                    PluginAction="toggles:plugin:sanctifiedimpale" });
+                monkStart++;
+                necromancerStart++;
+                witchDoctorStart++;
+                wizardStart++;
+                IPlugin optionalImpale = FindPluginByTypeName("s7o_Impale");
+                if (optionalImpale.GetType().GetField("AutoAimBolas") != null)
+                {
+                    allEntries.Insert(monkStart, new MacroEntry {
+                        Title = T("sanctified.impale.auto_aim", "Auto-aim Bolas"),
+                        Description = T("sanctified.impale.auto_aim.description", "Aim Bolas at an on-screen enemy, then restore the cursor before resuming Strafe. Preserves your mouse movement during aiming."),
+                        Code = "sanctified_impale_auto_aim", IsImpaleAimOption = true });
+                    monkStart++;
+                    necromancerStart++;
+                    witchDoctorStart++;
+                    wizardStart++;
+                }
+            }
+            if (FindPluginByTypeName("s7o_GenMonk") != null)
+            {
+                allEntries.Insert(necromancerStart, new MacroEntry {
+                    Title="Sanctified Raiment Monk",
+                    Description="While holding a generator, refreshes other Combination Strike buffs only when two seconds remain. Auto Dash and Self-Dash start on.",
+                    Code="sanctified_monk_plugin", IsPlugin=true, IsGenMonkSelector=true,
+                    PluginTypeNames=new[]{"s7o_GenMonk"},
+                    PluginAction="toggles:plugin:sanctifiedmonk" });
+                necromancerStart++;
+                witchDoctorStart++;
+                wizardStart++;
+            }
             int[] classStarts = { 0, barbarianStart, crusaderStart, demonHunterStart, monkStart, necromancerStart, witchDoctorStart, wizardStart };
             string[] classNames = { "Automation", "Barbarian", "Crusader", "Demon Hunter", "Monk", "Necromancer", "Witch Doctor", "Wizard" };
 
@@ -16111,6 +16854,13 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             _bPrevOrangeDash = Hud.Render.CreateBrush(180, 255, 120, 35, 2.0f);
             _bPrevBlueDash = Hud.Render.CreateBrush(170, 200, 200, 255, 2.0f);
             _bPrevPurpleDash = Hud.Render.CreateBrush(170, 255, 60, 255, 2.0f);
+            _xpPanelBrush = Hud.Render.CreateBrush(218, 18, 16, 19, 0);
+            _xpPanelBorder = Hud.Render.CreateBrush(245, 154, 108, 48, 1.4f);
+            _xpRowBrush = Hud.Render.CreateBrush(105, 72, 45, 25, 0);
+            _xpResetBrush = Hud.Render.CreateBrush(255, 106, 207, 251, 1.2f);
+            _xpLabelFont = Hud.Render.CreateFont("tahoma", 7.1f, 255, 226, 199, 146, false, false, true);
+            _xpValueFont = Hud.Render.CreateFont("tahoma", 7.3f, 255, 106, 207, 251, true, false, true);
+            _xpResetFont = Hud.Render.CreateFont("tahoma", 6.1f, 255, 255, 205, 155, false, false, true);
             _bPrevGrey = Hud.Render.CreateBrush(190, 150, 150, 150, 0);
             _bPrevYellow = Hud.Render.CreateBrush(220, 255, 220, 70, 0);
             _bPlayerCoePreviewCold = Hud.Render.CreateBrush(255, 70, 155, 255, 0);
@@ -18137,6 +18887,9 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 lines.Add("SETTINGS_VERSION=" + SettingsVersion.ToString(CultureInfo.InvariantCulture));
                 lines.Add("VISIBLE=False"); // start closed after HUD restart
                 lines.Add("SHOW_DOT=" + _showDot);
+                lines.Add("XP_TRACKER_ENABLED=" + _xpTrackerEnabled);
+                lines.Add("XP_TRACKER_EXPANDED=" + _xpTrackerExpanded);
+                lines.Add("XP_TRACKER_PERSIST=" + _xpTrackerPersist);
                 lines.Add("EDIT_MODE=" + _editMode);
                 lines.Add("NOCLICK_BACKGROUND=" + _noClickBackground);
                 lines.Add("MENU_HOTKEY=" + MenuHotkey);
@@ -18341,6 +19094,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 lines.Add("OPEN_GR_MAP_IDS=" + string.Join("|", _riftEnabledMapIds.OrderBy(v => v).Select(v => v.ToString(CultureInfo.InvariantCulture)).ToArray()));
                 lines.Add("AUTO_LOOT_EXPANDED=" + _autoLootExpanded.ToString(CultureInfo.InvariantCulture));
                 lines.Add("ZDH_HELPER_EXPANDED=" + _zdhHelperExpanded.ToString(CultureInfo.InvariantCulture));
+                lines.Add("SANCTIFIED_MONK_EXPANDED=" + _genMonkExpanded.ToString(CultureInfo.InvariantCulture));
                 lines.Add("AUTO_LOOT_ENABLED=" + _autoLootEnabled.ToString(CultureInfo.InvariantCulture));
                 lines.Add("AUTO_LOOT_PAUSE_HOTKEY=" + _autoLootPauseHotkey.ToString());
                 lines.Add("AUTO_LOOT_PRIMALS=" + _autoLootPrimals.ToString(CultureInfo.InvariantCulture));
@@ -18688,6 +19442,9 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                             _loadedSettingsVersion = iv;
                     }
                     else if (key == "SHOW_DOT") _showDot = ParseBool(val, _showDot);
+                    else if (key == "XP_TRACKER_ENABLED") _xpTrackerEnabled = ParseBool(val, _xpTrackerEnabled);
+                    else if (key == "XP_TRACKER_EXPANDED") _xpTrackerExpanded = ParseBool(val, _xpTrackerExpanded);
+                    else if (key == "XP_TRACKER_PERSIST") _xpTrackerPersist = ParseBool(val, _xpTrackerPersist);
                     else if (key == "EDIT_MODE") _editMode = ParseBool(val, _editMode);
                     else if (key == "NOCLICK_BACKGROUND") _noClickBackground = ParseBool(val, _noClickBackground);
                     else if (key == "MENU_HOTKEY")
@@ -19041,6 +19798,10 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     else if (string.Equals(key, "ZDH_HELPER_EXPANDED", StringComparison.OrdinalIgnoreCase))
                     {
                         _zdhHelperExpanded = ParseBool(val, _zdhHelperExpanded);
+                    }
+                    else if (string.Equals(key, "SANCTIFIED_MONK_EXPANDED", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _genMonkExpanded = ParseBool(val, _genMonkExpanded);
                     }
                     else if (string.Equals(key, "AUTO_LOOT_ENABLED", StringComparison.OrdinalIgnoreCase))
                     {
