@@ -14,7 +14,8 @@ namespace Turbo.Plugins.s7o
     // and native Armory slot, then restores enabled components after that exact
     // preset is equipped. Persisted native Paragon fingerprints verify settled
     // profiles without opening Paragon. At startup,
-    // the already equipped profile may establish layout trust passively; a passive
+    // a settled matching build restores Autocast once without an Armory click.
+    // The already equipped profile may establish layout trust passively; a passive
     // mismatch never opens Paragon or changes points. Legacy or genuinely different
     // layouts retain the visible apply path and are fingerprinted afterward.
     // Native Armory identity and stable item/socket data remain the final stale-slot
@@ -23,6 +24,7 @@ namespace Turbo.Plugins.s7o
     // Manual AutoSkill masks support both s7o_AutoSkill and LightningMOD AutoSkillPlugin.
     public class s7o_Paragon_Builds : BasePlugin,
         IAfterCollectHandler,
+        INewAreaHandler,
         IInGameTopPainter
     {
         private const string SettingsFileName = "s7o_Paragon_Builds.ini";
@@ -398,6 +400,16 @@ namespace Turbo.Plugins.s7o
         private string _warningText = string.Empty;
         private int _warningUntilTick = NoTick;
         private uint _sessionHeroId;
+        // Startup restore is independent of Paragon trust and exact Armory slot
+        // selection. Floor transitions must never reapply saved manual toggles.
+        private bool _startupAutoCastPending = true;
+        private int _startupAutoCastStartTick = NoTick;
+        private int _startupAutoCastNextTick = NoTick;
+        private int _startupAutoCastStableSinceTick = NoTick;
+        private int _startupAutoCastStableSamples;
+        private string _startupAutoCastLiveKey = string.Empty;
+        private string _startupAutoCastBaseKey = string.Empty;
+        private string _startupAutoCastStableKey = string.Empty;
 
         public s7o_Paragon_Builds()
         {
@@ -411,6 +423,93 @@ namespace Turbo.Plugins.s7o
             LoadSettings();
             RegisterUiElements();
             BuildResources();
+        }
+
+        public void OnNewArea(bool newGame, ISnoArea area)
+        {
+            if (newGame) ResetStartupAutoCastRestore();
+        }
+
+        private void ResetStartupAutoCastRestore()
+        {
+            _startupAutoCastPending = true;
+            _startupAutoCastStartTick = NoTick;
+            _startupAutoCastNextTick = NoTick;
+            _startupAutoCastStableSinceTick = NoTick;
+            _startupAutoCastStableSamples = 0;
+            _startupAutoCastLiveKey = string.Empty;
+            _startupAutoCastBaseKey = string.Empty;
+            _startupAutoCastStableKey = string.Empty;
+        }
+
+        private void ProcessStartupAutoCastRestore(int now)
+        {
+            if (!_startupAutoCastPending) return;
+            if (!AutoApplyOnArmoryEquip || !IsCurrentHeroAutoCastEnabled)
+            {
+                _startupAutoCastPending = false;
+                return;
+            }
+            if (_startupAutoCastNextTick != NoTick &&
+                unchecked(now - _startupAutoCastNextTick) < 0) return;
+            _startupAutoCastNextTick = unchecked(now + BuildMetadataRefreshMs);
+
+            if (_equipPending || _applyState != ApplyState.Idle || _scanRunning ||
+                _profileSaveAfterScan || _nativeTaskKind != NativeTaskKind.None ||
+                IsArmoryOpen() || IsParagonOpen())
+            {
+                _startupAutoCastStableSamples = 0;
+                _startupAutoCastStableSinceTick = NoTick;
+                return;
+            }
+
+            // Bounded metadata checks only; no UI/input work or persistent writes.
+            // An explicit Armory equip supersedes startup, even if it later fails.
+            if (_startupAutoCastStartTick == NoTick) _startupAutoCastStartTick = now;
+            if (unchecked(now - _startupAutoCastStartTick) >= EquipDetectTimeoutMs)
+            {
+                _startupAutoCastPending = false;
+                return;
+            }
+
+            string liveKey = GetLiveBuildKey();
+            string baseKey = GetLiveArmoryKey();
+            string stableKey = GetStableBuildKey();
+            if (string.IsNullOrEmpty(liveKey) || string.IsNullOrEmpty(baseKey) ||
+                string.IsNullOrEmpty(stableKey))
+            {
+                _startupAutoCastStableSamples = 0;
+                _startupAutoCastStableSinceTick = NoTick;
+                return;
+            }
+            // Compare raw snapshots for settling; quality equivalence is only
+            // for saved-profile matching, never for skipping a live transition.
+            if (_startupAutoCastStableSinceTick == NoTick ||
+                !string.Equals(liveKey, _startupAutoCastLiveKey, StringComparison.Ordinal) ||
+                !string.Equals(baseKey, _startupAutoCastBaseKey, StringComparison.Ordinal) ||
+                !string.Equals(stableKey, _startupAutoCastStableKey, StringComparison.Ordinal))
+            {
+                _startupAutoCastLiveKey = liveKey;
+                _startupAutoCastBaseKey = baseKey;
+                _startupAutoCastStableKey = stableKey;
+                _startupAutoCastStableSinceTick = now;
+                _startupAutoCastStableSamples = 1;
+                return;
+            }
+            _startupAutoCastStableSamples++;
+            if (_startupAutoCastStableSamples < BuildStableSamples ||
+                unchecked(now - _startupAutoCastStableSinceTick) < ProfileMatchStableMs) return;
+
+            _currentStableBuildKey = stableKey;
+            int ignoredIndex;
+            ParagonProfile profile = FindIndexedProfileForCurrentBuild(out ignoredIndex, true);
+            if (profile != null && profile.HeroId == CurrentHeroId &&
+                profile.HasAutoCastProfile && TryApplyAutoCastSetup(profile))
+            {
+                // Completion is per game/hero, not per frame or equipment edit.
+                // User changes after restore remain under the user's control.
+                _startupAutoCastPending = false;
+            }
         }
 
         private void ApplyCurrentHeroParagonEnabledState(bool enabled)
@@ -487,6 +586,7 @@ namespace Turbo.Plugins.s7o
                 IsCurrentHeroParagonEnabled;
             bool autoCastEnabled =
                 IsCurrentHeroAutoCastEnabled;
+            if (!autoCastEnabled) _startupAutoCastPending = false;
 
             if (leftDown != _leftDownLast)
             {
@@ -631,6 +731,7 @@ namespace Turbo.Plugins.s7o
                 _nextBuildMetadataRefreshTick = unchecked(
                     now + BuildMetadataRefreshMs);
             }
+            ProcessStartupAutoCastRestore(now);
         }
 
         public void PaintTopInGame(ClipState clipState)
@@ -962,12 +1063,10 @@ namespace Turbo.Plugins.s7o
             string stableKey = GetStableBuildKey();
 
             if (CurrentHeroId != _profileSaveHeroId ||
-                !string.Equals(liveKey, _profileSaveLiveKey,
-                    StringComparison.Ordinal) ||
+                !BuildKeysEqual(liveKey, _profileSaveLiveKey) ||
                 !string.Equals(baseKey, _profileSaveBaseKey,
                     StringComparison.Ordinal) ||
-                !string.Equals(stableKey, _profileSaveStableKey,
-                    StringComparison.Ordinal) ||
+                !BuildKeysEqual(stableKey, _profileSaveStableKey) ||
                 _activeArmoryIndex != _profileSaveArmoryIndex ||
                 !ArmorySlotMatchesLiveBuild(
                     _profileSaveArmoryIndex, baseKey))
@@ -991,12 +1090,10 @@ namespace Turbo.Plugins.s7o
                     _profileSaveHeroId,
                     _profileSaveArmoryIndex);
 
+            InvalidateGemQualityFingerprint(existing, stableKey);
             bool preserveExisting =
                 existing != null &&
-                string.Equals(
-                    existing.StableBuildKey,
-                    stableKey,
-                    StringComparison.Ordinal);
+                BuildKeysEqual(existing.StableBuildKey, stableKey);
 
             ParagonProfile profile = preserveExisting
                 ? CloneProfile(existing)
@@ -1104,6 +1201,7 @@ namespace Turbo.Plugins.s7o
 
         private void ArmoryEquipClicked(int now)
         {
+            _startupAutoCastPending = false; // Explicit selection owns restoration.
             if (!IsCurrentHeroParagonEnabled &&
                 !IsCurrentHeroAutoCastEnabled)
             {
@@ -1172,10 +1270,7 @@ namespace Turbo.Plugins.s7o
 
                 if (current != null &&
                     !string.IsNullOrEmpty(stableKey) &&
-                    string.Equals(
-                        current.StableBuildKey,
-                        stableKey,
-                        StringComparison.Ordinal))
+                    BuildKeysEqual(current.StableBuildKey, stableKey))
                 {
                     if (IsCurrentHeroParagonEnabled &&
                         current.HasParagonProfile)
@@ -1327,10 +1422,7 @@ namespace Turbo.Plugins.s7o
             bool expectedBuildMismatch =
                 profile != null &&
                 !string.IsNullOrEmpty(profile.StableBuildKey) &&
-                !string.Equals(
-                    profile.StableBuildKey,
-                    stableKey,
-                    StringComparison.Ordinal);
+                !BuildKeysEqual(profile.StableBuildKey, stableKey);
 
             int requiredStableMs =
                 expectedBuildMismatch
@@ -1443,10 +1535,7 @@ namespace Turbo.Plugins.s7o
                 GetStableBuildKey();
 
             if (string.IsNullOrEmpty(stableKey) ||
-                !string.Equals(
-                    profile.StableBuildKey,
-                    stableKey,
-                    StringComparison.Ordinal))
+                !BuildKeysEqual(profile.StableBuildKey, stableKey))
             {
                 ShowWarning(
                     "The equipped build changed before Paragon " +
@@ -2872,6 +2961,76 @@ namespace Turbo.Plugins.s7o
             }
         }
 
+        private readonly Dictionary<uint, string> _ordinaryGemFamilies = new Dictionary<uint, string>();
+
+        private string OrdinaryGemFamily(uint sno)
+        {
+            string family;
+            if (_ordinaryGemFamilies.TryGetValue(sno, out family)) return family;
+            family = sno.ToString(CultureInfo.InvariantCulture);
+            try
+            {
+                var item = Hud.Inventory.GetSnoItem(sno);
+                string code = item != null && item.Kind == ItemKind.gem ? item.Code : null;
+                if (!string.IsNullOrEmpty(code))
+                {
+                    if (code.StartsWith("x1_", StringComparison.OrdinalIgnoreCase)) code = code.Substring(3);
+                    int separator = code.LastIndexOf('_'), quality;
+                    if (separator > 0 && int.TryParse(code.Substring(separator + 1), out quality))
+                    {
+                        string color = code.Substring(0, separator).ToLowerInvariant();
+                        if (color == "ruby" || color == "emerald" || color == "amethyst"
+                            || color == "topaz" || color == "diamond") family = "gem:" + color;
+                    }
+                }
+            }
+            catch { } // Unknown/legendary gems keep their exact SNO identity.
+            if (_ordinaryGemFamilies.Count >= 256) _ordinaryGemFamilies.Clear();
+            _ordinaryGemFamilies[sno] = family;
+            return family;
+        }
+
+        private string NormalizeGemBuildKey(string key)
+        {
+            if (string.IsNullOrEmpty(key)) return key;
+            int marker = key.IndexOf(";sockets=", StringComparison.Ordinal);
+            if (marker < 0) return key;
+            int start = marker + 9, end = key.IndexOf(';', start);
+            if (end < 0) end = key.Length;
+            string[] slots = key.Substring(start, end - start).Split('|');
+            for (int slot = 0; slot < slots.Length; slot++)
+            {
+                string[] gems = slots[slot].Split(',');
+                for (int gem = 0; gem < gems.Length; gem++)
+                {
+                    uint sno;
+                    if (uint.TryParse(gems[gem], NumberStyles.Integer, CultureInfo.InvariantCulture, out sno)
+                        && sno != 0u) gems[gem] = OrdinaryGemFamily(sno);
+                }
+                slots[slot] = string.Join(",", gems);
+            }
+            return key.Substring(0, start) + string.Join("|", slots) + key.Substring(end);
+        }
+
+        private bool BuildKeysEqual(string left, string right)
+        {
+            if (string.Equals(left, right, StringComparison.Ordinal)) return true;
+            return left != null && right != null && string.Equals(
+                NormalizeGemBuildKey(left), NormalizeGemBuildKey(right), StringComparison.Ordinal);
+        }
+
+        private void InvalidateGemQualityFingerprint(ParagonProfile profile, string stableKey)
+        {
+            if (profile == null || profile.HeroId != CurrentHeroId || string.IsNullOrEmpty(profile.StableBuildKey)
+                || string.IsNullOrEmpty(stableKey) || string.Equals(profile.StableBuildKey, stableKey, StringComparison.Ordinal)
+                || !BuildKeysEqual(profile.StableBuildKey, stableKey)) return;
+            // Only quality-equivalent sockets changed. Keep saved rows/autocast, but
+            // recheck allocation through the existing UI path before relearning stats.
+            profile.NativeFingerprint = null;
+            profile.StableBuildKey = stableKey;
+            ResetEquipNativeStability();
+        }
+
         private static void AppendSocketSignature(StringBuilder sb, IItem item)
         {
             if (item == null || item.ItemsInSocket == null || item.ItemsInSocket.Length == 0)
@@ -2889,6 +3048,31 @@ namespace Turbo.Plugins.s7o
                     ? socket.SnoItem.Sno
                     : 0u);
             }
+        }
+
+        // Native Armory may omit empty slots. Reinsert live holes ONLY after every
+        // occupied AnnId matches in order; full arrays and mismatches stay unchanged.
+        // This shared key serves Equip settlement and Save; never bypass slot ambiguity.
+        private void NormalizeCompactArmoryItems(uint[] items, int count)
+        {
+            if (count <= 0 || count >= items.Length) return;
+            for (int i = 0; i < count; i++)
+                if (items[i] == 0u || items[i] == uint.MaxValue) return;
+            IItem[] equipped = GetEquippedItems();
+            if (equipped == null || equipped.Length != items.Length) return;
+            uint[] normalized = new uint[items.Length];
+            int occupied = 0;
+            for (int slot = 0; slot < equipped.Length; slot++)
+            {
+                IItem item = equipped[slot];
+                if (item == null) continue;
+                uint id = item.AnnId;
+                if (id == 0u || id == uint.MaxValue
+                    || occupied >= count || items[occupied] != id) return;
+                normalized[slot] = id;
+                occupied++;
+            }
+            if (occupied == count) Array.Copy(normalized, items, items.Length);
         }
 
         private string GetArmoryBuildKey(IPlayerArmorySet set)
@@ -2916,6 +3100,7 @@ namespace Turbo.Plugins.s7o
                         items[index++] = annId;
                     }
                 }
+                NormalizeCompactArmoryItems(items, index);
                 AppendUIntArray(sb, items);
 
                 sb.Append(";cube=")
@@ -2989,10 +3174,7 @@ namespace Turbo.Plugins.s7o
                 if (profile == null ||
                     profile.HeroId != CurrentHeroId ||
                     profile.ArmoryIndex >= 0 ||
-                    !string.Equals(
-                        profile.LiveSignature,
-                        liveSignature,
-                        StringComparison.Ordinal))
+                    !BuildKeysEqual(profile.LiveSignature, liveSignature))
                 {
                     continue;
                 }
@@ -3022,20 +3204,14 @@ namespace Turbo.Plugins.s7o
                             indexed.StableBuildKey) &&
                         !string.IsNullOrEmpty(
                             _currentStableBuildKey) &&
-                        string.Equals(
-                            indexed.StableBuildKey,
-                            _currentStableBuildKey,
-                            StringComparison.Ordinal))
+                        BuildKeysEqual(indexed.StableBuildKey, _currentStableBuildKey))
                     {
                         return indexed;
                     }
 
                     if (string.IsNullOrEmpty(
                             indexed.StableBuildKey) &&
-                        string.Equals(
-                            indexed.LiveSignature,
-                            liveSignature,
-                            StringComparison.Ordinal))
+                        BuildKeysEqual(indexed.LiveSignature, liveSignature))
                     {
                         return indexed;
                     }
@@ -3100,7 +3276,7 @@ namespace Turbo.Plugins.s7o
         }
 
         private ParagonProfile FindIndexedProfileForCurrentBuild(
-            out int uniqueArmoryIndex)
+            out int uniqueArmoryIndex, bool autoCastOnly = false)
         {
             uniqueArmoryIndex = -1;
 
@@ -3150,16 +3326,18 @@ namespace Turbo.Plugins.s7o
 
                 profiledNativeSlotCount++;
 
-                if (!string.Equals(
-                        profile.StableBuildKey,
-                        stableKey,
-                        StringComparison.Ordinal))
+                if (!BuildKeysEqual(profile.StableBuildKey, stableKey))
                 {
                     continue;
                 }
 
-                string layout =
-                    BuildEnabledSetupKey(profile);
+                // Startup Autocast may agree across siblings whose Paragon
+                // layouts differ. This never establishes exact Save-slot identity.
+                string layout = autoCastOnly
+                    ? (profile.HasAutoCastProfile
+                        ? NormalizeAutoCastMask(profile.AutoCastMask).ToString(CultureInfo.InvariantCulture)
+                        : string.Empty)
+                    : BuildEnabledSetupKey(profile);
 
                 if (representative == null)
                 {
@@ -3325,10 +3503,7 @@ namespace Turbo.Plugins.s7o
 
                 bool matchingLegacy =
                     existing.ArmoryIndex < 0 &&
-                    string.Equals(
-                        existing.LiveSignature,
-                        profile.LiveSignature,
-                        StringComparison.Ordinal);
+                    BuildKeysEqual(existing.LiveSignature, profile.LiveSignature);
 
                 if (sameSlot || matchingLegacy)
                     remove.Add(pair.Key);
@@ -3396,6 +3571,7 @@ namespace Turbo.Plugins.s7o
             string stableKey,
             int now)
         {
+            InvalidateGemQualityFingerprint(profile, stableKey);
             if (profile == null ||
                 !profile.HasParagonProfile ||
                 profile.NativeFingerprint == null ||
@@ -3404,10 +3580,7 @@ namespace Turbo.Plugins.s7o
                     profile.NativeFingerprint,
                     false) ||
                 string.IsNullOrEmpty(stableKey) ||
-                !string.Equals(
-                    profile.StableBuildKey,
-                    stableKey,
-                    StringComparison.Ordinal) ||
+                !BuildKeysEqual(profile.StableBuildKey, stableKey) ||
                 (_equipNativeStateObserved &&
                  !_equipNativeAccepted))
             {
@@ -3873,6 +4046,7 @@ namespace Turbo.Plugins.s7o
             ParagonProfile profile,
             int now)
         {
+            InvalidateGemQualityFingerprint(profile, GetStableBuildKey());
             if (profile == null ||
                 !profile.HasParagonProfile ||
                 profile.NativeFingerprint == null ||
@@ -3971,10 +4145,7 @@ namespace Turbo.Plugins.s7o
                 GetStableBuildKey();
 
             if (string.IsNullOrEmpty(stableKey) ||
-                !string.Equals(
-                    profile.StableBuildKey,
-                    stableKey,
-                    StringComparison.Ordinal))
+                !BuildKeysEqual(profile.StableBuildKey, stableKey))
             {
                 return;
             }
@@ -4246,11 +4417,11 @@ namespace Turbo.Plugins.s7o
             string stableKey =
                 GetStableBuildKey();
 
-            return !string.IsNullOrEmpty(stableKey) &&
-                string.Equals(
-                    profile.StableBuildKey,
-                    stableKey,
-                    StringComparison.Ordinal);
+            bool qualityChanged = !string.Equals(profile.StableBuildKey, stableKey, StringComparison.Ordinal)
+                && BuildKeysEqual(profile.StableBuildKey, stableKey);
+            InvalidateGemQualityFingerprint(profile, stableKey);
+            return !qualityChanged && !string.IsNullOrEmpty(stableKey) &&
+                BuildKeysEqual(profile.StableBuildKey, stableKey);
         }
 
         private void CommitNativeFingerprint(
@@ -5894,6 +6065,7 @@ namespace Turbo.Plugins.s7o
             string stableKey,
             out string message)
         {
+            InvalidateGemQualityFingerprint(profile, stableKey);
             message = string.Empty;
 
             if (profile == null ||
@@ -5926,10 +6098,7 @@ namespace Turbo.Plugins.s7o
                 return false;
             }
 
-            if (!string.Equals(
-                    profile.StableBuildKey,
-                    stableKey,
-                    StringComparison.Ordinal))
+            if (!BuildKeysEqual(profile.StableBuildKey, stableKey))
             {
                 message =
                     "This Armory slot now contains a different build. " +
@@ -7445,6 +7614,7 @@ namespace Turbo.Plugins.s7o
 
             if (_sessionHeroId == 0u)
             {
+                ResetStartupAutoCastRestore();
                 _sessionHeroId = heroId;
                 RestoreKnownLayoutMirror(heroId);
                 return;
@@ -7452,6 +7622,7 @@ namespace Turbo.Plugins.s7o
 
             if (_sessionHeroId != heroId)
             {
+                ResetStartupAutoCastRestore();
                 InvalidateSessionState(
                     now,
                     "hero changed",
