@@ -4,6 +4,7 @@ using System.Drawing;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using SharpDX.DirectInput;
+using MouseButtons = System.Windows.Forms.MouseButtons;
 using Turbo.Plugins.Default;
 
 namespace Turbo.Plugins.s7o
@@ -11,10 +12,11 @@ namespace Turbo.Plugins.s7o
     // v1.5.0: acknowledge cursor restore without treating a stale native sample as failure.
     // Optional Sanctified Shadow Strafe module.
     // Sanctified Strafe auto-casts the last non-channeled Hatred spender, so Impale
-    // is only primed/re-primed while the manual cadence belongs to a Hatred generator.
+    // is primed/re-primed before Strafe. Both modes refresh Focus with the generator;
+    // Combat additionally directs manual Impales through the same owned aim/restore job.
     // F3 ownership is Shadow 6-piece only and remains independent of DHStrafe state.
-    // Speed uses a sparse generator cadence for travel; Combat uses the fast GoD-style generator cadence.
-    public class s7o_Impale : BasePlugin, IKeyEventHandler, IAfterCollectHandler, IInGameTopPainter, INewAreaHandler, IS7oAutoLootInputHandoff
+    // Speed refreshes Focus near expiry; Combat adds targeted Impale at a 500 ms cadence.
+    public class s7o_Impale : BasePlugin, IKeyEventHandler, IAfterCollectHandler, IInGameTopPainter, INewAreaHandler, IMouseClickHandler, IS7oAutoLootInputHandoff
     {
         private const uint ShadowSetSno = 916931u;
         private const uint GoDSetSno = 791249u;
@@ -23,6 +25,8 @@ namespace Turbo.Plugins.s7o
         private const uint RapidFireSno = 131192u;
         private const uint BolasSno = 77552u;
         private const uint GrenadesSno = 86610u;
+        private const uint FocusBuffSno = 359583u;
+        private const int FocusBuffIconIndex = 1; // Same index as PlayerBottomBuffListPlugin.
         private const string Owner = "Impale";
         private const int PrimeVerifyMs = 450;
         private const int PrimeRetryMs = 250;
@@ -32,14 +36,15 @@ namespace Turbo.Plugins.s7o
         public Key ModeHotkey = Key.F2;
         public bool RequireShadowSet = true;
         public bool AutoAimBolas = true; // Optional queued aim/cast/restore; other generators are unchanged.
-        public int SpeedGeneratorIntervalMs = 2000;
-        public int CombatGeneratorIntervalMs = 140;
+        public int SpeedGeneratorIntervalMs = 500; // Retry/fallback cadence; active Focus suppresses unnecessary pulses.
+        public int CombatGeneratorIntervalMs = 500; // Retained public setting: now the Combat Impale interval.
         public int SkillPulseHoldMs = 8;
         public int AutoLootPauseMs = 300; // Same bounded pickup pause as DHStrafe.
         public bool PauseNearUnoperatedPylon = true;
-        public float PylonPauseRange = 15f;
+        public float PylonPauseRange = 8f;
         public bool PauseNearPortal = true;
-        public float PortalPauseRange = 15f;
+        public float PortalPauseRange = 8f;
+        public float InteractableHoverRange = 8f;
         public int PortalArrivalEscapeMinMs = 2000; // Arrival arming window, not a movement delay.
         public bool ShowStatusText = true;
         public float StatusTextCenterXFrac = 0.50f;
@@ -56,15 +61,21 @@ namespace Turbo.Plugins.s7o
         private int _nextPrimeTick;
         private int _primeAttempts;
         private int _interactionPauseUntilTick;
+        private bool _manualInteractionPending, _manualInteractionSawAnimation;
+        private int _manualInteractionApproachUntilTick;
+        private int _manualInteractionStartGameTick;
+        private AcdAnimationState _manualInteractionPreAnimation;
         private int _autoLootPauseUntilTick;
         private int _autoLootHandoffSerial;
         private IUiElement _chatEditLine;
         private IUiElement _urshiGemPane;
+        private IUiElement _paragonPane;
         private ActionKey _heldStrafe = ActionKey.Unknown;
         private ActionKey _pulse = ActionKey.Unknown;
         private ushort _ownedStandstill;
         private int _pulseReleaseTick;
-        private int _nextGeneratorTick;
+        private int _nextGeneratorTick, _nextCombatImpaleTick;
+        private uint _combatTargetAcd;
         private string _settingsPath;
         private s7o_HUD_MENU _hudMenu;
         private readonly List<IUiElement> _leftClickUiElements = new List<IUiElement>();
@@ -92,6 +103,11 @@ namespace Turbo.Plugins.s7o
             new RectangleF(1754f, 961f, 157f, 83f),
             new RectangleF(0f, 0f, 245f, 155f) // Pestilence's follower/portrait-side guard.
         };
+        private enum AimedSkillJob { Bolas, CombatImpale }
+        private AimedSkillJob _aimedSkillJob;
+        private ActionKey _aimedSkillKey;
+        private uint _aimedSkillSno;
+        // Existing _bolas cursor fields/stages form one shared transaction for both jobs.
         private enum BolasStage { Idle, Lease, Aim, Hold, PostInputSettle, Restore, RestoreSettle }
         // Input/settle defaults copied from ZDH Helper.
         private const int BolasPreviewMs = 31, BolasHoldMs = 35, BolasPostInputMs = 24;
@@ -99,7 +115,6 @@ namespace Turbo.Plugins.s7o
         private const int BolasPreInputLimitMs = 200, BolasPostInputLimitMs = 320;
         private BolasStage _bolasAimStage;
         private int _bolasAimStartedTick, _bolasDueTick, _bolasInputTick, _bolasResumeTick;
-        private int _bolasTransactionSerial;
         private uint _bolasAimActor;
         // All cursor fields are desktop pixels, including negative monitor origins.
         private int _bolasSavedX, _bolasSavedY, _bolasAimX, _bolasAimY;
@@ -111,6 +126,7 @@ namespace Turbo.Plugins.s7o
         private int _bolasRestoreStartedTick = int.MinValue, _bolasRestoreWriteGameTick = int.MinValue;
         private bool _bolasRestoreDesktopConfirmed, _bolasRestoreAwaitingNative;
         private AnimSnoEnum _bolasPreInputAnimation;
+        private int _aimedPreAnimationStartTick, _aimedInputGameTick;
         private string _bolasEndReason = "idle";
         private static readonly ActionKey[] MouseUiActions = {
             ActionKey.LeftSkill, ActionKey.RightSkill, ActionKey.Skill1, ActionKey.Skill2,
@@ -180,6 +196,8 @@ namespace Turbo.Plugins.s7o
                 "Root.NormalLayer.chatentry_dialog_backgroundScreen.chatentry_content.chat_editline", null, null);
             _urshiGemPane = Hud.Render.RegisterUiElement(
                 "Root.NormalLayer.vendor_dialog_mainPage.riftReward_dialog.LayoutRoot.gemUpgradePane", null, null);
+            _paragonPane = Hud.Render.RegisterUiElement(
+                "Root.NormalLayer.Paragon_main.LayoutRoot.ParagonPointSelect", null, null);
             _toggleEvent = Hud.Input.CreateKeyEvent(true, ToggleHotkey, false, false, false);
             _modeEvent = Hud.Input.CreateKeyEvent(true, ModeHotkey, false, false, false);
             _statusFont = Hud.Render.CreateFont("tahoma", 8, 255, 220, 190, 80, true, false, 255, 0, 0, 0, true);
@@ -189,6 +207,7 @@ namespace Turbo.Plugins.s7o
 
         public void OnNewArea(bool newGame, ISnoArea area)
         {
+            _manualInteractionPending = false;
             if (newGame || (area != null && area.IsTown))
             { Stop(); return; }
 
@@ -202,7 +221,8 @@ namespace Turbo.Plugins.s7o
             _primePending = false;
             _primeAttempts = 0;
             _primeStartedTick = 0;
-            _nextPrimeTick = _nextGeneratorTick = now;
+            _nextPrimeTick = _nextGeneratorTick = _nextCombatImpaleTick = now;
+            _combatTargetAcd = 0u;
             _interactionPauseUntilTick = _autoLootPauseUntilTick = now;
             _areaResumePending = _running && area != null;
             _inputPauseReason = _running ? "world transition" : "idle";
@@ -225,9 +245,84 @@ namespace Turbo.Plugins.s7o
 
         public void StopForAutoLootUrshiHandoff() { Stop(); }
 
+        public bool MouseDown(MouseButtons button)
+        {
+            if (!Enabled || !_running || (button != MouseButtons.Left && button != MouseButtons.Right)
+                || s7o_ImpaleInput.OwnsMouseButton(button)) return false;
+
+            // A new user click can replace/cancel a previous interaction approach.
+            int now = Environment.TickCount;
+            if (_manualInteractionPending) _interactionPauseUntilTick = now;
+            _manualInteractionPending = false;
+            if (button != MouseButtons.Left) return false;
+
+            IPlayerSkill strafe, impale, generator;
+            if (!CanRun(out strafe, out impale, out generator) || !IsLeftClickSafe()) return false;
+            var actor = Hud.Game.SelectedActor;
+            if (!IsClickedWorldInteractable(actor)) return false;
+
+            _manualInteractionPending = true;
+            _manualInteractionSawAnimation = false;
+            _manualInteractionStartGameTick = Hud.Game.CurrentGameTick;
+            _manualInteractionPreAnimation = Hud.Game.Me.AnimationState;
+            // This is an abandoned-approach watchdog, not a mandatory wait.
+            _manualInteractionApproachUntilTick = unchecked(now + 5000);
+            _interactionPauseUntilTick = unchecked(now + 300); // Existing interaction acknowledgement window.
+            _inputPauseReason = "clicked world interaction";
+            CancelPulse(_inputPauseReason);
+            ReleaseStrafe();
+            _primePending = false;
+            return false; // Pass the original click through; never release the user's LMB.
+        }
+
+        public bool MouseUp(MouseButtons button) { return false; }
+
+        private static bool IsClickedWorldInteractable(IActor actor)
+        {
+            if (actor == null || actor.SnoActor == null || !actor.IsOnScreen || !actor.IsClickable
+                || actor.IsDisabled || actor.IsOperated
+                || actor is IItem || actor is IPlayer || actor.GizmoType == GizmoType.Item) return false;
+            var monster = actor as IMonster;
+            if (monster != null && monster.Attackable) return false;
+            ActorKind kind = actor.SnoActor.Kind;
+            return kind != ActorKind.Follower && kind != ActorKind.Player && kind != ActorKind.Skill
+                && kind != ActorKind.Avoid && kind != ActorKind.Gold && kind != ActorKind.HealthGlobe
+                && kind != ActorKind.PowerGlobe && kind != ActorKind.RiftOrb;
+        }
+
+        private bool MaintainManualInteraction(int now)
+        {
+            if (!_manualInteractionPending) return false;
+            var state = Hud.Game.Me.AnimationState;
+            bool animating = state == AcdAnimationState.Gizmo || state == AcdAnimationState.FloatConversation
+                || state == AcdAnimationState.CastingPortal || state == AcdAnimationState.Casting
+                || state == AcdAnimationState.Channeling;
+            if (animating)
+            {
+                // Do not count the outgoing Strafe sample as a completed bounty interaction.
+                if (Hud.Game.CurrentGameTick != _manualInteractionStartGameTick
+                    && (state != _manualInteractionPreAnimation || state == AcdAnimationState.Gizmo
+                        || state == AcdAnimationState.FloatConversation || state == AcdAnimationState.CastingPortal))
+                    _manualInteractionSawAnimation = true;
+                return true;
+            }
+            if (_manualInteractionSawAnimation)
+            {
+                _interactionPauseUntilTick = now;
+                _manualInteractionPending = false;
+                return false; // Animation finished: resume even if the player is now moving.
+            }
+            bool approaching = state == AcdAnimationState.Running && !Due(now, _manualInteractionApproachUntilTick);
+            if (approaching || !Due(now, _interactionPauseUntilTick)) return true;
+            _manualInteractionPending = false;
+            return false;
+        }
+
         public void OnKeyEvent(IKeyEvent keyEvent)
         {
             if (!Enabled || keyEvent == null || !keyEvent.IsPressed) return;
+            // Paragon allocation owns these hotkeys while its panel is open.
+            if (IsVisible(_paragonPane)) return;
 
             if (_toggleEvent != null && _toggleEvent.Matches(keyEvent))
             {
@@ -245,7 +340,8 @@ namespace Turbo.Plugins.s7o
                 _running = true;
                 _combat = false;
                 _needsImpalePrime = true;
-                _nextGeneratorTick = Environment.TickCount;
+                _combatTargetAcd = 0u;
+                _nextGeneratorTick = _nextCombatImpaleTick = Environment.TickCount;
                 _nextPrimeTick = _nextGeneratorTick;
                 _interactionPauseUntilTick = _nextGeneratorTick;
                 _autoLootPauseUntilTick = _nextGeneratorTick;
@@ -256,7 +352,7 @@ namespace Turbo.Plugins.s7o
                 && Hud.Game != null && !Hud.Game.IsInTown && !InputUiBlocked())
             {
                 _combat = !_combat;
-                _nextGeneratorTick = Environment.TickCount;
+                _nextGeneratorTick = _nextCombatImpaleTick = Environment.TickCount;
             }
         }
 
@@ -265,6 +361,16 @@ namespace Turbo.Plugins.s7o
             int now = Environment.TickCount;
             if (Hud != null && Hud.Window != null && Hud.Window.IsForeground)
                 s7o_InputReleaseArbiter.RetryPending(now);
+
+            // Yield our inputs to Paragon allocation, keeping F3 armed for resume.
+            if (IsVisible(_paragonPane))
+            {
+                _inputPauseReason = "Paragon menu";
+                CancelPulse(_inputPauseReason);
+                ReleaseStrafe();
+                _primePending = false;
+                return;
+            }
 
             // A failed restore keeps its destination for foreground recovery. Never
             // start another aim or resume Strafe with our old synthetic aim left behind.
@@ -308,11 +414,12 @@ namespace Turbo.Plugins.s7o
 
             // Match DHStrafe: interaction zones take precedence over queued casts.
             // An item hover still does not request a pickup or an interaction pause.
+            bool manualInteraction = MaintainManualInteraction(now);
             bool hoveredInteraction = IsHoveringUrshi() || IsHoveringInteractable();
             if (hoveredInteraction) _interactionPauseUntilTick = unchecked(now + 300);
-            if (_pylonPauseActive || _portalPauseActive || !Due(now, _interactionPauseUntilTick))
+            if (manualInteraction || _pylonPauseActive || _portalPauseActive || !Due(now, _interactionPauseUntilTick))
             {
-                _inputPauseReason = _pylonPauseActive ? "pylon nearby"
+                _inputPauseReason = manualInteraction ? "clicked world interaction" : _pylonPauseActive ? "pylon nearby"
                     : _portalPauseActive ? "portal nearby" : "hovered interaction";
                 CancelPulse(_inputPauseReason);
                 ReleaseStrafe();
@@ -333,7 +440,12 @@ namespace Turbo.Plugins.s7o
             }
             _inputPauseReason = "running";
 
-            if (_bolasAimStage != BolasStage.Idle && AdvanceBolasAim(generator, now)) return;
+            bool aimedSkillFinished = false;
+            if (_bolasAimStage != BolasStage.Idle)
+            {
+                if (AdvanceBolasAim(_aimedSkillJob == AimedSkillJob.CombatImpale ? impale : generator, now)) return;
+                aimedSkillFinished = true;
+            }
 
             // Observe while the pulse is still held: a short cast animation may finish
             // before the release frame. Successful input injection alone is not a cast.
@@ -347,7 +459,7 @@ namespace Turbo.Plugins.s7o
 
             // Generator input never changes Sanctified Strafe's selected spender. If the
             // player uses another non-channeled Hatred spender, re-prime Impale once after
-            // that input releases; otherwise Impale is not manually cast again.
+            // that input releases. Combat's aimed Impale jobs already select that spender.
             if (IsAlternateHatredSpenderDown(impale, strafe, generator))
             {
                 _needsImpalePrime = true;
@@ -368,29 +480,58 @@ namespace Turbo.Plugins.s7o
                 _heldStrafe = strafe.Key;
             if (_heldStrafe == ActionKey.Unknown) return;
 
+            // Hand back one real update before starting another owned cursor transaction.
+            if (aimedSkillFinished) return;
             MaintainGenerator(generator, now);
+            if (_bolasAimStage != BolasStage.Idle || _pulse != ActionKey.Unknown) return;
+            if (_combat) MaintainCombatImpale(impale, now);
         }
 
-        private void MaintainGenerator(IPlayerSkill generator, int now)
+        private void MaintainGenerator(IPlayerSkill generator, int now, bool resourceRecovery = false)
         {
             if (!Due(now, _nextGeneratorTick)) return;
-            int interval = Math.Max(50, _combat ? CombatGeneratorIntervalMs : SpeedGeneratorIntervalMs);
+            if (!resourceRecovery && FocusTimeLeft() > 0.5) return;
+            if (!HasGeneratorTarget(generator)) return;
+            int interval = Math.Max(50, SpeedGeneratorIntervalMs);
             if (s7o_ImpaleInput.IsDown(generator.Key))
             { _nextGeneratorTick = unchecked(now + interval); return; }
-            if (AutoAimBolas && generator.SnoPower.Sno == BolasSno
-                && BeginBolasAim(generator, now)) return;
+            if (AutoAimBolas && generator.SnoPower.Sno == BolasSno)
+            {
+                if (BeginBolasAim(generator, now)) return;
+                // Neither mode falls back to a blind pulse after a failed target aim.
+                return;
+            }
             if (StartSkillPulse(generator.Key, now))
                 _nextGeneratorTick = unchecked(now + interval);
             else
                 _nextGeneratorTick = unchecked(now + 50);
         }
 
+        private bool HasGeneratorTarget(IPlayerSkill generator)
+        {
+            // Reuse the same live, attackable, on-screen and UI-safe target checks as Bolas aim.
+            foreach (var monster in Hud.Game.AliveMonsters)
+            {
+                int x, y;
+                if (TryBolasPoint(monster, generator.Key, out x, out y)) return true;
+            }
+            return false;
+        }
+
+        private double FocusTimeLeft()
+        {
+            var buff = Hud.Game.Me.Powers.GetBuff(FocusBuffSno);
+            if (buff == null || buff.TimeLeftSeconds == null
+                || buff.TimeLeftSeconds.Length <= FocusBuffIconIndex) return 0.0;
+            return Math.Max(0.0, buff.TimeLeftSeconds[FocusBuffIconIndex]);
+        }
+
         public void SetAutoAimBolas(bool enabled)
         {
             AutoAimBolas = enabled;
-            if (_running && _bolasAimStage != BolasStage.Idle)
+            if (_running && _bolasAimStage != BolasStage.Idle && _aimedSkillJob == AimedSkillJob.Bolas)
                 CancelBolasAim("aim setting changed", Environment.TickCount);
-            else CancelPulse();
+            else if (_bolasAimStage == BolasStage.Idle) CancelPulse();
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(_settingsPath));
@@ -399,12 +540,13 @@ namespace Turbo.Plugins.s7o
             catch { }
         }
 
-        private bool TryBolasPoint(IMonster monster, ActionKey key, out int x, out int y)
+        private bool TryBolasPoint(IMonster monster, ActionKey key, out int x, out int y, bool projectedCombat = false)
         {
             x = y = 0;
-            if (monster == null || !monster.IsAlive || !monster.Attackable || !monster.IsOnScreen
-                || monster.Illusion || monster.Invulnerable || monster.Untargetable
-                || monster.Invisible || monster.Hidden || monster.FloorCoordinate == null) return false;
+            if (monster == null || !monster.IsAlive || (!projectedCombat && (!monster.Attackable || !monster.IsOnScreen))
+                || monster.Illusion || monster.Invulnerable || monster.Untargetable || monster.Stealthed
+                || monster.Invisible || monster.Hidden || monster.WorldId != Hud.Game.Me.WorldId
+                || monster.FloorCoordinate == null) return false;
             var point = monster.FloorCoordinate.ToScreenCoordinate(true, true);
             if (point == null || double.IsNaN(point.X) || double.IsNaN(point.Y)
                 || double.IsInfinity(point.X) || double.IsInfinity(point.Y)) return false;
@@ -418,6 +560,39 @@ namespace Turbo.Plugins.s7o
         }
 
         private bool BeginBolasAim(IPlayerSkill generator, int now)
+        { return BeginAimedSkill(generator, now, AimedSkillJob.Bolas); }
+
+        private void MaintainCombatImpale(IPlayerSkill impale, int now)
+        {
+            if (!Due(now, _nextCombatImpaleTick) || impale.IsOnCooldown
+                || s7o_ImpaleInput.IsDown(impale.Key)
+                || Hud.Game.Me.Stats.ResourceCurPri + 0.1f < Math.Max(0f, impale.ResourceCost)) return;
+            BeginAimedSkill(impale, now, AimedSkillJob.CombatImpale);
+        }
+
+        private static bool RangedHasAffix(IMonster monster, MonsterAffix affix)
+        {
+            if (monster.AffixSnoList != null)
+                foreach (var entry in monster.AffixSnoList)
+                    if (entry != null && entry.Affix == affix) return true;
+            if (monster.Pack != null && monster.Pack.AffixSnoList != null)
+                foreach (var entry in monster.Pack.AffixSnoList)
+                    if (entry != null && entry.Affix == affix) return true;
+            return false;
+        }
+
+        private static int CombatImpaleTargetTier(IMonster monster)
+        {
+            if (monster.Rarity == ActorRarity.Boss) return 5;
+            bool leader = monster.Rarity == ActorRarity.Rare || monster.Rarity == ActorRarity.Champion
+                || monster.Rarity == ActorRarity.Unique;
+            bool minion = monster.Rarity == ActorRarity.RareMinion;
+            if (leader || minion)
+                return RangedHasAffix(monster, MonsterAffix.Juggernaut) ? (leader ? 2 : 1) : (leader ? 4 : 3);
+            return 0;
+        }
+
+        private bool BeginAimedSkill(IPlayerSkill generator, int now, AimedSkillJob job)
         {
             // A manual LMB hold keeps its aim and native target lock.
             if (s7o_InputReleaseArbiter.HasPendingRelease
@@ -427,13 +602,17 @@ namespace Turbo.Plugins.s7o
             foreach (var monster in Hud.Game.AliveMonsters)
             {
                 if (monster == null) continue;
-                int tier = monster.Rarity == ActorRarity.Boss || monster.Rarity == ActorRarity.Rare
-                    || monster.Rarity == ActorRarity.Champion || monster.Rarity == ActorRarity.Unique ? 2
-                    : monster.Rarity == ActorRarity.RareMinion ? 1 : 0;
-                if (best != null && (tier < bestTier
-                    || (tier == bestTier && monster.NormalizedXyDistanceToMe >= best.NormalizedXyDistanceToMe))) continue;
+                int tier = job == AimedSkillJob.CombatImpale ? CombatImpaleTargetTier(monster)
+                    : monster.Rarity == ActorRarity.Boss || monster.Rarity == ActorRarity.Rare
+                        || monster.Rarity == ActorRarity.Champion || monster.Rarity == ActorRarity.Unique ? 2
+                        : monster.Rarity == ActorRarity.RareMinion ? 1 : 0;
                 int x, y;
-                if (!TryBolasPoint(monster, generator.Key, out x, out y)) continue;
+                if (!TryBolasPoint(monster, generator.Key, out x, out y, job == AimedSkillJob.CombatImpale)) continue;
+                bool retained = job == AimedSkillJob.CombatImpale && monster.AcdId == _combatTargetAcd;
+                bool bestRetained = best != null && job == AimedSkillJob.CombatImpale && best.AcdId == _combatTargetAcd;
+                if (best != null && (tier < bestTier || (tier == bestTier && (bestRetained
+                    || (!retained && (monster.NormalizedXyDistanceToMe > best.NormalizedXyDistanceToMe
+                        || (monster.NormalizedXyDistanceToMe == best.NormalizedXyDistanceToMe && monster.AcdId >= best.AcdId))))))) continue;
                 best = monster; bestTier = tier; aimX = x; aimY = y;
             }
             CursorPoint cursor;
@@ -443,6 +622,8 @@ namespace Turbo.Plugins.s7o
             ReleaseStrafe();
             if (s7o_InputReleaseArbiter.HasPendingRelease || !EnsureStandstill()) return false;
             // No cursor ownership until native movement has stopped.
+            _aimedSkillJob = job; _aimedSkillKey = generator.Key; _aimedSkillSno = generator.SnoPower.Sno;
+            if (job == AimedSkillJob.CombatImpale) _combatTargetAcd = best.AcdId;
             _bolasAimActor = best.AcdId;
             _bolasAimX = aimX; _bolasAimY = aimY;
             _bolasAimStartedTick = now;
@@ -454,7 +635,6 @@ namespace Turbo.Plugins.s7o
             _bolasRestoreStartedTick = _bolasRestoreWriteGameTick = int.MinValue;
             _bolasRestorePrepared = _bolasCursorOwned = _bolasSyntheticPending = false;
             _bolasDeltaX = _bolasDeltaY = 0;
-            _bolasTransactionSerial++;
             _bolasEndReason = "pending";
             _bolasAimStage = BolasStage.Lease;
             return true;
@@ -466,14 +646,20 @@ namespace Turbo.Plugins.s7o
                 || _bolasAimStage == BolasStage.Restore || _bolasAimStage == BolasStage.RestoreSettle
                 || Hud == null || Hud.Game == null || Hud.Game.Me == null) return;
             var state = Hud.Game.Me.AnimationState;
-            if (Hud.Game.Me.Animation != _bolasPreInputAnimation
+            if ((_aimedSkillJob == AimedSkillJob.CombatImpale
+                    ? IsImpaleAnimation() && (Hud.Game.Me.Animation != _bolasPreInputAnimation
+                        || (Hud.Game.Me.LoopingAnimationStartTick > _aimedPreAnimationStartTick
+                            && Hud.Game.Me.LoopingAnimationStartTick >= _aimedInputGameTick))
+                    : Hud.Game.Me.Animation != _bolasPreInputAnimation)
                 && (state == AcdAnimationState.Attacking || state == AcdAnimationState.Casting))
                 _bolasSawCastAnimation = true;
         }
 
         private bool AdvanceBolasAim(IPlayerSkill generator, int now)
         {
-            if ((!AutoAimBolas || generator.SnoPower.Sno != BolasSno)
+            if ((generator == null || generator.SnoPower == null || generator.Key != _aimedSkillKey || generator.SnoPower.Sno != _aimedSkillSno
+                    || (_aimedSkillJob == AimedSkillJob.Bolas && !AutoAimBolas)
+                    || (_aimedSkillJob == AimedSkillJob.CombatImpale && !_combat))
                 && _bolasAimStage != BolasStage.Restore && _bolasAimStage != BolasStage.RestoreSettle)
             { CancelBolasAim("aim disabled/loadout changed", now); return true; }
             int age = unchecked(now - (_bolasInputSent ? _bolasInputTick : _bolasAimStartedTick));
@@ -492,7 +678,7 @@ namespace Turbo.Plugins.s7o
                 }
                 int x, y;
                 CursorPoint cursor;
-                if (!TryBolasPoint(FindBolasTarget(), generator.Key, out x, out y)
+                if (!TryBolasPoint(FindBolasTarget(), generator.Key, out x, out y, _aimedSkillJob == AimedSkillJob.CombatImpale)
                     || !GetCursorPos(out cursor)
                     || !IsLeftClickPointSafe((long)cursor.X - Hud.Window.Offset.X,
                         (long)cursor.Y - Hud.Window.Offset.Y))
@@ -514,21 +700,36 @@ namespace Turbo.Plugins.s7o
                 CaptureBolasCursorIntent();
                 if (Hud.Game.Me.AnimationState == AcdAnimationState.Running
                     || !s7o_ImpaleInput.IsVirtualKeyDown(StandstillKey())
-                    || s7o_ImpaleInput.IsDown(generator.Key))
+                    || s7o_ImpaleInput.IsDown(generator.Key)
+                    || (_aimedSkillJob == AimedSkillJob.CombatImpale
+                        && (generator.IsOnCooldown || Hud.Game.Me.Stats.ResourceCurPri + 0.1f < Math.Max(0f, generator.ResourceCost))))
                 { CancelBolasAim("readiness lost/player input", now); return true; }
                 int x, y;
-                if (!TryBolasPoint(FindBolasTarget(), generator.Key, out x, out y)
+                if (!TryBolasPoint(FindBolasTarget(), generator.Key, out x, out y, _aimedSkillJob == AimedSkillJob.CombatImpale)
                     || (generator.Key == ActionKey.LeftSkill
                         && !IsLeftClickPointSafe((long)_bolasAimX - Hud.Window.Offset.X,
                             (long)_bolasAimY - Hud.Window.Offset.Y)))
                 { CancelBolasAim("target lost/UI", now); return true; }
+                if (_aimedSkillJob == AimedSkillJob.CombatImpale)
+                {
+                    var hovered = Hud.Game.SelectedActor as IMonster;
+                    if (generator.Key == ActionKey.LeftSkill
+                        && (hovered == null || !hovered.IsAlive || hovered.AcdId != _bolasAimActor
+                            || BolasCursorDistance(x, y, _bolasAimX, _bolasAimY) > 10))
+                    { CancelBolasAim("LMB target acknowledgement lost", now); return true; }
+                    // Keyboard Impale can use the current projection in the ordered batch.
+                    // Mouse Impale additionally requires a native acknowledged preview.
+                    _bolasAimX = x; _bolasAimY = y;
+                }
                 _bolasPreInputAnimation = Hud.Game.Me.Animation;
+                _aimedPreAnimationStartTick = Hud.Game.Me.LoopingAnimationStartTick;
+                _aimedInputGameTick = Hud.Game.CurrentGameTick;
                 // Reassert the exact previewed aim and skill-down as one ordered batch.
                 ArmBolasSyntheticWrite(_bolasAimX, _bolasAimY);
                 if (!s7o_ImpaleInput.DownAt(Owner, generator.Key, _bolasAimX, _bolasAimY))
                 { CancelBolasAim("aim/input batch failed", now); return true; }
                 _pulse = generator.Key;
-                _pulseReleaseTick = unchecked(now + BolasHoldMs);
+                _pulseReleaseTick = unchecked(now + (_aimedSkillJob == AimedSkillJob.CombatImpale ? 55 : BolasHoldMs));
                 _bolasInputSent = true;
                 _bolasInputTick = now;
                 _bolasAimStage = BolasStage.Hold;
@@ -620,8 +821,10 @@ namespace Turbo.Plugins.s7o
 
         private void SkipBolasCadence(int now)
         {
-            _nextGeneratorTick = unchecked(now + Math.Max(50,
-                _combat ? CombatGeneratorIntervalMs : SpeedGeneratorIntervalMs));
+            // Cadence follows handback; keep generator and spender deadlines independent.
+            if (_aimedSkillJob == AimedSkillJob.CombatImpale)
+                _nextCombatImpaleTick = unchecked(now + Math.Max(50, CombatGeneratorIntervalMs));
+            else _nextGeneratorTick = unchecked(now + Math.Max(50, SpeedGeneratorIntervalMs));
         }
 
         private static int BolasCursorDistance(long x, long y, long tx, long ty)
@@ -839,7 +1042,7 @@ namespace Turbo.Plugins.s7o
             // recover Hatred. Preserve the selected Speed/Combat generator cadence.
             if (Hud.Game.Me.Stats.ResourceCurPri + 0.1f < Math.Max(0f, impale.ResourceCost))
             {
-                MaintainGenerator(generator, now);
+                MaintainGenerator(generator, now, true);
                 return;
             }
             if (!Due(now, _nextPrimeTick)) return;
@@ -853,7 +1056,7 @@ namespace Turbo.Plugins.s7o
 
         private bool InputUiBlocked()
         {
-            return IsVisible(_chatEditLine) || IsVisible(_urshiGemPane)
+            return IsVisible(_chatEditLine) || IsVisible(_urshiGemPane) || IsVisible(_paragonPane)
                 || IsVisible(Hud.Render.WorldMapUiElement)
                 || IsVisible(Hud.Render.ActMapUiElement);
         }
@@ -1231,7 +1434,8 @@ namespace Turbo.Plugins.s7o
             try
             {
                 var actor = Hud.Game.SelectedActor;
-                if (actor == null || actor.SnoActor == null || actor.NormalizedXyDistanceToMe > 10f)
+                if (actor == null || actor.SnoActor == null
+                    || actor.CentralXyDistanceToMe > Math.Max(0, InteractableHoverRange))
                     return false;
                 bool portal = actor.SnoActor.Kind == ActorKind.Portal
                     || actor.GizmoType == GizmoType.Portal || actor.GizmoType == GizmoType.BossPortal;
@@ -1266,6 +1470,7 @@ namespace Turbo.Plugins.s7o
 
         private void Stop()
         {
+            _manualInteractionPending = false;
             CancelPulse();
             ReleaseStrafe();
             _running = false;
@@ -1278,7 +1483,8 @@ namespace Turbo.Plugins.s7o
             _primeAttempts = 0;
             _interactionPauseUntilTick = Environment.TickCount;
             _autoLootPauseUntilTick = _interactionPauseUntilTick;
-            _nextGeneratorTick = 0;
+            _nextGeneratorTick = _nextCombatImpaleTick = 0;
+            _combatTargetAcd = 0u;
             _pylonPauseActive = false;
             _inputPauseReason = "idle";
             ResetPortalApproachState();
@@ -1351,6 +1557,16 @@ namespace Turbo.Plugins.s7o
         {
             int code = VirtualKey(key);
             return code != 0 && (GetAsyncKeyState(code) & 0x8000) != 0;
+        }
+
+        public static bool OwnsMouseButton(MouseButtons button)
+        {
+            int code = button == MouseButtons.Left ? 0x01 : button == MouseButtons.Right ? 0x02 : 0;
+            if (code == 0) return false;
+            if (OwnedVirtualKeys.Contains((ushort)code)) return true;
+            foreach (int ownedCode in OwnedActions.Values)
+                if (ownedCode == code) return true;
+            return false;
         }
 
         public static bool IsVirtualKeyDown(ushort code)
