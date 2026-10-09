@@ -7,7 +7,6 @@ namespace Turbo.Plugins.s7o
     using System.IO;
     using System.Linq;
     using System.Runtime.InteropServices;
-    using System.Text;
     using System.Windows.Forms;
     using SharpDX.Direct2D1;
     using SharpDX.DirectInput;
@@ -86,6 +85,7 @@ namespace Turbo.Plugins.s7o
         private const int StashColumns = 7;
         private const int StashRowsPerTab = 10;
         private const uint PetrifiedScreamSno = 1051857800;
+        private const uint AngelicCrucibleSno = 2410396267u; // FreeHUD P74_Consumable_Sanctify_Legendary_Item.
         private const uint RamaladniGiftSno = 1844495708;
         private const ushort VkEscape = 0x1B;
         private const int StorageSettingsVersion = 11;
@@ -423,6 +423,9 @@ namespace Turbo.Plugins.s7o
 
         public void AfterCollect()
         {
+            if (_runMode == RunMode.Store)
+                s7o_InventoryModInput.ObserveStoreCursor(Enabled && Hud != null
+                    && Hud.Window != null && Hud.Window.IsForeground);
             if (!Enabled)
                 return;
 
@@ -446,6 +449,7 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
+            s7o_InventoryModInput.BeginStoreCursor();
             _queue.Clear();
             _specialCostDecisionCache.Clear();
             _currentQueueIndex = 0;
@@ -555,6 +559,9 @@ namespace Turbo.Plugins.s7o
 
         private void StopRun(string status)
         {
+            if (_runMode == RunMode.Store)
+                s7o_InventoryModInput.EndStoreCursor(Hud != null
+                    && Hud.Window != null && Hud.Window.IsForeground);
             _running = false;
             _runMode = RunMode.None;
             _stage = StoreStage.Idle;
@@ -1102,12 +1109,26 @@ namespace Turbo.Plugins.s7o
 
         private static bool IsSpecialStackableSno(uint sno)
         {
-            return sno == RamaladniGiftSno || sno == PetrifiedScreamSno;
+            // Seasonal Crucibles share the existing special-stack storage pipeline.
+            // Merchant selling and filtered-drop categories keep their explicit SNO checks.
+            return sno == RamaladniGiftSno || sno == PetrifiedScreamSno || sno == AngelicCrucibleSno;
         }
 
         private static bool IsSpecialStackableItem(IItem item)
         {
             return item != null && item.SnoItem != null && IsSpecialStackableSno(item.SnoItem.Sno);
+        }
+
+        private static bool HasSpecialStackableStorageBinding(IItem item)
+        {
+            if (!IsSpecialStackableItem(item) || !item.AccountBound) return false;
+            if (item.BoundToMyAccount) return true;
+
+            // FreeHUD can report BoundToMyAccount=false for Crucibles even in the
+            // local inventory/stash (observed with Me.SummonerId=0). Accept only
+            // account-bound Crucibles in those locations; other items retain the check.
+            return item.SnoItem.Sno == AngelicCrucibleSno
+                && (item.Location == ItemLocation.Inventory || item.Location == ItemLocation.Stash);
         }
 
         private static bool IsKnownSpecialStackSource(IItem item)
@@ -1117,7 +1138,7 @@ namespace Turbo.Plugins.s7o
             if (item.IsInventoryLocked) return false;
             if (item.Seed == 0) return false;
             if (item.Quantity <= 0) return false;
-            if (!item.AccountBound || !item.BoundToMyAccount) return false;
+            if (!HasSpecialStackableStorageBinding(item)) return false;
             return true;
         }
 
@@ -1127,7 +1148,7 @@ namespace Turbo.Plugins.s7o
             if (item.Location != ItemLocation.Inventory) return false;
             if (item.IsInventoryLocked) return false;
             if (item.Seed == 0) return false;
-            if (!item.AccountBound || !item.BoundToMyAccount) return false;
+            if (!HasSpecialStackableStorageBinding(item)) return false;
             return plan.HasKnownSpecialSeed(item.SnoItem.Sno, item.Seed);
         }
 
@@ -1136,7 +1157,7 @@ namespace Turbo.Plugins.s7o
             if (!IsSpecialStackableItem(item)) return false;
             if (item.Location != ItemLocation.Inventory || item.IsInventoryLocked) return false;
             if (item.Seed == 0) return false;
-            return item.AccountBound && item.BoundToMyAccount;
+            return HasSpecialStackableStorageBinding(item);
         }
 
         private static bool IsSpecialStackableStorageSafe(IItem item, StashPlan plan)
@@ -3323,7 +3344,7 @@ namespace Turbo.Plugins.s7o
                     if (item.Location != ItemLocation.Inventory) continue;
                     if (item.IsInventoryLocked) continue;
                     if (item.Seed == 0) continue;
-                    if (!item.AccountBound || !item.BoundToMyAccount) continue;
+                    if (!HasSpecialStackableStorageBinding(item)) continue;
 
                     string key = item.SnoItem.Sno.ToString(CultureInfo.InvariantCulture) + ":" + item.Seed.ToString(CultureInfo.InvariantCulture);
                     int amount = (int)Math.Max(1L, item.Quantity);
@@ -3498,6 +3519,8 @@ namespace Turbo.Plugins.s7o
         [StructLayout(LayoutKind.Sequential)] private struct KEYBDINPUT { public ushort VirtualKey; public ushort ScanCode; public uint Flags; public uint Time; public IntPtr ExtraInfo; }
 
         [DllImport("user32.dll")] private static extern bool SetCursorPos(int x, int y);
+        [DllImport("user32.dll")] private static extern bool GetCursorPos(out POINT point);
+        [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
         [DllImport("user32.dll", SetLastError = true)] private static extern uint SendInput(uint inputCount, INPUT[] inputs, int inputSize);
         [DllImport("user32.dll")] private static extern IntPtr FindWindow(string className, string windowText);
         [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
@@ -3507,6 +3530,58 @@ namespace Turbo.Plugins.s7o
         private const uint WmLButtonUp = 0x0202;
         private const uint WmRButtonDown = 0x0204;
         private const uint WmRButtonUp = 0x0205;
+
+        // Store owns only its tab/probe cursor moves. Capture/restore in absolute
+        // desktop coordinates; a fresh user move or focus loss cancels restoration.
+        // Merchant/drop input and SendMessage client coordinates remain independent.
+        private static bool _storeCursorActive, _storeCursorRestore, _storeCursorMoved;
+        private static POINT _storeCursorOrigin, _storeCursorLast;
+
+        public static void BeginStoreCursor()
+        {
+            _storeCursorActive = true;
+            _storeCursorMoved = false;
+            IntPtr game = FindWindow("D3 Main Window Class", null);
+            _storeCursorRestore = game != IntPtr.Zero && GetForegroundWindow() == game
+                && GetCursorPos(out _storeCursorOrigin);
+            _storeCursorLast = _storeCursorOrigin;
+        }
+
+        public static void ObserveStoreCursor(bool foreground)
+        {
+            if (!_storeCursorActive || !_storeCursorRestore) return;
+            POINT current;
+            if (!foreground || !GetCursorPos(out current)
+                || current.X != _storeCursorLast.X || current.Y != _storeCursorLast.Y)
+                _storeCursorRestore = false;
+        }
+
+        public static void EndStoreCursor(bool foreground)
+        {
+            ObserveStoreCursor(foreground);
+            POINT origin = _storeCursorOrigin;
+            IntPtr game = FindWindow("D3 Main Window Class", null);
+            bool restore = _storeCursorActive && _storeCursorRestore && _storeCursorMoved
+                && game != IntPtr.Zero && GetForegroundWindow() == game;
+            _storeCursorActive = _storeCursorRestore = _storeCursorMoved = false;
+            if (restore) SetCursorPos(origin.X, origin.Y); // No click and no deferred restore.
+        }
+
+        private static bool MoveOperationCursor(int x, int y)
+        {
+            if (_storeCursorActive)
+            {
+                IntPtr game = FindWindow("D3 Main Window Class", null);
+                ObserveStoreCursor(game != IntPtr.Zero && GetForegroundWindow() == game);
+            }
+            if (!SetCursorPos(x, y)) return false;
+            if (_storeCursorActive && _storeCursorRestore)
+            {
+                _storeCursorMoved = true;
+                if (!GetCursorPos(out _storeCursorLast)) _storeCursorRestore = false;
+            }
+            return true;
+        }
 
         public static bool LeftClickRect(RectangleF rect)
         {
@@ -3518,7 +3593,7 @@ namespace Turbo.Plugins.s7o
             if (rect.Width <= 0 || rect.Height <= 0) return false;
             int x = (int)Math.Round(rect.X + rect.Width * 0.5f);
             int y = (int)Math.Round(rect.Y + rect.Height * 0.5f);
-            return SetCursorPos(x, y);
+            return MoveOperationCursor(x, y);
         }
 
         public static bool RightClickRect(RectangleF rect)
@@ -3606,7 +3681,7 @@ namespace Turbo.Plugins.s7o
 
             int x = (int)Math.Round(rect.X + rect.Width * 0.5f);
             int y = (int)Math.Round(rect.Y + rect.Height * 0.5f);
-            if (!SetCursorPos(x, y)) return false;
+            if (!MoveOperationCursor(x, y)) return false;
 
             var input = new INPUT[2];
             input[0].Type = InputMouse;
