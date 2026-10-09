@@ -152,6 +152,14 @@ namespace Turbo.Plugins.s7o
         public float NearbyAlternativeRadiusPx { get; set; } = 110f;
         public float MaxSnapAngleDegrees { get; set; } = 30f;
         public bool UseGeometrySafety { get; set; } = true;
+        public float MapPullClearance { get; set; } = 1.25f; // Optional straight pull corridor, not a route.
+        private IPlugin _mapPlugin;
+        private Func<string,object[],object> _mapGet;
+        private int _mapLookupTick=int.MinValue;
+        // Reachability participates in selection only; it never changes input ownership.
+        private bool _mapPullSelecting;
+        private readonly Dictionary<uint,bool> _mapPullBlockedTargets=new Dictionary<uint,bool>();
+        private IWorldCoordinate _pendingMapRayEnd;
 
         // Elite course correction is a small aim assist for near-miss spear casts.
         // It only corrects within the player's current spear direction, so it should not snap sideways.
@@ -552,6 +560,8 @@ namespace Turbo.Plugins.s7o
                 if (me == null)
                     return;
 
+                _mapPullBlockedTargets.Clear();
+                _mapPullSelecting = true;
                 float aimX;
                 float aimY;
                 IWorldCoordinate markerWorld;
@@ -598,6 +608,17 @@ namespace Turbo.Plugins.s7o
                     ? courseCorrectTargetAcdId
                     : FindMarkerTargetAcdId(finalMarkerWorld, aimX, aimY, failed);
 
+                var mapRayEnd=MapPullRayEnd(me.FloorCoordinate,aimX,aimY,finalMarkerWorld);
+                if(MapPullBlocked(me.FloorCoordinate,mapRayEnd,MapPullClearance)) {
+                    MapPullFeedback("blocked-pull",finalMarkerTargetAcdId,mapRayEnd);
+                    // One bounded alternative search, before taking cursor/key ownership.
+                    if(!TryMapReachablePullFallback(me.FloorCoordinate,cursorX,cursorY,
+                        out aimX,out aimY,out finalMarkerWorld,out finalMarkerTargetAcdId))return;
+                    failed=false;
+                    mapRayEnd=MapPullRayEnd(me.FloorCoordinate,aimX,aimY,finalMarkerWorld);
+                    MapPullFeedback("reachable-fallback",finalMarkerTargetAcdId,mapRayEnd);
+                }
+                _pendingMapRayEnd=mapRayEnd;
                 _castStartedMs = nowMs;
                 _savedCursorX = cursorX;
                 _savedCursorY = cursorY;
@@ -620,6 +641,7 @@ namespace Turbo.Plugins.s7o
             }
             finally
             {
+                _mapPullSelecting = false;
                 if (_castPhase == CastPhase.Idle)
                     _castingNow = false;
             }
@@ -666,6 +688,13 @@ namespace Turbo.Plugins.s7o
 
         private void BeginPendingSpearInput(int tick, long nowMs)
         {
+            // Recheck immediately before synthetic DOWN; release only our owned transaction.
+            string mapState=MapPullCorridorState(Hud.Game.Me.FloorCoordinate,_pendingMapRayEnd,MapPullClearance);
+            if(mapState=="BlockedCandidate") {
+                MapPullFeedback("blocked-before-cast",_pendingMarkerTargetAcdId,_pendingMapRayEnd);
+                CompletePendingCast(tick,nowMs);return;
+            }
+            MapPullFeedback("pull-"+(mapState??"native"),_pendingMarkerTargetAcdId,_pendingMapRayEnd);
             bool inputStarted = false;
 
             switch (_spearKey)
@@ -926,6 +955,7 @@ namespace Turbo.Plugins.s7o
             if (mePos == null || cursorWorld == null || Hud?.Game?.AliveMonsters == null)
                 return false;
 
+            bool mapAvailable=MapPullStatus()!=null;
             float manualX = cursorWorld.X - mePos.X;
             float manualY = cursorWorld.Y - mePos.Y;
             float manualDistance = (float)Math.Sqrt((manualX * manualX) + (manualY * manualY));
@@ -1057,6 +1087,15 @@ namespace Turbo.Plugins.s7o
                 relativeCandidates.Add(ClampFloat(relativeAngle, -maximumAngle, maximumAngle));
                 relativeCandidates.Add(ClampFloat(relativeAngle - halfWidth, -maximumAngle, maximumAngle));
                 relativeCandidates.Add(ClampFloat(relativeAngle + halfWidth, -maximumAngle, maximumAngle));
+                if(mapAvailable) {
+                    // Nearby angular samples let a straight ray use the middle of a doorway.
+                    // These stay inside the existing user aim cone and must hit eligible bodies.
+                    float degree=(float)Math.PI/180f;
+                    for(int offset=1;offset<=4;offset*=2) {
+                        relativeCandidates.Add(ClampFloat(relativeAngle-offset*degree,-maximumAngle,maximumAngle));
+                        relativeCandidates.Add(ClampFloat(relativeAngle+offset*degree,-maximumAngle,maximumAngle));
+                    }
+                }
             }
 
             relativeCandidates.Sort();
@@ -1115,7 +1154,8 @@ namespace Turbo.Plugins.s7o
                 if (manualPlan.Valid
                     && manualPlan.PackHits >= bestPlan.PackHits
                     && manualPlan.LeaderHits >= bestPlan.LeaderHits
-                    && manualPlan.MinionHits >= bestPlan.MinionHits)
+                    && manualPlan.MinionHits >= bestPlan.MinionHits
+                    && (!mapAvailable||manualPlan.Safety<=bestPlan.Safety+0.01f))
                     bestPlan = manualPlan;
             }
             else
@@ -1127,7 +1167,8 @@ namespace Turbo.Plugins.s7o
                 int preserveWithin = Math.Max(0, LinearTrashPreferWithinBodies);
                 if (manualPlan.Valid
                     && manualPlan.WeightedDensity + preserveWithin >= bestPlan.WeightedDensity
-                    && manualPlan.BodyHits + preserveWithin >= bestPlan.BodyHits)
+                    && manualPlan.BodyHits + preserveWithin >= bestPlan.BodyHits
+                    && (!mapAvailable||manualPlan.Safety<=bestPlan.Safety+0.01f))
                     bestPlan = manualPlan;
             }
 
@@ -1427,6 +1468,8 @@ namespace Turbo.Plugins.s7o
                         if (dot < cosTh) continue;
                     }
                 }
+
+                if (MapPullTargetBlocked(m)) continue;
 
                 if (m.IsElite)
                 {
@@ -3208,7 +3251,7 @@ namespace Turbo.Plugins.s7o
             if (IgnoreIllusions && m.Illusion) return false;
             if (IgnoreKnockbackImmune && IsNativeKnockbackImmune(m)) return false;
             if (IgnoreKnownUnpullables && IsKnownUnpullableFamily(m)) return false;
-            return true;
+            return !MapPullTargetBlocked(m);
         }
 
         private bool IsPullableTrashAllowed(IMonster m)
@@ -3219,7 +3262,7 @@ namespace Turbo.Plugins.s7o
             if (IgnoreIllusions && m.Illusion) return false;
             if (IgnoreKnockbackImmune && IsNativeKnockbackImmune(m)) return false;
             if (IgnoreKnownUnpullables && IsKnownUnpullableFamily(m)) return false;
-            return true;
+            return !MapPullTargetBlocked(m);
         }
 
         private bool IsHighValueTrash(IMonster m)
@@ -3427,13 +3470,144 @@ namespace Turbo.Plugins.s7o
             }
         }
 
+        // Optional service discovery uses only BCL delegates. Removing MapViewer preserves
+        // existing actor-based safety/targeting; no spear bends or automatic player movement.
+        private Dictionary<string,object> MapPullStatus()
+        {
+            if(!UseGeometrySafety||Hud==null||Hud.Game==null)return null;
+            if(_mapGet==null||_mapPlugin==null||!_mapPlugin.Enabled) {
+                _mapGet=null;_mapPlugin=null;int tick=Hud.Game.CurrentGameTick;
+                if(_mapLookupTick!=int.MinValue&&tick>=_mapLookupTick&&tick-_mapLookupTick<60)return null;
+                _mapLookupTick=tick;
+                foreach(var plugin in Hud.AllPlugins) {
+                    if(plugin==null||!plugin.Enabled)continue;
+                    var bridge=plugin as IEnumerable<KeyValuePair<string,Func<string,object[],object>>>;
+                    if(bridge==null)continue;
+                    foreach(var entry in bridge)if(entry.Key=="s7o.MapViewer.v1") {_mapPlugin=plugin;_mapGet=entry.Value;break;}
+                    if(_mapGet!=null)break;
+                }
+            }
+            if(_mapGet==null)return null;
+            try {
+                var status=_mapGet("player",new object[0]) as Dictionary<string,object>;
+                return status!=null&&status.ContainsKey("ok")&&status["ok"] is bool&&(bool)status["ok"]
+                    &&status.ContainsKey("epoch")&&status.ContainsKey("worldId")
+                    &&Convert.ToUInt32(status["worldId"])==Hud.Game.Me.WorldId?status:null;
+            }catch {_mapGet=null;_mapPlugin=null;return null;}
+        }
+        private string MapPullCorridorState(IWorldCoordinate from,IWorldCoordinate to,float radius)
+        {
+            if(from==null||to==null)return null;
+            var status=MapPullStatus();if(status==null)return null;
+            try {
+                var result=_mapGet("corridor",new object[]{status["epoch"],from.X,from.Y,from.Z,to.X,to.Y,to.Z,
+                    Math.Max(0f,Math.Min(3f,radius))}) as Dictionary<string,object>;
+                return result!=null&&result.ContainsKey("state")?result["state"] as string:null;
+            }catch {_mapGet=null;_mapPlugin=null;return null;}
+        }
+        private bool MapPullBlocked(IWorldCoordinate from,IWorldCoordinate to,float radius)
+        { return MapPullCorridorState(from,to,radius)=="BlockedCandidate"; }
+        private bool MapPullTargetBlocked(IMonster target)
+        {
+            if(!_mapPullSelecting||target==null||target.FloorCoordinate==null||Hud.Game.Me==null)return false;
+            bool blocked;
+            if(_mapPullBlockedTargets.TryGetValue(target.AcdId,out blocked))return blocked;
+            var from=Hud.Game.Me.FloorCoordinate;var to=target.FloorCoordinate;
+            float reach=Math.Max(ForwardEliteScanMaxYards,Math.Max(LinearTrashMaxYards,ForwardEliteCommittedMaxYards));
+            if(MaxPlayerDistanceYards>0f)reach=Math.Min(reach,MaxPlayerDistanceYards);
+            if(from.XYDistanceTo(to)>Math.Min(PullPlanMaximumReachYards,reach))return false;
+            blocked=MapPullBlocked(from,to,MapPullClearance);
+            if(blocked) {
+                // Exposed body edges remain eligible when the centre is behind a corner.
+                float dx=to.X-from.X,dy=to.Y-from.Y,len=(float)Math.Sqrt(dx*dx+dy*dy);
+                if(len>0.1f) {
+                    float r=Math.Min(3f,Math.Max(0.35f,GetMonsterRadiusBottom(target)))*0.8f;
+                    for(int side=-1;side<=1&&blocked;side+=2) {
+                        var edge=Hud.Window.CreateWorldCoordinate(to.X-dy/len*r*side,to.Y+dx/len*r*side,to.Z);
+                        blocked=MapPullBlocked(from,edge,MapPullClearance);
+                    }
+                }
+            }
+            // Unknown/missing coverage is not a veto. Cache is scoped to this cast.
+            if(_mapPullBlockedTargets.Count<512)_mapPullBlockedTargets[target.AcdId]=blocked;
+            return blocked;
+        }
+
+        private bool TryMapReachablePullFallback(IWorldCoordinate from,float cursorX,float cursorY,
+            out float aimX,out float aimY,out IWorldCoordinate marker,out uint targetAcd)
+        {
+            aimX=cursorX;aimY=cursorY;marker=null;targetAcd=0;
+            var intent=GetScreenWorld(cursorX,cursorY);
+            if(from==null||intent==null||MapPullStatus()==null)return false;
+            var candidates=new List<IMonster>();
+            float maxReach=Math.Max(ForwardEliteScanMaxYards,LinearTrashMaxYards);
+            maxReach=Math.Min(PullPlanMaximumReachYards,Math.Max(maxReach,ForwardEliteCommittedMaxYards));
+            if(MaxPlayerDistanceYards>0f)maxReach=Math.Min(maxReach,MaxPlayerDistanceYards);
+            foreach(var m in Hud.Game.AliveMonsters) {
+                if(m==null||m.FloorCoordinate==null||!m.IsAlive)continue;
+                float distance=from.XYDistanceTo(m.FloorCoordinate);
+                if(distance<=1.5f||distance>maxReach||(MinPlayerDistanceYards>0f&&distance<MinPlayerDistanceYards))continue;
+                if(!IsWithinMaxSnapAngle(from,intent,m.FloorCoordinate,MaxSnapAngleDegrees))continue;
+                if(IsLeaderElite(m)) {
+                    if(IsEliteBlocked(m)||!IsEliteAllowed(m))continue;
+                    if(intent.XYDistanceTo(from)>StackedLeaderSuppressYards+3f&&IsStackedLeaderElite(m,from))continue;
+                } else if(!m.IsOnScreen||!IsPullableTrashAllowed(m))continue;
+                candidates.Add(m);
+            }
+            // Keep original tier priority and intent cone. Never retry a blind blocked ray.
+            var ranked=candidates.OrderByDescending(m=>IsLeaderElite(m)?3:IsEliteMinion(m)?2:IsHighValueTrash(m)?1:0)
+                .ThenBy(m=>m.FloorCoordinate.XYDistanceTo(intent)).Take(64);
+            foreach(var m in ranked) {
+                var to=m.FloorCoordinate;
+                float dx=to.X-from.X,dy=to.Y-from.Y,len=(float)Math.Sqrt(dx*dx+dy*dy);
+                float r=Math.Min(3f,Math.Max(0.35f,GetMonsterRadiusBottom(m)))*0.8f;
+                for(int probe=0;probe<3;probe++) {
+                    int side=probe==0?0:probe==1?-1:1;
+                    var edge=Hud.Window.CreateWorldCoordinate(to.X-dy/len*r*side,to.Y+dx/len*r*side,to.Z);
+                    if(!IsWithinMaxSnapAngle(from,intent,edge,MaxSnapAngleDegrees))continue;
+                    var screen=edge.ToScreenCoordinate();
+                    if(screen==null||!IsWithinWindow(screen.X,screen.Y))continue;
+                    var ray=MapPullRayEnd(from,screen.X,screen.Y,edge);
+                    if(MapPullBlocked(from,ray,MapPullClearance)
+                        ||ComputeLineSafetyPenalty(from,ray)>=SimplePathRejectThreshold)continue;
+                    aimX=screen.X;aimY=screen.Y;marker=edge;targetAcd=m.AcdId;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private float MapPullSafetyPenalty(IWorldCoordinate from,IWorldCoordinate to)
+        {
+            string state=MapPullCorridorState(from,to,MapPullClearance);
+            if(state=="BlockedCandidate")return SimplePathRejectThreshold*2f;
+            // Among otherwise equal eligible pulls, prefer the roomier straight angle.
+            if(state=="ClearCandidate"&&MapPullBlocked(from,to,Math.Min(3f,MapPullClearance+0.5f)))return 1f;
+            return 0f;
+        }
+        private IWorldCoordinate MapPullRayEnd(IWorldCoordinate from,float screenX,float screenY,IWorldCoordinate marker)
+        {
+            var aim=GetScreenWorld(screenX,screenY);
+            if(from==null||aim==null)return marker;
+            float dx=aim.X-from.X,dy=aim.Y-from.Y,length=(float)Math.Sqrt(dx*dx+dy*dy);
+            if(length<0.1f)return marker;
+            float reach=marker==null?length:Math.Max(1.5f,((marker.X-from.X)*dx+(marker.Y-from.Y)*dy)/length);
+            reach=Math.Min(140f,reach);
+            return Hud.Window.CreateWorldCoordinate(from.X+dx/length*reach,from.Y+dy/length*reach,marker==null?from.Z:marker.Z);
+        }
+        private void MapPullFeedback(string action,uint target,IWorldCoordinate point)
+        {
+            var status=MapPullStatus();if(status==null||point==null)return;
+            try {_mapGet("feedback",new object[]{status["epoch"],"ZB_AutoSnap",action,target,point.X,point.Y,point.Z});}
+            catch {_mapGet=null;_mapPlugin=null;}
+        }
         private float ComputeLineSafetyPenalty(IWorldCoordinate fromWorld, IWorldCoordinate toWorld)
         {
             if (!UseGeometrySafety || fromWorld == null || toWorld == null || Hud?.Game == null) return 0f;
 
             EnsureGeometryBlockerSnapshot();
 
-            float penalty = 0f;
+            float penalty = MapPullSafetyPenalty(fromWorld,toWorld);
             penalty += AccumulateBlockerPenalty(_cachedWallerBlockers, fromWorld, toWorld, EliteWallPenaltyWeight * 1.20f);
             penalty += AccumulateBlockerPenalty(_cachedPylonBlockers, fromWorld, toWorld, EliteWallPenaltyWeight * 0.95f);
             penalty += AccumulateBlockerPenalty(_cachedProjectileBlockers, fromWorld, toWorld, ObstaclePenaltyWeight * 1.10f);
@@ -3448,7 +3622,7 @@ namespace Turbo.Plugins.s7o
 
             EnsureGeometryBlockerSnapshot();
 
-            float penalty = 0f;
+            float penalty = MapPullSafetyPenalty(fromWorld,toWorld);
             penalty += AccumulateBlockerPenalty(_cachedPylonBlockers, fromWorld, toWorld, EliteWallPenaltyWeight * 1.15f);
             penalty += AccumulateBlockerPenalty(_cachedWallerBlockers, fromWorld, toWorld, EliteWallPenaltyWeight * 1.35f);
             penalty += AccumulateBlockerPenalty(_cachedProjectileBlockers, fromWorld, toWorld, ObstaclePenaltyWeight * 1.25f);
@@ -4081,6 +4255,7 @@ namespace Turbo.Plugins.s7o
             _aimX = 0f;
             _aimY = 0f;
             _pendingMarkerWorld = null;
+            _pendingMapRayEnd = null;
             _pendingMarkerTargetAcdId = 0;
             _pendingMarkerFailed = false;
             _pendingResumeHeldWhirlwind = false;
