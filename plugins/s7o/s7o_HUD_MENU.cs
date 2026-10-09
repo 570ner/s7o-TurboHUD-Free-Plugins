@@ -267,6 +267,10 @@ namespace Turbo.Plugins.s7o
         };
 
         // ── VISUAL / HUD language ─────────────────────────────────────────────────────
+        private bool _mapViewerExpanded;
+        private IPlugin _mapViewerPlugin;
+        private Func<string,object[],object> _mapViewerGet;
+        private int _mapViewerLookupTick=int.MinValue;
         private bool _hudLanguageExpanded = false;
         private string _hudLanguageCode = "enUS";
         private readonly bool[] _hudLanguageAvailable = new bool[HudLanguageCodes.Length];
@@ -9731,6 +9735,14 @@ namespace Turbo.Plugins.s7o
         {
             string[] p = action.Split(':');
             if (p.Length < 3) return;
+            if(p[1]=="mapviewer") {
+                if(p[2]=="expand") {_mapViewerExpanded=!_mapViewerExpanded;return;}
+                var controls=MapViewerControls();if(controls==null)return;
+                bool grid=(bool)controls["showGrid"],debug=(bool)controls["diagnostics"];
+                if(p[2]=="grid")grid=!grid;else if(p[2]=="debug")debug=!debug;else return;
+                try {_mapViewerGet("configure",new object[]{grid,debug});}catch {_mapViewerGet=null;_mapViewerPlugin=null;}
+                return;
+            }
 
             string cmd     = p[1];
             string feature = p[2];
@@ -10438,6 +10450,52 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
         // VISUAL DRAW HELPERS (UI rows)
         // ════════════════════════════════════════════════════════════════════════
 
+        // Optional BCL bridge: hiding the grid never disables consumers' geometry.
+        // The row exists only when the module and its data folder are installed.
+        private Dictionary<string,object> MapViewerControls()
+        {
+            if(_mapViewerGet==null||_mapViewerPlugin==null||!_mapViewerPlugin.Enabled) {
+                _mapViewerGet=null;_mapViewerPlugin=null;
+                int tick=Hud.Game.CurrentGameTick;
+                if(_mapViewerLookupTick!=int.MinValue&&tick>=_mapViewerLookupTick&&tick-_mapViewerLookupTick<60)return null;
+                _mapViewerLookupTick=tick;
+                foreach(var plugin in Hud.AllPlugins) {
+                    if(plugin==null||!plugin.Enabled)continue;
+                    var bridge=plugin as IEnumerable<KeyValuePair<string,Func<string,object[],object>>>;
+                    if(bridge==null)continue;
+                    foreach(var entry in bridge)if(entry.Key=="s7o.MapViewer.v1") {_mapViewerPlugin=plugin;_mapViewerGet=entry.Value;break;}
+                    if(_mapViewerGet!=null)break;
+                }
+            }
+            if(_mapViewerGet==null)return null;
+            try {
+                var controls=_mapViewerGet("controls",new object[0]) as Dictionary<string,object>;
+                return controls!=null&&controls.ContainsKey("dataPresent")&&controls["dataPresent"] is bool
+                    &&(bool)controls["dataPresent"]&&controls.ContainsKey("showGrid")&&controls["showGrid"] is bool
+                    &&controls.ContainsKey("diagnostics")&&controls["diagnostics"] is bool?controls:null;
+            }catch {_mapViewerGet=null;_mapViewerPlugin=null;return null;}
+        }
+        private void DrawMapViewerRow(RectangleF r,int rowIdx,Dictionary<string,object> controls,bool debugRow)
+        {
+            (rowIdx%2==0?_bRow:_bRowAlt).DrawRectangle(r.Left,r.Top,r.Width,r.Height);
+            float expandWidth=debugRow?0f:36f;
+            var state=new RectangleF(r.Right-expandWidth-164f,r.Top+6f,156f,r.Height-12f);
+            float x=r.Left+(debugRow?28f:12f),width=Math.Max(40f,state.Left-x-12f);
+            string title=debugRow?T("mapviewer.debug.title","Debug Logging"):T("mapviewer.title","Map Viewer");
+            string description=debugRow?T("mapviewer.debug.description","Write bounded map and consumer diagnostics. Leave off for normal play.")
+                :T("mapviewer.description","Show the map grid and collision outlines. Geometry remains available when the grid is hidden.");
+            DrawOutlinedTextAt(_fRowTitle,_fRowTitleShadow,title,x,r.Top+8f);
+            var lines=WrapToggleDescription(description,ApproxCharsForToggleDescription(width),3);
+            for(int i=0;i<lines.Length&&i<3;i++)DrawOutlinedTextAt(_fRowText,_fRowTextShadow,lines[i],x,r.Top+29f+15f*i);
+            bool on=(bool)controls[debugRow?"diagnostics":"showGrid"];
+            DrawGlossButton(state,DisplayText(on?"ON":"OFF"),on,false,true);
+            RegisterToggleHit(debugRow?"visual:mapviewer:debug":"visual:mapviewer:grid",state);
+            if(!debugRow) {
+                var expand=new RectangleF(r.Right-38f,r.Top+6f,30f,r.Height-12f);
+                DrawGlossButton(expand,_mapViewerExpanded?"-":"+",_mapViewerExpanded,false,true);
+                RegisterToggleHit("visual:mapviewer:expand",expand);
+            }
+        }
         private void DrawHudLanguageFeatureRow(RectangleF r, bool expanded, int rowIdx)
         {
             const float stateW = 156f;
@@ -12237,8 +12295,11 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             ordered.AddRange(favIdx);
             ordered.AddRange(mainIdx);
 
-            // Count fixed language rows, favorites, the favorites-end separator, and normal rows.
-            int totalItems = languageFeatureIndex >= 0 ? 1 : 0;
+            // Map Viewer is optional and fixed above language; neither enters favorites.
+            var mapControls=MapViewerControls();
+            int mapRows=mapControls==null?0:(_mapViewerExpanded?2:1);
+            // Count fixed rows, favorites, the favorites-end separator, and normal rows.
+            int totalItems = mapRows+(languageFeatureIndex >= 0 ? 1 : 0);
             if (languageFeatureIndex >= 0 && fexpanded[languageFeatureIndex])
                 totalItems += GetCustomVisualExpandedRowCount("hudlanguage");
             totalItems += (favIdx.Count > 0 ? 1 : 0);
@@ -12260,7 +12321,16 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             int itemIdx = 0;
             float drawY = listTop;
 
-            // Fixed first option: HUD language.
+            // Optional first feature, including its child, participates in the same scroll indices.
+            for(int part=0;part<mapRows;part++) {
+                if(itemIdx>=_visualScroll) {
+                    if(drawY>=clipTop&&drawY+VisualListSlotH<=clipBot)
+                        DrawMapViewerRow(new RectangleF(x,drawY,w,VisualListSlotH-8f),ri,mapControls,part==1);
+                    drawY+=VisualListSlotH;
+                }
+                ri++;itemIdx++;
+            }
+            // Fixed next option: HUD language.
             if (languageFeatureIndex >= 0)
             {
                 if (itemIdx >= _visualScroll)
@@ -14132,7 +14202,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             {
                 allEntries.Insert(monkStart, new MacroEntry {
                     Title="Sanctified Impale Strafe",
-                    Description="F3 toggles Shadow Strafe; Impale is primed for Sanctified autocasts while F2 switches the generator cadence between Speed and Combat.",
+                    Description="F3 toggles Shadow Impale Strafe. Both modes refresh Focus with Bolas; Combat adds targeted Impale casts. F2 switches modes.",
                     Code="sanctified_impale_plugin", IsPlugin=true,
                     PluginTypeNames=new[]{"s7o_Impale"},
                     PluginAction="toggles:plugin:sanctifiedimpale" });
