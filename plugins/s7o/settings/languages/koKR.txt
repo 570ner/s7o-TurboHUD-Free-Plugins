@@ -1996,7 +1996,7 @@ hud.visual.unscathed.title=일반 몬스터 생명력 막대
 hud.visual.unscathed.description=피해를 입지 않은 일반 몬스터 위에 생명력 막대를 표시해 더 잘 보이게 합니다.
 
 hud.text.sanctified_impale_strafe=성화된 투검 난사
-macro.entry.sanctified_impale_plugin.description=F3으로 어둠 투검 난사를 전환하고 F2로 속도와 전투 모드를 바꿉니다.
+macro.entry.sanctified_impale_plugin.description=F3으로 어둠 투검 난사를 켜거나 끕니다. 두 모드 모두 올가미로 집중 효과를 갱신하며, 전투 모드는 대상에게 투검도 시전합니다. F2로 모드를 전환합니다.
 hud.text.sanctified_raiment_monk=성화된 천둥의 화신 수도사
 macro.entry.sanctified_monk_plugin.description=생성 기술을 누르는 동안 다른 연계 일격 강화 효과가 2초 남으면 확인 후 갱신합니다. 자동 진격과 제자리 진격은 기본 켜짐입니다.
 sanctified.monk.auto_dash=자동 진격
@@ -2014,3 +2014,8 @@ sanctified.monk.melee_assist=근접 대상 지원
 sanctified.monk.melee_assist.description=길게 눌러 가장 가까운 유효한 정예, 하수인, 일반 몬스터 순서로 대상을 선택합니다. 대상이 죽거나 공격 불가가 되거나 우선순위가 더 높은 적이 나타날 때까지 유지합니다. 접근하거나 강화 효과를 갱신할 때 대상에게 질주합니다. 놓으면 중지합니다.
 sanctified.impale.auto_aim=올가미 자동 조준
 sanctified.impale.auto_aim.description=화면 안의 적에게 올가미를 조준한 뒤 난사를 재개하기 전에 커서를 복원합니다. 조준 중에도 마우스 움직임을 반영합니다.
+
+mapviewer.title=지도 뷰어
+mapviewer.description=지도 격자와 충돌 윤곽을 표시합니다. 격자를 숨겨도 지형 정보는 계속 제공됩니다.
+mapviewer.debug.title=진단 로그
+mapviewer.debug.description=지도 및 이를 사용하는 플러그인의 제한된 진단 정보를 기록합니다. 일반 플레이에서는 끄세요.

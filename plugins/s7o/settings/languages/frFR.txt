@@ -1998,7 +1998,7 @@ hud.visual.unscathed.title=Barres de vie des monstres ordinaires
 hud.visual.unscathed.description=Barres de vie au-dessus des monstres ordinaires indemnes pour mieux les repérer.
 
 hud.text.sanctified_impale_strafe=Rafale Empaleur sanctifiée
-macro.entry.sanctified_impale_plugin.description=F3 active ou désactive Empaleur de l'Ombre; F2 alterne vitesse et combat.
+macro.entry.sanctified_impale_plugin.description=F3 active ou désactive Rafale avec Empaleur des Ombres. Les deux modes renouvellent Concentration avec Bolas ; Combat ajoute des tirs ciblés d’Empaleur. F2 change de mode.
 hud.text.sanctified_raiment_monk=Moine Tenue sanctifié
 macro.entry.sanctified_monk_plugin.description=Pendant que vous maintenez un générateur, confirme les autres bonus de Frappe combinée à deux secondes de leur fin. Dash auto et sur soi sont activés.
 sanctified.monk.auto_dash=Dash auto
@@ -2016,3 +2016,8 @@ sanctified.monk.melee_assist=Assistance de ciblage en mêlée
 sanctified.monk.melee_assist.description=Maintenir pour choisir l’élite valide la plus proche, puis un serviteur ou un ennemi ordinaire. Garder la cible jusqu’à sa mort, son invalidité ou une priorité supérieure. Ruée vers la cible pour approcher ou renouveler le bonus. Relâcher pour arrêter.
 sanctified.impale.auto_aim=Visée automatique des bolas
 sanctified.impale.auto_aim.description=Vise un ennemi à l’écran avec les bolas, puis restaure le curseur avant de reprendre Rafale. Les mouvements de souris sont conservés pendant la visée.
+
+mapviewer.title=Vue de la carte
+mapviewer.description=Affiche la grille et les contours de collision. La géométrie reste disponible lorsque la grille est masquée.
+mapviewer.debug.title=Journal de diagnostic
+mapviewer.debug.description=Enregistre des diagnostics limités de la carte et des plugins utilisateurs. À désactiver en jeu normal.

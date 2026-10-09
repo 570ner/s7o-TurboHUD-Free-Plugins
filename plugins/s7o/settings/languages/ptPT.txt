@@ -1996,7 +1996,7 @@ hud.visual.unscathed.title=Barras de vida de monstros comuns
 hud.visual.unscathed.description=Barras de vida sobre monstros comuns ilesos para os ver melhor.
 
 hud.text.sanctified_impale_strafe=Disparo Empalar Santificado
-macro.entry.sanctified_impale_plugin.description=F3 ativa Empalar das Sombras; F2 alterna velocidade e combate.
+macro.entry.sanctified_impale_plugin.description=F3 ativa ou desativa o Bombardeio com Empalar das Sombras. Ambos os modos renovam Foco com Bolas; Combate adiciona usos de Empalar no alvo. F2 alterna os modos.
 hud.text.sanctified_raiment_monk=Monge Trajes Santificado
 macro.entry.sanctified_monk_plugin.description=Enquanto mantém um gerador, confirma os outros bónus de Golpe Combinado quando faltam dois segundos. Investida automática e em si estão ligadas.
 sanctified.monk.auto_dash=Investida auto
@@ -2014,3 +2014,8 @@ sanctified.monk.melee_assist=Assistência de alvos corpo a corpo
 sanctified.monk.melee_assist.description=Mantém premido para escolher o elite válido mais próximo, depois lacaios e inimigos comuns. Mantém o alvo até morrer, ficar inválido ou surgir prioridade maior. Avança até ele para te aproximares ou renovares o bónus; solta para parar.
 sanctified.impale.auto_aim=Mira automática de Bolas
 sanctified.impale.auto_aim.description=Aponta Bolas a um inimigo no ecrã e repõe o cursor antes de retomar Rajada. Preserva os movimentos do rato durante a mira.
+
+mapviewer.title=Visualizador do mapa
+mapviewer.description=Mostra a grelha do mapa e os contornos de colisão. A geometria continua disponível com a grelha oculta.
+mapviewer.debug.title=Registo de diagnóstico
+mapviewer.debug.description=Guarda diagnósticos limitados do mapa e dos plugins que o utilizam. Desative durante o jogo normal.

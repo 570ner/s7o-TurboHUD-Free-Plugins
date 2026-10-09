@@ -1998,7 +1998,7 @@ hud.visual.unscathed.title=Paski życia zwykłych potworów
 hud.visual.unscathed.description=Paski życia nad nieuszkodzonymi zwykłymi potworami, aby łatwiej je dostrzec.
 
 hud.text.sanctified_impale_strafe=Uświęcony Ostrzał Przebicia
-macro.entry.sanctified_impale_plugin.description=F3 włącza Ostrzał Przebicia Cienia; F2 przełącza szybkość i walkę.
+macro.entry.sanctified_impale_plugin.description=F3 włącza lub wyłącza Ostrzał z Przebiciem Cienia. Oba tryby odnawiają Skupienie za pomocą Bolas; Walka dodaje celowane użycia Przebicia. F2 zmienia tryb.
 hud.text.sanctified_raiment_monk=Uświęcony mnich Szaty
 macro.entry.sanctified_monk_plugin.description=Gdy trzymasz generator, potwierdza pozostałe premie Uderzenia Łączonego przy dwóch sekundach do końca. Auto Doskok i doskok w miejscu są włączone.
 sanctified.monk.auto_dash=Auto Doskok
@@ -2016,3 +2016,8 @@ sanctified.monk.melee_assist=Pomoc w wyborze celu w zwarciu
 sanctified.monk.melee_assist.description=Przytrzymaj, aby wybrać najbliższą dostępną elitę, potem sługę lub zwykłego wroga. Utrzymuj cel do śmierci, utraty dostępności lub pojawienia się wyższego priorytetu. Doskok do celu przy zbliżaniu lub odnowieniu premii. Puść, aby zatrzymać.
 sanctified.impale.auto_aim=Automatyczne celowanie Bolasem
 sanctified.impale.auto_aim.description=Celuje Bolasem we wroga na ekranie, a następnie przywraca kursor przed wznowieniem Ostrzału. Zachowuje ruch myszy podczas celowania.
+
+mapviewer.title=Podgląd mapy
+mapviewer.description=Pokazuje siatkę mapy i obrysy kolizji. Geometria pozostaje dostępna po ukryciu siatki.
+mapviewer.debug.title=Dziennik diagnostyczny
+mapviewer.debug.description=Zapisuje ograniczone dane diagnostyczne mapy i korzystających z niej wtyczek. Wyłącz podczas zwykłej gry.

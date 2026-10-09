@@ -1998,7 +1998,7 @@ hud.visual.unscathed.title=Lebensbalken normaler Monster
 hud.visual.unscathed.description=Lebensbalken über unversehrten normalen Monstern für bessere Sichtbarkeit.
 
 hud.text.sanctified_impale_strafe=Geheiligtes Aufspießen-Strafe
-macro.entry.sanctified_impale_plugin.description=F3 schaltet Schatten-Aufspießen-Strafe um; F2 wechselt Tempo und Kampf.
+macro.entry.sanctified_impale_plugin.description=F3 schaltet Shadow Impale Strafe um. Beide Modi erneuern Fokus mit Bolas; Kampf wirkt zusätzlich gezieltes Aufspießen. F2 wechselt den Modus.
 hud.text.sanctified_raiment_monk=Geheiligter Gewand-Mönch
 macro.entry.sanctified_monk_plugin.description=Während du einen Generator hältst, werden andere Komboschlag-Buffs bei zwei Sekunden Restzeit bestätigt. Auto-Dash und Selbst-Dash sind an.
 sanctified.monk.auto_dash=Auto-Dash
@@ -2016,3 +2016,8 @@ sanctified.monk.melee_assist=Nahkampf-Zielhilfe
 sanctified.monk.melee_assist.description=Gedrückt halten: den nächsten gültigen Elitegegner, dann Diener und normale Gegner wählen. Ziel behalten, bis es stirbt, ungültig wird oder eine höhere Priorität erscheint. Für Annäherung oder Bufferneuerung zum Ziel dashen. Loslassen beendet die Hilfe.
 sanctified.impale.auto_aim=Bolas automatisch zielen
 sanctified.impale.auto_aim.description=Bolas auf einen sichtbaren Gegner richten, dann den Cursor vor Strafe wiederherstellen. Deine Mausbewegung bleibt während des Zielens erhalten.
+
+mapviewer.title=Kartenansicht
+mapviewer.description=Zeigt das Kartenraster und Kollisionsumrisse. Die Geometrie bleibt bei ausgeblendetem Raster verfügbar.
+mapviewer.debug.title=Diagnoseprotokoll
+mapviewer.debug.description=Schreibt begrenzte Karten- und Plugin-Diagnosen. Für normales Spielen ausgeschaltet lassen.

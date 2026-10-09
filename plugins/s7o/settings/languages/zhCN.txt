@@ -1996,7 +1996,7 @@ hud.visual.unscathed.title=普通怪物生命条
 hud.visual.unscathed.description=在未受伤的普通怪物上方显示生命条，使其更容易被看见。
 
 hud.text.sanctified_impale_strafe=圣化暗影飞刀扫射
-macro.entry.sanctified_impale_plugin.description=F3 切换暗影飞刀扫射，F2 切换速度与战斗模式。
+macro.entry.sanctified_impale_plugin.description=F3 开关暗影飞刀扫射。两种模式都会用缚锤弹刷新克己效果；战斗模式还会对目标施放飞刀。F2 切换模式。
 hud.text.sanctified_raiment_monk=圣化千风飓武僧
 macro.entry.sanctified_monk_plugin.description=按住一个内力生成技能时，在其他组合打击增益剩余两秒时确认并刷新。自动冲刺与原地冲刺默认开启。
 sanctified.monk.auto_dash=自动冲刺
@@ -2014,3 +2014,8 @@ sanctified.monk.melee_assist=近战目标辅助
 sanctified.monk.melee_assist.description=按住后依次选择最近的有效精英、仆从、普通怪物。保持当前目标，直到它死亡、失效或出现更高优先级敌人。接近或刷新增益时向目标疾奔。松开停止。
 sanctified.impale.auto_aim=缚影弹自动瞄准
 sanctified.impale.auto_aim.description=将缚影弹瞄准屏幕内的敌人，然后恢复鼠标位置并继续扫射。瞄准期间保留鼠标移动输入。
+
+mapviewer.title=地图查看器
+mapviewer.description=显示地图网格和碰撞轮廓。隐藏网格后，其他插件仍可获取地形数据。
+mapviewer.debug.title=诊断日志
+mapviewer.debug.description=记录有限的地图及调用插件诊断信息。正常游戏时请关闭。

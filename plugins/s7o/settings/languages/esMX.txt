@@ -1998,7 +1998,7 @@ hud.visual.unscathed.title=Barras de vida de enemigos comunes
 hud.visual.unscathed.description=Barras de vida sobre enemigos comunes ilesos para verlos mejor.
 
 hud.text.sanctified_impale_strafe=Ametralladora de Empalar santificada
-macro.entry.sanctified_impale_plugin.description=F3 activa o desactiva Empalar con Sombras; F2 cambia entre velocidad y combate.
+macro.entry.sanctified_impale_plugin.description=F3 activa o desactiva Acribillar con Empalar de las Sombras. Ambos modos renuevan Foco con Bolas; Combate añade lanzamientos dirigidos de Empalar. F2 cambia de modo.
 hud.text.sanctified_raiment_monk=Monje de Atavío santificado
 macro.entry.sanctified_monk_plugin.description=Mientras mantienes un generador, confirma los otros bonos de Golpe combinado cuando queden dos segundos. Dash automático y hacia uno mismo están activos.
 sanctified.monk.auto_dash=Dash automático
@@ -2016,3 +2016,8 @@ sanctified.monk.melee_assist=Asistencia de objetivos cuerpo a cuerpo
 sanctified.monk.melee_assist.description=Mantén pulsado para elegir al élite válido más cercano, luego esbirros y enemigos normales. Conserva el objetivo hasta que muera, deje de ser válido o aparezca uno de mayor prioridad. Embiste para acercarte o renovar el beneficio; suelta para detener.
 sanctified.impale.auto_aim=Apuntar Bolas automáticamente
 sanctified.impale.auto_aim.description=Apunta Bolas a un enemigo en pantalla y restaura el cursor antes de reanudar Ametralladora. Conserva el movimiento del ratón mientras apunta.
+
+mapviewer.title=Visor del mapa
+mapviewer.description=Muestra la cuadrícula del mapa y los contornos de colisión. La geometría sigue disponible al ocultar la cuadrícula.
+mapviewer.debug.title=Registro de depuración
+mapviewer.debug.description=Guarda diagnósticos limitados del mapa y de los plugins que lo utilizan. Desactívalo para jugar normalmente.

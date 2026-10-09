@@ -1998,7 +1998,7 @@ hud.visual.unscathed.title=Trash HP Bars
 hud.visual.unscathed.description=Health bars over unscathed trash for visibility.
 
 hud.text.sanctified_impale_strafe=Sanctified Impale Strafe
-macro.entry.sanctified_impale_plugin.description=F3 toggles Shadow Impale Strafe; F2 switches Speed and Combat.
+macro.entry.sanctified_impale_plugin.description=F3 toggles Shadow Impale Strafe. Both modes refresh Focus with Bolas; Combat adds targeted Impale casts. F2 switches modes.
 hud.text.sanctified_raiment_monk=Sanctified Raiment Monk
 macro.entry.sanctified_monk_plugin.description=While you hold a generator, confirm other Combination Strike buffs when two seconds remain. Auto Dash and Self-Dash start on.
 sanctified.monk.auto_dash=Auto Dash
@@ -2016,3 +2016,8 @@ sanctified.monk.melee_assist=Melee Target Assist
 sanctified.monk.melee_assist.description=Hold to acquire the nearest eligible elite, then minion, then trash. Keep the target while eligible; switch when it dies, becomes invalid, or a higher priority appears. Dash to the target for approach or refresh; release to stop.
 sanctified.impale.auto_aim=Auto-aim Bolas
 sanctified.impale.auto_aim.description=Aim Bolas at an on-screen enemy, then restore the cursor before resuming Strafe. Preserves your mouse movement during aiming.
+
+mapviewer.title=Map Viewer
+mapviewer.description=Show the map grid and collision outlines. Geometry remains available when the grid is hidden.
+mapviewer.debug.title=Debug Logging
+mapviewer.debug.description=Write bounded map and consumer diagnostics. Leave off for normal play.

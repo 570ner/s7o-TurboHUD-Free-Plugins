@@ -1998,7 +1998,7 @@ hud.visual.unscathed.title=Barre della vita dei mostri comuni
 hud.visual.unscathed.description=Barre della vita sopra i mostri comuni illesi per vederli meglio.
 
 hud.text.sanctified_impale_strafe=Raffica Impalamento santificata
-macro.entry.sanctified_impale_plugin.description=F3 attiva o disattiva Impalamento Ombra; F2 alterna velocità e combattimento.
+macro.entry.sanctified_impale_plugin.description=F3 attiva o disattiva Assalto Dinamico con Impalamento delle Ombre. Entrambe le modalità rinnovano Focus con Bolas; Combattimento aggiunge lanci mirati di Impalamento. F2 cambia modalità.
 hud.text.sanctified_raiment_monk=Monaco Vesti santificato
 macro.entry.sanctified_monk_plugin.description=Mentre tieni premuto un generatore, conferma gli altri bonus di Colpo combinato quando restano due secondi. Scatto auto e su di sé sono attivi.
 sanctified.monk.auto_dash=Scatto auto
@@ -2016,3 +2016,8 @@ sanctified.monk.melee_assist=Assistenza bersagli da mischia
 sanctified.monk.melee_assist.description=Tieni premuto per scegliere l’élite valido più vicino, poi servitori e nemici normali. Mantieni il bersaglio finché muore, diventa non valido o appare una priorità superiore. Scatta verso di esso per avvicinarti o rinnovare il bonus. Rilascia per fermarti.
 sanctified.impale.auto_aim=Mira automatica di Bolas
 sanctified.impale.auto_aim.description=Mira Bolas a un nemico sullo schermo, poi ripristina il cursore prima di riprendere Assalto Dinamico. I movimenti del mouse vengono mantenuti durante la mira.
+
+mapviewer.title=Visualizzatore mappa
+mapviewer.description=Mostra la griglia e i contorni delle collisioni. La geometria resta disponibile quando la griglia è nascosta.
+mapviewer.debug.title=Registro diagnostico
+mapviewer.debug.description=Registra diagnostica limitata della mappa e dei plugin che la usano. Disattivare durante il gioco normale.
