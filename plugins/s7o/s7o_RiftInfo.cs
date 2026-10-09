@@ -146,11 +146,15 @@ namespace Turbo.Plugins.s7o
         public bool TrackOnlyLocalPlayerStricken { get; set; } = false;
 
         // Remote party players cannot be safely gated by the local player's animation.
-        // This counts remote Stricken proc rising edges against the current tracked target.
+        // Observed native cooldown starts/restarts estimate stacks on the tracked guardian.
         public bool UseProcEdgeEstimatorForRemotePlayers { get; set; } = true;
 
-        // Prevent remote proc flicker/double-counts.
-        public int RemoteStrickenMinAcceptedStackIntervalTicks { get; set; } = 25;
+        // Local proc observation avoids requiring unreliable damage-source attributes.
+        // Disable this to use the existing stricter damage-attribution diagnostic path.
+        public bool UseProcEdgeEstimatorForLocalPlayer { get; set; } = true;
+
+        // Native proc events already obey the gem cooldown; do not impose a fixed 25-tick cap.
+        public int RemoteStrickenMinAcceptedStackIntervalTicks { get; set; } = 1;
 
         // Exact AcdId does not work for this setup; FreeHUD reports real damage through AnnId.
         public bool StrictDirectPlayerAcdOnly { get; set; } = false;
@@ -158,7 +162,7 @@ namespace Turbo.Plugins.s7o
         // Allow AnnId only when the local player was recently attacking/casting/channeling.
         public bool AllowAnnIdDamageWhenLocalAttackRecent { get; set; } = true;
 
-        // This remains mandatory. It blocks follower-only idle false counts.
+        // Applies only to the optional strict damage-attribution path.
         public bool RequireLocalAttackAnimationForStricken { get; set; } = true;
 
         // Stricken proc/damage timing can lag well after animation sampling.
@@ -167,8 +171,8 @@ namespace Turbo.Plugins.s7o
         // AnnId attribution must be close to a verified attack/cast/channel animation.
         public int StrickenAnnIdMaxLocalAttackAgeTicks { get; set; } = 45;
 
-        // Conservative accepted-stack cooldown to block flicker/double-counting.
-        public int StrickenMinAcceptedStackIntervalTicks { get; set; } = 25;
+        // One native tick prevents duplicate samples without limiting fast native procs.
+        public int StrickenMinAcceptedStackIntervalTicks { get; set; } = 1;
 
         // Search enough nearby monsters to catch density around the player/target.
         public int StrickenCandidateRangeYards { get; set; } = 80;
@@ -187,9 +191,6 @@ namespace Turbo.Plugins.s7o
         // selection/unload transitions.
         public int StrickenBossTargetCacheTicks { get; set; } = 7200;
 
-        // Dedicated Stricken debug. Enable manually for diagnostics.
-        public bool EnableStrickenDebug { get; set; } = false;
-        public int StrickenDebugIntervalTicks { get; set; } = 30;
 
         // Correct native proc pulse discovered from debug logs.
         // Primary 428348 index 2 toggles; primary index 0 is always active/equipped state.
@@ -201,9 +202,6 @@ namespace Turbo.Plugins.s7o
         // About 0.33s at 60 ticks/sec, only used if the diagnostic fallback is manually enabled.
         public int StrickenDamageOnlyFallbackCooldownTicks { get; set; } = 20;
 
-        // ── Debug logging ────────────────────────────────────────────────
-        public bool EnableRiftInfoDebug { get; set; } = false;
-        public int DebugLogIntervalTicks { get; set; } = 120;
 
         // ── Fonts / textures ─────────────────────────────────────────────
         public IFont RpFont { get; set; }
@@ -335,10 +333,8 @@ namespace Turbo.Plugins.s7o
         private double _prevPct = 0;
         private int _prevPctTick = 0;
 
-        private int _lastDebugTick = 0;
         private int _lastSeenGameTick = 0;
         private uint _lastLocalHeroId = 0;
-        private bool _strickenDebugStarted = false;
 
         private IMonster _lastValidStrickenTarget = null;
         private int _lastValidStrickenTargetKey = 0;
@@ -348,7 +344,6 @@ namespace Turbo.Plugins.s7o
         private int _lastLocalAttackTick = 0;
         private string _lastLocalAttackState = "";
         private string _lastLocalAttackAnimation = "";
-        private int _lastLocalAttackRejectDebugTick = 0;
 
         private const uint StrickenSno = 428348u;
         private const uint StrickenSecondarySno = 428349u;
@@ -439,6 +434,16 @@ namespace Turbo.Plugins.s7o
 
             // For remote-party proc-edge estimator.
             public int LastRemoteAcceptedStackTick;
+
+            // Native observation is seeded without counting an already-active cooldown.
+            public bool ProcSampleSeeded;
+            public int LastProcSampleTick = -1;
+            public double LastProcElapsed = -1;
+            public double LastProcLeft = -1;
+            public int ObservedProcs;
+            public int ObservedTimerRestarts;
+            public int RejectedProcTargets;
+            public string LastObservedEvent = "seed";
         }
 
         private class PendingStrickenProc
@@ -663,8 +668,6 @@ namespace Turbo.Plugins.s7o
             // frozen boss summary from surviving character changes or a leave-game/rejoin cycle.
             ResetVolatileState(true);
             _lastSeenGameTick = 0;
-            _lastDebugTick = 0;
-            _lastLocalAttackRejectDebugTick = 0;
         }
 
         // ── AfterCollect ─────────────────────────────────────────────────
@@ -689,14 +692,6 @@ namespace Turbo.Plugins.s7o
             if (localHeroId != 0u)
                 _lastLocalHeroId = localHeroId;
 
-            if (EnableStrickenDebug && !_strickenDebugStarted)
-            {
-                _strickenDebugStarted = true;
-                Hud.TextLog.Log(
-                    "s7o_RiftInfo_StrickenDebug",
-                    "Stricken debug started. Look for this file in TurboHUD/FreeHUD logs. " +
-                    "Primary=428348 Secondary=428349 HybridAnnIdLocalAttack=True LocalAttackGate=True");
-            }
 
             int tick = Hud.Game.CurrentGameTick;
 
@@ -983,24 +978,6 @@ namespace Turbo.Plugins.s7o
             _summaryUrshiSeenInTown = false;
             _summaryUrshiMissingInTownSinceTick = 0;
 
-            if (EnableRiftInfoDebug)
-            {
-                try
-                {
-                    Hud.TextLog.Log(
-                        "s7o_RiftInfo_Debug",
-                        "tick=" + tick.ToString(CultureInfo.InvariantCulture) +
-                        " phase=freeze-completed-rift reason=" + reason +
-                        " riftStart=" + _riftStartTick.ToString(CultureInfo.InvariantCulture) +
-                        " riftEnd=" + _riftCompleteTick.ToString(CultureInfo.InvariantCulture) +
-                        " bossStart=" + _bossStartTick.ToString(CultureInfo.InvariantCulture) +
-                        " bossEnd=" + _bossEndTick.ToString(CultureInfo.InvariantCulture)
-                    );
-                }
-                catch
-                {
-                }
-            }
         }
 
         private bool IsCompletedRiftSummaryStillValid(int tick)
@@ -1074,7 +1051,6 @@ namespace Turbo.Plugins.s7o
         }
 
 
-
         private void ResetVolatileState(bool clearStrickenStacks)
         {
             _riftSessionActive = false;
@@ -1114,20 +1090,6 @@ namespace Turbo.Plugins.s7o
         {
             _strickenStacksByHeroAndTarget.Clear();
 
-            if (EnableStrickenDebug)
-            {
-                try
-                {
-                    Hud.TextLog.Log(
-                        "s7o_RiftInfo_StrickenDebug",
-                        "tick=" + tick.ToString(CultureInfo.InvariantCulture) +
-                        " phase=stricken-stack-clear reason=" + reason
-                    );
-                }
-                catch
-                {
-                }
-            }
         }
 
         private void ClearPendingStrickenAttribution()
@@ -1169,22 +1131,6 @@ namespace Turbo.Plugins.s7o
             _bossEndTick = 0;
             _bossActive = true;
 
-            if (EnableRiftInfoDebug)
-            {
-                try
-                {
-                    Hud.TextLog.Log(
-                        "s7o_RiftInfo_Debug",
-                        "tick=" + tick.ToString(CultureInfo.InvariantCulture) +
-                        " phase=boss-timer-start reason=" + reason +
-                        " step=" + GetGreaterRiftQuestStepId().ToString(CultureInfo.InvariantCulture) +
-                        " rp=" + Hud.Game.RiftPercentage.ToString("F2", CultureInfo.InvariantCulture)
-                    );
-                }
-                catch
-                {
-                }
-            }
         }
 
         private void UpdateBossState(int tick)
@@ -2019,7 +1965,6 @@ namespace Turbo.Plugins.s7o
             if (ShowSpawnAlert && alert != SpawnAlertKind.None)
                 DrawSpawnAlert(GetSpawnAlertText(alert), x, y + 2.0f, alert);
 
-            DebugRpSnapshot(rp, remaining, alert);
         }
 
         private enum SpawnAlertKind
@@ -2539,13 +2484,15 @@ namespace Turbo.Plugins.s7o
         }
 
 
-
         // ── Stricken estimator ───────────────────────────────────────────
         private void UpdateStrickenEstimator(int tick)
         {
             UpdateLocalAttackGate(tick);
             UpdateTrackedStrickenTarget(tick);
-            UpdateStrickenGlobalDamageSamples(tick);
+            // Native-proc mode does not need per-hit source scans. Keep them for strict attribution mode.
+            if (!UseProcEdgeEstimatorForLocalPlayer ||
+                (!TrackOnlyLocalPlayerStricken && !UseProcEdgeEstimatorForRemotePlayers))
+                UpdateStrickenGlobalDamageSamples(tick);
 
             if (TrackOnlyLocalPlayerStricken)
             {
@@ -2581,21 +2528,24 @@ namespace Turbo.Plugins.s7o
             if (!PlayerHasStricken(player))
             {
                 state.LastProcActive = false;
+                state.ProcSampleSeeded = false;
+                state.LastProcSampleTick = -1;
                 state.PendingProc = null;
-                DebugStrickenPlayerState(player, trackedTarget, tick, "no-stricken");
                 return;
             }
 
             bool procActive = IsStrickenProcActive(player);
+            bool observedProc = ObserveStrickenProc(player, state, procActive, tick);
 
-            if (!player.IsMe && UseProcEdgeEstimatorForRemotePlayers)
+            if ((player.IsMe && UseProcEdgeEstimatorForLocalPlayer) ||
+                (!player.IsMe && UseProcEdgeEstimatorForRemotePlayers))
             {
-                UpdateRemotePlayerStrickenEstimator(player, heroId, state, trackedTarget, procActive, tick);
+                UpdateObservedStrickenEstimator(player, heroId, state, trackedTarget, observedProc, tick);
                 return;
             }
 
-            // Local-player path: keep the validated conservative attribution model unchanged.
-            if (procActive && !state.LastProcActive)
+            // Optional strict path: retains source/animation attribution, with the same native events.
+            if (observedProc)
             {
                 state.LastProcTick = tick;
 
@@ -2604,7 +2554,6 @@ namespace Turbo.Plugins.s7o
                 if (!localAttackRecent)
                 {
                     state.PendingProc = null;
-                    DebugStrickenPlayerState(player, trackedTarget, tick, "reject-proc-no-local-attack");
                 }
                 else
                 {
@@ -2620,64 +2569,106 @@ namespace Turbo.Plugins.s7o
                         LocalAttackAnimation = _lastLocalAttackAnimation
                     };
 
-                    DebugStrickenPlayerState(player, trackedTarget, tick, "proc-edge");
                 }
             }
-
-            if (!procActive && state.LastProcActive)
-                DebugStrickenPlayerState(player, trackedTarget, tick, "proc-reset");
 
             ResolvePendingStrickenProc(player, heroId, state, tick);
 
             state.LastProcActive = procActive;
 
-            DebugStrickenPlayerState(player, GetTrackedStrickenTarget(), tick, "tick");
         }
 
-        private void UpdateRemotePlayerStrickenEstimator(
-            IPlayer player,
-            uint heroId,
-            StrickenProcState state,
-            IMonster trackedTarget,
-            bool procActive,
-            int tick)
+        private bool ObserveStrickenProc(IPlayer player, StrickenProcState state, bool active, int tick)
         {
-            if (state == null)
-                return;
-
-            if (procActive && !state.LastProcActive)
+            if (state.LastProcSampleTick == tick)
+                return false;
+            if (tick < state.LastProcSampleTick)
             {
-                state.LastProcTick = tick;
-
-                int targetKey = GetFreshTrackedStrickenTargetKey(trackedTarget, tick);
-
-                if (targetKey != 0)
-                {
-                    if (state.LastRemoteAcceptedStackTick <= 0 ||
-                        tick - state.LastRemoteAcceptedStackTick >= RemoteStrickenMinAcceptedStackIntervalTicks)
-                    {
-                        IncrementStrickenStack(heroId, targetKey, tick, "remote-proc-edge-estimator");
-                        state.LastRemoteAcceptedStackTick = tick;
-
-                        DebugStrickenPlayerState(player, trackedTarget, tick, "remote-proc-edge-accepted");
-                    }
-                    else
-                    {
-                        DebugStrickenPlayerState(player, trackedTarget, tick, "remote-proc-too-soon");
-                    }
-                }
-                else
-                {
-                    DebugStrickenPlayerState(player, trackedTarget, tick, "remote-proc-no-target");
-                }
+                // Re-seed after a native clock reset; old tick values must not stall observations.
+                state.ProcSampleSeeded = false;
+                state.PendingProc = null;
+                state.LastAcceptedStackTick = state.LastRemoteAcceptedStackTick = 0;
             }
 
-            if (!procActive && state.LastProcActive)
-                DebugStrickenPlayerState(player, trackedTarget, tick, "remote-proc-reset");
+            double elapsed = -1, left = -1;
+            try
+            {
+                var buff = player.Powers.GetBuff(StrickenSno);
+                int index = StrickenProcIconIndex;
+                if (buff != null && index >= 0)
+                {
+                    if (buff.TimeElapsedSeconds != null && index < buff.TimeElapsedSeconds.Length)
+                        elapsed = buff.TimeElapsedSeconds[index];
+                    if (buff.TimeLeftSeconds != null && index < buff.TimeLeftSeconds.Length)
+                        left = buff.TimeLeftSeconds[index];
+                }
+            }
+            catch { }
+            if (double.IsNaN(elapsed) || double.IsInfinity(elapsed) || elapsed < 0) elapsed = -1;
+            if (double.IsNaN(left) || double.IsInfinity(left) || left < 0) left = -1;
 
-            state.LastProcActive = procActive;
+            // Continued active state can hide a new cooldown between collect frames.
+            // Only an observed timer restart counts; sheet APS never manufactures stacks.
+            bool restart = active && state.LastProcActive && elapsed >= 0 &&
+                state.LastProcElapsed > elapsed + (1.0 / 120.0);
+            bool edge = active && !state.LastProcActive;
+            bool proc = state.ProcSampleSeeded && tick > state.LastProcSampleTick && (edge || restart);
+            state.ProcSampleSeeded = true;
+            state.LastProcSampleTick = tick;
+            state.LastProcActive = active;
+            state.LastProcElapsed = elapsed;
+            state.LastProcLeft = left;
+            if (proc)
+            {
+                state.LastProcTick = tick;
+                state.ObservedProcs++;
+                if (restart) state.ObservedTimerRestarts++;
+                state.LastObservedEvent = restart ? "timer-restart" : "active-edge";
+            }
+            return proc;
+        }
 
-            DebugStrickenPlayerState(player, trackedTarget, tick, "remote-tick");
+        private void UpdateObservedStrickenEstimator(
+            IPlayer player, uint heroId, StrickenProcState state,
+            IMonster trackedTarget, bool observedProc, int tick)
+        {
+            if (!observedProc)
+                return;
+
+            // A cached target is useful through a selection change, but not enough to
+            // attribute a proc while that guardian is absent, dead, or on another floor.
+            int targetKey = 0;
+            trackedTarget = trackedTarget == null ? null :
+                FindAliveMonsterByTargetKey(GetMonsterTargetKey(trackedTarget));
+            if (trackedTarget != null && IsValidStrickenDisplayTarget(trackedTarget) &&
+                !trackedTarget.Invulnerable && !trackedTarget.Illusion &&
+                player.CoordinateKnown && player.WorldId == trackedTarget.WorldId &&
+                player.FloorCoordinate != null && trackedTarget.FloorCoordinate != null &&
+                player.FloorCoordinate.XYDistanceTo(trackedTarget.FloorCoordinate) <= StrickenCandidateRangeYards)
+                targetKey = GetMonsterTargetKey(trackedTarget);
+
+            // A proc while the local player explicitly targets an add is not a boss stack.
+            if (player.IsMe)
+            {
+                var selected = Hud.Game.SelectedMonster2 ?? Hud.Game.SelectedMonster1;
+                if (selected != null && selected.IsAlive && !IsRiftGuardianLike(selected))
+                    targetKey = 0;
+            }
+
+            int lastAccepted = player.IsMe ? state.LastAcceptedStackTick : state.LastRemoteAcceptedStackTick;
+            int minTicks = Math.Max(1, player.IsMe ? StrickenMinAcceptedStackIntervalTicks :
+                RemoteStrickenMinAcceptedStackIntervalTicks);
+            if (targetKey == 0 || (lastAccepted > 0 && tick - lastAccepted < minTicks))
+            {
+                state.RejectedProcTargets++;
+                state.LastObservedEvent += targetKey == 0 ? ":no-live-boss" : ":duplicate";
+                return;
+            }
+
+            string reason = player.IsMe ? "local-native-proc-estimate" : "remote-native-proc-estimate";
+            IncrementStrickenStack(heroId, targetKey, tick, reason);
+            if (player.IsMe) state.LastAcceptedStackTick = tick;
+            else state.LastRemoteAcceptedStackTick = tick;
         }
 
         private void UpdateLocalAttackGate(int tick)
@@ -2728,7 +2719,6 @@ namespace Turbo.Plugins.s7o
 
             if (!IsValidStrickenAttackAnimation(state, anim))
             {
-                DebugStrickenLocalAttackAnimationRejected(tick, state, anim);
                 return;
             }
 
@@ -2767,6 +2757,7 @@ namespace Turbo.Plugins.s7o
 
             return
                 a.Contains("attack") ||
+                a.Contains("rapidstrikes") || // Way of the Hundred Fists native animation family.
                 a.Contains("spellcast_aoe") ||
                 a.Contains("spellcast_directed") ||
                 a.Contains("orb_spellcast");
@@ -2783,41 +2774,6 @@ namespace Turbo.Plugins.s7o
             return tick - _lastLocalAttackTick <= StrickenRecentLocalAttackTicks;
         }
 
-        private string GetLocalAttackDebug(int tick)
-        {
-            return
-                " localAttackTick=" + _lastLocalAttackTick.ToString(CultureInfo.InvariantCulture) +
-                " localAttackAge=" + (_lastLocalAttackTick <= 0 ? "none" : (tick - _lastLocalAttackTick).ToString(CultureInfo.InvariantCulture)) +
-                " localAttackRecent=" + HasRecentLocalAttack(tick).ToString() +
-                " localAttackState=" + _lastLocalAttackState +
-                " localAttackAnim=" + _lastLocalAttackAnimation;
-        }
-
-        private void DebugStrickenLocalAttackAnimationRejected(int tick, AcdAnimationState state, string animation)
-        {
-            if (!EnableStrickenDebug)
-                return;
-
-            if (tick - _lastLocalAttackRejectDebugTick < Math.Max(1, StrickenDebugIntervalTicks))
-                return;
-
-            _lastLocalAttackRejectDebugTick = tick;
-
-            try
-            {
-                string line =
-                    "tick=" + tick.ToString(CultureInfo.InvariantCulture) +
-                    " phase=local-attack-animation-rejected" +
-                    " state=" + state.ToString() +
-                    " animation=" + animation +
-                    GetLocalAttackDebug(tick);
-
-                Hud.TextLog.Log("s7o_RiftInfo_StrickenDebug", line);
-            }
-            catch
-            {
-            }
-        }
 
         private void UpdateStrickenGlobalDamageSamples(int tick)
         {
@@ -2875,7 +2831,6 @@ namespace Turbo.Plugins.s7o
                     sample.LastAcdAttackedBy = ReadActorAttributeUInt(m, Hud.Sno.Attributes.Last_ACD_Attacked_By);
                     sample.LastDamageMainActor = ReadActorAttributeUInt(m, Hud.Sno.Attributes.Last_Damage_MainActor);
 
-                    DebugStrickenDamageSample(sample, tick);
                 }
 
                 sample.LastHealth = curHealth;
@@ -3004,7 +2959,6 @@ namespace Turbo.Plugins.s7o
 
             if (RequireLocalAttackAnimationForStricken && !proc.LocalAttackRecentAtProc)
             {
-                DebugStrickenAttribution(player, proc, null, tick, "reject-no-local-attack-at-proc", StrickenDamageSourceMatch.None);
                 proc.Active = false;
                 return;
             }
@@ -3052,7 +3006,6 @@ namespace Turbo.Plugins.s7o
             {
                 if (RejectAmbiguousStrickenFirstHits && sameTickAcceptedHitCount > 1)
                 {
-                    DebugStrickenAttribution(player, proc, first, tick, "reject-ambiguous-first-hit", firstMatch);
                     proc.Active = false;
                     return;
                 }
@@ -3060,7 +3013,6 @@ namespace Turbo.Plugins.s7o
                 if (state.LastAcceptedStackTick > 0 &&
                     tick - state.LastAcceptedStackTick < StrickenMinAcceptedStackIntervalTicks)
                 {
-                    DebugStrickenAttribution(player, proc, first, tick, "reject-accepted-stack-too-soon", firstMatch);
                     proc.Active = false;
                     return;
                 }
@@ -3073,10 +3025,6 @@ namespace Turbo.Plugins.s7o
                 IncrementStrickenStack(heroId, first.TargetKey, tick, reason);
                 state.LastAcceptedStackTick = tick;
 
-                if (proc.LockedTargetKey != 0 && first.TargetKey != proc.LockedTargetKey)
-                    DebugStrickenAttribution(player, proc, first, tick, "diverted-stack-not-tracked-target", firstMatch);
-                else
-                    DebugStrickenAttribution(player, proc, first, tick, "accepted-" + reason, firstMatch);
 
                 proc.Active = false;
                 return;
@@ -3084,11 +3032,9 @@ namespace Turbo.Plugins.s7o
 
             if (tick > endTick)
             {
-                DebugStrickenAttribution(player, proc, null, tick, "expired-no-accepted-source-hit", StrickenDamageSourceMatch.None);
                 proc.Active = false;
             }
         }
-
 
 
         private void IncrementStrickenStack(uint heroId, int targetKey, int tick, string reason)
@@ -3104,7 +3050,6 @@ namespace Turbo.Plugins.s7o
 
             _strickenStacksByHeroAndTarget[key] = stacks;
 
-            DebugStrickenStackIncrement(heroId, targetKey, tick, stacks, reason);
         }
 
         private IMonster GetSelectedStrickenTarget()
@@ -3129,6 +3074,21 @@ namespace Turbo.Plugins.s7o
         private void UpdateTrackedStrickenTarget(int tick)
         {
             IMonster current = GetSelectedStrickenTarget();
+            if (current == null && Hud.Game.AliveMonsters != null)
+            {
+                current = FindAliveMonsterByTargetKey(_lastValidStrickenTargetKey);
+                if (current == null)
+                {
+                    foreach (var monster in Hud.Game.AliveMonsters)
+                    {
+                        if (!ShouldSampleMonsterForStricken(monster) || monster.WorldId != Hud.Game.Me.WorldId)
+                            continue;
+                        // Multiple native boss candidates are ambiguous: wait for selection.
+                        if (current != null) { current = null; break; }
+                        current = monster;
+                    }
+                }
+            }
             if (current == null)
                 return;
 
@@ -3442,438 +3402,5 @@ namespace Turbo.Plugins.s7o
             StrickenSmallFont.DrawText(layout, tx, y);
         }
 
-        // ── Debug ────────────────────────────────────────────────────────
-        private void DebugRpSnapshot(NearbyRpSnapshot rp, double remaining, SpawnAlertKind alert)
-        {
-            if (!EnableRiftInfoDebug)
-                return;
-
-            int tick = Hud.Game.CurrentGameTick;
-
-            if (tick - _lastDebugTick < DebugLogIntervalTicks)
-                return;
-
-            _lastDebugTick = tick;
-
-            try
-            {
-                string line =
-                    "tick=" + tick.ToString(CultureInfo.InvariantCulture) +
-                    " pct=" + Hud.Game.RiftPercentage.ToString("F2", CultureInfo.InvariantCulture) +
-                    " remaining=" + remaining.ToString("F2", CultureInfo.InvariantCulture) +
-                    " total=" + rp.TotalRP.ToString("F2", CultureInfo.InvariantCulture) +
-                    " elite=" + rp.EliteRP.ToString("F2", CultureInfo.InvariantCulture) +
-                    " eliteBody=" + rp.EliteBodyPct.ToString("F2", CultureInfo.InvariantCulture) +
-                    " eliteOrb=" + rp.EliteOrbPct.ToString("F2", CultureInfo.InvariantCulture) +
-                    " trash=" + rp.TrashRP.ToString("F2", CultureInfo.InvariantCulture) +
-                    " bluePacks=" + rp.BluePacks.ToString(CultureInfo.InvariantCulture) +
-                    " yellowPacks=" + rp.YellowPacks.ToString(CultureInfo.InvariantCulture) +
-                    " rareMinions=" + rp.RareMinions.ToString(CultureInfo.InvariantCulture) +
-                    " alert=" + alert.ToString();
-
-                Hud.TextLog.Log("s7o_RiftInfo_Debug", line);
-            }
-            catch
-            {
-            }
-        }
-
-        private void DebugStrickenPlayerState(IPlayer player, IMonster target, int tick, string phase)
-        {
-            if (!EnableStrickenDebug)
-                return;
-
-            if (tick % Math.Max(1, StrickenDebugIntervalTicks) != 0 &&
-                phase == "tick")
-            {
-                return;
-            }
-
-            try
-            {
-                IMonster selected = GetSelectedStrickenTarget();
-                IMonster tracked = GetTrackedStrickenTarget();
-
-                string line =
-                    "tick=" + tick.ToString(CultureInfo.InvariantCulture) +
-                    " phase=" + phase +
-                    " player=" + GetDebugPlayerName(player) +
-                    " hasStricken=" + PlayerHasStricken(player).ToString() +
-                    " proc=" + IsStrickenProcActive(player).ToString() +
-                    " procDebug=" + GetPrimaryStrickenProcDebug(player) +
-                    " buff=" + GetStrickenBuffDebug(player) +
-                    " selectedTarget=" + GetDebugMonster(selected) +
-                    " trackedTarget=" + GetDebugMonster(tracked) +
-                    " trackedTargetKey=" + _lastValidStrickenTargetKey.ToString(CultureInfo.InvariantCulture) +
-                    " trackedTargetName=" + GetTrackedStrickenTargetName() +
-                    " trackedStacks=" + GetEstimatedStrickenStacksByKey(player, _lastValidStrickenTargetKey).ToString(CultureInfo.InvariantCulture) +
-                    GetLocalAttackDebug(tick);
-
-                Hud.TextLog.Log("s7o_RiftInfo_StrickenDebug", line);
-            }
-            catch
-            {
-            }
-        }
-
-        private void DebugStrickenDamageSample(StrickenGlobalDamageSample sample, int tick)
-        {
-            if (!EnableStrickenDebug || sample == null)
-                return;
-
-            try
-            {
-                uint meAcd = 0;
-                uint meAnn = 0;
-
-                try { if (Hud.Game.Me != null) meAcd = Hud.Game.Me.AcdId; } catch { }
-                try { if (Hud.Game.Me != null) meAnn = Hud.Game.Me.AnnId; } catch { }
-
-                bool exactAcdMatch =
-                    meAcd != 0 &&
-                    (sample.LastDamageAcd == meAcd || sample.LastAcdAttackedBy == meAcd);
-
-                bool annMatch =
-                    meAnn != 0 &&
-                    (sample.LastDamageAcd == meAnn || sample.LastAcdAttackedBy == meAnn);
-
-                string line =
-                    "tick=" + tick.ToString(CultureInfo.InvariantCulture) +
-                    " phase=damage-sample" +
-                    " targetAcdId=" + sample.TargetKey.ToString(CultureInfo.InvariantCulture) +
-                    " name=" + sample.Name +
-                    " code=" + sample.Code +
-                    " rarity=" + sample.Rarity.ToString() +
-                    " dmg=" + sample.LastDamageAmount.ToString("F0", CultureInfo.InvariantCulture) +
-                    " lastDamageAcd=" + sample.LastDamageAcd.ToString(CultureInfo.InvariantCulture) +
-                    " lastAcdAttackedBy=" + sample.LastAcdAttackedBy.ToString(CultureInfo.InvariantCulture) +
-                    " lastDamageMainActor=" + sample.LastDamageMainActor.ToString(CultureInfo.InvariantCulture) +
-                    " meAcd=" + meAcd.ToString(CultureInfo.InvariantCulture) +
-                    " meAnn=" + meAnn.ToString(CultureInfo.InvariantCulture) +
-                    " exactAcdMatch=" + exactAcdMatch.ToString() +
-                    " annMatch=" + annMatch.ToString() +
-                    GetLocalAttackDebug(tick);
-
-                Hud.TextLog.Log("s7o_RiftInfo_StrickenDebug", line);
-            }
-            catch
-            {
-            }
-        }
-
-        private void DebugStrickenAttribution(
-            IPlayer player,
-            PendingStrickenProc proc,
-            StrickenGlobalDamageSample first,
-            int tick,
-            string result,
-            StrickenDamageSourceMatch sourceMatch)
-        {
-            if (!EnableStrickenDebug)
-                return;
-
-            try
-            {
-                uint meAcd = 0;
-                uint meAnn = 0;
-
-                try { if (Hud.Game.Me != null) meAcd = Hud.Game.Me.AcdId; } catch { }
-                try { if (Hud.Game.Me != null) meAnn = Hud.Game.Me.AnnId; } catch { }
-
-                string firstText = "null";
-
-                if (first != null)
-                {
-                    bool exactAcdMatch =
-                        meAcd != 0 &&
-                        (first.LastDamageAcd == meAcd || first.LastAcdAttackedBy == meAcd);
-
-                    bool annMatch =
-                        meAnn != 0 &&
-                        (first.LastDamageAcd == meAnn || first.LastAcdAttackedBy == meAnn);
-
-                    firstText =
-                        "targetAcdId=" + first.TargetKey.ToString(CultureInfo.InvariantCulture) +
-                        " name=" + first.Name +
-                        " code=" + first.Code +
-                        " dmgTick=" + first.LastDamageTick.ToString(CultureInfo.InvariantCulture) +
-                        " lastDamageAcd=" + first.LastDamageAcd.ToString(CultureInfo.InvariantCulture) +
-                        " lastAcdAttackedBy=" + first.LastAcdAttackedBy.ToString(CultureInfo.InvariantCulture) +
-                        " exactAcdMatch=" + exactAcdMatch.ToString() +
-                        " annMatch=" + annMatch.ToString();
-                }
-
-                string line =
-                    "tick=" + tick.ToString(CultureInfo.InvariantCulture) +
-                    " phase=stricken-attribution" +
-                    " result=" + result +
-                    " sourceMatch=" + sourceMatch.ToString() +
-                    " procTick=" + (proc == null ? "0" : proc.ProcTick.ToString(CultureInfo.InvariantCulture)) +
-                    " lockedTargetKey=" + (proc == null ? "0" : proc.LockedTargetKey.ToString(CultureInfo.InvariantCulture)) +
-                    " lockedTargetName=" + (proc == null ? "" : proc.LockedTargetName) +
-                    " localAttackTick=" + (proc == null ? "0" : proc.LocalAttackTick.ToString(CultureInfo.InvariantCulture)) +
-                    " localAttackRecentAtProc=" + (proc == null ? "False" : proc.LocalAttackRecentAtProc.ToString()) +
-                    " localAttackState=" + (proc == null ? "" : proc.LocalAttackState) +
-                    " localAttackAnim=" + (proc == null ? "" : proc.LocalAttackAnimation) +
-                    GetLocalAttackDebug(tick) +
-                    " first=" + firstText;
-
-                Hud.TextLog.Log("s7o_RiftInfo_StrickenDebug", line);
-            }
-            catch
-            {
-            }
-        }
-
-
-        private void DebugStrickenStackIncrement(uint heroId, int targetKey, int tick, int stacks, string reason)
-        {
-            if (!EnableStrickenDebug)
-                return;
-
-            try
-            {
-                string line =
-                    "tick=" + tick.ToString(CultureInfo.InvariantCulture) +
-                    " phase=stack-increment" +
-                    " heroId=" + heroId.ToString(CultureInfo.InvariantCulture) +
-                    " targetAcdId=" + targetKey.ToString(CultureInfo.InvariantCulture) +
-                    " stacks=" + stacks.ToString(CultureInfo.InvariantCulture) +
-                    " reason=" + reason;
-
-                Hud.TextLog.Log("s7o_RiftInfo_StrickenDebug", line);
-            }
-            catch
-            {
-            }
-        }
-
-        private string GetDebugPlayerName(IPlayer player)
-        {
-            if (player == null)
-                return "null";
-
-            try
-            {
-                return player.Index.ToString(CultureInfo.InvariantCulture) + ":" + player.HeroName;
-            }
-            catch
-            {
-                return "player";
-            }
-        }
-
-        private string GetDebugMonster(IMonster m)
-        {
-            if (m == null)
-                return "null";
-
-            string name = "";
-
-            try
-            {
-                if (m.SnoMonster != null)
-                    name = m.SnoMonster.NameLocalized;
-            }
-            catch
-            {
-            }
-
-            if (string.IsNullOrEmpty(name))
-            {
-                try
-                {
-                    if (m.SnoMonster != null)
-                        name = m.SnoMonster.Code;
-                }
-                catch
-                {
-                }
-            }
-
-            string code = "";
-
-            try
-            {
-                if (m.SnoMonster != null)
-                    code = m.SnoMonster.Code;
-            }
-            catch
-            {
-            }
-
-            return
-                "acd=" + GetMonsterTargetKey(m).ToString(CultureInfo.InvariantCulture) +
-                " name=" + name +
-                " code=" + code +
-                " rarity=" + m.Rarity.ToString() +
-                " hp=" + SafeMonsterHealthText(m);
-        }
-
-        private string SafeMonsterHealthText(IMonster m)
-        {
-            try
-            {
-                return m.CurHealth.ToString("F0", CultureInfo.InvariantCulture) + "/" +
-                       m.MaxHealth.ToString("F0", CultureInfo.InvariantCulture);
-            }
-            catch
-            {
-                return "?";
-            }
-        }
-
-        private string GetPrimaryStrickenProcDebug(IPlayer player)
-        {
-            if (player == null || player.Powers == null)
-                return "no-player";
-
-            try
-            {
-                var buff = player.Powers.GetBuff(StrickenSno);
-
-                string active0 = SafeBuffIsActive(player, StrickenSno, 0) ? "1" : "0";
-                string active2 = SafeBuffIsActive(player, StrickenSno, StrickenProcIconIndex) ? "1" : "0";
-
-                if (buff == null)
-                {
-                    return "primary428348 active0=" + active0 +
-                           " active2=" + active2 +
-                           " buff=null";
-                }
-
-                string count2 = "?";
-                string elapsed2 = "?";
-                string left2 = "?";
-
-                try
-                {
-                    if (buff.IconCounts != null && buff.IconCounts.Length > StrickenProcIconIndex)
-                        count2 = buff.IconCounts[StrickenProcIconIndex].ToString(CultureInfo.InvariantCulture);
-                }
-                catch
-                {
-                }
-
-                try
-                {
-                    if (buff.TimeElapsedSeconds != null && buff.TimeElapsedSeconds.Length > StrickenProcIconIndex)
-                        elapsed2 = buff.TimeElapsedSeconds[StrickenProcIconIndex].ToString("F2", CultureInfo.InvariantCulture);
-                }
-                catch
-                {
-                }
-
-                try
-                {
-                    if (buff.TimeLeftSeconds != null && buff.TimeLeftSeconds.Length > StrickenProcIconIndex)
-                        left2 = buff.TimeLeftSeconds[StrickenProcIconIndex].ToString("F2", CultureInfo.InvariantCulture);
-                }
-                catch
-                {
-                }
-
-                return "primary428348 active0=" + active0 +
-                       " active2=" + active2 +
-                       " count2=" + count2 +
-                       " elapsed2=" + elapsed2 +
-                       " left2=" + left2;
-            }
-            catch (Exception ex)
-            {
-                return "primary-debug-error=" + ex.GetType().Name;
-            }
-        }
-
-        private string GetStrickenBuffDebug(IPlayer player)
-        {
-            return
-                "primary{" + GetSingleStrickenBuffDebug(player, StrickenSno) + "} " +
-                "secondary{" + GetSingleStrickenBuffDebug(player, StrickenSecondarySno) + "}";
-        }
-
-        private string GetSingleStrickenBuffDebug(IPlayer player, uint sno)
-        {
-            if (player == null || player.Powers == null)
-                return "no-player";
-
-            try
-            {
-                var buff = player.Powers.GetBuff(sno);
-                string activeIdx = GetStrickenIconActiveDebug(player, sno);
-
-                if (buff == null)
-                    return "sno=" + sno.ToString(CultureInfo.InvariantCulture) +
-                           " buff=null activeIdx=" + activeIdx;
-
-                string counts = ArrayToDebugString(buff.IconCounts);
-                string elapsed = ArrayToDebugString(buff.TimeElapsedSeconds);
-                string left = ArrayToDebugString(buff.TimeLeftSeconds);
-
-                return
-                    "sno=" + sno.ToString(CultureInfo.InvariantCulture) +
-                    " buffActive=" + buff.Active.ToString() +
-                    " activeIdx=" + activeIdx +
-                    " counts=" + counts +
-                    " elapsed=" + elapsed +
-                    " left=" + left;
-            }
-            catch (Exception ex)
-            {
-                return "sno=" + sno.ToString(CultureInfo.InvariantCulture) +
-                       " buff-error=" + ex.GetType().Name;
-            }
-        }
-
-        private string GetStrickenIconActiveDebug(IPlayer player, uint sno)
-        {
-            if (player == null || player.Powers == null)
-                return "";
-
-            string s = "";
-
-            for (int i = 0; i <= 7; i++)
-            {
-                bool active = SafeBuffIsActive(player, sno, i);
-                if (i > 0) s += ",";
-                s += i.ToString(CultureInfo.InvariantCulture) + ":" + (active ? "1" : "0");
-            }
-
-            return s;
-        }
-
-        private string ArrayToDebugString(int[] values)
-        {
-            if (values == null)
-                return "null";
-
-            int len = Math.Min(values.Length, 8);
-            string s = "[";
-
-            for (int i = 0; i < len; i++)
-            {
-                if (i > 0) s += ",";
-                s += values[i].ToString(CultureInfo.InvariantCulture);
-            }
-
-            return s + "]";
-        }
-
-        private string ArrayToDebugString(double[] values)
-        {
-            if (values == null)
-                return "null";
-
-            int len = Math.Min(values.Length, 8);
-            string s = "[";
-
-            for (int i = 0; i < len; i++)
-            {
-                if (i > 0) s += ",";
-                s += values[i].ToString("F2", CultureInfo.InvariantCulture);
-            }
-
-            return s + "]";
-        }
     }
 }
