@@ -49,6 +49,7 @@ Use the HUD Menu to toggle plugins, change visual options, manage TTS alerts, se
 | **s7o_KanaiCube**              | Kanai helper for common cube tasks like reforge, upgrade rare, and material conversion.                                                                                 |
 | **s7o_Localization**           | Shared localization helper for the HUD Menu and supported plugin overlays, with editable language files and persistent personal translation overrides.                 |
 | **s7o_MapCursor**              | Customizable minimap mouse cursor with town visibility, multi-monitor positioning, and HUD Menu controls for color, size, and line thickness.                          |
+| **s7o_MapViewer**             | Native map geometry and collision/path queries for compatible plugins. Grid/debug controls are in F8 > Visual; developer examples are in `MapViewerData/README.md`. |
 | **s7o_MysticEnchant**          | Mystic reroll helper. Select the stat you want to roll, then press the hotkey (**F3** by default).                                                                      |
 | **s7o_Oculus_Triune**          | Oculus/Triune circle visuals.                                                                                                                                           |
 | **s7o_Paragon_Builds**         | Saves and restores Paragon layouts per hero and Armory loadout.                                                 |
