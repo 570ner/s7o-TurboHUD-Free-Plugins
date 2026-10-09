@@ -1,3 +1,4 @@
+// REV8 TEST: immediate atomic pickup input; native-hover recovery tolerates normal steering.
 // Confirm ultrawide stacked-loot selection on a fresh game tick before clicking.
 // Preserve Urshi no-progress limits across actor/ground handoffs.
 using System;
@@ -15,6 +16,13 @@ namespace Turbo.Plugins.s7o
     {
         void PauseForAutoLootPickup();
         void StopForAutoLootUrshiHandoff();
+    }
+
+    // Optional owners can protect an in-flight cast or immediate safety escape from pickup takeover.
+    // Separate from the existing handoff so older modules require no changes.
+    public interface IS7oAutoLootPickupGuard
+    {
+        bool CanYieldForAutoLootPickup { get; }
     }
 
     // GR reward handoff: native count/shard cues win first, with the proven 4s fallback retained for missed observations.
@@ -77,6 +85,11 @@ namespace Turbo.Plugins.s7o
         private const int MovementSampleMs = 90;
         private const float MovementThresholdYards = 0.22f;
         private const int MaxAttempts = 8;
+        private const int MaterialFastClicksBeforeRecovery = 2;
+        private const int ItemRecoveryMaxWatches = 256;
+        private const int ItemRecoveryMaxProbes = 3;
+        private const int ItemRecoveryMaxConfirmedClicks = 2;
+        private const int ItemRecoveryWatchdogMs = 250;
         private const int StuckRetryCooldownMs = 6000;
         private const int StuckResyncMoveMinMs = 180;
         private const int StuckResyncMoveMaxMs = 650;
@@ -145,6 +158,7 @@ namespace Turbo.Plugins.s7o
         private const int CleanupStuckIgnoreMs = 8000;
         private const uint RamaladniGiftSno = 1844495708;
         private const uint PetrifiedScreamSno = 1051857800;
+        private const uint AngelicCrucibleSno = 2410396267u;
         private const uint WhisperLowSno = 685356142;
         private const uint WhisperHighSno = 1141915165;
 
@@ -190,6 +204,10 @@ namespace Turbo.Plugins.s7o
         private int _stuckResyncActiveSeed;
         private bool _stuckResyncSelectionRetry;
         private StuckResyncPhase _stuckResyncPhase;
+        private int _stuckResyncMoveGameTick;
+        private uint _stuckResyncWorld;
+        private float _stuckResyncOriginX, _stuckResyncOriginY;
+        private int _stuckResyncOffsetX, _stuckResyncOffsetY, _stuckResyncWidth, _stuckResyncHeight;
         private long _stuckResyncReadyMs;
         private long _stuckResyncDeadlineMs;
         private bool _stuckResyncHasRestorePoint;
@@ -314,9 +332,17 @@ namespace Turbo.Plugins.s7o
         private bool _townSuspended;
         private bool _pendingCursorRestore;
         private NativePoint _pendingCursorPoint;
+        private NativePoint _lastIssuedPickupCursorPoint;
+        private bool _hasIssuedPickupCursorPoint;
+        private NativePoint _pendingCursorOwnedPoint;
+        private bool _pendingCursorHasOwnedPoint;
+        private bool _pendingCursorRestoreNeedsOwnership;
+        private uint _pendingCursorRecoveryWorld, _pendingCursorRecoveryArea;
+        private int _pendingCursorRecoveryOffsetX, _pendingCursorRecoveryOffsetY, _pendingCursorRecoveryWidth, _pendingCursorRecoveryHeight;
         private long _pendingCursorRestoreAtMs;
         private long _pendingCursorRestoreExpireMs;
         private int _hazardHoverSeed;
+        private long _hazardHoverInputExpireMs; // Ownership watchdog only; pickup probes keep their original cadence.
         private int _hazardHoverProbe;
         private bool _hazardHoverHasRestorePoint;
         private NativePoint _hazardHoverRestorePoint;
@@ -336,6 +362,24 @@ namespace Turbo.Plugins.s7o
         private int _ultrawideStackedHoverProbe;
         private int _ultrawideStackedHoverTick;
         private long _ultrawideStackedHoverExpireMs;
+        // Native item recovery handles gear after one failed fast click, materials after
+        // two. Urshi-only hover stays separate. Watches survive range/offscreen exits
+        // and attempt resets, so a persistent floor item never regains blind retries.
+        private sealed class ItemRecoveryWatch
+        {
+            public uint Ann, Acd;
+            public int LastClickTick, FastClicks, ConfirmedClicks, AbsentTicks;
+            public bool Required;
+        }
+        private readonly Dictionary<int, ItemRecoveryWatch> _itemRecoveryWatches = new Dictionary<int, ItemRecoveryWatch>();
+        private readonly List<int> _itemRecoveryRetire = new List<int>();
+        private int _itemRecoveryWatchTick = int.MinValue;
+        private int _itemRecoverySeed, _itemRecoveryProbe, _itemRecoveryTick;
+        private uint _itemRecoveryAnn, _itemRecoveryAcd, _itemRecoveryWorld;
+        private long _itemRecoveryDeadlineMs;
+        private NativePoint _itemRecoveryPoint, _itemRecoveryRestorePoint, _itemRecoverySteeringSample;
+        private bool _itemRecoveryHasRestorePoint;
+        private int _itemRecoveryOffsetX, _itemRecoveryOffsetY, _itemRecoveryWidth, _itemRecoveryHeight;
         private bool _inventoryFullAlertActive;
         private int _inventoryFullAlertUsed;
         private int _inventoryFullAlertTotal;
@@ -350,6 +394,7 @@ namespace Turbo.Plugins.s7o
         private static extern void mouse_event(uint dwFlags, int dx, int dy, uint dwData, IntPtr dwExtraInfo);
         [DllImport("user32.dll")]
         private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+
 
         public s7o_AutoLoot()
         {
@@ -414,6 +459,77 @@ namespace Turbo.Plugins.s7o
         public int NormalPickupRangeYards { get { return _normalPickupRangeYards; } }
         public int EventPickupRangeYards { get { return _eventPickupRangeYards; } }
 
+        // Optional input owners resume when the real pickup cursor/input transaction ends.
+        // Read-only: this does not select items, arm timers, or change pickup cadence.
+        public bool HasPendingPickupInput
+        {
+            get
+            {
+                if (Hud == null || Hud.Game == null) return false;
+                long now = Hud.Game.CurrentRealTimeMilliseconds;
+                return (_pendingCursorRestore && now <= _pendingCursorRestoreExpireMs)
+                    || (_itemRecoverySeed != 0 && now <= _itemRecoveryDeadlineMs)
+                    || (_materialHoverSeed != 0 && _materialHoverExpireMs != 0 && now <= _materialHoverExpireMs)
+                    || (_ultrawideStackedHoverSeed != 0 && now <= _ultrawideStackedHoverExpireMs)
+                    || (_hazardHoverSeed != 0 && _hazardHoverProbe < HazardHoverMaxCollections && now <= _hazardHoverInputExpireMs)
+                    || (_stuckResyncPhase != StuckResyncPhase.None && now <= _stuckResyncDeadlineMs)
+                    || (_urshiRiskHoverSeed != 0 && _urshiRiskHoverClickAtMs != 0 &&
+                        now <= _urshiRiskHoverClickAtMs + CursorRestoreExpireMs)
+                    || (_autoUrshiHasRestorePoint && now <= _lastClickMs + CursorRestoreExpireMs)
+                    || (_autoUrshiReturnProbeTick != 0 && now <= _autoUrshiReturnProbeMs + CursorRestoreExpireMs);
+            }
+        }
+
+        // Urgent input owners cancel a real pickup lease before escaping; normal pickup never calls this.
+        // Release only our held pickup button, restore only our cursor, and keep loot/retry policy intact.
+        public void CancelPendingPickupInput()
+        {
+            long now = Hud != null && Hud.Game != null ? Hud.Game.CurrentRealTimeMilliseconds : 0;
+            NativePoint cursor;
+            bool ownsCursor = _hasIssuedPickupCursorPoint && Hud != null && Hud.Window != null &&
+                Hud.Window.IsForeground && GetCursorPos(out cursor) &&
+                IsCursorAtOwnedPoint(cursor, _lastIssuedPickupCursorPoint);
+            // Existing resync cleanup always releases a held LMB. Do not rewind a cursor taken by the user.
+            if (!ownsCursor) _stuckResyncHasRestorePoint = false;
+            ClearActiveStuckPickupResync(true);
+            ClearMaterialHoverState(ownsCursor); // Also clears the separate active material recovery lease.
+            ClearHazardHoverState(ownsCursor, now);
+            ClearUltrawideStackedHoverState();
+            ClearUrshiRiskLootHover();
+            ClearAutoUrshiTalkHover();
+            _autoUrshiReturnProbeTick = 0;
+            if (ownsCursor) RestoreAutoUrshiTalkCursor(now);
+            else
+            {
+                _autoUrshiHasRestorePoint = false;
+                _autoUrshiRestorePoint = new NativePoint();
+            }
+            if (_pendingCursorRestore && ownsCursor)
+            {
+                // Finish a valid owned restore now, before the caller aims its emergency action.
+                if (!_pendingCursorRestoreNeedsOwnership)
+                {
+                    _pendingCursorRecoveryWorld = Hud.Game != null && Hud.Game.Me != null ? Hud.Game.Me.WorldId : 0;
+                    _pendingCursorRecoveryArea = Hud.Game != null && Hud.Game.Me != null && Hud.Game.Me.SnoArea != null
+                        ? Hud.Game.Me.SnoArea.Sno : 0;
+                    _pendingCursorRecoveryOffsetX = Hud.Window.Offset.X;
+                    _pendingCursorRecoveryOffsetY = Hud.Window.Offset.Y;
+                    _pendingCursorRecoveryWidth = Hud.Window.Size.Width;
+                    _pendingCursorRecoveryHeight = Hud.Window.Size.Height;
+                    _pendingCursorRestoreNeedsOwnership = true;
+                }
+                _pendingCursorRestoreAtMs = now;
+                ProcessPendingCursorRestore(now);
+            }
+            _pendingCursorRestore = false;
+            _pendingCursorRestoreAtMs = _pendingCursorRestoreExpireMs = 0;
+            _pendingCursorHasOwnedPoint = false;
+            _pendingCursorRestoreNeedsOwnership = false;
+            _pendingStuckResyncSeed = 0;
+            _pendingStuckResyncSelectionRetry = _pendingStuckResyncUiBlocked = false;
+            _hasIssuedPickupCursorPoint = false;
+        }
+
         public void SetPaused(bool paused)
         {
             if (_paused == paused) return;
@@ -424,6 +540,9 @@ namespace Turbo.Plugins.s7o
         private void ResetRuntimeState(bool keepDroppedSuppress = false)
         {
             ClearActiveStuckPickupResync(true);
+            ClearItemRecoveryState(true);
+            _itemRecoveryWatches.Clear();
+            _itemRecoveryWatchTick = int.MinValue;
             _attempts.Clear();
             _retryAfterMs.Clear();
             _pickupAcknowledgeUntilMs.Clear();
@@ -464,6 +583,7 @@ namespace Turbo.Plugins.s7o
             _lastMovementSampleMs = 0;
             _playerMoving = false;
             _pendingCursorRestore = false;
+            _hasIssuedPickupCursorPoint = false;
             ClearHazardHoverState(false, 0);
             ClearMaterialHoverState(true);
             ClearUltrawideStackedHoverState();
@@ -512,6 +632,8 @@ namespace Turbo.Plugins.s7o
         public void OnItemPicked(IItem item)
         {
             if (item == null) return;
+            if (_itemRecoverySeed == item.Seed) ClearItemRecoveryState(true);
+            _itemRecoveryWatches.Remove(item.Seed);
             if (!IsBloodShard(item))
                 MarkLootPickupProgress();
             _attempts.Remove(item.Seed);
@@ -567,6 +689,8 @@ namespace Turbo.Plugins.s7o
             }
             if (to != ItemLocation.Floor)
             {
+                if (_itemRecoverySeed == item.Seed) ClearItemRecoveryState(true);
+                _itemRecoveryWatches.Remove(item.Seed);
                 _pickupAcknowledgeUntilMs.Remove(item.Seed);
                 _cleanupStuckIgnoreUntilMs.Remove(item.Seed);
                 if (_pendingStuckResyncSeed == item.Seed)
@@ -645,12 +769,20 @@ namespace Turbo.Plugins.s7o
 
         public void AfterCollect()
         {
+            // Cache only this collection: camera/window/world updates must reproject next time.
+            _floorItemProjectionCache.Clear();
             if (Hud == null || Hud.Game == null || !Hud.Game.IsInGame)
+            {
+                ClearItemRecoveryState(false);
                 return;
+            }
 
             IPlayer me = Hud.Game.Me;
             if (me == null)
+            {
+                ClearItemRecoveryState(false);
                 return;
+            }
 
             TrackAutoUrshiGreaterRiftRank(me);
 
@@ -695,6 +827,12 @@ namespace Turbo.Plugins.s7o
             }
 
             _townSuspended = false;
+            // Ask before any restore/recovery/new pickup can seize an owner's in-flight cursor.
+            if (!CanOptionalInputOwnersYieldForPickup())
+            {
+                CancelPendingPickupInput();
+                return;
+            }
             ProcessPendingCursorRestore(Hud.Game.CurrentRealTimeMilliseconds);
 
             if (!_enabled || _paused || Hud.Game.IsPaused || !Hud.Window.IsForeground)
@@ -713,7 +851,9 @@ namespace Turbo.Plugins.s7o
             }
 
             if (HandleActiveStuckPickupResync(now))
+            {
                 return;
+            }
 
             // Record the guardian-phase route even while stationary combat owns input.
             // This observes travel only; it never clicks before the loot handoff.
@@ -820,7 +960,7 @@ namespace Turbo.Plugins.s7o
             TrackAutoUrshiReturnState(postRiftCleanup, now, urshi);
             BeginAutoUrshiRewardBatch(postRiftCleanup, now, urshi != null);
             var visibleCandidates = Hud.Game.Items
-                .Where(i => i != null && i.Location == ItemLocation.Floor && i.IsOnScreen && !IsExcludedPickup(i) && !IsSuppressedDroppedItem(i, now) && !IsCleanupStuckIgnored(i, now) && !IsProtectedChestRisk(i, protectedChest) && i.CentralXyDistanceToMe <= range)
+                .Where(i => i != null && i.Location == ItemLocation.Floor && IsProjectedFloorItemVisible(i) && !IsExcludedPickup(i) && !IsSuppressedDroppedItem(i, now) && !IsCleanupStuckIgnored(i, now) && !IsProtectedChestRisk(i, protectedChest) && i.CentralXyDistanceToMe <= range)
                 .Select(i => new LootCandidate(i, WantedPriority(i), IsUrshiRisk(i, urshi)))
                 .Where(c => c.Priority >= 0 && IsAutoUrshiHandoffLoot(c.Item))
                 .ToList();
@@ -847,6 +987,12 @@ namespace Turbo.Plugins.s7o
             if (postRiftCleanup && TryCommitAutoUrshiHandoff(now) && candidates.Count > 0)
                 candidates = candidates.Where(c => IsAutoUrshiHandoffLoot(c.Item)).ToList();
 
+            if (_itemRecoverySeed != 0 && !candidates.Any(c => c.Item.Seed == _itemRecoverySeed &&
+                c.Item.AnnId == _itemRecoveryAnn && c.Item.AcdId == _itemRecoveryAcd &&
+                c.Item.CentralXyDistanceToMe <= _normalPickupRangeYards))
+            {
+                ClearItemRecoveryState(true);
+            }
             TrackVisibleEligibleLootProgress(candidates.Count);
             if (postRiftCleanup && candidates.Count > 0)
             {
@@ -905,26 +1051,48 @@ namespace Turbo.Plugins.s7o
             AbortAutoUrshiTalkForVisibleLoot(now);
 
             bool stackedLoot = HasStackedLootCluster(candidates);
+            // An acknowledgement wait is not a failed approach. Keep the destination
+            // in the full eligible list while CanTry temporarily excludes its next click.
+            LootCandidate committedApproach = wideCleanup && _lastCleanupClickFar
+                ? GetCommittedWideCleanupCandidate(candidates, wideCleanup, stackedLoot)
+                : null;
+            long acknowledgeUntil;
+            if (committedApproach != null &&
+                _pickupAcknowledgeUntilMs.TryGetValue(committedApproach.Item.Seed, out acknowledgeUntil) &&
+                now < acknowledgeUntil)
+            {
+                return;
+            }
+
             bool noSpacePickupOnScreen = candidates.Any(c => IsNoSpaceMaterialPickup(c.Item));
             int delay = postRiftCleanup
                 ? (_lastCleanupClickFar ? CleanupFarMoveDelayMs : CleanupDelayMs)
                 : (lootBurstCleanup || nephalemRiftRewardCleanup
                     ? (_lastCleanupClickFar ? SpecialCleanupFarMoveDelayMs : SpecialCleanupDelayMs)
                     : NormalDelayMs);
-            if ((stackedLoot || (postRiftCleanup && noSpacePickupOnScreen)) && delay > StackedLootDelayMs)
+            // A nearby label stack must not accelerate clicks during a distant approach.
+            if (committedApproach == null &&
+                (stackedLoot || (postRiftCleanup && noSpacePickupOnScreen)) && delay > StackedLootDelayMs)
                 delay = StackedLootDelayMs;
-            if (now - _lastClickMs < delay)
+            if (_itemRecoverySeed == 0 && now - _lastClickMs < delay)
+            {
                 return;
+            }
 
             var tryCandidates = candidates.Where(c => CanTry(c.Item, c.UrshiRisk, now)).ToList();
             if (_pendingStuckResyncSeed != 0)
             {
+                ClearItemRecoveryState(true);
                 ExecutePendingStuckPickupResync(candidates, now);
                 return;
             }
             if (tryCandidates.Count == 0 && RefreshRetryStateAfterLootProgress(candidates, now))
                 tryCandidates = candidates.Where(c => CanTry(c.Item, c.UrshiRisk, now)).ToList();
 
+            // Service a bounded cursor lease on native events, outside click cadence.
+            // tryCandidates is the one existing wanted/fit/range/ack/retry-ready list.
+            if (_itemRecoverySeed != 0 && HandleItemRecovery(tryCandidates, candidates, wideCleanup, stackedLoot, now))
+                return;
             if (tryCandidates.Count == 0)
             {
                 ResetAutoUrshiTalkReadyState();
@@ -963,11 +1131,16 @@ namespace Turbo.Plugins.s7o
             }
 
             bool targetStacked = stackedLoot && IsStackedWithAnother(target, candidates);
-            if (wideCleanup && !targetStacked)
+            if (wideCleanup && (!targetStacked || target.Item.CentralXyDistanceToMe > _normalPickupRangeYards))
                 _wideCleanupCommittedSeed = target.Item.Seed;
             else if (!wideCleanup || _wideCleanupCommittedSeed == target.Item.Seed)
                 _wideCleanupCommittedSeed = 0;
 
+            if (!target.UrshiRisk && NeedsItemRecovery(target.Item))
+            {
+                StartItemRecovery(target, wideCleanup, targetStacked, now);
+                return;
+            }
             ClickItem(target.Item, target.UrshiRisk && urshi != null, wideCleanup, targetStacked, now);
         }
 
@@ -1097,7 +1270,7 @@ namespace Turbo.Plugins.s7o
                 foreach (var item in Hud.Game.Items)
                 {
                     if (item == null || item.Seed == 0 || item.Location != ItemLocation.Floor ||
-                        !item.IsOnScreen || !IsAutoUrshiCountedLegendaryReward(item))
+                        !IsProjectedFloorItemVisible(item) || !IsAutoUrshiCountedLegendaryReward(item))
                         continue;
                     if (IsExcludedPickup(item) || IsSuppressedDroppedItem(item, now) ||
                         IsProtectedChestRisk(item, protectedChest) ||
@@ -1334,6 +1507,7 @@ namespace Turbo.Plugins.s7o
 
         private void PurgeRetryState(long now)
         {
+            PurgeItemRecoveryWatches();
             if (_attempts.Count != 0)
             {
                 foreach (var seed in _attempts.Keys.ToArray())
@@ -1413,7 +1587,7 @@ namespace Turbo.Plugins.s7o
 
         private bool IsVisibleFloorSeed(int seed)
         {
-            return Hud.Game.Items.Any(i => i != null && i.Seed == seed && i.Location == ItemLocation.Floor && i.IsOnScreen);
+            return Hud.Game.Items.Any(i => i != null && i.Seed == seed && i.Location == ItemLocation.Floor && IsProjectedFloorItemVisible(i));
         }
 
         private bool CanTry(IItem item, bool riskyUrshi, long now)
@@ -1477,11 +1651,6 @@ namespace Turbo.Plugins.s7o
                 return true;
 
             _attempts[item.Seed] = 0;
-            if (IsNoSpaceMaterialPickup(item))
-            {
-                _retryAfterMs[item.Seed] = now + NoSpacePickupRetryCooldownMs;
-                return false;
-            }
 
             // One bounded positional resync before the legacy long cooldown. This is
             // intentionally outside the normal pickup path and only exists for an item
@@ -1489,12 +1658,14 @@ namespace Turbo.Plugins.s7o
             if (_pendingStuckResyncSeed == 0 && _stuckResyncUsedSeeds.Add(item.Seed))
             {
                 _pendingStuckResyncSeed = item.Seed;
-                _pendingStuckResyncSelectionRetry = false;
+                // Resync is movement only; gear/materials return to their guarded pickup paths.
+                _pendingStuckResyncSelectionRetry = true;
                 _pendingStuckResyncUiBlocked = false;
                 return false;
             }
 
-            _retryAfterMs[item.Seed] = now + StuckRetryCooldownMs;
+            _retryAfterMs[item.Seed] = now + (IsNoSpaceMaterialPickup(item)
+                ? NoSpacePickupRetryCooldownMs : StuckRetryCooldownMs);
             return false;
         }
 
@@ -1558,16 +1729,36 @@ namespace Turbo.Plugins.s7o
             PauseDhStrafeForPickup();
             NativePoint old = new NativePoint();
             bool restore = GetCursorPos(out old);
-            if (!TrySetCursorForWorldClick(x, y))
+            if (!TryEmitPickupClick(item, new NativePoint { X = x, Y = y }, "ground_resync"))
             {
                 _retryAfterMs[seed] = now + StuckRetryCooldownMs;
+                if (restore)
+                {
+                    ScheduleCursorRestore(old, now);
+                    GuardPickupCursorRestore(new NativePoint { X = x, Y = y }, item.WorldId);
+                }
                 return;
             }
 
-            MouseLeftClick();
-            if (restore) ScheduleCursorRestore(old, now);
+            if (restore)
+            {
+                ScheduleCursorRestore(old, now);
+                // The resync restore must yield to steering or a monitor/world change.
+                _pendingCursorRestoreNeedsOwnership = true;
+                _pendingCursorRecoveryWorld = Hud.Game.Me.WorldId;
+                _pendingCursorRecoveryArea = Hud.Game.Me.SnoArea != null ? Hud.Game.Me.SnoArea.Sno : 0;
+                _pendingCursorRecoveryOffsetX = Hud.Window.Offset.X;
+                _pendingCursorRecoveryOffsetY = Hud.Window.Offset.Y;
+                _pendingCursorRecoveryWidth = Hud.Window.Size.Width;
+                _pendingCursorRecoveryHeight = Hud.Window.Size.Height;
+            }
 
             _stuckResyncActiveSeed = seed;
+            _stuckResyncMoveGameTick = Hud.Game.CurrentGameTick;
+            _stuckResyncWorld = Hud.Game.Me.WorldId;
+            _stuckResyncOriginX = me.X; _stuckResyncOriginY = me.Y;
+            _stuckResyncOffsetX = Hud.Window.Offset.X; _stuckResyncOffsetY = Hud.Window.Offset.Y;
+            _stuckResyncWidth = Hud.Window.Size.Width; _stuckResyncHeight = Hud.Window.Size.Height;
             _stuckResyncSelectionRetry = selectionRetry;
             _stuckResyncPhase = StuckResyncPhase.WaitForIdle;
             _stuckResyncReadyMs = now + StuckResyncMoveMinMs;
@@ -1595,19 +1786,26 @@ namespace Turbo.Plugins.s7o
             if (Hud == null || Hud.Game == null || Hud.Game.Me == null || Hud.Window == null ||
                 !Hud.Window.IsForeground || Hud.Game.IsPaused || Hud.Game.IsLoading ||
                 Hud.Game.Me.Powers == null || Hud.Game.Me.Powers.CantMove ||
-                IsBlockingLootUiOpen() || item.Location != ItemLocation.Floor || !item.IsOnScreen ||
+                IsBlockingLootUiOpen() || item.Location != ItemLocation.Floor || !IsProjectedFloorItemVisible(item) ||
                 item.FloorCoordinate == null || !item.FloorCoordinate.IsValid ||
                 Hud.Game.Me.FloorCoordinate == null || !Hud.Game.Me.FloorCoordinate.IsValid ||
-                IsUrshiRisk(item, GetUrshiActor()) || HasStuckResyncHazardNear(item, StuckResyncHazardYards))
+                Hud.Game.Me.WorldId != _stuckResyncWorld || Hud.Window.Offset.X != _stuckResyncOffsetX
+                || Hud.Window.Offset.Y != _stuckResyncOffsetY || Hud.Window.Size.Width != _stuckResyncWidth
+                || Hud.Window.Size.Height != _stuckResyncHeight || WantedPriority(item) < 0 || !CanFit(item, SafeFreeSlots())
+                || IsUrshiRisk(item, GetUrshiActor()) || HasStuckResyncHazardNear(item, StuckResyncHazardYards))
             {
                 FailActiveStuckPickupResync(seed, now);
                 return true;
             }
 
+            PauseDhStrafeForPickup();
             if (_stuckResyncPhase == StuckResyncPhase.WaitForIdle)
             {
-                if (now < _stuckResyncReadyMs)
-                    return true;
+                double moveX = Hud.Game.Me.FloorCoordinate.X - _stuckResyncOriginX;
+                double moveY = Hud.Game.Me.FloorCoordinate.Y - _stuckResyncOriginY;
+                bool freshMoved = Hud.Game.CurrentGameTick > _stuckResyncMoveGameTick
+                    && moveX * moveX + moveY * moveY >= 0.25;
+                if (now < _stuckResyncReadyMs && !freshMoved) return true;
 
                 if (Hud.Game.Me.AnimationState != AcdAnimationState.Idle)
                 {
@@ -1617,9 +1815,9 @@ namespace Turbo.Plugins.s7o
                     return true;
                 }
 
-                // Material hover recovery only needs a fresh client position. After
-                // movement settles, return to the normal exact-selection path rather
-                // than issuing an unconfirmed held click into a crowded loot pile.
+                // Reuse the native-confirmed item pipeline after the ground step.
+                // Holding an unconfirmed LMB can walk/attack instead of collecting.
+                // Urshi-risk pickup still uses its separate exact-selection guard.
                 if (_stuckResyncSelectionRetry)
                 {
                     ClearActiveStuckPickupResync(false);
@@ -1670,7 +1868,7 @@ namespace Turbo.Plugins.s7o
 
             if (_stuckResyncPhase == StuckResyncPhase.Verify)
             {
-                if (item.Location != ItemLocation.Floor || !item.IsOnScreen)
+                if (item.Location != ItemLocation.Floor || !IsProjectedFloorItemVisible(item))
                 {
                     ClearActiveStuckPickupResync(false);
                     return false;
@@ -1689,7 +1887,7 @@ namespace Turbo.Plugins.s7o
 
         private bool CanStartStuckPickupResync(IItem item)
         {
-            return item != null && item.Location == ItemLocation.Floor && item.IsOnScreen &&
+            return item != null && item.Location == ItemLocation.Floor && IsProjectedFloorItemVisible(item) &&
                 item.FloorCoordinate != null && item.FloorCoordinate.IsValid &&
                 Hud != null && Hud.Game != null && Hud.Game.Me != null &&
                 Hud.Game.Me.FloorCoordinate != null && Hud.Game.Me.FloorCoordinate.IsValid &&
@@ -1734,6 +1932,10 @@ namespace Turbo.Plugins.s7o
             }
 
             _stuckResyncActiveSeed = 0;
+            _stuckResyncMoveGameTick = int.MinValue;
+            _stuckResyncWorld = 0;
+            _stuckResyncOriginX = _stuckResyncOriginY = 0;
+            _stuckResyncOffsetX = _stuckResyncOffsetY = _stuckResyncWidth = _stuckResyncHeight = 0;
             _stuckResyncSelectionRetry = false;
             _stuckResyncPhase = StuckResyncPhase.None;
             _stuckResyncReadyMs = 0;
@@ -1811,10 +2013,10 @@ namespace Turbo.Plugins.s7o
             LootCandidate committed = candidates.FirstOrDefault(c =>
                 c != null && c.Item != null && c.Item.Seed == _wideCleanupCommittedSeed);
 
-            // Stacked labels keep their proven rotation. A separated reward keeps the
-            // current native pathfinder destination until floor state or retry state
-            // proves that this seed is resolved or temporarily unavailable.
-            if (committed == null || (stackedLoot && IsStackedWithAnother(committed, candidates)))
+            // Rotate stacked labels only within normal pickup range. While approaching,
+            // keep the native pathfinder destination until floor or retry state releases it.
+            if (committed == null || (committed.Item.CentralXyDistanceToMe <= _normalPickupRangeYards &&
+                stackedLoot && IsStackedWithAnother(committed, candidates)))
             {
                 _wideCleanupCommittedSeed = 0;
                 return null;
@@ -1963,6 +2165,19 @@ namespace Turbo.Plugins.s7o
             NotifyOptionalInputOwners(true);
         }
 
+        private bool CanOptionalInputOwnersYieldForPickup()
+        {
+            foreach (var plugin in Hud.AllPlugins)
+            {
+                if (plugin == null || !plugin.Enabled) continue;
+                var guard = plugin as IS7oAutoLootPickupGuard;
+                if (guard == null) continue;
+                try { if (!guard.CanYieldForAutoLootPickup) return false; }
+                catch { } // An optional module failure must not disable ordinary pickup globally.
+            }
+            return true;
+        }
+
         private void NotifyOptionalInputOwners(bool stopForUrshi)
         {
             foreach (var plugin in Hud.AllPlugins)
@@ -1981,6 +2196,8 @@ namespace Turbo.Plugins.s7o
         private void ClickItem(IItem item, bool riskyUrshi, bool cleanup, bool stackedLoot, long now)
         {
             PauseDhStrafeForPickup();
+            // If an Urshi-risk hover became ordinary loot, finish its owned restore first.
+            if (!riskyUrshi && _materialHoverSeed != 0) ClearMaterialHoverState(true);
 
             NativePoint old = new NativePoint();
             bool restore = !cleanup && GetCursorPos(out old);
@@ -1993,7 +2210,9 @@ namespace Turbo.Plugins.s7o
             if (riskyUrshi && HandleUrshiRiskLootHoverClick(item, tries, stackedLoot, now))
                 return;
 
-            if (IsNoSpaceMaterialPickup(item) &&
+            // Ordinary materials keep the proven immediate-click path. Waiting for
+            // exact hover confirmation here fought movement and delayed the first click.
+            if (riskyUrshi && IsNoSpaceMaterialPickup(item) &&
                 HandleMaterialConfirmedRetry(item, tries, cleanup, stackedLoot, now, old, restore))
                 return;
 
@@ -2004,8 +2223,9 @@ namespace Turbo.Plugins.s7o
             IActor selectedBeforeMove = GetSelectedActorSafe();
             bool hazardHoverPending = _hazardHoverSeed == item.Seed;
             int pointAttempt = tries + (hazardHoverPending ? _hazardHoverProbe : 0);
-            int x, y;
-            bool hasClickPoint = TryGetUiSafeItemClickPoint(item, pointAttempt, cleanup, stackedLoot, out x, out y);
+            int x = 0, y = 0;
+            bool currentHover = !riskyUrshi && TryGetCurrentItemHoverPoint(item, out x, out y);
+            bool hasClickPoint = currentHover || TryGetUiSafeItemClickPoint(item, pointAttempt, cleanup, stackedLoot, out x, out y);
 
             if (!hasClickPoint)
             {
@@ -2018,7 +2238,8 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
-            if (!TrySetCursorForWorldClick(x, y))
+            bool needsHazardPreview = hazardHoverPending || IsHazardousSelectedInteractable(selectedBeforeMove);
+            if (needsHazardPreview && !TrySetCursorForWorldClick(x, y))
             {
                 if (hazardHoverPending)
                     ClearHazardHoverState(true, now);
@@ -2051,13 +2272,410 @@ namespace Turbo.Plugins.s7o
             else if (IsHazardousSelectedInteractable(selectedBeforeMove))
             {
                 _hazardHoverSeed = item.Seed;
+                _hazardHoverInputExpireMs = now + CursorRestoreExpireMs;
                 _hazardHoverProbe = 1;
                 _hazardHoverHasRestorePoint = restore;
                 _hazardHoverRestorePoint = old;
                 return;
             }
 
-            CommitItemClick(item, tries, cleanup, stackedLoot, now, old, restore);
+            CommitItemClick(item, tries, cleanup, stackedLoot, now, old, restore,
+                false, new NativePoint { X = x, Y = y });
+        }
+
+        // Recover only after an actual click leaves this identity on the floor after
+        // its acknowledgement window. Cached exactSelected=false is not failure proof.
+        private bool NeedsItemRecovery(IItem item)
+        {
+            ItemRecoveryWatch watch;
+            int attempts;
+            bool watched = item != null && _itemRecoveryWatches.TryGetValue(item.Seed, out watch)
+                && watch.Ann == item.AnnId && watch.Acd == item.AcdId && watch.Required;
+            // If the bounded watch cache is full, still never send blind gear retries.
+            return item != null && item.CentralXyDistanceToMe <= _normalPickupRangeYards
+                && (watched || (!IsNoSpaceMaterialPickup(item) && _itemRecoveryWatches.Count >= ItemRecoveryMaxWatches
+                    && _attempts.TryGetValue(item.Seed, out attempts) && attempts > 0));
+        }
+
+        private void RecordItemClick(IItem item, bool confirmedRecovery)
+        {
+            // A far cleanup click is a pathfinder approach, not a failed pickup.
+            if (item == null || item.CentralXyDistanceToMe > _normalPickupRangeYards) return;
+            ItemRecoveryWatch watch;
+            if (!_itemRecoveryWatches.TryGetValue(item.Seed, out watch) || watch.Ann != item.AnnId || watch.Acd != item.AcdId)
+            {
+                // The source list is native floor state; this bound keeps recovery
+                // memory modest even in very large reward piles.
+                if (_itemRecoveryWatches.Count >= ItemRecoveryMaxWatches && !_itemRecoveryWatches.ContainsKey(item.Seed)) return;
+                watch = new ItemRecoveryWatch { Ann = item.AnnId, Acd = item.AcdId };
+                _itemRecoveryWatches[item.Seed] = watch;
+            }
+            watch.LastClickTick = Hud.Game.CurrentGameTick;
+            watch.AbsentTicks = 0;
+            if (confirmedRecovery) { watch.ConfirmedClicks++; watch.Required = true; }
+            else if (++watch.FastClicks >= (IsNoSpaceMaterialPickup(item) ? MaterialFastClicksBeforeRecovery : 1)) watch.Required = true;
+        }
+
+        private bool IsItemRecoveryClickLimitReached(IItem item)
+        {
+            ItemRecoveryWatch watch;
+            return item != null && item.CentralXyDistanceToMe <= _normalPickupRangeYards &&
+                _itemRecoveryWatches.TryGetValue(item.Seed, out watch) &&
+                watch.ConfirmedClicks >= ItemRecoveryMaxConfirmedClicks;
+        }
+
+        private void PurgeItemRecoveryWatches()
+        {
+            if (_itemRecoveryWatches.Count == 0) return;
+            int tick = Hud.Game.CurrentGameTick;
+            if (tick == _itemRecoveryWatchTick) return;
+            _itemRecoveryWatchTick = tick;
+            foreach (var watch in _itemRecoveryWatches.Values) watch.AbsentTicks++;
+            // One native cache traversal per fresh tick while item watches exist;
+            // offscreen floor objects retain their recovery budget.
+            foreach (IItem item in Hud.Game.Items)
+            {
+                ItemRecoveryWatch watch;
+                if (item != null && item.Location == ItemLocation.Floor &&
+                    _itemRecoveryWatches.TryGetValue(item.Seed, out watch) && watch.Ann == item.AnnId && watch.Acd == item.AcdId)
+                    watch.AbsentTicks = 0;
+            }
+            _itemRecoveryRetire.Clear();
+            foreach (var pair in _itemRecoveryWatches)
+                if (pair.Value.AbsentTicks >= 2) _itemRecoveryRetire.Add(pair.Key);
+            foreach (int seed in _itemRecoveryRetire)
+            {
+                if (_itemRecoverySeed == seed) ClearItemRecoveryState(true);
+                _itemRecoveryWatches.Remove(seed);
+            }
+        }
+
+        private void StartItemRecovery(LootCandidate target, bool cleanup, bool stackedLoot, long now)
+        {
+            IItem item = target.Item;
+            ItemRecoveryWatch watch;
+            if (!_itemRecoveryWatches.TryGetValue(item.Seed, out watch) || watch.Ann != item.AnnId || watch.Acd != item.AcdId)
+            {
+                if (_itemRecoveryWatches.Count >= ItemRecoveryMaxWatches && !_itemRecoveryWatches.ContainsKey(item.Seed))
+                {
+                    _retryAfterMs[item.Seed] = now + StuckRetryCooldownMs;
+                    return;
+                }
+                watch = new ItemRecoveryWatch { Ann = item.AnnId, Acd = item.AcdId, Required = true };
+                _itemRecoveryWatches[item.Seed] = watch;
+            }
+            // Same-tick floor/hover data cannot describe the previous actual click.
+            if (Hud.Game.CurrentGameTick <= watch.LastClickTick)
+            {
+                return;
+            }
+            if (watch.ConfirmedClicks >= ItemRecoveryMaxConfirmedClicks)
+            {
+                QueueItemRecoveryResync(item, now, "confirmed_hover_no_pickup_after_ack");
+                return;
+            }
+            ClearMaterialHoverState(true);
+            ClearUltrawideStackedHoverState();
+            ClearHazardHoverState(true, now);
+            ProcessPendingCursorRestore(now);
+            _pendingCursorRestore = false;
+            // A fresh, already selected item needs no preview/confirmation frame.
+            // Its actual click acknowledgement and confirmed-click limit stay intact.
+            int hitX, hitY;
+            NativePoint userPoint;
+            if (TryGetCurrentItemHoverPoint(item, out hitX, out hitY) && GetCursorPos(out userPoint))
+            {
+                PauseDhStrafeForPickup();
+                int tries; _attempts.TryGetValue(item.Seed, out tries);
+                CommitItemRecoveryClick(target, tries, cleanup, stackedLoot, now, userPoint, true,
+                    new NativePoint { X = hitX, Y = hitY });
+                return;
+            }
+            _itemRecoverySeed = item.Seed;
+            _itemRecoveryAnn = item.AnnId;
+            _itemRecoveryAcd = item.AcdId;
+            _itemRecoveryWorld = item.WorldId;
+            _itemRecoveryProbe = 0;
+            _itemRecoveryDeadlineMs = now + ItemRecoveryWatchdogMs;
+            _itemRecoveryHasRestorePoint = GetCursorPos(out _itemRecoveryRestorePoint);
+            if (!_itemRecoveryHasRestorePoint)
+            {
+                ClearItemRecoveryState(false);
+                return;
+            }
+            _itemRecoveryOffsetX = Hud.Window.Offset.X;
+            _itemRecoveryOffsetY = Hud.Window.Offset.Y;
+            _itemRecoveryWidth = Hud.Window.Size.Width;
+            _itemRecoveryHeight = Hud.Window.Size.Height;
+            PositionItemRecoveryProbe(item, now);
+        }
+
+        private bool HandleItemRecovery(List<LootCandidate> ready, List<LootCandidate> candidates,
+            bool cleanup, bool stackedLoot, long now)
+        {
+            int intendedSeed = _itemRecoverySeed;
+            LootCandidate intended = candidates.FirstOrDefault(c => c.Item.Seed == intendedSeed &&
+                c.Item.AnnId == _itemRecoveryAnn && c.Item.AcdId == _itemRecoveryAcd &&
+                c.Item.CentralXyDistanceToMe <= _normalPickupRangeYards);
+            if (intended == null)
+            {
+                ClearItemRecoveryState(true);
+                return false;
+            }
+            if (intended.Item.WorldId != _itemRecoveryWorld ||
+                Hud.Window.Offset.X != _itemRecoveryOffsetX || Hud.Window.Offset.Y != _itemRecoveryOffsetY ||
+                Hud.Window.Size.Width != _itemRecoveryWidth || Hud.Window.Size.Height != _itemRecoveryHeight)
+            {
+                ClearItemRecoveryState(false);
+                return true;
+            }
+            NativePoint cursor;
+            if (!GetCursorPos(out cursor))
+            {
+                ClearItemRecoveryState(false);
+                return true;
+            }
+            // Steering is expected during drive-by pickup. Retain its current point
+            // for restoration, without discarding a valid native item hover.
+            if (_itemRecoveryHasRestorePoint)
+            {
+                // Each OS motion sample is counted once, even if several collections
+                // share a game tick. Translate steering back around the user's origin.
+                _itemRecoveryRestorePoint.X += cursor.X - _itemRecoverySteeringSample.X;
+                _itemRecoveryRestorePoint.Y += cursor.Y - _itemRecoverySteeringSample.Y;
+            }
+            _itemRecoverySteeringSample = cursor;
+            PauseDhStrafeForPickup();
+            if (now >= _itemRecoveryDeadlineMs)
+            {
+                ClearItemRecoveryState(true);
+                QueueItemRecoveryResync(intended.Item, now, "native_hover_watchdog");
+                return true;
+            }
+            int tick = Hud.Game.CurrentGameTick;
+            if (tick < _itemRecoveryTick)
+            {
+                ClearItemRecoveryState(true);
+                return true;
+            }
+            if (tick == _itemRecoveryTick) return true;
+            // Convert native client cursor to the same desktop space as SetCursorPos.
+            NativePoint nativeCursor = new NativePoint {
+                X = Hud.Window.CursorX + Hud.Window.Offset.X, Y = Hud.Window.CursorY + Hud.Window.Offset.Y
+            };
+            _itemRecoveryTick = tick;
+            IActor selected = GetSelectedActorSafe();
+            LootCandidate actual = GetNativeItemRecoveryCandidate(ready, selected);
+            // Free also exposes native item highlight when SelectedActor is absent.
+            // An explicit non-item actor never falls through to item highlight.
+            if (actual != null && IsSafeSyntheticWorldClick(nativeCursor.X, nativeCursor.Y))
+            {
+                NativePoint restorePoint = _itemRecoveryRestorePoint;
+                bool restore = _itemRecoveryHasRestorePoint;
+                uint intendedAnn = _itemRecoveryAnn;
+                int probe = _itemRecoveryProbe;
+                NativePoint issuedPoint = nativeCursor;
+                int tries; _attempts.TryGetValue(actual.Item.Seed, out tries);
+                bool actualStacked = stackedLoot && IsStackedWithAnother(actual, candidates);
+                // The selected item and native cursor belong to the fresh snapshot.
+                // Click that known hit point, not an OS cursor that the user moved.
+                // Movement and button input are one indivisible Windows batch.
+                // Keep all eligibility/context guards; cursor drift is normal steering.
+                NativePoint finalCursor;
+                if (!GetCursorPos(out finalCursor) ||
+                    Hud.Game.Me == null || Hud.Game.Me.WorldId != _itemRecoveryWorld ||
+                    Hud.Window.Offset.X != _itemRecoveryOffsetX || Hud.Window.Offset.Y != _itemRecoveryOffsetY ||
+                    Hud.Window.Size.Width != _itemRecoveryWidth || Hud.Window.Size.Height != _itemRecoveryHeight ||
+                    IsBlockingLootUiOpen() || !IsSafeSyntheticWorldClick(issuedPoint.X, issuedPoint.Y)
+                    || actual.Item.Location != ItemLocation.Floor || WantedPriority(actual.Item) < 0
+                    || !CanFit(actual.Item, SafeFreeSlots()))
+                {
+                    ClearItemRecoveryState(false);
+                    return true;
+                }
+                if (restore)
+                {
+                    // Add only motion since the earlier OS sample; do not count the
+                    // full probe delta a second time after handoff/telemetry reads.
+                    restorePoint.X += finalCursor.X - cursor.X;
+                    restorePoint.Y += finalCursor.Y - cursor.Y;
+                }
+                ClearItemRecoveryState(false);
+                CommitItemRecoveryClick(actual, tries, cleanup, actualStacked, now, restorePoint, restore, issuedPoint);
+                return true;
+            }
+            if (++_itemRecoveryProbe >= ItemRecoveryMaxProbes)
+            {
+                ClearItemRecoveryState(true);
+                QueueItemRecoveryResync(intended.Item, now, "native_hover_probes_exhausted");
+                return true;
+            }
+            PositionItemRecoveryProbe(intended.Item, now);
+            return true;
+        }
+
+        private LootCandidate GetNativeItemRecoveryCandidate(List<LootCandidate> ready, IActor selected)
+        {
+            if (selected != null)
+                return IsSelectedActorItem(selected) ? ready.FirstOrDefault(c => c.Item.AnnId == selected.AnnId) : null;
+            LootCandidate highlighted = null;
+            foreach (LootCandidate candidate in ready)
+            {
+                if (!candidate.Item.IsSelected) continue;
+                if (highlighted != null) return null; // Native highlight must be unambiguous.
+                highlighted = candidate;
+            }
+            return highlighted;
+        }
+
+        private void GetItemRecoveryProbePoint(IItem item, int probe, out int x, out int y)
+        {
+            // These are search points, never click authority. Keep the proven label
+            // estimate and two native projections; no arbitrary pixel-offset sweep.
+            if (probe == 0 && TryGetCurrentItemHoverPoint(item, out x, out y)) return;
+            if (probe == 1 && TryGetFloorClickPoint(item, out x, out y)) return;
+            if (probe == 2)
+            {
+                try
+                {
+                    var collision = item.CollisionCoordinate;
+                    var projected = collision != null && collision.IsValid ? collision.ToScreenCoordinate(true, true) : null;
+                    if (projected != null && !float.IsNaN(projected.X) && !float.IsInfinity(projected.X)
+                        && !float.IsNaN(projected.Y) && !float.IsInfinity(projected.Y))
+                    {
+                        x = (int)Math.Round(projected.X + Hud.Window.Offset.X);
+                        y = (int)Math.Round(projected.Y + Hud.Window.Offset.Y);
+                        return;
+                    }
+                }
+                catch { }
+            }
+            GetItemClickBase(item, IsNoSpaceMaterialPickup(item), out x, out y);
+        }
+
+        private bool TryGetCurrentItemHoverPoint(IItem item, out int x, out int y)
+        {
+            x = y = 0;
+            if (!IsExactItemSelected(item)) return false;
+            x = Hud.Window.CursorX + Hud.Window.Offset.X;
+            y = Hud.Window.CursorY + Hud.Window.Offset.Y;
+            if (!IsSafeSyntheticWorldClick(x, y)) { x = y = 0; return false; }
+            return true;
+        }
+
+        private void PositionItemRecoveryProbe(IItem item, long now)
+        {
+            int x = 0, y = 0;
+            // Skip guarded UI points within the same finite geometry budget.
+            while (_itemRecoveryProbe < ItemRecoveryMaxProbes)
+            {
+                if (item.ScreenCoordinate == null) break;
+                GetItemRecoveryProbePoint(item, _itemRecoveryProbe, out x, out y);
+                if (IsSafeSyntheticWorldClick(x, y)) break;
+                _itemRecoveryProbe++;
+            }
+            if (_itemRecoveryProbe >= ItemRecoveryMaxProbes || item.ScreenCoordinate == null)
+            {
+                ClearItemRecoveryState(true);
+                QueueItemRecoveryResync(item, now, "safe_probe_unavailable");
+                return;
+            }
+            PauseDhStrafeForPickup();
+            if (!TrySetCursorForWorldClick(x, y))
+            {
+                ClearItemRecoveryState(true);
+                _retryAfterMs[item.Seed] = now + StackedLootSkipMs;
+                return;
+            }
+            _itemRecoveryPoint = new NativePoint { X = x, Y = y };
+            _itemRecoverySteeringSample = _itemRecoveryPoint;
+            _itemRecoveryTick = Hud.Game.CurrentGameTick;
+        }
+
+        private void CommitItemRecoveryClick(LootCandidate actual, int tries, bool cleanup, bool stackedLoot,
+            long now, NativePoint restorePoint, bool restore, NativePoint issuedPoint)
+        {
+            bool fallback = actual.UrshiRisk && actual.Item.Seed == _urshiFallbackSeed && now <= _urshiFallbackUntilMs;
+            long fallbackUntil = _urshiFallbackUntilMs;
+            if (cleanup && (!stackedLoot || actual.Item.CentralXyDistanceToMe > _normalPickupRangeYards))
+                _wideCleanupCommittedSeed = actual.Item.Seed;
+            else if (!cleanup || _wideCleanupCommittedSeed == actual.Item.Seed)
+                _wideCleanupCommittedSeed = 0;
+            if (!CommitItemClick(actual.Item, tries, cleanup, stackedLoot, now, restorePoint, restore, true, issuedPoint)) return;
+            // Recovery-origin restoration remains protected by ownership/context.
+            // Ordinary schedules retain their proven immediate-path behavior.
+            _pendingCursorRestoreNeedsOwnership = restore && _pendingCursorRestore;
+            if (_pendingCursorRestoreNeedsOwnership)
+            {
+                _pendingCursorOwnedPoint = issuedPoint;
+                _pendingCursorHasOwnedPoint = true;
+                _pendingCursorRecoveryWorld = actual.Item.WorldId;
+                _pendingCursorRecoveryArea = Hud.Game.Me.SnoArea != null ? Hud.Game.Me.SnoArea.Sno : 0;
+                _pendingCursorRecoveryOffsetX = Hud.Window.Offset.X;
+                _pendingCursorRecoveryOffsetY = Hud.Window.Offset.Y;
+                _pendingCursorRecoveryWidth = Hud.Window.Size.Width;
+                _pendingCursorRecoveryHeight = Hud.Window.Size.Height;
+            }
+            if (!actual.UrshiRisk) return;
+            // Fresh native Item identity provides the risk guard; preserve the existing
+            // Urshi recovery/fallback bookkeeping without another cursor move.
+            if (fallback)
+            {
+                int fallbackTries; _urshiFallbackTriesBySeed.TryGetValue(actual.Item.Seed, out fallbackTries);
+                _urshiFallbackTriesBySeed[actual.Item.Seed] = fallbackTries + 1;
+                _urshiFallbackSeed = actual.Item.Seed;
+                _urshiFallbackUntilMs = fallbackUntil;
+            }
+            ClearGenericUrshiRecoveryState();
+            ClearAccidentalUrshiRecoveryState();
+            _nextUrshiRiskClickMs = now + UrshiRiskClickDelayMs;
+            _urshiArmedUntilMs = now + UrshiPanelRecoveryWindowMs;
+            _urshiArmedSeed = actual.Item.Seed;
+            _nextUrshiSpaceMs = 0;
+            _urshiSpaceAttempts = 0;
+            _urshiPortalCancelAttempts = 0;
+            CacheAccidentalUrshiClickPoint(GetUrshiActor());
+        }
+
+        private void QueueItemRecoveryResync(IItem item, long now, string reason)
+        {
+            if (_pendingStuckResyncSeed != 0 || _stuckResyncActiveSeed != 0) return;
+            if (!_stuckResyncUsedSeeds.Add(item.Seed))
+            {
+                _retryAfterMs[item.Seed] = now + NoSpacePickupRetryCooldownMs;
+                ItemRecoveryWatch exhausted;
+                if (_itemRecoveryWatches.TryGetValue(item.Seed, out exhausted)) exhausted.ConfirmedClicks = 0;
+                return;
+            }
+            ItemRecoveryWatch watch;
+            if (_itemRecoveryWatches.TryGetValue(item.Seed, out watch)) watch.ConfirmedClicks = 0;
+            _pendingStuckResyncSeed = item.Seed;
+            _pendingStuckResyncSelectionRetry = true;
+            _pendingStuckResyncUiBlocked = false;
+        }
+
+        private bool IsCursorAtOwnedPoint(NativePoint cursor, NativePoint issued)
+        {
+            double dx = cursor.X - issued.X, dy = cursor.Y - issued.Y;
+            double radius = Math.Max(3.0d, 4.0d * UiScale());
+            return dx * dx + dy * dy <= radius * radius;
+        }
+
+        private void ClearItemRecoveryState(bool restoreCursor)
+        {
+            NativePoint cursor;
+            if (restoreCursor && _itemRecoveryHasRestorePoint && Hud != null && Hud.Game != null &&
+                Hud.Game.Me != null && Hud.Game.Me.WorldId == _itemRecoveryWorld && Hud.Window != null && Hud.Window.IsForeground &&
+                Hud.Window.Offset.X == _itemRecoveryOffsetX && Hud.Window.Offset.Y == _itemRecoveryOffsetY &&
+                Hud.Window.Size.Width == _itemRecoveryWidth && Hud.Window.Size.Height == _itemRecoveryHeight &&
+                GetCursorPos(out cursor) && IsCursorAtOwnedPoint(cursor, _itemRecoveryPoint))
+                SetCursorPos(_itemRecoveryRestorePoint.X, _itemRecoveryRestorePoint.Y);
+            _itemRecoverySeed = 0;
+            _itemRecoveryAnn = _itemRecoveryAcd = _itemRecoveryWorld = 0;
+            _itemRecoveryProbe = _itemRecoveryTick = 0;
+            _itemRecoveryDeadlineMs = 0;
+            _itemRecoveryHasRestorePoint = false;
+            _itemRecoveryPoint = _itemRecoveryRestorePoint = _itemRecoverySteeringSample = new NativePoint();
         }
 
         private bool HandleUltrawideStackedConfirmedClick(IItem item, int tries, bool cleanup, bool stackedLoot,
@@ -2270,7 +2888,8 @@ namespace Turbo.Plugins.s7o
         private void GetMaterialHoverPoint(IItem item, int probe, out int x, out int y)
         {
             // Native zero lift and the proven ordinary lift precede gentle, existing
-            // fallback geometry. These are hover probes, never unconfirmed clicks.
+            // fallback geometry. The same points serve ordinary material retries;
+            // Urshi-risk pickup still requires exact hover confirmation.
             if (probe < 2)
             {
                 GetItemClickBase(item, probe == 0, out x, out y);
@@ -2388,21 +3007,45 @@ namespace Turbo.Plugins.s7o
             _lastUiBlockedMissMs = 0;
         }
 
-        private void CommitItemClick(IItem item, int tries, bool cleanup, bool stackedLoot, long now, NativePoint old, bool restore)
+        private bool CommitItemClick(IItem item, int tries, bool cleanup, bool stackedLoot, long now, NativePoint old, bool restore,
+            bool confirmedItemRecovery = false, NativePoint? preciseClickPoint = null)
         {
             ClearUiBlockedMisses(item.Seed);
             if (IsNoSpaceMaterialPickup(item))
                 ResetMaterialSelectionMisses();
-            _attempts[item.Seed] = tries + 1;
             ClearUrshiArmedRecoveryState(true);
             ArmGenericUrshiPickupRecovery(item, cleanup, now);
-            MouseLeftClick();
-            // Preserve the validated cadence. Stacked loot stays fully rapid through attempt 8;
-            // only the final click gets the existing acknowledgement window so it
-            // cannot be declared stuck while that click is still resolving.
-            if (!stackedLoot || tries + 1 >= MaxAttempts)
+            if (preciseClickPoint.HasValue)
+            {
+                if (!TryEmitPickupClick(item, preciseClickPoint.Value, confirmedItemRecovery ? "native_recovery" : "pickup"))
+                {
+                    _retryAfterMs[item.Seed] = now + StackedLootSkipMs;
+                    _lastClickMs = now;
+                    if (restore)
+                    {
+                        ScheduleCursorRestore(old, now);
+                        GuardPickupCursorRestore(preciseClickPoint.Value, item.WorldId);
+                    }
+                    return false;
+                }
+            }
+            else MouseLeftClick();
+            // Count injected clicks only, not failed batches or cursor probes.
+            _attempts[item.Seed] = tries + 1;
+            RecordItemClick(item, confirmedItemRecovery);
+            // Preserve normal REV4 cadence. Its final attempt retains the existing
+            // acknowledgement window; failed item recovery uses that watchdog
+            // after two confirmed recovery clicks before an early resync decision.
+            if (!stackedLoot || tries + 1 >= MaxAttempts ||
+                (confirmedItemRecovery && IsItemRecoveryClickLimitReached(item)))
                 _pickupAcknowledgeUntilMs[item.Seed] = now + PickupAcknowledgeMs;
-            if (restore) ScheduleCursorRestore(old, now);
+            if (restore)
+            {
+                ScheduleCursorRestore(old, now);
+                // Restore only while our snap still owns the cursor. Fresh user
+                // steering or a changed window/world must never be rewound.
+                if (preciseClickPoint.HasValue) GuardPickupCursorRestore(preciseClickPoint.Value, item.WorldId);
+            }
             _lastClickSeed = item.Seed;
             if (stackedLoot)
             {
@@ -2411,10 +3054,12 @@ namespace Turbo.Plugins.s7o
             }
             _lastCleanupClickFar = cleanup && item.CentralXyDistanceToMe > _normalPickupRangeYards;
             _lastClickMs = now;
+            return true;
         }
 
         private void ClearMaterialHoverState(bool restoreCursor)
         {
+            ClearItemRecoveryState(restoreCursor);
             if (restoreCursor && _materialHoverHasRestorePoint)
             {
                 NativePoint cursor;
@@ -2442,6 +3087,7 @@ namespace Turbo.Plugins.s7o
                 ScheduleCursorRestore(_hazardHoverRestorePoint, now);
 
             _hazardHoverSeed = 0;
+            _hazardHoverInputExpireMs = 0;
             _hazardHoverProbe = 0;
             _hazardHoverHasRestorePoint = false;
             _hazardHoverRestorePoint = new NativePoint();
@@ -2489,7 +3135,7 @@ namespace Turbo.Plugins.s7o
 
                 foreach (var item in Hud.Game.Items)
                 {
-                    if (item == null || item == anchor || item.Location != ItemLocation.Floor || !item.IsOnScreen || !item.IsSelected) continue;
+                    if (item == null || item == anchor || item.Location != ItemLocation.Floor || !IsProjectedFloorItemVisible(item) || !item.IsSelected) continue;
                     if (item.FloorCoordinate == null || item.FloorCoordinate.XYDistanceTo(anchor.FloorCoordinate) > StackedLootWorldRadiusYards + 0.8f) continue;
                     if (IsExcludedPickup(item) || WantedPriority(item) < 0) continue;
                     return true;
@@ -2515,7 +3161,7 @@ namespace Turbo.Plugins.s7o
 
                 foreach (var item in Hud.Game.Items)
                 {
-                    if (item == null || item.Location != ItemLocation.Floor || !item.IsOnScreen) continue;
+                    if (item == null || item.Location != ItemLocation.Floor || !IsProjectedFloorItemVisible(item)) continue;
                     if (IsExcludedPickup(item) || IsSuppressedDroppedItem(item, now) || IsCleanupStuckIgnored(item, now)) continue;
                     if (IsProtectedChestRisk(item, protectedChest) || item.CentralXyDistanceToMe > range) continue;
                     if (WantedPriority(item) < 0 || !CanFit(item, freeSlots) || !IsAutoUrshiHandoffLoot(item)) continue;
@@ -2644,6 +3290,10 @@ namespace Turbo.Plugins.s7o
         private void ScheduleCursorRestore(NativePoint point, long now)
         {
             _pendingCursorPoint = point;
+            _pendingCursorRestoreNeedsOwnership = false;
+            _pendingCursorRecoveryWorld = _pendingCursorRecoveryArea = 0;
+            _pendingCursorRecoveryOffsetX = _pendingCursorRecoveryOffsetY = _pendingCursorRecoveryWidth = _pendingCursorRecoveryHeight = 0;
+            _pendingCursorHasOwnedPoint = GetCursorPos(out _pendingCursorOwnedPoint);
             _pendingCursorRestore = true;
             _pendingCursorRestoreAtMs = now + CursorRestoreDelayMs;
             _pendingCursorRestoreExpireMs = now + CursorRestoreExpireMs;
@@ -2658,6 +3308,16 @@ namespace Turbo.Plugins.s7o
             if (now > _pendingCursorRestoreExpireMs || Hud == null || Hud.Window == null || !Hud.Window.IsForeground)
                 return;
 
+            NativePoint cursor;
+            if (_pendingCursorRestoreNeedsOwnership &&
+                (!_pendingCursorHasOwnedPoint || !GetCursorPos(out cursor) || !IsCursorAtOwnedPoint(cursor, _pendingCursorOwnedPoint) ||
+                Hud.Game == null || Hud.Game.Me == null || Hud.Game.Me.WorldId != _pendingCursorRecoveryWorld ||
+                (Hud.Game.Me.SnoArea != null ? Hud.Game.Me.SnoArea.Sno : 0) != _pendingCursorRecoveryArea ||
+                Hud.Window.Offset.X != _pendingCursorRecoveryOffsetX || Hud.Window.Offset.Y != _pendingCursorRecoveryOffsetY ||
+                Hud.Window.Size.Width != _pendingCursorRecoveryWidth || Hud.Window.Size.Height != _pendingCursorRecoveryHeight))
+            {
+                return;
+            }
             SetCursorPos(_pendingCursorPoint.X, _pendingCursorPoint.Y);
         }
 
@@ -2729,10 +3389,17 @@ namespace Turbo.Plugins.s7o
 
         private void GetMaterialClickPoint(IItem item, int attempt, out int x, out int y)
         {
-            // Telemetry shows the native zero-lift point becomes the exact selected
-            // material actor one or two collection frames after cursor movement.
-            // Keep every material attempt focused on that validated point.
-            GetItemClickBase(item, true, out x, out y);
+            // Use a confirmed current hover without moving away from its hitbox.
+            NativePoint cursor;
+            if (GetCursorPos(out cursor) && IsExactItemSelected(item)
+                && IsCursorNearMaterialBase(item, cursor))
+            {
+                x = cursor.X; y = cursor.Y;
+                return;
+            }
+            // First click keeps zero lift. Only failed clicks use the existing scaled
+            // ordinary lift and gentle alternate points; do not repeat one missed point.
+            GetMaterialHoverPoint(item, Math.Max(0, attempt) % 8, out x, out y);
         }
 
         private bool IsCursorNearMaterialBase(IItem item, NativePoint point)
@@ -2756,23 +3423,68 @@ namespace Turbo.Plugins.s7o
             y = (int)Math.Round(item.ScreenCoordinate.Y - lift + Hud.Window.Offset.Y);
         }
 
-        private bool TryGetFloorClickPoint(IItem item, out int x, out int y)
+        // Native IsOnScreen can retain stock-camera bounds when ZoomAware changes zoom.
+        // Raw native projection is authoritative for viewport visibility, without a zoom-plugin dependency.
+        // Cache one collection only so repeated reward/recovery scans remain lightweight.
+        private struct FloorItemProjection
         {
-            x = 0;
-            y = 0;
+            public bool Visible;
+            public float X, Y;
+        }
+        private readonly Dictionary<IItem, FloorItemProjection> _floorItemProjectionCache =
+            new Dictionary<IItem, FloorItemProjection>();
+
+        private bool IsProjectedFloorItemVisible(IItem item)
+        {
+            FloorItemProjection projection;
+            return TryGetVisibleFloorItemProjection(item, out projection);
+        }
+
+        private bool TryGetVisibleFloorItemProjection(IItem item, out FloorItemProjection projection)
+        {
+            projection = new FloorItemProjection();
+            if (item == null) return false;
+            // Pickup callbacks can change this same actor from Floor to Inventory within a collection.
+            if (item.Location != ItemLocation.Floor || Hud == null || Hud.Game == null || Hud.Game.Me == null ||
+                item.WorldId != Hud.Game.Me.WorldId) return false;
+            if (_floorItemProjectionCache.TryGetValue(item, out projection)) return projection.Visible;
             try
             {
-                if (item == null || item.FloorCoordinate == null) return false;
-                var screen = item.FloorCoordinate.ToScreenCoordinate(true, true);
-                if (screen == null || float.IsNaN(screen.X) || float.IsInfinity(screen.X) ||
-                    float.IsNaN(screen.Y) || float.IsInfinity(screen.Y) ||
-                    screen.X < 0 || screen.Y < 0 ||
-                    screen.X >= Hud.Window.Size.Width || screen.Y >= Hud.Window.Size.Height) return false;
-                x = (int)Math.Round(screen.X + Hud.Window.Offset.X);
-                y = (int)Math.Round(screen.Y + Hud.Window.Offset.Y);
-                return true;
+                var me = Hud != null && Hud.Game != null ? Hud.Game.Me : null;
+                var point = item.FloorCoordinate;
+                if (me != null && Hud.Window != null && item.Location == ItemLocation.Floor &&
+                    item.WorldId == me.WorldId && point != null && point.IsValid &&
+                    !float.IsNaN(point.X) && !float.IsInfinity(point.X) &&
+                    !float.IsNaN(point.Y) && !float.IsInfinity(point.Y) &&
+                    !float.IsNaN(point.Z) && !float.IsInfinity(point.Z))
+                {
+                    var size = Hud.Window.Size;
+                    var screen = point.ToScreenCoordinate(true, true);
+                    if (screen != null)
+                    {
+                        projection.X = screen.X;
+                        projection.Y = screen.Y;
+                        projection.Visible = size.Width > 0 && size.Height > 0 &&
+                            !float.IsNaN(screen.X) && !float.IsInfinity(screen.X) &&
+                            !float.IsNaN(screen.Y) && !float.IsInfinity(screen.Y) &&
+                            screen.X >= 0f && screen.Y >= 0f &&
+                            screen.X < size.Width && screen.Y < size.Height;
+                    }
+                }
             }
-            catch { return false; }
+            catch { projection.Visible = false; } // An invalid projection never authorizes a pickup.
+            if (_floorItemProjectionCache.Count < 512) _floorItemProjectionCache[item] = projection;
+            return projection.Visible;
+        }
+
+        private bool TryGetFloorClickPoint(IItem item, out int x, out int y)
+        {
+            x = y = 0;
+            FloorItemProjection projection;
+            if (!TryGetVisibleFloorItemProjection(item, out projection)) return false;
+            x = (int)Math.Round(projection.X + Hud.Window.Offset.X);
+            y = (int)Math.Round(projection.Y + Hud.Window.Offset.Y);
+            return true;
         }
 
         private int WantedPriority(IItem item)
@@ -2783,6 +3495,7 @@ namespace Turbo.Plugins.s7o
 
             if (actor == ActorSnoEnum._horadricrelic) return IsBloodShardCapped() ? -1 : 0;
             if (IsGreaterRiftKey(actor)) return 1;
+            if (IsAngelicCrucible(item)) return _screams ? 4 : -1;
             if (IsPlan(item) || IsWhisper(item)) return 2;
             if (actor == ActorSnoEnum._crafting_looted_reagent_05) return _deathsBreath ? 40 : -1;
             if (_materials && NoSpaceActors.Contains(actor)) return 3;
@@ -2947,8 +3660,15 @@ namespace Turbo.Plugins.s7o
 
         private bool HasMatchingStack(IItem item)
         {
-            if (item == null || item.SnoActor == null) return false;
-            return Hud.Inventory.ItemsInInventory.Any(i => i != null && i.SnoActor != null && i.SnoActor.Sno == item.SnoActor.Sno && IsStackable(i));
+            // A shared actor SNO is not proof that two plans/consumables can merge.
+            // Unidentified drops require a free slot, even if an identified stack exists.
+            // Unknown stack limits also require space; no seasonal item list is needed.
+            if (item == null || item.SnoItem == null || item.Unidentified || item.SnoItem.StackSize <= 1)
+                return false;
+
+            return Hud.Inventory.ItemsInInventory.Any(i => i != null && i.SnoItem != null &&
+                !i.Unidentified && i.SnoItem.Sno == item.SnoItem.Sno &&
+                i.Quantity > 0 && i.Quantity < i.SnoItem.StackSize);
         }
 
         private static bool IsStackable(IItem item)
@@ -3065,6 +3785,15 @@ namespace Turbo.Plugins.s7o
                 || IsProtectedAutoUrshiLoot(item);
         }
 
+        private static bool IsAngelicCrucible(IItem item)
+        {
+            // SDK item ID; actor fallbacks cover a drop before its item metadata arrives.
+            // This is an inventory consumable, never a no-space crafting material.
+            return item != null && ((item.SnoItem != null && item.SnoItem.Sno == AngelicCrucibleSno)
+                || (item.SnoActor != null && ((int)item.SnoActor.Sno == 487667
+                    || (int)item.SnoActor.Sno == 487847)));
+        }
+
         private static bool IsWhisper(IItem item)
         {
             if (item == null || item.SnoItem == null) return false;
@@ -3143,7 +3872,16 @@ namespace Turbo.Plugins.s7o
                 return false;
             }
             if (_lootBurstCleanupUntilMs > now)
+            {
                 return true;
+            }
+
+            // Ordinary Vision floor drops are not reward events. An observed reward
+            // chest opening still enables the existing wide-range latch above.
+            if (IsVisionWorld())
+            {
+                return false;
+            }
 
             try
             {
@@ -3151,7 +3889,7 @@ namespace Turbo.Plugins.s7o
                 int count = 0;
                 foreach (var item in Hud.Game.Items)
                 {
-                    if (item == null || item.Location != ItemLocation.Floor || !item.IsOnScreen || item.CentralXyDistanceToMe > _eventPickupRangeYards) continue;
+                    if (item == null || item.Location != ItemLocation.Floor || !IsProjectedFloorItemVisible(item) || item.CentralXyDistanceToMe > _eventPickupRangeYards) continue;
                     if (IsExcludedPickup(item) || IsSuppressedDroppedItem(item, now) || WantedPriority(item) < 0 || !CanFit(item, freeSlots)) continue;
                     if (++count >= LootBurstThreshold)
                     {
@@ -3184,7 +3922,9 @@ namespace Turbo.Plugins.s7o
                     }
 
                     if ((actor.IsDisabled || actor.IsOperated) && _unopenedProtectedRewardChestAnnIds.Remove(actor.AnnId))
+                    {
                         _lootBurstCleanupUntilMs = now + LootBurstLatchMs;
+                    }
                 }
             }
             catch { }
@@ -3233,7 +3973,7 @@ namespace Turbo.Plugins.s7o
                 int range = PostRiftLootRangeYards();
                 foreach (var item in Hud.Game.Items)
                 {
-                    if (item == null || item.Location != ItemLocation.Floor || !item.IsOnScreen ||
+                    if (item == null || item.Location != ItemLocation.Floor || !IsProjectedFloorItemVisible(item) ||
                         item.CentralXyDistanceToMe > range)
                         continue;
 
@@ -3684,7 +4424,7 @@ namespace Turbo.Plugins.s7o
 
                 foreach (var item in Hud.Game.Items)
                 {
-                    if (item == null || item.Location != ItemLocation.Floor || !item.IsOnScreen)
+                    if (item == null || item.Location != ItemLocation.Floor || !IsProjectedFloorItemVisible(item))
                         continue;
                     if (!IsAutoUrshiPrimaryReward(item) || IsExcludedPickup(item) ||
                         IsSuppressedDroppedItem(item, now))
@@ -4014,7 +4754,10 @@ namespace Turbo.Plugins.s7o
 
         private bool TrySetCursorForWorldClick(int x, int y)
         {
-            return IsSafeSyntheticWorldClick(x, y) && SetCursorPos(x, y);
+            if (!IsSafeSyntheticWorldClick(x, y) || !SetCursorPos(x, y)) return false;
+            _lastIssuedPickupCursorPoint = new NativePoint { X = x, Y = y };
+            _hasIssuedPickupCursorPoint = true;
+            return true;
         }
 
         private bool IsSafeSyntheticWorldClick(int screenX, int screenY)
@@ -4342,7 +5085,7 @@ namespace Turbo.Plugins.s7o
                     i != null
                     && i.Seed == seed
                     && i.Location == ItemLocation.Floor
-                    && i.IsOnScreen);
+                    && IsProjectedFloorItemVisible(i));
             }
             catch { return null; }
         }
@@ -5027,6 +5770,81 @@ namespace Turbo.Plugins.s7o
             catch { return false; }
         }
 
+
+        // Windows INPUT is 28 bytes on x86, 40 on x64. MOUSEINPUT is its largest
+        // union member; this mouse-only definition preserves both native layouts.
+        [StructLayout(LayoutKind.Sequential)]
+        private struct PickupMouseInput
+        {
+            public int X, Y;
+            public uint Data, Flags, Time;
+            public IntPtr ExtraInfo;
+        }
+        [StructLayout(LayoutKind.Explicit)]
+        private struct PickupInputUnion { [FieldOffset(0)] public PickupMouseInput Mouse; }
+        [StructLayout(LayoutKind.Sequential)]
+        private struct PickupInput { public uint Type; public PickupInputUnion Union; }
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern uint SendInput(uint count, PickupInput[] inputs, int size);
+        [DllImport("user32.dll")]
+        private static extern int GetSystemMetrics(int index);
+        private readonly PickupInput[] _pickupInputBatch = new PickupInput[3];
+        private static readonly int PickupInputSize = Marshal.SizeOf(typeof(PickupInput));
+
+        private bool TryEmitPickupClick(IItem item, NativePoint point, string purpose = "pickup")
+        {
+            if (item == null || Hud == null || Hud.Game == null || Hud.Game.Me == null || Hud.Window == null
+                || !Hud.Window.IsForeground || Hud.Game.IsLoading || Hud.Game.IsPaused || IsBlockingLootUiOpen()
+                || !IsSafeSyntheticWorldClick(point.X, point.Y) || item.Location != ItemLocation.Floor
+                || item.WorldId != Hud.Game.Me.WorldId || WantedPriority(item) < 0 || !CanFit(item, SafeFreeSlots()))
+            {
+                return false;
+            }
+            int left = GetSystemMetrics(76), top = GetSystemMetrics(77);
+            int width = GetSystemMetrics(78), height = GetSystemMetrics(79);
+            if (width <= 0 || height <= 0 || point.X < left || point.Y < top
+                || (long)point.X >= (long)left + width || (long)point.Y >= (long)top + height)
+            {
+                return false;
+            }
+            // Map pixel centers into the absolute [0,65535] virtual desktop.
+            int ax = Math.Min(65535, Math.Max(0, (int)(((double)point.X - left + 0.5d) * 65536d / width)));
+            int ay = Math.Min(65535, Math.Max(0, (int)(((double)point.Y - top + 0.5d) * 65536d / height)));
+            _pickupInputBatch[0] = new PickupInput {
+                Type = 0, Union = new PickupInputUnion { Mouse = new PickupMouseInput { X = ax, Y = ay, Flags = 0xC001u } }
+            }; // MOVE | ABSOLUTE | VIRTUALDESK
+            _pickupInputBatch[1] = new PickupInput {
+                Type = 0, Union = new PickupInputUnion { Mouse = new PickupMouseInput { Flags = 0x0002u } }
+            };
+            _pickupInputBatch[2] = new PickupInput {
+                Type = 0, Union = new PickupInputUnion { Mouse = new PickupMouseInput { Flags = 0x0004u } }
+            };
+            uint sent = SendInput(3u, _pickupInputBatch, PickupInputSize);
+            // The first packet owns the cursor even if the remaining click packets fail.
+            if (sent > 0u)
+            {
+                _lastIssuedPickupCursorPoint = point;
+                _hasIssuedPickupCursorPoint = true;
+            }
+            // Never leave synthetic LMB held if movement/down were inserted without up.
+            if (sent == 2u) MouseLeftUp();
+            return sent == 3u;
+        }
+
+        private void GuardPickupCursorRestore(NativePoint issuedPoint, uint world)
+        {
+            // The click has already been sent. An old restore must not rewind
+            // steering resumed after the short snap/click operation.
+            _pendingCursorRestoreNeedsOwnership = true;
+            _pendingCursorOwnedPoint = issuedPoint;
+            _pendingCursorHasOwnedPoint = true;
+            _pendingCursorRecoveryWorld = world;
+            _pendingCursorRecoveryArea = Hud.Game.Me.SnoArea != null ? Hud.Game.Me.SnoArea.Sno : 0;
+            _pendingCursorRecoveryOffsetX = Hud.Window.Offset.X;
+            _pendingCursorRecoveryOffsetY = Hud.Window.Offset.Y;
+            _pendingCursorRecoveryWidth = Hud.Window.Size.Width;
+            _pendingCursorRecoveryHeight = Hud.Window.Size.Height;
+        }
 
         private static void MouseLeftClick()
         {
