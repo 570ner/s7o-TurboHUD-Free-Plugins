@@ -579,7 +579,7 @@ namespace Turbo.Plugins.s7o
             if(_valid) {
                 LogContextChange("Suspend",reason);
                 _suspendedTimestamp=Stopwatch.GetTimestamp();
-                Interlocked.Increment(ref _routeSerial);_route=null;_routeRequest=null;_corridorSnapshot=null;_epoch++;
+                Interlocked.Increment(ref _routeSerial);_pathSlot.Request=null;_pathSlot.Result=null;_approachSlot.Request=null;_approachSlot.Result=null;_corridorSnapshot=null;_epoch++;
             }
             _valid=false;_drawingPlacements.Clear();_obstacles.Clear();_footprintCandidates.Clear();
             _nativeBoxes.Clear();_targets.Clear();_lastCollectMs=0;
@@ -588,7 +588,7 @@ namespace Turbo.Plugins.s7o
         {
             LogContextChange("Discard",reason);
             _suspendedTimestamp=-1;
-            Interlocked.Increment(ref _routeSerial);_route=null;_routeRequest=null;_corridorSnapshot=null;
+            Interlocked.Increment(ref _routeSerial);ResetRouteSlots();_corridorSnapshot=null;
             if(_valid||_placements.Count>0)_epoch++;
             _valid=false;_placements.Clear();_drawingPlacements.Clear();_sceneCoverageLogged.Clear();_obstacles.Clear();_footprintCandidates.Clear();_nativeBoxes.Clear();_targets.Clear();_worldId=0;_worldSno=0;_lastCollectMs=0;
         }
@@ -856,13 +856,15 @@ namespace Turbo.Plugins.s7o
                     case "corridor":if(args.Length!=8)return Error("ExpectedEpochFromXYZToXYZRadius");
                         return Corridor(Number(args[1]),Number(args[2]),Number(args[3]),Number(args[4]),Number(args[5]),Number(args[6]),Number(args[7]));
                     case "resetpath":if(args.Length!=1)return Error("ExpectedEpoch");
-                        _route=null;_routeRequest=null;Interlocked.Increment(ref _routeSerial);return Status();
+                        ResetRouteSlots();Interlocked.Increment(ref _routeSerial);return Status();
                     case "feedback":if(args.Length!=7)return Error("ExpectedEpochConsumerEventTargetXYZ");
                         LogConsumer(args);return Status();
                     case "dash":if(args.Length!=8)return Error("ExpectedEpochFromXYZToXYZRadius");
                         return DashHop(Number(args[1]),Number(args[2]),Number(args[3]),Number(args[4]),Number(args[5]),Number(args[6]),Number(args[7]));
                     case "path":if(args.Length!=8)return Error("ExpectedEpochFromXYZToXYZRadius");
                         return Route(Number(args[1]),Number(args[2]),Number(args[3]),Number(args[4]),Number(args[5]),Number(args[6]),Number(args[7]));
+                    case "approach":if(args.Length!=7)return Error("ExpectedEpochFromXYZActorReachRadius");
+                        return Approach(Number(args[1]),Number(args[2]),Number(args[3]),Convert.ToUInt32(args[4]),Number(args[5]),Number(args[6]));
                     default:return Error("UnknownMethod");
                 }
             } catch(FormatException){return Error("InvalidArguments");}
@@ -1386,9 +1388,9 @@ namespace Turbo.Plugins.s7o
         // require a continuous walk corridor; unknown terrain keeps native recovery.
         // Door traversal is planning-only: the actual dash stops before a closed door.
         private const float RouteStep=1.25f,RouteMaxHop=42f;
-        private int _routeSerial,_routeWorker;
-        private RouteRequest _routeRequest;
-        private volatile RouteResult _route;
+        private int _routeSerial;
+        private sealed class RouteSlot { public RouteRequest Request; public volatile RouteResult Result; public int Worker; }
+        private readonly RouteSlot _pathSlot=new RouteSlot(), _approachSlot=new RouteSlot();
         private string _routeLogged="";
         private sealed class RouteScene
         {
@@ -1399,12 +1401,13 @@ namespace Turbo.Plugins.s7o
         private sealed class RouteRequest
         {
             public int Serial;public long Epoch,Fingerprint;
-            public float X,Y,Z,TX,TY,TZ,Radius;
+            public float X,Y,Z,TX,TY,TZ,Radius,ApproachReach;
+            public uint ApproachAcd; // Nonzero means a reachable interaction region, never a route through closed blockers.
             public RouteScene[] Scenes;public NativeBox[] Boxes;public Obstacle[] Props;
         }
         private sealed class RouteResult
         {
-            public RouteRequest Request;public float[][] Points;public string State;
+            public RouteRequest Request;public float[][] Points;public string State, Reason;public bool RequiresDoor;
             public int Expanded;public long ElapsedMs;
         }
         private static long RouteBucket(float x,float y)
@@ -1426,10 +1429,11 @@ namespace Turbo.Plugins.s7o
             // Portals and decorative selection bounds are not automatically solid.
             return o.FloorZKnown&&o.Radius>0&&o.Kind!="Portal";
         }
-        private RouteRequest CaptureRoute(float x,float y,float z,float tx,float ty,float tz,float radius,long fingerprint,bool tracked=true)
+        private RouteRequest CaptureRoute(float x,float y,float z,float tx,float ty,float tz,float radius,long fingerprint,bool tracked=true,uint approachAcd=0,float approachReach=0)
         {
             var scenes=new List<RouteScene>();
-            float left=Math.Min(x,tx)-20,top=Math.Min(y,ty)-20,right=Math.Max(x,tx)+20,bottom=Math.Max(y,ty)+20;
+            float margin=approachAcd==0?20f:30f; // Door detours can first lead away from its centre.
+            float left=Math.Min(x,tx)-margin,top=Math.Min(y,ty)-margin,right=Math.Max(x,tx)+margin,bottom=Math.Max(y,ty)+margin;
             foreach(var p in _placements.Values) {
                 if(p.Template==null||p.OriginConflict||p.MaxX<left||p.X>right||p.MaxY<top||p.Y>bottom)continue;
                 var t=p.Template;
@@ -1445,38 +1449,56 @@ namespace Turbo.Plugins.s7o
             var props=new List<Obstacle>();
             foreach(var o in _obstacles)if(!HasNativeBox(o)&&RoutePropBlocks(o))props.Add(o);
             return new RouteRequest {Serial=tracked?Interlocked.Increment(ref _routeSerial):0,Epoch=_epoch,Fingerprint=fingerprint,
-                X=x,Y=y,Z=z,TX=tx,TY=ty,TZ=tz,Radius=radius,Scenes=scenes.ToArray(),Boxes=_nativeBoxes.ToArray(),Props=props.ToArray()};
+                X=x,Y=y,Z=z,TX=tx,TY=ty,TZ=tz,Radius=radius,ApproachAcd=approachAcd,ApproachReach=approachReach,
+                Scenes=scenes.ToArray(),Boxes=_nativeBoxes.ToArray(),Props=props.ToArray()};
         }
-        private object Route(float x,float y,float z,float tx,float ty,float tz,float radius)
+        // Consumers pass a known actor identity. No generic switch is permission to click it.
+        // Search reaches a walkable interaction point on the player's connected side;
+        // closed doors remain solid even when their centre is the requested destination.
+        private void ResetRouteSlots()
+        {
+            _pathSlot.Request=null; _pathSlot.Result=null;
+            _approachSlot.Request=null; _approachSlot.Result=null;
+        }
+        private object Approach(float x,float y,float z,uint actorAcd,float reach,float radius)
+        {
+            if(actorAcd==0||reach<2||reach>10)return Error("ApproachBounds");
+            foreach(var o in _obstacles)if(o.AcdId==actorAcd&&o.FloorZKnown)
+                return Route(x,y,z,o.FloorX,o.FloorY,o.FloorZ,radius,actorAcd,reach);
+            return Error("ApproachActorUnknown");
+        }
+        private object Route(float x,float y,float z,float tx,float ty,float tz,float radius,uint approachAcd=0,float approachReach=0)
         {
             if(radius<0||radius>3||DistanceSquared(x,y,tx,ty)>120*120)return Error("RouteBounds");
-            long stamp=RouteFingerprint();var request=_routeRequest;
+            long stamp=RouteFingerprint();var slot=approachAcd==0?_pathSlot:_approachSlot;var request=slot.Request;
             bool same=request!=null&&request.Epoch==_epoch&&request.Fingerprint==stamp
                 &&DistanceSquared(tx,ty,request.TX,request.TY)<4&&Math.Abs(tz-request.TZ)<1
-                &&Math.Abs(radius-request.Radius)<0.01;
-            if(same&&_route!=null&&_route.State!="Ready"&&DistanceSquared(x,y,request.X,request.Y)>16)same=false;
-            if(!same) {_route=null;request=CaptureRoute(x,y,z,tx,ty,tz,radius,stamp);_routeRequest=request;}
+                &&Math.Abs(radius-request.Radius)<0.01&&request.ApproachAcd==approachAcd
+                &&Math.Abs(request.ApproachReach-approachReach)<0.01;
+            if(same&&slot.Result!=null&&slot.Result.State!="Ready"&&DistanceSquared(x,y,request.X,request.Y)>16)same=false;
+            if(!same) {slot.Result=null;request=CaptureRoute(x,y,z,tx,ty,tz,radius,stamp,true,approachAcd,approachReach);slot.Request=request;}
             var result=Envelope();result["ok"]=false;result["state"]="Pending";
             if(request.Scenes.Length==0){result["state"]="Unavailable";return result;}
-            if(_route==null||_route.Request!=request) {
-                if(Interlocked.CompareExchange(ref _routeWorker,1,0)==0) {
+            if(slot.Result==null||slot.Result.Request!=request) {
+                if(Interlocked.CompareExchange(ref slot.Worker,1,0)==0) {
                     var work=request;
                     ThreadPool.QueueUserWorkItem(delegate {
                         try {
                             var next=BuildRoute(work);
-                            if(work.Serial==Volatile.Read(ref _routeSerial))_route=next;
-                        }catch {if(work.Serial==Volatile.Read(ref _routeSerial))_route=new RouteResult {Request=work,State="NoRoute"};}
-                        finally {Interlocked.Exchange(ref _routeWorker,0);}
+                            if(slot.Request==work&&work.Epoch==Volatile.Read(ref _epoch))slot.Result=next;
+                        }catch {if(slot.Request==work&&work.Epoch==Volatile.Read(ref _epoch))slot.Result=new RouteResult {Request=work,State="Unavailable",Reason="WorkerException"};}
+                        finally {Interlocked.Exchange(ref slot.Worker,0);}
                     });
                 }
                 LogRoute(result,request,null);return result;
             }
-            var route=_route;
+            var route=slot.Result;
+            result["reason"]=route.Reason??"none";result["requiresDoor"]=route.RequiresDoor;
             result["state"]=route.State;result["expanded"]=route.Expanded;result["planningMs"]=route.ElapsedMs;
             if(route.Points==null||route.Points.Length==0){LogRoute(result,request,route);return result;}
             int nearest;float[] waypoint=RouteShortcut(request,route,x,y,z,out nearest);
             uint door=0;
-            for(int i=nearest;i+1<route.Points.Length&&i<nearest+48;i++) {
+            for(int i=nearest;i+1<route.Points.Length&&i<(route.RequiresDoor?route.Points.Length:nearest+48);i++) {
                 var a=route.Points[i];var b=route.Points[i+1];
                 foreach(var box in request.Boxes)if(RouteIsDoor(box.Definition.Kind)) {
                     Interval span;
@@ -1487,34 +1509,65 @@ namespace Turbo.Plugins.s7o
                 if(door!=0)break;
             }
             result["doorAcd"]=door;
+            if(approachAcd!=0) {
+                var goal=route.Points[route.Points.Length-1];
+                result["approachAcd"]=approachAcd;result["approachGoal"]=(float[])goal.Clone();
+                double remaining=Math.Sqrt(DistanceSquared(x,y,route.Points[nearest][0],route.Points[nearest][1]));
+                for(int i=nearest;i+1<route.Points.Length;i++)
+                    remaining+=Math.Sqrt(DistanceSquared(route.Points[i][0],route.Points[i][1],route.Points[i+1][0],route.Points[i+1][1]));
+                result["remainingDistance"]=remaining;
+                if(RouteApproachGoal(request,x,y,z)) {
+                    result["ok"]=true;result["state"]="AtApproach";
+                    LogRoute(result,request,route);return result;
+                }
+            }
             if(waypoint!=null&&DistanceSquared(x,y,waypoint[0],waypoint[1])>1) {
                 result["ok"]=true;result["waypoint"]=(float[])waypoint.Clone();
                 result["state"]="Ready";result["clearanceRadius"]=radius;
             }else result["state"]=door!=0?"DoorApproach":"NativeRecovery";
             LogRoute(result,request,route);return result;
         }
+        private static RouteRequest RouteView(RouteRequest r,float x,float y,float z,float radius)
+        {
+            return new RouteRequest { Serial=r.Serial,Epoch=r.Epoch,Fingerprint=r.Fingerprint,
+                X=x,Y=y,Z=z,TX=r.TX,TY=r.TY,TZ=r.TZ,Radius=radius,
+                ApproachAcd=r.ApproachAcd,ApproachReach=r.ApproachReach,
+                Scenes=r.Scenes,Boxes=r.Boxes,Props=r.Props };
+        }
         private static float[] RouteShortcut(RouteRequest request,RouteResult route,float x,float y,float z,out int nearest)
         {
+            // Follow the current position, not the first route origin.
+            // A short landing at an edge may still escape toward the corridor interior.
+            bool approach=request.ApproachAcd!=0;
+            request=RouteView(request,x,y,z,request.Radius);
+            var wide=approach?RouteView(request,x,y,z,Math.Max(request.Radius,2f)):null;
+            var middle=approach?RouteView(request,x,y,z,Math.Max(request.Radius,1.25f)):null;
             nearest=0;double distance=Double.MaxValue;
             for(int i=0;i<route.Points.Length;i++) {
                 var p=route.Points[i];double d=DistanceSquared(x,y,p[0],p[1])+Math.Abs(z-p[2])*4;
-                if(d<distance){distance=d;nearest=i;}
+                if(d<distance&&(!approach||RouteClear(request,x,y,z,p[0],p[1],p[2],false)))
+                {distance=d;nearest=i;}
             }
-            float[] waypoint=null;
-            // Advance along the route, then smooth only where the whole corridor is covered.
-            // A collision/new live actor invalidates the snapshot before reaching this code.
+            float[] waypoint=null,centered=null,moderate=null;
             for(int i=nearest;i<route.Points.Length;i++) {
                 var p=route.Points[i];
                 double hop=Math.Sqrt(DistanceSquared(x,y,p[0],p[1]));
                 if(hop>RouteMaxHop) {
                     float a=(float)(RouteMaxHop/hop),hx=x+(p[0]-x)*a,hy=y+(p[1]-y)*a,hz;
-                    if(RouteFloor(request,hx,hy,z+(p[2]-z)*a,out hz)&&RouteClear(request,x,y,z,hx,hy,hz,false))
-                        waypoint=new[]{hx,hy,hz};
-                    break;
+                    if(RouteFloor(request,hx,hy,z+(p[2]-z)*a,out hz))p=new[]{hx,hy,hz};
+                    else break;
                 }
-                if(RouteClear(request,x,y,z,p[0],p[1],p[2],false))waypoint=p;
+                if(RouteClear(request,x,y,z,p[0],p[1],p[2],false)) {
+                    waypoint=p;
+                    // Prefer a central corridor; a truly narrow doorway remains usable.
+                    if(approach&&DistanceSquared(x,y,p[0],p[1])>6.25f) {
+                        if(RouteClear(wide,x,y,z,p[0],p[1],p[2],false))centered=p;
+                        if(RouteClear(middle,x,y,z,p[0],p[1],p[2],false))moderate=p;
+                    }
+                }
+                if(hop>RouteMaxHop)break;
             }
-            return waypoint;
+            return centered??moderate??waypoint;
         }
         private void LogRoute(Dictionary<string,object> result,RouteRequest request,RouteResult route)
         {
@@ -1575,10 +1628,10 @@ namespace Turbo.Plugins.s7o
             }
             return found&&gap<=4f;
         }
-        private static bool RouteAt(RouteRequest r,float x,float y,float reference,bool doors,out float z,bool originSlack=false)
+        private static bool RouteAt(RouteRequest r,float x,float y,float reference,bool doors,out float z,bool originSlack=false,float clearanceRadius=-1f)
         {
             if(!RouteFloor(r,x,y,reference,out z))return false;
-            float radius=r.Radius;
+            float radius=clearanceRadius>=0?clearanceRadius:r.Radius;
             float terrainRadius=originSlack?Math.Min(radius,(float)Math.Sqrt(DistanceSquared(x,y,r.X,r.Y))*0.75f):radius;
             float unused;
             for(int i=0;i<ClearanceX.Length&&terrainRadius>0;i++)
@@ -1724,53 +1777,97 @@ namespace Turbo.Plugins.s7o
                 Nodes[at]=node;Scores[at]=score;return result;
             }
         }
+        private static bool RouteApproachGoal(RouteRequest r,float x,float y,float z)
+        {
+            double distance=Math.Sqrt(DistanceSquared(x,y,r.TX,r.TY));
+            if(distance>r.ApproachReach||Math.Abs(z-r.TZ)>4f)return false;
+            float end=1f;
+            foreach(var box in r.Boxes)if(box.AcdId==r.ApproachAcd) {
+                Interval span;
+                if(BoxInterval(box,x,y,z,r.TX,r.TY,r.TZ,r.Radius,out span))
+                    end=Math.Min(end,Math.Max(0f,(float)span.Start-0.03f));
+            }
+            foreach(var o in r.Props)if(o.AcdId==r.ApproachAcd&&distance>0.001)
+                end=Math.Min(end,Math.Max(0f,(float)((distance-o.Radius-r.Radius-0.25)/distance)));
+            return RouteClear(r,x,y,z,x+(r.TX-x)*end,y+(r.TY-y)*end,z+(r.TZ-z)*end,false);
+        }
         private static RouteResult BuildRoute(RouteRequest request)
         {
             var watch=Stopwatch.StartNew();RouteIndex(request);
-            if(RouteClear(request,request.X,request.Y,request.Z,request.TX,request.TY,request.TZ,false))
+            if(request.ApproachAcd==0&&RouteClear(request,request.X,request.Y,request.Z,request.TX,request.TY,request.TZ,false))
                 return new RouteResult {Request=request,State="Ready",ElapsedMs=watch.ElapsedMilliseconds,
                     Points=new[]{new[]{request.X,request.Y,request.Z},new[]{request.TX,request.TY,request.TZ}}};
             var result=SearchRoute(request,false,watch);
-            if(result.Points==null&&watch.ElapsedMilliseconds<120)result=SearchRoute(request,true,watch);
+            if(request.ApproachAcd==0&&result.Points==null&&watch.ElapsedMilliseconds<120)
+                result=SearchRoute(request,true,watch);
             result.ElapsedMs=watch.ElapsedMilliseconds;return result;
         }
         private static RouteResult SearchRoute(RouteRequest r,bool doors,Stopwatch watch)
         {
-            float left=(float)Math.Floor((Math.Min(r.X,r.TX)-20)/RouteStep)*RouteStep;
-            float top=(float)Math.Floor((Math.Min(r.Y,r.TY)-20)/RouteStep)*RouteStep;
-            int width=(int)Math.Ceiling((Math.Max(r.X,r.TX)+20-left)/RouteStep)+1;
-            int height=(int)Math.Ceiling((Math.Max(r.Y,r.TY)+20-top)/RouteStep)+1,n=width*height;
-            var result=new RouteResult {Request=r,State="NoRoute"};
-            if(n>20000)return result;
-            var cost=new float[n];var floors=new float[n];var parent=new int[n];var state=new byte[n];var closed=new bool[n];
+            float margin=r.ApproachAcd==0?20f:30f;
+            float left=(float)Math.Floor((Math.Min(r.X,r.TX)-margin)/RouteStep)*RouteStep;
+            float top=(float)Math.Floor((Math.Min(r.Y,r.TY)-margin)/RouteStep)*RouteStep;
+            int width=(int)Math.Ceiling((Math.Max(r.X,r.TX)+margin-left)/RouteStep)+1;
+            int height=(int)Math.Ceiling((Math.Max(r.Y,r.TY)+margin-top)/RouteStep)+1,n=width*height;
+            var result=new RouteResult {Request=r,State="NoRoute",Reason="Disconnected",RequiresDoor=doors};
+            if(n>20000){result.State="Unavailable";result.Reason="SearchAreaBudget";return result;}
+            var cost=new float[n];var wallCost=r.ApproachAcd!=0?new float[n]:null;var floors=new float[n];var parent=new int[n];var state=new byte[n];var closed=new bool[n];
             for(int i=0;i<n;i++){cost[i]=Single.MaxValue;parent[i]=-1;}
             int start=(int)Math.Round((r.X-left)/RouteStep)+(int)Math.Round((r.Y-top)/RouteStep)*width;
             int end=(int)Math.Round((r.TX-left)/RouteStep)+(int)Math.Round((r.TY-top)/RouteStep)*width;
             float startX=left+(start%width)*RouteStep,startY=top+(start/width)*RouteStep,startZ;
-            if(!RouteAt(r,startX,startY,r.Z,doors,out startZ,true)||!RouteClear(r,r.X,r.Y,r.Z,startX,startY,startZ,doors))return result;
-            var heap=new RouteHeap();cost[start]=0;floors[start]=startZ;state[start]=1;heap.Push(start,0);
+            var heap=new RouteHeap();
+            if(RouteAt(r,startX,startY,r.Z,doors,out startZ,true)&&RouteClear(r,r.X,r.Y,r.Z,startX,startY,startZ,doors))
+            {cost[start]=0;floors[start]=startZ;state[start]=1;heap.Push(start,0);}
+            else
+            {
+                int sx=start%width,sy=start/width;
+                for(int oy=-1;oy<=1;oy++)for(int ox=-1;ox<=1;ox++)
+                {
+                    int nx=sx+ox,ny=sy+oy;if(nx<0||ny<0||nx>=width||ny>=height)continue;
+                    int seed=ny*width+nx;float px=left+nx*RouteStep,py=top+ny*RouteStep,z;
+                    if(!RouteAt(r,px,py,r.Z,doors,out z,true)||!RouteClear(r,r.X,r.Y,r.Z,px,py,z,doors))continue;
+                    cost[seed]=(float)Math.Sqrt(DistanceSquared(r.X,r.Y,px,py));floors[seed]=z;state[seed]=1;heap.Push(seed,cost[seed]);
+                }
+                if(heap.Nodes.Count==0){result.Reason="NoConnectedStart";return result;}
+            }
             int[] dx={1,0,-1,0,1,-1,-1,1},dy={0,1,0,-1,1,1,-1,-1};
             while(heap.Nodes.Count>0&&result.Expanded<12000&&watch.ElapsedMilliseconds<150) {
                 int current=heap.Pop();if(closed[current])continue;closed[current]=true;result.Expanded++;
                 int cx=current%width,cy=current/width;float x=left+cx*RouteStep,y=top+cy*RouteStep;
-                if(current==end&&RouteClear(r,x,y,floors[current],r.TX,r.TY,r.TZ,doors)) {
-                    var reverse=new List<float[]>();reverse.Add(new[]{r.TX,r.TY,r.TZ});
+                bool reached=r.ApproachAcd!=0?RouteApproachGoal(r,x,y,floors[current])
+                    :current==end&&RouteClear(r,x,y,floors[current],r.TX,r.TY,r.TZ,doors);
+                if(reached) {
+                    var reverse=new List<float[]>();
+                    if(r.ApproachAcd==0)reverse.Add(new[]{r.TX,r.TY,r.TZ});
                     for(int p=current;p!=-1;p=parent[p])reverse.Add(new[]{left+(p%width)*RouteStep,top+(p/width)*RouteStep,floors[p]});
                     reverse.Add(new[]{r.X,r.Y,r.Z});reverse.Reverse();
-                    result.Points=reverse.ToArray();result.State="Ready";return result;
+                    result.Points=reverse.ToArray();result.State="Ready";result.Reason=doors?"RequiresClosedDoor":"Connected";return result;
                 }
                 for(int d=0;d<8;d++) {
                     int nx=cx+dx[d],ny=cy+dy[d];if(nx<0||ny<0||nx>=width||ny>=height)continue;
                     int next=ny*width+nx;if(closed[next])continue;
                     float px=left+nx*RouteStep,py=top+ny*RouteStep,z;
-                    if(state[next]==0){state[next]=RouteAt(r,px,py,floors[current],doors,out z,true)?(byte)1:(byte)2;floors[next]=z;}
+                    if(state[next]==0) {
+                        state[next]=RouteAt(r,px,py,floors[current],doors,out z,true)?(byte)1:(byte)2;floors[next]=z;
+                        if(wallCost!=null&&state[next]==1) {
+                            float unused;
+                            // Cost only: center corridors without rejecting narrow routes.
+                            wallCost[next]=RouteAt(r,px,py,z,doors,out unused,false,2f)?0f
+                                :RouteAt(r,px,py,z,doors,out unused,false,1.25f)?0.35f:1.0f;
+                        }
+                    }
                     if(state[next]!=1||Math.Abs(floors[next]-floors[current])>2.5f
                         ||!RouteClear(r,x,y,floors[current],px,py,floors[next],doors))continue;
-                    float score=cost[current]+(d<4?RouteStep:RouteStep*1.414214f)+Math.Abs(floors[next]-floors[current])*0.1f;
+                    float step=d<4?RouteStep:RouteStep*1.414214f;
+                    float score=cost[current]+step+Math.Abs(floors[next]-floors[current])*0.1f
+                        +(wallCost==null?0f:step*wallCost[next]);
                     if(score>=cost[next])continue;cost[next]=score;parent[next]=current;
-                    float heuristic=(float)Math.Sqrt(DistanceSquared(px,py,r.TX,r.TY));heap.Push(next,score+heuristic);
+                    float heuristic=Math.Max(0f,(float)Math.Sqrt(DistanceSquared(px,py,r.TX,r.TY))-r.ApproachReach);
+                    heap.Push(next,score+heuristic);
                 }
             }
+            if(heap.Nodes.Count>0){result.State="Unavailable";result.Reason=result.Expanded>=12000?"ExpansionBudget":"TimeBudget";}
             return result;
         }
 
