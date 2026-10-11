@@ -1,6 +1,3 @@
-// REV8 TEST: immediate atomic pickup input; native-hover recovery tolerates normal steering.
-// Confirm ultrawide stacked-loot selection on a fresh game tick before clicking.
-// Preserve Urshi no-progress limits across actor/ground handoffs.
 using System;
 using System.Collections.Generic;
 using System.Drawing;
@@ -231,6 +228,13 @@ namespace Turbo.Plugins.s7o
         private int _urshiRiskHoverSeed;
         private int _urshiRiskHoverX;
         private int _urshiRiskHoverY;
+        // Urshi probes observe a fresh native tick; only confirmed eligible items authorize clicks.
+        private int _urshiRiskHoverTick;
+        private uint _urshiRiskHoverWorld;
+        private int _urshiRiskHoverOffsetX, _urshiRiskHoverOffsetY;
+        private int _urshiRiskHoverWidth, _urshiRiskHoverHeight;
+        private NativePoint _urshiRiskHoverRestorePoint;
+        private bool _urshiRiskHoverRestore;
         private long _nextUrshiSpaceMs;
         private int _lastClickSeed;
         private int _lootProgressSerial;
@@ -2207,7 +2211,7 @@ namespace Turbo.Plugins.s7o
             if (riskyUrshi && _ultrawideStackedHoverSeed != 0)
                 ClearUltrawideStackedHoverState();
 
-            if (riskyUrshi && HandleUrshiRiskLootHoverClick(item, tries, stackedLoot, now))
+            if (riskyUrshi && HandleUrshiRiskLootHoverClick(item, tries, cleanup, stackedLoot, now, old, restore))
                 return;
 
             // Ordinary materials keep the proven immediate-click path. Waiting for
@@ -3173,93 +3177,51 @@ namespace Turbo.Plugins.s7o
             return false;
         }
 
-        private bool HandleUrshiRiskLootHoverClick(IItem item, int tries, bool stackedLoot, long now)
+        private bool HandleUrshiRiskLootHoverClick(IItem item, int tries, bool cleanup, bool stackedLoot,
+            long now, NativePoint old, bool restore)
         {
             IActor urshi = GetUrshiActor();
-            if (urshi == null)
-                return false;
-
+            if (urshi == null) return false;
             bool fallbackMode = item.Seed == _urshiFallbackSeed && now <= _urshiFallbackUntilMs;
             int fallbackTries = 0;
-            if (fallbackMode)
-                _urshiFallbackTriesBySeed.TryGetValue(item.Seed, out fallbackTries);
-
+            if (fallbackMode) _urshiFallbackTriesBySeed.TryGetValue(item.Seed, out fallbackTries);
             int probe = fallbackMode ? fallbackTries : tries;
 
             if (_urshiRiskHoverSeed == item.Seed && _urshiRiskHoverClickAtMs != 0)
             {
-                if (now < _urshiRiskHoverClickAtMs)
-                    return true;
-
-                int hx = _urshiRiskHoverX;
-                int hy = _urshiRiskHoverY;
+                int tick = Hud.Game.CurrentGameTick;
+                if (now < _urshiRiskHoverClickAtMs || tick == _urshiRiskHoverTick) return true;
+                bool sameContext = tick > _urshiRiskHoverTick && Hud.Game.Me.WorldId == _urshiRiskHoverWorld
+                    && Hud.Window.Offset.X == _urshiRiskHoverOffsetX && Hud.Window.Offset.Y == _urshiRiskHoverOffsetY
+                    && Hud.Window.Size.Width == _urshiRiskHoverWidth && Hud.Window.Size.Height == _urshiRiskHoverHeight;
+                NativePoint userPoint = _urshiRiskHoverRestorePoint;
+                bool restoreUser = _urshiRiskHoverRestore;
                 ClearUrshiRiskLootHover();
+                if (!sameContext) return true;
 
                 bool recoveryUiVisible = IsUrshiRecoveryUiVisible();
-                IActor selectedActor = GetSelectedActorSafe();
-                bool urshiSelected = IsUrshiSelected(urshi, selectedActor);
-                bool lootSelected = IsAnyEligibleLootSelectedNear(item);
-                bool itemActorSelected = IsSelectedActorItem(selectedActor);
-                bool noActorSelected = selectedActor == null;
-
-                if (!recoveryUiVisible
-                    && !urshiSelected
-                    && (lootSelected || itemActorSelected || noActorSelected)
-                    && IsSafeSyntheticWorldClick(hx, hy)
-                    && TrySetCursorForWorldClick(hx, hy))
+                IItem actual = recoveryUiVisible ? null : GetConfirmedUrshiLoot(item, GetSelectedActorSafe(), now);
+                NativePoint hit = new NativePoint {
+                    X = Hud.Window.CursorX + Hud.Window.Offset.X, Y = Hud.Window.CursorY + Hud.Window.Offset.Y
+                };
+                if (actual != null && IsSafeSyntheticWorldClick(hit.X, hit.Y))
                 {
-                    _attempts[item.Seed] = tries + 1;
-
-                    if (fallbackMode)
-                        _urshiFallbackTriesBySeed[item.Seed] = fallbackTries + 1;
-
-                    _nextUrshiRiskClickMs = now + UrshiRiskClickDelayMs;
-                    ClearAccidentalUrshiRecoveryState();
-                    _urshiArmedUntilMs = now + UrshiPanelRecoveryWindowMs;
-                    _urshiArmedSeed = item.Seed;
-                    _nextUrshiSpaceMs = 0;
-                    _urshiSpaceAttempts = 0;
-                    _urshiPortalCancelAttempts = 0;
-                    CacheAccidentalUrshiClickPoint(urshi);
-
-                    MouseLeftClick();
-
-                    _lastClickSeed = item.Seed;
-                    if (stackedLoot)
-                    {
-                        RememberStackedLootClick(item, now);
-                        _stackedLootSkipUntilMs[item.Seed] = now + StackedLootSkipMs;
-                    }
-                    _lastCleanupClickFar = item.CentralXyDistanceToMe > _normalPickupRangeYards;
-                    _lastClickMs = now;
+                    int actualTries; _attempts.TryGetValue(actual.Seed, out actualTries);
+                    // Native identity and hit point come from one fresh HUD snapshot.
+                    // Reuse the atomic move/down/up emitter and its acknowledgement bookkeeping.
+                    // A probe, a stale selection, or a non-item actor never authorizes LMB near Urshi.
+                    CommitItemRecoveryClick(new LootCandidate(actual, WantedPriority(actual), IsUrshiRisk(actual, urshi)),
+                        actualTries, cleanup, stackedLoot, now, userPoint, restoreUser, hit);
                     return true;
                 }
-
+                if (restoreUser) ScheduleCursorRestore(userPoint, now);
+                // Count a finite search budget without pretending a probe was an injected click.
                 _attempts[item.Seed] = tries + 1;
-
-                if (fallbackMode)
-                    _urshiFallbackTriesBySeed[item.Seed] = fallbackTries + 1;
-
-                if (recoveryUiVisible)
-                {
-                    _nextUrshiRiskClickMs = now + UrshiPanelConfirmDelayMs;
-                    _lastClickMs = now;
-                }
-                else
-                {
-                    _nextUrshiRiskClickMs = now + UrshiRiskHoverRetryMs;
-
-                    if (urshiSelected || (!lootSelected && !itemActorSelected && !noActorSelected))
-                    {
-                        int failedProbe = fallbackMode ? fallbackTries : tries;
-                        if (failedProbe >= 3)
-                            _retryAfterMs[item.Seed] = now + UrshiRiskRotateItemMs;
-                    }
-                }
-
+                if (fallbackMode) _urshiFallbackTriesBySeed[item.Seed] = fallbackTries + 1;
+                _nextUrshiRiskClickMs = now + (recoveryUiVisible ? UrshiPanelConfirmDelayMs : UrshiRiskHoverRetryMs);
+                if (probe >= 3) _retryAfterMs[item.Seed] = now + UrshiRiskRotateItemMs;
                 return true;
             }
-
             int x, y;
             if (!TryGetUrshiSafeFallbackClickPoint(item, urshi, probe, out x, out y))
             {
@@ -3267,22 +3229,51 @@ namespace Turbo.Plugins.s7o
                 _nextUrshiRiskClickMs = now + UrshiRiskRetryCooldownMs;
                 return true;
             }
-
-            if (!TrySetCursorForWorldClick(x, y))
-                return true;
-
+            if (!TrySetCursorForWorldClick(x, y)) return true;
             _urshiRiskHoverSeed = item.Seed;
-            _urshiRiskHoverX = x;
-            _urshiRiskHoverY = y;
+            _urshiRiskHoverX = x; _urshiRiskHoverY = y;
+            _urshiRiskHoverTick = Hud.Game.CurrentGameTick;
+            _urshiRiskHoverWorld = Hud.Game.Me.WorldId;
+            _urshiRiskHoverOffsetX = Hud.Window.Offset.X; _urshiRiskHoverOffsetY = Hud.Window.Offset.Y;
+            _urshiRiskHoverWidth = Hud.Window.Size.Width; _urshiRiskHoverHeight = Hud.Window.Size.Height;
+            _urshiRiskHoverRestorePoint = old; _urshiRiskHoverRestore = restore;
             _urshiRiskHoverClickAtMs = now + UrshiRiskHoverSettleMs;
             _nextUrshiRiskClickMs = now + UrshiRiskHoverRetryMs;
             return true;
+        }
+
+        private IItem GetConfirmedUrshiLoot(IItem anchor, IActor selected, long now)
+        {
+            if (selected != null && !IsSelectedActorItem(selected)) return null;
+            IItem match = null;
+            int freeSlots = SafeFreeSlots();
+            foreach (IItem candidate in Hud.Game.Items)
+            {
+                if (candidate == null || candidate.Location != ItemLocation.Floor
+                    || candidate.WorldId != anchor.WorldId
+                    || (selected != null ? candidate.AnnId != selected.AnnId : !candidate.IsSelected)) continue;
+                if (candidate.FloorCoordinate == null || anchor.FloorCoordinate == null
+                    || candidate.FloorCoordinate.XYDistanceTo(anchor.FloorCoordinate) > StackedLootWorldRadiusYards + 0.8f
+                    || !IsProjectedFloorItemVisible(candidate) || IsExcludedPickup(candidate)
+                    || WantedPriority(candidate) < 0 || !CanFit(candidate, freeSlots)
+                    || !IsAutoUrshiHandoffLoot(candidate) || IsSuppressedDroppedItem(candidate, now)
+                    || IsCleanupStuckIgnored(candidate, now)) continue;
+                long until;
+                if ((_retryAfterMs.TryGetValue(candidate.Seed, out until) && now < until)
+                    || (_pickupAcknowledgeUntilMs.TryGetValue(candidate.Seed, out until) && now < until)
+                    || IsProtectedChestRisk(candidate, GetUnopenedProtectedChest())) continue;
+                // An overlapping, eligible item is useful progress; an ambiguous highlight is not.
+                if (match != null) return null;
+                match = candidate;
+            }
+            return match;
         }
 
         private void ClearUrshiRiskLootHover()
         {
             _urshiRiskHoverSeed = 0;
             _urshiRiskHoverClickAtMs = 0;
+            _urshiRiskHoverRestore = false;
             _urshiRiskHoverX = 0;
             _urshiRiskHoverY = 0;
         }
@@ -3774,7 +3765,11 @@ namespace Turbo.Plugins.s7o
         private bool IsProtectedAutoUrshiLoot(IItem item)
         {
             return (item != null && item.AncientRank >= 1 && IsLegendaryLike(item))
-                || IsUnownedLegendaryGem(item);
+                || IsUnownedLegendaryGem(item)
+                // Enabled Screams share ancient/Primal late-drop protection, not ordinary material pickup.
+                || (_screams && item != null
+                    && ((item.SnoItem != null && item.SnoItem.Sno == PetrifiedScreamSno)
+                        || (item.SnoActor != null && item.SnoActor.Sno == ActorSnoEnum._swarmriftkey)));
         }
 
         private bool IsAutoUrshiHandoffLoot(IItem item)
