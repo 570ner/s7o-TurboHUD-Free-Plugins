@@ -32,11 +32,13 @@ Use the HUD Menu to toggle plugins, change visual options, manage TTS alerts, se
 | Plugin                         | What it does                                                                                                                                                            |
 | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **s7o_HUD_MENU**               | Main F8 menu for plugin toggles, visuals, TTS, hotkeys, and QoL controls.                                                                                               |
+| **s7o_HoverTips**             | Short hover descriptions for HUD Menu options, with support for all 13 menu languages.                                                                                  |
 | **s7o_ArmoryBugFix**           | Armory reliability fix for the crafted primal/Armory equip bug. Helps validate and retry failed build swaps.                                                            |
 | **s7o_AutoLoot**               | Auto pickup helper with item filters, improved material/reward pickup, stacked-loot speedup, inventory-full feedback, and optional Talk to Urshi with return assistance. |
 | **s7o_AutoSkill**              | General skill automation helper for simple timed/conditional skill use, with selected-world-interaction safeguards.                                                                 |
 | **s7o_Auto_Gem_Upgrade**       | Urshi gem upgrade helper with town portal timing.                                                                                                                       |
 | **s7o_BannerSoundPlugin**      | TTS/sound alert for banner drops.                                                                                                                                       |
+| **s7o_Buffs**                 | Movable shrine, pylon, class skill, item/gem, and class/follower cheat-death icons. Off by default, with size and opacity controls.                                        |
 | **s7o_DangerousSkillOverlays** | Extra danger overlays for boss and Rift Guardian attacks.                                                                                                               |
 | **s7o_DHStrafe**               | Demon Hunter Strafe/primary helper. Defaults: **F3** start/stop, **F2** attack/move mode, **T** town portal sequence.                                                   |
 | **s7o_DoorsMinimap**           | Door indicators on the minimap.                                                                                                                                         |
