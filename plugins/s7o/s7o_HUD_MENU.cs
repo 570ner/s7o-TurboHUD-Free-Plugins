@@ -156,6 +156,8 @@ namespace Turbo.Plugins.s7o
             public RectangleF StatusBar;
             public RectangleF TopControlBar;
             public RectangleF ContentPane;
+            public RectangleF HoverTipsCheck;
+            public RectangleF HoverTipsLabel;
             public RectangleF NoClickCheck;
             public RectangleF NoClickLabel;
             public RectangleF ProfileCloseMask;
@@ -211,6 +213,35 @@ namespace Turbo.Plugins.s7o
         private bool _layoutDirty = true;
         private bool _activeRowsDirty = true;
 
+        public bool HoverTipsEnabled { get; private set; } = true;
+        public Action<string,string,string,RectangleF> HoverTipsPainter;
+        public bool HoverTipsMenuVisible { get { return _visible; } }
+        public int HoverTipsContext
+        {
+            get { unchecked { return ((((((int)_activePage*31+(int)_activeToggleCategory)*31+_mainScroll)*31
+                +_visualScroll)*31+_macrosScroll)*31+_ttsAlertsScrollPx)*31+_autoGemSpecificScroll; } }
+        }
+        public bool HoverTipsBlocked
+        {
+            get { return _editMode || _capturingHotkey || _draggingWindow || _draggingDot
+                || _draggingScrollThumb || _draggingMacrosThumb || _draggingVisualThumb
+                || _draggingMainThumb || _draggingTtsScrollThumb || _draggingGlobalTtsSlider
+                || _draggingAutoGemSpecificScrollThumb || _playerBuffsHotkeyCapture
+                || _genMonkMeleeHotkeyCapture || _zbarbAutoSnapHotkeyCapture
+                || _playerCoeHotkeyCapture || _playerCoeElementHotkeyCapture
+                || _partyInspectorHotkeyCapture || _tipsPlayerMarkerHotkeyCapture
+                || _autoLootPauseHotkeyCapture || _pestilenceRgkJuggerHotkeyCapture
+                || _pestilenceRgkOculusHotkeyCapture || _inariusRgkJuggerHotkeyCapture
+                || _autoSkillKeybindCaptureSlot>=0 || _ttsCustomMessageHotkeyCaptureIndex>=0
+                || _asHotkeyCaptureActive.Any(x=>x) || _capturingHudHotkeyIdx>=0; }
+        }
+        private struct HoverHelpRegion
+        {
+            public string Action, Parent, Title; public RectangleF Rect;
+        }
+        private readonly List<HoverHelpRegion> _hoverHelpRegions = new List<HoverHelpRegion>(256);
+        private string _hoverHelpParent="", _hoverHelpTitle="";
+        private RectangleF _hoverHelpClip;
         private bool _visible = false;
         private bool _showDot = true;
         private bool _editMode = false;
@@ -254,6 +285,7 @@ namespace Turbo.Plugins.s7o
         private bool _zbarbAutoSnapExpanded = false;
         private bool _zdhHelperExpanded = false;
         private bool _genMonkExpanded = false;
+        private bool _impaleExpanded = false;
         private bool _genMonkMeleeHotkeyCapture = false;
         private int _zbarbAutoSnapConeDegrees = 30;
         private const int ZBarbAutoSnapConeMin = 8;
@@ -728,6 +760,9 @@ namespace Turbo.Plugins.s7o
         // stale samples cannot manufacture XP when corrected, and combat needs no quiet window.
         private bool _xpTrackerEnabled = true;
         private bool _xpTrackerExpanded = false;
+        private bool _playerBuffsExpanded, _playerBuffsHotkeyCapture;
+        public bool PlayerBuffsEditingBlocked { get { return _visible || IsChatEntryOpen(); } }
+        private s7o_buffs GetPlayerBuffsPlugin() { return FindPluginByTypeName("s7o_buffs") as s7o_buffs; }
         private bool _xpTrackerPersist = true;
         private double _xpAllGained, _xpAllSeconds, _xpGrGained, _xpGrSeconds;
         private double _xpLastAll = -1d, _xpLastGr = -1d;
@@ -1224,7 +1259,7 @@ namespace Turbo.Plugins.s7o
             _editMode = false;
             _capturingHotkey = false;
             _tipsPlayerMarkerHotkeyCapture = false;
-            _playerCoeHotkeyCapture = false;
+            _playerCoeHotkeyCapture = false; _playerBuffsHotkeyCapture = false;
             _playerCoeElementHotkeyCapture = false;
             ClearProfileBackgroundState();
 
@@ -1548,17 +1583,26 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
+            if (_playerBuffsHotkeyCapture)
+            {
+                _playerBuffsHotkeyCapture=false;
+                if(IsCaptureCancelKey(keyEvent.Key))return;
+                var buffs=GetPlayerBuffsPlugin();
+                if(buffs!=null){buffs.MoveHotkey=keyEvent.Key;buffs.SaveSettings();}
+                return;
+            }
+
             if (_playerCoeHotkeyCapture)
             {
                 if (IsCaptureCancelKey(keyEvent.Key))
                 {
-                    _playerCoeHotkeyCapture = false;
+                    _playerCoeHotkeyCapture = false; _playerBuffsHotkeyCapture = false;
                     _status = "PLAYER COE PLACEMENT HOTKEY CAPTURE CANCELLED";
                     return;
                 }
 
                 _playerCoeHotkey = keyEvent.Key;
-                _playerCoeHotkeyCapture = false;
+                _playerCoeHotkeyCapture = false; _playerBuffsHotkeyCapture = false;
                 ApplyPlayerCoeSettingsToPlugin();
                 _status = "PLAYER COE PLACE / MOVE HOTKEY SET TO " + CaptureKeyLabel(_playerCoeHotkey);
                 SaveSettings();
@@ -2209,6 +2253,7 @@ namespace Turbo.Plugins.s7o
 
             DrawWindow(layout);
             DrawProfileCloseMask(layout);
+            PaintHoverHelp();
 
             // Menu-only click animation. Draw last so it appears above the HUD Manager overlay.
             try
@@ -2294,6 +2339,12 @@ namespace Turbo.Plugins.s7o
 
         private bool HandleNoClickClick(MenuLayout layout, float x, float y)
         {
+            if (Contains(layout.HoverTipsCheck,x,y) || Contains(layout.HoverTipsLabel,x,y))
+            {
+                HoverTipsEnabled=!HoverTipsEnabled;
+                try {if(HoverTipsPainter!=null)HoverTipsPainter(null,null,null,RectangleF.Empty);}catch { }
+                SaveSettings();return true;
+            }
             if (Contains(layout.NoClickCheck, x, y) || Contains(layout.NoClickLabel, x, y))
             {
                 ToggleNoClickBackground();
@@ -2699,8 +2750,43 @@ namespace Turbo.Plugins.s7o
             SaveSettings();
         }
 
+        private void SetHoverHelpContext(string id,string title)
+        { _hoverHelpParent=id??"";_hoverHelpTitle=title??""; }
+        private void RegisterHoverHelp(string action,RectangleF rect)
+        {
+            if(!HoverTipsEnabled || string.IsNullOrEmpty(action) || rect.Width<=0 || rect.Height<=0)return;
+            if(!_hoverHelpClip.IsEmpty)
+            {
+                float x=Math.Max(rect.Left,_hoverHelpClip.Left),y=Math.Max(rect.Top,_hoverHelpClip.Top);
+                float right=Math.Min(rect.Right,_hoverHelpClip.Right),bottom=Math.Min(rect.Bottom,_hoverHelpClip.Bottom);
+                if(right<=x || bottom<=y)return;
+                rect=new RectangleF(x,y,right-x,bottom-y);
+            }
+            _hoverHelpRegions.Add(new HoverHelpRegion{Action=action,Parent=_hoverHelpParent,Title=_hoverHelpTitle,Rect=rect});
+        }
+        private void PaintHoverHelp()
+        {
+            var paint=HoverTipsPainter;if(paint==null)return;
+            if(!HoverTipsEnabled || HoverTipsBlocked || !Hud.Window.IsForeground)
+            {try {paint(null,null,null,RectangleF.Empty);}catch { } return;}
+            float x=Hud.Window.CursorX,y=Hud.Window.CursorY;
+            int best=-1;float area=float.MaxValue;
+            for(int i=_hoverHelpRegions.Count-1;i>=0;i--)
+            {
+                var h=_hoverHelpRegions[i];float a=h.Rect.Width*h.Rect.Height;
+                if(Contains(h.Rect,x,y) && a<area){best=i;area=a;}
+            }
+            try
+            {
+                if(best<0)paint(null,null,null,RectangleF.Empty);
+                else {var h=_hoverHelpRegions[best];paint(h.Action,h.Parent,h.Title,h.Rect);}
+            }
+            catch { } // An optional help overlay cannot interrupt the menu.
+        }
+
         private void RegisterMainHit(string action, RectangleF rect)
         {
+            RegisterHoverHelp(action,rect);
             if (string.IsNullOrWhiteSpace(action)) return;
             _mainHitRects[action] = rect;
         }
@@ -2727,6 +2813,7 @@ namespace Turbo.Plugins.s7o
 
         private void RegisterToggleHit(string action, RectangleF rect)
         {
+            RegisterHoverHelp(action,rect);
             if (string.IsNullOrWhiteSpace(action))
                 return;
 
@@ -2750,6 +2837,7 @@ namespace Turbo.Plugins.s7o
 
         private void RegisterGlobalHit(string action, RectangleF rect)
         {
+            RegisterHoverHelp(action,rect);
             if (string.IsNullOrWhiteSpace(action)) return;
             _globalHitRects[action] = rect;
         }
@@ -2810,6 +2898,23 @@ namespace Turbo.Plugins.s7o
                 return ok;
             }
 
+            if (action == "sanctifiedimpale:expand")
+            {
+                _impaleExpanded=!_impaleExpanded; SaveSettings(); return true;
+            }
+            if (action.StartsWith("sanctifiedimpale:cadence:", StringComparison.Ordinal))
+            {
+                var plugin=FindPluginByTypeName("s7o_Impale");
+                int delta;
+                if(plugin!=null && int.TryParse(action.Substring("sanctifiedimpale:cadence:".Length),out delta))
+                    try
+                    {
+                        int current=(int)plugin.GetType().GetField("CombatGeneratorIntervalMs").GetValue(plugin);
+                        var setter=plugin.GetType().GetMethod("SetCombatCastInterval");
+                        if(setter!=null)setter.Invoke(plugin,new object[]{current+(delta<0?-50:50)});
+                    } catch { }
+                return true;
+            }
             if (action == "sanctifiedimpale:bolasaim")
             {
                 IPlugin plugin = FindPluginByTypeName("s7o_Impale");
@@ -5448,6 +5553,8 @@ namespace Turbo.Plugins.s7o
             float noClickCheckSize = 12f;
             float noClickX = l.PageTabBand.Right - noClickW;
             float noClickY = l.PageTabBand.Top + 6f;
+            l.HoverTipsCheck=new RectangleF(noClickX-136f,noClickY,12f,12f);
+            l.HoverTipsLabel=new RectangleF(l.HoverTipsCheck.Right+6f,l.PageTabBand.Top+3f,112f,18f);
 
             l.NoClickCheck = new RectangleF(
                 noClickX,
@@ -6017,6 +6124,14 @@ namespace Turbo.Plugins.s7o
 
         private void DrawWindow(MenuLayout l)
         {
+            _hoverHelpRegions.Clear();_hoverHelpClip=RectangleF.Empty;
+            _hoverHelpParent=_hoverHelpTitle="";
+            RegisterHoverHelp("cat:shared.menu_key",l.HotkeyButton);
+            RegisterHoverHelp("cat:shared.move",l.MoveButton);
+            RegisterHoverHelp("cat:shared.close",l.CloseHudButton);
+            RegisterHoverHelp("cat:shared.hide",l.HideButton);
+            foreach(var page in l.PageTabRects)
+                RegisterHoverHelp("cat:shared."+page.Key.ToString().ToLowerInvariant(),page.Value);
             _lastHitRects.Clear();
 
             _bShadow.DrawRectangle(l.Window.Left + 5f, l.Window.Top + 5f, l.Window.Width, l.Window.Height);
@@ -6181,6 +6296,7 @@ namespace Turbo.Plugins.s7o
             float listTop = paneTop + 4f;
             RectangleF listRect = new RectangleF(x, listTop, w, Math.Max(1f, paneBot - listTop));
 
+            _hoverHelpClip=listRect;
             List<MainPanelItem> panels = BuildMainPanelItems();
 
             _mainTotalItems = panels.Count;
@@ -6229,6 +6345,7 @@ namespace Turbo.Plugins.s7o
             }
 
             _bPaneBorder.DrawRectangle(l.ContentPane.Left, l.ContentPane.Top, l.ContentPane.Width, l.ContentPane.Height);
+                    _hoverHelpClip=RectangleF.Empty;
         }
 
 
@@ -6348,6 +6465,8 @@ namespace Turbo.Plugins.s7o
 
         private void DrawAutoSnapPanel(RectangleF r)
         {
+            SetHoverHelpContext("cat:autosnap.overview",DisplayText("AutoSnap"));
+            RegisterHoverHelp("row",r);
             _bTextDimBg.DrawRectangle(r.Left, r.Top, r.Width, r.Height);
             _bPaneBorder.DrawRectangle(r.Left, r.Top, r.Width, r.Height);
 
@@ -6528,11 +6647,14 @@ namespace Turbo.Plugins.s7o
             RegisterMainHit(minusAction, minus);
             RegisterMainHit(plusAction, plus);
 
+            RegisterHoverHelp(plusAction,val);
             x = plus.Right;
         }
 
         private void DrawAutoGemMainPanel(RectangleF r)
         {
+            SetHoverHelpContext("cat:autogem.enable",DisplayText("Auto Gem Upgrade"));
+            RegisterHoverHelp("row",r);
             _bTextDimBg.DrawRectangle(r.Left, r.Top, r.Width, r.Height);
             _bPaneBorder.DrawRectangle(r.Left, r.Top, r.Width, r.Height);
 
@@ -6645,6 +6767,7 @@ namespace Turbo.Plugins.s7o
             DrawGlossButton(delayPlus, "+", false, false, true);
             DrawGlossButton(lagBtn, "LAG", s7o_AutoGemUpgradeState.AutoGemTPLagBoost, false, false);
 
+            RegisterHoverHelp("autogem:delay+",delayValue);
             RegisterMainHit("autogem:delay-", delayMinus);
             RegisterMainHit("autogem:delay+", delayPlus);
             RegisterMainHit("autogem:lag", lagBtn);
@@ -6681,6 +6804,7 @@ namespace Turbo.Plugins.s7o
 
             RegisterMainHit("autogem:specific-list", gemValueBtn);
             RegisterMainHit("autogem:specific-submode", subModeBtn);
+            RegisterHoverHelp(subHighest?"cat:autogem.specific_high":"cat:autogem.specific_auto",subModeBtn);
             RegisterMainHit("autogem:specific-list-button", listBtn);
 
             y += rowH + rowGap;
@@ -8143,6 +8267,8 @@ namespace Turbo.Plugins.s7o
 
         private void DrawTogglePluginButtonRow(RectangleF r, string title, string description, string actionKey, params string[] typeNames)
         {
+            SetHoverHelpContext(actionKey,DisplayText(title));
+            RegisterHoverHelp("row",r);
             IPlugin plugin = FindPluginByTypeName(typeNames);
             bool installed = plugin != null;
             bool enabled   = installed && SafePluginEnabled(plugin);
@@ -9756,6 +9882,7 @@ namespace Turbo.Plugins.s7o
             if (cmd == "elitehp") { HandleEliteHpVisualAction(p); return; }
             if (cmd == "simhp") { HandleSimHpVisualAction(p); return; }
             if (cmd == "playercoe") { HandlePlayerCoeVisualAction(p); return; }
+            if (cmd == "playerbuffs") { HandlePlayerBuffsAction(p); return; }
             if (cmd == "xppersist")
             {
                 _xpTrackerPersist = !_xpTrackerPersist;
@@ -9779,7 +9906,7 @@ namespace Turbo.Plugins.s7o
             if (cmd == "hotkey" && feature == "playercoeelement")
             {
                 _playerCoeElementHotkeyCapture = true;
-                _playerCoeHotkeyCapture = false;
+                _playerCoeHotkeyCapture = false; _playerBuffsHotkeyCapture = false;
                 _status = "PRESS PLAYER COE ELEMENT HOTKEY";
                 return;
             }
@@ -9920,6 +10047,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
         private void ToggleVisualFeature(string feature)
         {
+            if(feature=="playerbuffs")
+            {
+                var buffs=GetPlayerBuffsPlugin();
+                if(buffs!=null){buffs.ShowPlayerBuffs=!buffs.ShowPlayerBuffs;buffs.SaveSettings();}
+                return;
+            }
             if (feature == "xptracker")
             {
                 _xpTrackerEnabled = !_xpTrackerEnabled;
@@ -10103,6 +10236,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
         private void ToggleVisualExpanded(string feature)
         {
+            if(feature=="playerbuffs"){_playerBuffsExpanded=!_playerBuffsExpanded;return;}
             if (feature == "minimapcursor")
             {
                 _visMapCursorExpanded = !_visMapCursorExpanded;
@@ -10484,6 +10618,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             string title=debugRow?T("mapviewer.debug.title","Debug Logging"):T("mapviewer.title","Map Viewer");
             string description=debugRow?T("mapviewer.debug.description","Write bounded map and consumer diagnostics. Leave off for normal play.")
                 :T("mapviewer.description","Show the map grid and collision outlines. Geometry remains available when the grid is hidden.");
+            SetHoverHelpContext(debugRow?"cat:visual.mapviewer_debug":"cat:visual.mapviewer",title);
+            RegisterHoverHelp("row",r);
             DrawOutlinedTextAt(_fRowTitle,_fRowTitleShadow,title,x,r.Top+8f);
             var lines=WrapToggleDescription(description,ApproxCharsForToggleDescription(width),3);
             for(int i=0;i<lines.Length&&i<3;i++)DrawOutlinedTextAt(_fRowText,_fRowTextShadow,lines[i],x,r.Top+29f+15f*i);
@@ -10498,6 +10634,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
         }
         private void DrawHudLanguageFeatureRow(RectangleF r, bool expanded, int rowIdx)
         {
+            SetHoverHelpContext("visual:hudlanguage",DisplayText("HUD Language"));
+            RegisterHoverHelp("row",r);
             const float stateW = 156f;
             const float expandW = 30f;
 
@@ -10532,6 +10670,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             string code = HudLanguageCodes[languageIndex];
             string name = HudLanguageNames[languageIndex];
+            SetHoverHelpContext("visual:hudlanguage",name);
+            RegisterHoverHelp("visual:language:"+code,r);
             bool selected = string.Equals(_hudLanguageCode, code, StringComparison.OrdinalIgnoreCase);
             bool available = _hudLanguageAvailable[languageIndex];
 
@@ -10554,6 +10694,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
         private void DrawVisualFeatureRow(RectangleF r, string feature, string title, string description,
             bool enabled, bool expanded, int rowIdx)
         {
+            SetHoverHelpContext("visual:"+feature,DisplayText(title));
+            RegisterHoverHelp("row",r);
             const float starW   = 32f;
             const float stateW  = 120f;
             const float expandW = 30f;
@@ -10744,6 +10886,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             DrawGlossButton(center, centerText, false, false, enabled);
             DrawGlossButton(plus, "+", enabled && IsVisualButtonFlashActive(plusAction), false, enabled);
 
+            RegisterHoverHelp(minusAction,minus);RegisterHoverHelp(plusAction,plus);
+            RegisterHoverHelp(plusAction,center);
             if (!enabled)
                 return;
 
@@ -10761,12 +10905,13 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
                 private static bool IsCustomVisualFeature(string feature)
         {
-            return feature == "hudlanguage" || feature == "xptracker" || feature == "playercoe" || feature == "tipshelper" || feature == "dangeraffixes" || feature == "elitehp" || feature == "elitecircles" || feature == "simhp" || feature == "menubutton" || feature == "partyinspector";
+            return feature == "playerbuffs" || feature == "hudlanguage" || feature == "xptracker" || feature == "playercoe" || feature == "tipshelper" || feature == "dangeraffixes" || feature == "elitehp" || feature == "elitecircles" || feature == "simhp" || feature == "menubutton" || feature == "partyinspector";
         }
 
 
                 private int GetCustomVisualExpandedRowCount(string feature)
         {
+            if(feature=="playerbuffs")return 6+PlayerBuffsPreviewRows();
             if (feature == "hudlanguage")
                 return HudLanguageCodes.Length;
 
@@ -10973,6 +11118,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             string action,
             string previewKind)
         {
+            SetHoverHelpContext(action,title);
+            RegisterHoverHelp("row",r);
             if (string.IsNullOrWhiteSpace(title))
                 return;
 
@@ -11205,6 +11352,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
         private void DrawSimHpBarsOptionsRow(RectangleF r, int rowIdx, bool own)
         {
+            SetHoverHelpContext(own?"visual:simhp_own":"visual:simhp_party",DisplayText(own?"Own Simulacrums":"Party Simulacrums"));
+            RegisterHoverHelp("row",r);
             (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
 
             const float btnW = 82f;
@@ -11525,8 +11674,85 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             }
         }
 
+        private void HandlePlayerBuffsAction(string[] p)
+        {
+            var buffs=GetPlayerBuffsPlugin();if(buffs==null || p.Length<3)return;
+            if(p[2]=="hotkey")
+            {
+                _playerCoeHotkeyCapture=false;_playerCoeElementHotkeyCapture=false;
+                _partyInspectorHotkeyCapture=false;_tipsPlayerMarkerHotkeyCapture=false;
+                _playerBuffsHotkeyCapture=true;return;
+            }
+            if(p[2]=="positions"){buffs.ResetPositions();return;}
+            if(p[2]=="flag" && p.Length>=4)buffs.SetFlag(p[3],!buffs.GetFlag(p[3]));
+            else if(p.Length>=4)
+            {
+                float delta=p[3]=="+1"?0.05f:-0.05f;
+                if(p[2]=="size")buffs.IconSize=ViClampF(buffs.IconSize+delta,0.5f,2f);
+                else if(p[2]=="opacity")buffs.Opacity=ViClampF(buffs.Opacity+delta,0.1f,1f);
+            }
+            buffs.SaveSettings();
+        }
+        private float _playerBuffsPreviewClipTop,_playerBuffsPreviewClipBottom;
+        private int PlayerBuffsPreviewRows() { return 2; }
+        private void DrawPlayerBuffsOptionsRow(RectangleF r,int rowIdx,int part)
+        {
+            SetHoverHelpContext("visual:playerbuffs",T("playerbuffs.title","Player Buffs"));
+            RegisterHoverHelp("row",r);
+            var buffs=GetPlayerBuffsPlugin();
+            if(buffs==null){DrawPlayerCoeInstructionRow(r,rowIdx,T("playerbuffs.title","Player Buffs"),T("playerbuffs.missing","Install s7o_buffs.cs to use these controls."));return;}
+            string[] flags={"ShowShrines","ShowPylons","ShowClassSkills","ShowCheatDeath","ShowLegendary"};
+            string[] keys={"shrines","pylons","classskills","cheatdeath","legendary"};
+            string[] names={"Shrines","Pylons","Class Skills","Cheat Death Icons","Legendary Powers"};
+            string[] descriptions={"Shrine effects.","Pylon effects.","Active skill buffs and cooldowns.",
+                "Recovery timer for class/follower cheat death cooldowns.","Item and gem effects."};
+            if(part<flags.Length)
+            {
+                DrawSingleToggleOptionRow(r,rowIdx,T("playerbuffs."+keys[part],names[part]),
+                    T("playerbuffs."+keys[part]+".description",descriptions[part]),
+                    buffs.GetFlag(flags[part]),"visual:playerbuffs:flag:"+flags[part],null);
+                return;
+            }
+            (rowIdx%2==0?_bRowAlt:_bRow).DrawRectangle(r.Left,r.Top,r.Width,r.Height);
+            int previewRows=PlayerBuffsPreviewRows();
+            if(part>=5 && part<5+previewRows)
+            {
+                int slot=part-5;
+                float top=r.Top-slot*VisualListSlotH;
+                float height=2*VisualListSlotH-8;
+                // A fixed icon lane keeps both centers still as the selected size changes.
+                float maxIcon=Math.Min(55f/1200f*Hud.Window.Size.Height*2,height-16);
+                float iconSize=Math.Min(buffs.PreviewIconSize,height-16);
+                float width=Math.Min(190,Math.Max(120,r.Width-maxIcon-56));
+                const float gap=24;
+                float left=r.Left+(r.Width-maxIcon-gap-width)/2;
+                float x=left+maxIcon+gap;
+                float middle=top+height/2;
+                if(slot==0)
+                    DrawVisualStepperWide(new RectangleF(x,middle-37,width,30),T("playerbuffs.size","Size"),buffs.IconSize.ToString("0.00",CultureInfo.InvariantCulture)+"x","visual:playerbuffs:size:-1","visual:playerbuffs:size:+1");
+                else
+                {
+                    DrawVisualStepperWide(new RectangleF(x,middle+7,width,30),T("playerbuffs.opacity","Opacity"),Math.Round(buffs.Opacity*100)+"%","visual:playerbuffs:opacity:-1","visual:playerbuffs:opacity:+1");
+                    var preview=new RectangleF(left+(maxIcon-iconSize)/2,middle-iconSize/2,iconSize,iconSize);
+                    if(preview.Top>=_playerBuffsPreviewClipTop && preview.Bottom<=_playerBuffsPreviewClipBottom)
+                        buffs.PaintPowerPylonPreview(new SharpDX.RectangleF(preview.X,preview.Y,preview.Width,preview.Height));
+                }
+                return;
+            }
+            var reset=new RectangleF(r.Right-78,r.Top+8,70,r.Height-16);
+            var hotkey=new RectangleF(reset.Left-154,r.Top+8,146,r.Height-16);
+            DrawOutlinedTextAt(_fRowTitle,_fRowTitleShadow,T("playerbuffs.move","Move Buff Groups"),r.Left+14,r.Top+8);
+            string[] lines=WrapToggleDescription(T("playerbuffs.move.description","Close menu. Hold key over a group, move mouse, release to save."),ApproxCharsForToggleDescription(Math.Max(40,hotkey.Left-r.Left-26)),3);
+            for(int i=0;i<lines.Length;i++)DrawOutlinedTextAt(_fRowText,_fRowTextShadow,lines[i],r.Left+14,r.Top+29+i*15);
+            DrawGlossButton(hotkey,_playerBuffsHotkeyCapture?T("playerbuffs.press","PRESS..."):TF("hud.button.hotkey_value","HOTKEY {0}",CaptureKeyLabel(buffs.MoveHotkey)),_playerBuffsHotkeyCapture,false,true);
+            RegisterToggleHit("visual:playerbuffs:hotkey",hotkey);
+            DrawGlossButton(reset,T("playerbuffs.reset","Reset"),false,false,true);RegisterToggleHit("visual:playerbuffs:positions",reset);
+        }
+
         private void DrawPlayerCoeControlsRow(RectangleF r, int rowIdx)
         {
+            SetHoverHelpContext("visual:playercoe",DisplayText("Player CoE Overlay"));
+            RegisterHoverHelp("row",r);
             (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
 
             const float stepW = 210f;
@@ -11653,6 +11879,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
         private void DrawTipsTripleToggleRow(RectangleF r, int rowIdx, string title, string desc,
             bool enabled, string enabledAction, bool arrows, string arrowsAction, bool text, string textAction)
         {
+            SetHoverHelpContext(enabledAction,DisplayText(title));
+            RegisterHoverHelp("row",r);
             (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
 
             const float stateW = 82f;
@@ -11684,6 +11912,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
         private void DrawTipsTextSettingsRow(RectangleF r, int rowIdx, string title, string colorFeature, int colorIdx, int tone,
             string sizeFeature, float size, string durationFeature, int seconds)
         {
+            SetHoverHelpContext("visual:"+colorFeature,DisplayText(title));
+            RegisterHoverHelp("row",r);
             (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
 
             const float colorW = 172f;
@@ -11710,6 +11940,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
         private void DrawTipsToggleSizeRow(RectangleF r, int rowIdx, string title, string desc, bool enabled, string action, string sizeFeature, float size,
             string sizeLabel = "Size", string sizeSuffix = "")
         {
+            SetHoverHelpContext(action,DisplayText(title));
+            RegisterHoverHelp("row",r);
             (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
 
             const float btnW = 82f;
@@ -11735,6 +11967,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
         private void DrawTipsPlayerMarkerRow(RectangleF r, int rowIdx)
         {
+            SetHoverHelpContext("visual:playermarkers",DisplayText("Player Markers"));
+            RegisterHoverHelp("row",r);
             (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
 
             const float btnW = 82f;
@@ -11766,6 +12000,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
         private void DrawTipsSingleToggleRow(RectangleF r, int rowIdx, string title, string desc, bool enabled, string action,
             string expandFeature = null, bool expanded = false)
         {
+            SetHoverHelpContext(action,DisplayText(title));
+            RegisterHoverHelp("row",r);
             if (string.IsNullOrWhiteSpace(title))
                 return;
 
@@ -11799,6 +12035,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
         private void DrawTipsColorRow(RectangleF r, int rowIdx, string title, string feature, int colorIdx, int tone)
         {
+            SetHoverHelpContext("visual:"+feature,DisplayText(title));
+            RegisterHoverHelp("row",r);
             (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
 
             RectangleF labelR = new RectangleF(r.Left + 14f, r.Top + 8f, 220f, 22f);
@@ -11892,6 +12130,9 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
         private void DrawCustomVisualOptionsRow(RectangleF r, string feature, int rowIdx, int part)
         {
+            SetHoverHelpContext("visual:"+feature,DisplayText(feature=="playerbuffs"?"Player Buffs":_hoverHelpTitle));
+            RegisterHoverHelp("row",r);
+            if(feature=="playerbuffs"){DrawPlayerBuffsOptionsRow(r,rowIdx,part);return;}
             if (feature == "hudlanguage")
             {
                 DrawHudLanguageOptionRow(r, rowIdx, part);
@@ -12108,11 +12349,13 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             float listTop = headerY + 58f;
             float clipTop = listTop;
             float clipBot = detail.Bottom - 8f;
+            _hoverHelpClip=new RectangleF(x,clipTop,w,Math.Max(0,clipBot-clipTop));
 
             string[] feats =
             {
                 "hudlanguage",
                 "xptracker",
+                "playerbuffs",
                 "playercoe",
                 "tipshelper",
                 "dangeraffixes",
@@ -12131,12 +12374,14 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 "outline",
                 "minion",
                 "siphon"
+            
             };
 
             string[] ftitles =
             {
                 "HUD Language",
                 T("xp.tracker.title", "XP Tracker"),
+                T("playerbuffs.title", "Player Buffs"),
                 "Player CoE Overlay",
                 "Visual Helpers",
                 "Elite/Dangerous Affix Visuals",
@@ -12155,12 +12400,14 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 "Reticle Outline",
                 "Minion Circles",
                 "Siphon Debuff Circle"
+            
             };
 
             string[] fdescs =
             {
                 "Changes FreeHUD localized text. Restart HUD after selecting a language.",
                 T("xp.tracker.description", "Inventory-only XP rates; reset each counter with its X."),
+                T("playerbuffs.description", "Movable buff and cooldown icons."),
                 T("hud.indirect.player_coe_party_overlays", "Movable Convention of Elements overlays for party members.") + "\n" +
                     T("hud.indirect.player_coe_adjustments", "Adjust transparency, size, placement, and damage element."),
                 "Ancient/primal alerts, globe dots, and party markers.",
@@ -12180,12 +12427,14 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 "Outer ring drawn around selected monster. Adjustable color and thickness.",
                 "Draws ground circles on elite minions.",
                 "Shows Siphon debuffs and other Necromancers' primary targets on any class."
+            
             };
 
             bool[] fenabled =
             {
                 true,
                 _xpTrackerEnabled,
+                GetPlayerBuffsPlugin()!=null && GetPlayerBuffsPlugin().ShowPlayerBuffs,
                 IsPlayerCoeOverlayEnabled(),
                 _visTipsHelperEnabled,
                 _visDangerousAffixVisualsEnabled,
@@ -12204,12 +12453,14 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 _visReticleOutlineEnabled,
                 _visMinionCirclesEnabled,
                 _visSiphonEnabled
+            
             };
 
             bool[] fexpanded =
             {
                 _hudLanguageExpanded,
                 _xpTrackerExpanded,
+                _playerBuffsExpanded,
                 _visPlayerCoeExpanded,
                 _visTipsHelperExpanded,
                 _visDangerousAffixVisualsExpanded,
@@ -12228,10 +12479,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 _visReticleOutlineExpanded,
                 _visMinionCirclesExpanded,
                 _visSiphonExpanded
+            
             };
 
             int[] fcolor =
             {
+                0,
                 0,
                 0,
                 0,
@@ -12252,10 +12505,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 _visReticleOutlineColorIdx,
                 _visMinionColorIdx,
                 _visSiphonColorIdx
+            
             };
 
             int[] ftone =
             {
+                0,
                 0,
                 0,
                 0,
@@ -12276,6 +12531,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 _visReticleOutlineTone,
                 _visMinionTone,
                 _visSiphonTone
+            
             };
 
             // HUD Language is the only fixed VISUAL option. Every other row, including
@@ -12313,6 +12569,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             _visualTotalItems = totalItems;
             RectangleF listRect = new RectangleF(x, listTop, w, Math.Max(1f, clipBot - listTop));
+            _playerBuffsPreviewClipTop=clipTop;_playerBuffsPreviewClipBottom=clipBot;
             _visualVisibleItems = Math.Max(1, (int)Math.Floor((listRect.Height - 4f) / VisualListSlotH));
             ClampVisualScroll();
             DrawPluginsStyleVisualScrollbar(detail);
@@ -12418,6 +12675,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                             {
                                 if (IsCustomVisualFeature(feature))
                                 {
+                                    SetHoverHelpContext("visual:"+feature,DisplayText(ftitles[fi]));
                                     DrawCustomVisualOptionsRow(
                                         new RectangleF(x, ry, w, VisualListSlotH - 8f),
                                         feature,
@@ -12449,6 +12707,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                                     float size = feature == "reticle" ? _visTargetReticleSize : 0f;
                                     float dot = feature == "siphon" ? _visSiphonDotSize : 0f;
 
+                                    SetHoverHelpContext("visual:"+feature,DisplayText(ftitles[fi]));
                                     DrawVisualOptionsRow(
                                         new RectangleF(x, ry, w, VisualListSlotH - 8f),
                                         feature,
@@ -12485,6 +12744,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 _bPaneCover.DrawRectangle(detail.Left + 1f, detail.Bottom - 3f, detail.Width - 2f, 3f);
             }
             _bPaneBorder.DrawRectangle(detail.Left, detail.Top, detail.Width, detail.Height);
+                    _hoverHelpClip=RectangleF.Empty;
         }
 
 
@@ -12528,6 +12788,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             public bool   IsZBarbChild;
             public int    ZBarbOptionKind;
             public bool   IsImpaleAimOption;
+            public bool   IsImpaleSelector;
             public bool   IsGenMonkSelector;
             public bool   IsGenMonkChild;
             public int    GenMonkOptionKind;
@@ -12663,6 +12924,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
         private void DrawMacroEntryRow(RectangleF slot, MacroEntry entry, int rowIdx, bool isFav)
         {
+            SetHoverHelpContext("macro:"+entry.Code,GetMacroTitleDisplay(entry));
+            RegisterHoverHelp("row",slot);
             if (entry.IsOpenGrMapChild)
             {
                 DrawOpenGrMapChildRow(slot, entry, rowIdx);
@@ -12791,7 +13054,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             RectangleF stateR = new RectangleF(rr.Right - stateW - 8f, rr.Top + 6f, stateW, rr.Height - 12f);
             RectangleF expandR = RectangleF.Empty;
-            if (entry.IsPestilenceSelector || entry.IsInariusSelector || entry.IsAutoLootSelector || entry.IsInventoryDropSelector || entry.IsZBarbSelector || entry.IsZdhHelperSelector || entry.IsGenMonkSelector)
+            if (entry.IsPestilenceSelector || entry.IsInariusSelector || entry.IsAutoLootSelector || entry.IsInventoryDropSelector || entry.IsZBarbSelector || entry.IsZdhHelperSelector || entry.IsGenMonkSelector || entry.IsImpaleSelector)
             {
                 expandR = new RectangleF(stateR.Left - 34f - buttonGap, rr.Top + 6f, 34f, rr.Height - 12f);
             }
@@ -12799,14 +13062,14 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             RectangleF hotkeyR = RectangleF.Empty;
             if (entry.HasHotkeyButton)
             {
-                float hotkeyLeft = ((entry.IsPestilenceSelector || entry.IsInariusSelector || entry.IsAutoLootSelector || entry.IsInventoryDropSelector || entry.IsZBarbSelector || entry.IsZdhHelperSelector || entry.IsGenMonkSelector) && expandR != RectangleF.Empty)
+                float hotkeyLeft = ((entry.IsPestilenceSelector || entry.IsInariusSelector || entry.IsAutoLootSelector || entry.IsInventoryDropSelector || entry.IsZBarbSelector || entry.IsZdhHelperSelector || entry.IsGenMonkSelector || entry.IsImpaleSelector) && expandR != RectangleF.Empty)
                     ? (expandR.Left - hotkeyW - hotkeyExpandGap)
                     : (stateR.Left - hotkeyW - buttonGap);
                 hotkeyR = new RectangleF(hotkeyLeft, rr.Top + 6f, hotkeyW, rr.Height - 12f);
             }
 
             float textX = starR.Right + 10f;
-            float textRight = entry.HasHotkeyButton ? hotkeyR.Left - 10f : ((entry.IsPestilenceSelector || entry.IsInariusSelector || entry.IsAutoLootSelector || entry.IsInventoryDropSelector || entry.IsZdhHelperSelector || entry.IsGenMonkSelector) ? expandR.Left - 10f : stateR.Left - 10f);
+            float textRight = entry.HasHotkeyButton ? hotkeyR.Left - 10f : ((entry.IsPestilenceSelector || entry.IsInariusSelector || entry.IsAutoLootSelector || entry.IsInventoryDropSelector || entry.IsZdhHelperSelector || entry.IsGenMonkSelector || entry.IsImpaleSelector) ? expandR.Left - 10f : stateR.Left - 10f);
             float textW = Math.Max(40f, textRight - textX);
 
             string localizedTitle = GetMacroTitleDisplay(entry);
@@ -12820,10 +13083,9 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             if (!string.IsNullOrWhiteSpace(entry.Description))
             {
                 string localizedDescription = GetMacroDescriptionDisplay(entry);
-                string[] descLines = WrapTextApprox(
-                    localizedDescription,
-                    ApproxCharsForToggleDescription(textW),
-                    3);
+                bool seasonal=entry.IsGenMonkSelector || entry.IsImpaleSelector;
+                string[] descLines = seasonal ? WrapMeasuredDescription(_fRowText,localizedDescription,textW,3)
+                    : WrapTextApprox(localizedDescription,ApproxCharsForToggleDescription(textW),3);
 
                 if (descLines.Length > 0)
                     DrawOutlinedTextAtRaw(_fRowText, _fRowTextShadow, descLines[0], textX, rr.Top + 28f);
@@ -12891,6 +13153,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             {
                 DrawGlossButton(expandR, _inventoryDropExpanded ? "-" : "+", _inventoryDropExpanded, false, false);
                 RegisterToggleHit("inventorydrop:expand", expandR);
+            }
+
+            if (entry.IsImpaleSelector)
+            {
+                DrawGlossButton(expandR, _impaleExpanded ? "-" : "+", _impaleExpanded, false, false);
+                RegisterToggleHit("sanctifiedimpale:expand", expandR);
             }
 
             if (entry.IsGenMonkSelector)
@@ -13102,6 +13370,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     {
                         AddGenMonkChildItems(items, true);
                     }
+                    if (entry.IsImpaleSelector && _impaleExpanded)AddImpaleChildItems(items, true);
 
                     if (entry.IsAutoLootSelector && _autoLootExpanded)
                     {
@@ -13176,6 +13445,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     {
                         AddGenMonkChildItems(items, false);
                     }
+                    if (entry.IsImpaleSelector && _impaleExpanded)AddImpaleChildItems(items, false);
 
                     if (entry.IsPestilenceSelector && _pestilenceRgkExpanded)
                     {
@@ -13200,14 +13470,14 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 Kind = MacroListItemKind.Entry,
                 Entry = new MacroEntry {
                     Title = T("sanctified.monk.auto_dash", "Auto Dash"),
-                    Description = T("sanctified.monk.auto_dash.description", "While attacking, refresh Radiance around 3.5 seconds or other Dash runes around 5.5 seconds."),
+                    Description = T("sanctified.monk.auto_dash.description", "Refresh Dash buffs while attacking."),
                     Code = "sanctified_monk_auto_dash", IsGenMonkChild = true,
                     GenMonkOptionKind = 1 }, IsFavoriteDisplay = favoriteDisplay });
             items.Add(new MacroListItem {
                 Kind = MacroListItemKind.Entry,
                 Entry = new MacroEntry {
                     Title = T("sanctified.monk.self_dash", "Self-Dash"),
-                    Description = T("sanctified.monk.self_dash.description", "Manual attacks: Shift uses Self-Dash; unshifted LMB uses the attacked melee target when known. Off: Dash toward your aim. Melee assist always Dashes to its target."),
+                    Description = T("sanctified.monk.self_dash.description", "Shift: Dash in place. Off: Dash toward aim. Assist uses its target."),
                     Code = "sanctified_monk_self_dash", IsGenMonkChild = true,
                     GenMonkOptionKind = 2 }, IsFavoriteDisplay = favoriteDisplay });
             IPlugin monk = FindPluginByTypeName("s7o_GenMonk");
@@ -13216,22 +13486,51 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     Kind = MacroListItemKind.Entry,
                     Entry = new MacroEntry {
                         Title = T("sanctified.monk.melee_assist", "Melee Target Assist"),
-                        Description = T("sanctified.monk.melee_assist.description", "Hold to acquire the nearest eligible elite, then minion, then trash. Keep the target while eligible; switch when it dies, becomes invalid, or a higher priority appears. Dash to the target for approach or refresh; release to stop."),
+                        Description = T("sanctified.monk.melee_assist.description", "Hold to approach and attack. Prioritizes elites; release to stop."),
                         Code = "sanctified_monk_melee_assist", IsGenMonkChild = true,
                         GenMonkOptionKind = 3 }, IsFavoriteDisplay = favoriteDisplay });
+        }
+
+        private void AddImpaleChildItems(List<MacroListItem> items,bool favoriteDisplay)
+        {
+            var plugin=FindPluginByTypeName("s7o_Impale");
+            if(plugin==null)return;
+            if(plugin.GetType().GetField("AutoAimBolas")!=null)
+                items.Add(new MacroListItem {Kind=MacroListItemKind.Entry,IsFavoriteDisplay=favoriteDisplay,
+                    Entry=new MacroEntry {Code="sanctified_impale_auto_aim",IsImpaleAimOption=true,
+                        Title=T("sanctified.impale.auto_aim","Auto-aim Bolas"),
+                        Description=T("sanctified.impale.auto_aim.description","Aim Bolas at an enemy, then restore the cursor.")} });
+            if(plugin.GetType().GetMethod("SetCombatCastInterval")!=null)
+                items.Add(new MacroListItem {Kind=MacroListItemKind.Entry,IsFavoriteDisplay=favoriteDisplay,
+                    Entry=new MacroEntry {Code="sanctified_impale_cadence",IsImpaleAimOption=true,
+                        Title=T("sanctified.spender.interval","Combat Cast Interval"),
+                        Description=T("sanctified.spender.interval.description","Combat only. Time between aimed spender casts.")} });
         }
 
         private void DrawImpaleAimOptionRow(RectangleF r, MacroEntry entry)
         {
             _bRow.DrawRectangle(r.Left, r.Top, r.Width, r.Height);
             IPlugin plugin = FindPluginByTypeName("s7o_Impale");
+            if(entry.Code=="sanctified_impale_cadence")
+            {
+                int interval=750;
+                try {interval=(int)plugin.GetType().GetField("CombatGeneratorIntervalMs").GetValue(plugin);}catch { }
+                var control=new RectangleF(r.Right-224,r.Top+12,216,30);
+                DrawVisualStepperWide(control,"",interval.ToString(CultureInfo.InvariantCulture)+" ms",
+                    "sanctifiedimpale:cadence:-1","sanctifiedimpale:cadence:+1");
+                float textX=r.Left+44, textWidth=Math.Max(40,control.Left-textX-10);
+                DrawOutlinedFittedText(_fRowText,_fRowTextShadow,_fSmall,_fSmallShadow,GetMacroTitleDisplay(entry),textX,r.Top+7,textWidth);
+                var descriptionLines=WrapMeasuredDescription(_fSmall,GetMacroDescriptionDisplay(entry),textWidth,2);
+                for(int i=0;i<descriptionLines.Length;i++)DrawOutlinedTextAtRaw(_fSmall,_fSmallShadow,descriptionLines[i],textX,r.Top+28+i*16);
+                return;
+            }
             bool on = GetOptionalMacroBool(plugin, "AutoAimBolas", true);
             RectangleF state = new RectangleF(r.Right - 128f, r.Top + 9f, 120f, r.Height - 18f);
             float x = r.Left + 44f;
             float width = Math.Max(40f, state.Left - x - 10f);
             DrawOutlinedFittedText(_fRowText, _fRowTextShadow, _fSmall, _fSmallShadow,
                 GetMacroTitleDisplay(entry), x, r.Top + 7f, width);
-            string[] lines = WrapTextApprox(GetMacroDescriptionDisplay(entry), ApproxCharsForToggleDescription(width), 2);
+            string[] lines = WrapMeasuredDescription(_fSmall,GetMacroDescriptionDisplay(entry),width,2);
             if (lines.Length > 0) DrawOutlinedTextAtRaw(_fSmall, _fSmallShadow, lines[0], x, r.Top + 28f);
             if (lines.Length > 1) DrawOutlinedTextAtRaw(_fSmall, _fSmallShadow, lines[1], x, r.Top + 44f);
             DrawGlossButton(state, on ? "ON" : "OFF", on, false, false);
@@ -13261,8 +13560,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             float textW = Math.Max(40f, (hotkeyR != RectangleF.Empty ? hotkeyR.Left : stateR.Left) - textX - 10f);
             DrawOutlinedFittedText(_fRowText, _fRowTextShadow, _fSmall, _fSmallShadow,
                 "• " + GetMacroTitleDisplay(entry), textX, r.Top + 7f, textW);
-            string[] lines = WrapTextApprox(GetMacroDescriptionDisplay(entry),
-                ApproxCharsForToggleDescription(textW), 2);
+            string[] lines = WrapMeasuredDescription(_fSmall,GetMacroDescriptionDisplay(entry),textW,2);
             if (lines.Length > 0) DrawOutlinedTextAtRaw(_fSmall, _fSmallShadow, lines[0], textX, r.Top + 28f);
             if (lines.Length > 1) DrawOutlinedTextAtRaw(_fSmall, _fSmallShadow, lines[1], textX, r.Top + 44f);
             DrawGlossButton(stateR, plugin == null ? "NOT INSTALLED" : !available ? "LOCKED" : on ? "ON" : "OFF",
@@ -14201,33 +14499,22 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             if (FindPluginByTypeName("s7o_Impale") != null)
             {
                 allEntries.Insert(monkStart, new MacroEntry {
-                    Title="Sanctified Impale Strafe",
-                    Description="F3 toggles Shadow Impale Strafe. Both modes refresh Focus with Bolas; Combat adds targeted Impale casts. F2 switches modes.",
-                    Code="sanctified_impale_plugin", IsPlugin=true,
+                    Title=T("sanctified.spender.title", "Sanctified Impale / Multishot"),
+                    Description=T("sanctified.spender.description", "F3: start/stop Strafe. F2: Combat/Speed. Speed primes the spender once."),
+                    Code="sanctified_impale_plugin", IsPlugin=true, IsImpaleSelector=true,
                     PluginTypeNames=new[]{"s7o_Impale"},
                     PluginAction="toggles:plugin:sanctifiedimpale" });
                 monkStart++;
                 necromancerStart++;
                 witchDoctorStart++;
                 wizardStart++;
-                IPlugin optionalImpale = FindPluginByTypeName("s7o_Impale");
-                if (optionalImpale.GetType().GetField("AutoAimBolas") != null)
-                {
-                    allEntries.Insert(monkStart, new MacroEntry {
-                        Title = T("sanctified.impale.auto_aim", "Auto-aim Bolas"),
-                        Description = T("sanctified.impale.auto_aim.description", "Aim Bolas at an on-screen enemy, then restore the cursor before resuming Strafe. Preserves your mouse movement during aiming."),
-                        Code = "sanctified_impale_auto_aim", IsImpaleAimOption = true });
-                    monkStart++;
-                    necromancerStart++;
-                    witchDoctorStart++;
-                    wizardStart++;
-                }
+
             }
             if (FindPluginByTypeName("s7o_GenMonk") != null)
             {
                 allEntries.Insert(necromancerStart, new MacroEntry {
                     Title="Sanctified Raiment Monk",
-                    Description="While holding a generator, refreshes other Combination Strike buffs only when two seconds remain. Auto Dash and Self-Dash start on.",
+                    Description="Hold a generator to maintain Combination Strike and Dash buffs.",
                     Code="sanctified_monk_plugin", IsPlugin=true, IsGenMonkSelector=true,
                     PluginTypeNames=new[]{"s7o_GenMonk"},
                     PluginAction="toggles:plugin:sanctifiedmonk" });
@@ -14270,6 +14557,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             _macrosVisibleItems = VisibleMacroItemCount(listRect);
             ClampMacroScroll();
 
+            _hoverHelpClip=listRect;
             int start = Math.Max(0, Math.Min(_macrosScroll, MaxMacroScroll()));
 
             float y = listRect.Top + 2f;
@@ -14300,6 +14588,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             DrawMacrosFixedHeader(detail);
             DrawPluginsStyleMacrosScrollbar();
             _bPaneBorder.DrawRectangle(detail.Left, detail.Top, detail.Width, detail.Height);
+                    _hoverHelpClip=RectangleF.Empty;
         }
 
 
@@ -14353,6 +14642,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             float viewportW = Math.Max(1f, detail.Width - 20f - ReservedScrollbarGutterW);
             float viewportH = Math.Max(1f, detail.Bottom - viewportTop - 12f);
             RectangleF viewport = new RectangleF(viewportLeft, viewportTop, viewportW, viewportH);
+            _hoverHelpClip=viewport;
             _ttsAlertsViewportHeightPx = (int)Math.Ceiling(viewport.Height);
 
             const float rowH = 76f;
@@ -14402,6 +14692,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             DrawTtsAlertsFixedHeader(detail);
             DrawTtsAlertsScrollbar(detail, viewport);
             _bPaneBorder.DrawRectangle(detail.Left, detail.Top, detail.Width, detail.Height);
+                    _hoverHelpClip=RectangleF.Empty;
         }
 
 
@@ -14413,6 +14704,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             if (FullyInsideViewport(r, viewport))
             {
+                SetHoverHelpContext("cat:tts.broadcast",DisplayText("TTS Broadcast"));
+                RegisterHoverHelp("row",r);
                 (enabled ? _bRow : _bRowAlt).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
 
                 const float stateW = 146f;
@@ -14522,6 +14815,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             if (i < 0 || i >= _ttsCustomMessages.Count)
                 return;
 
+            SetHoverHelpContext("cat:tts.broadcast",DisplayText("TTS Broadcast"));
+            RegisterHoverHelp("row",rowR);
             TtsCustomMessage msg = _ttsCustomMessages[i];
             if (msg == null)
                 return;
@@ -14726,6 +15021,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
         private void DrawNoClickToggle(MenuLayout l)
         {
+            DrawSquareCheck(l.HoverTipsCheck,HoverTipsEnabled);
+            DrawLeftFittedText(_fSmall,_fButtonTiny,T("hover_tips.title","Hover Tips"),l.HoverTipsLabel);
+            SetHoverHelpContext("cat:shared.hover_tips",T("hover_tips.title","Hover Tips"));
+            RegisterHoverHelp("row",new RectangleF(l.HoverTipsCheck.Left,l.HoverTipsLabel.Top,130f,22f));
+            SetHoverHelpContext("cat:shared.no_click",DisplayText("No-Click Background"));
+            RegisterHoverHelp("row",new RectangleF(l.NoClickCheck.Left,l.NoClickLabel.Top,l.NoClickLabel.Right-l.NoClickCheck.Left,22f));
             DrawSquareCheck(l.NoClickCheck, _noClickBackground);
             _fSmall.DrawText(DisplayText("No-Click Background"), l.NoClickLabel.Left, l.NoClickLabel.Top + 4f);
         }
@@ -14796,6 +15097,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 var rr = new RectangleF(l.ListRect.Left + 6f, y, l.ListRect.Width - 30f, 30f);
                 ((i % 2) == 0 ? _bRow : _bRowAlt).DrawRectangle(rr.Left, rr.Top, rr.Width, rr.Height);
 
+                SetHoverHelpContext("plugin:"+row.TypeName,GetPluginDisplayName(row));
+                RegisterHoverHelp("row",rr);
                 bool enabled = SafePluginEnabled(row.Plugin);
                 var star       = new RectangleF(rr.Left + 8f, rr.Top + 6f, 24f, 18f);
                 var statusRect = new RectangleF(rr.Right - 72f, rr.Top + 5f, 62f, 20f);
@@ -14810,6 +15113,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 DrawGlossButton(statusRect, enabled ? "ON" : "OFF", enabled, false, true);
 
                 // Star = favorite; right button = only plugin toggle
+                RegisterHoverHelp("favorite",star);
+                RegisterHoverHelp("row",statusRect);
                 _lastHitRects["star|"   + row.TypeName] = star;
                 _lastHitRects["toggle|" + row.TypeName] = statusRect;
 
@@ -14974,6 +15279,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
         // Expanded content is laid out inline — scroll down if it exceeds the page.
         private void DrawHotkeysPanel(RectangleF r)
         {
+            SetHoverHelpContext("cat:hotkey.overview",DisplayText("HUD Hotkeys"));
+            RegisterHoverHelp("row",r);
             _bTextDimBg.DrawRectangle(r.Left, r.Top, r.Width, r.Height);
             _bPaneBorder.DrawRectangle(r.Left, r.Top, r.Width, r.Height);
 
@@ -15241,6 +15548,26 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                    string.Equals(text, "-", StringComparison.Ordinal) ||
                    string.Equals(text, "X", StringComparison.Ordinal) ||
                    string.Equals(text, "×", StringComparison.Ordinal);
+        }
+
+        private static string[] WrapMeasuredDescription(IFont font,string text,float width,int maxLines)
+        {
+            var lines=new List<string>();
+            string rest=(text??"").Trim();
+            while(rest.Length>0 && lines.Count<maxLines)
+            {
+                int end=0;
+                while(end<rest.Length && TextFitsWidth(font,rest.Substring(0,end+1),width))end++;
+                if(end==0)end=1;
+                if(end<rest.Length)
+                {
+                    int space=rest.LastIndexOf(' ',end-1,end);
+                    if(space>0)end=space;
+                }
+                lines.Add(rest.Substring(0,end).TrimEnd()); rest=rest.Substring(end).TrimStart();
+            }
+            if(rest.Length>0 && lines.Count>0)lines[lines.Count-1]+=" "+rest;
+            return lines.ToArray();
         }
 
         private static bool TextFitsWidth(IFont font, string text, float maxWidth)
@@ -15608,7 +15935,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 _ttsCustomMessageHotkeyCaptureIndex = -1;
                 _zbarbAutoSnapHotkeyCapture = false;
                 _autoLootPauseHotkeyCapture = false;
-                _playerCoeHotkeyCapture = false;
+                _playerCoeHotkeyCapture = false; _playerBuffsHotkeyCapture = false;
                 _playerCoeElementHotkeyCapture = false;
                 _partyInspectorHotkeyCapture = false;
                 _autoSkillKeybindCaptureSlot = -1;
@@ -15646,7 +15973,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             _ttsCustomMessageHotkeyCaptureIndex = -1;
             _zbarbAutoSnapHotkeyCapture = false;
             _autoLootPauseHotkeyCapture = false;
-            _playerCoeHotkeyCapture = false;
+            _playerCoeHotkeyCapture = false; _playerBuffsHotkeyCapture = false;
             _playerCoeElementHotkeyCapture = false;
             _partyInspectorHotkeyCapture = false;
             _autoSkillKeybindCaptureSlot = -1;
@@ -18959,8 +19286,10 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 lines.Add("SHOW_DOT=" + _showDot);
                 lines.Add("XP_TRACKER_ENABLED=" + _xpTrackerEnabled);
                 lines.Add("XP_TRACKER_EXPANDED=" + _xpTrackerExpanded);
+                lines.Add("PLAYER_BUFFS_EXPANDED=" + _playerBuffsExpanded);
                 lines.Add("XP_TRACKER_PERSIST=" + _xpTrackerPersist);
                 lines.Add("EDIT_MODE=" + _editMode);
+                lines.Add("HOVER_TIPS=" + HoverTipsEnabled);
                 lines.Add("NOCLICK_BACKGROUND=" + _noClickBackground);
                 lines.Add("MENU_HOTKEY=" + MenuHotkey);
                 lines.Add("DEBUG_LOGGING=" + _debugLogging);
@@ -19165,6 +19494,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 lines.Add("AUTO_LOOT_EXPANDED=" + _autoLootExpanded.ToString(CultureInfo.InvariantCulture));
                 lines.Add("ZDH_HELPER_EXPANDED=" + _zdhHelperExpanded.ToString(CultureInfo.InvariantCulture));
                 lines.Add("SANCTIFIED_MONK_EXPANDED=" + _genMonkExpanded.ToString(CultureInfo.InvariantCulture));
+                lines.Add("SANCTIFIED_IMPALE_EXPANDED=" + _impaleExpanded.ToString(CultureInfo.InvariantCulture));
                 lines.Add("AUTO_LOOT_ENABLED=" + _autoLootEnabled.ToString(CultureInfo.InvariantCulture));
                 lines.Add("AUTO_LOOT_PAUSE_HOTKEY=" + _autoLootPauseHotkey.ToString());
                 lines.Add("AUTO_LOOT_PRIMALS=" + _autoLootPrimals.ToString(CultureInfo.InvariantCulture));
@@ -19514,8 +19844,10 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     else if (key == "SHOW_DOT") _showDot = ParseBool(val, _showDot);
                     else if (key == "XP_TRACKER_ENABLED") _xpTrackerEnabled = ParseBool(val, _xpTrackerEnabled);
                     else if (key == "XP_TRACKER_EXPANDED") _xpTrackerExpanded = ParseBool(val, _xpTrackerExpanded);
+                    else if (key == "PLAYER_BUFFS_EXPANDED") _playerBuffsExpanded = ParseBool(val, _playerBuffsExpanded);
                     else if (key == "XP_TRACKER_PERSIST") _xpTrackerPersist = ParseBool(val, _xpTrackerPersist);
                     else if (key == "EDIT_MODE") _editMode = ParseBool(val, _editMode);
+                    else if (key == "HOVER_TIPS") HoverTipsEnabled = ParseBool(val, HoverTipsEnabled);
                     else if (key == "NOCLICK_BACKGROUND") _noClickBackground = ParseBool(val, _noClickBackground);
                     else if (key == "MENU_HOTKEY")
                     {
@@ -19868,6 +20200,10 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     else if (string.Equals(key, "ZDH_HELPER_EXPANDED", StringComparison.OrdinalIgnoreCase))
                     {
                         _zdhHelperExpanded = ParseBool(val, _zdhHelperExpanded);
+                    }
+                    else if (string.Equals(key, "SANCTIFIED_IMPALE_EXPANDED", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _impaleExpanded = ParseBool(val, _impaleExpanded);
                     }
                     else if (string.Equals(key, "SANCTIFIED_MONK_EXPANDED", StringComparison.OrdinalIgnoreCase))
                     {
