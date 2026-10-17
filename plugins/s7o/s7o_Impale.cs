@@ -9,19 +9,21 @@ using Turbo.Plugins.Default;
 
 namespace Turbo.Plugins.s7o
 {
-    // v1.5.0: acknowledge cursor restore without treating a stale native sample as failure.
-    // Optional Sanctified Shadow Strafe module.
+    // Optional Sanctified Impale / Multishot Strafe module.
     // Sanctified Strafe auto-casts the last non-channeled Hatred spender, so Impale
     // is primed/re-primed before Strafe. Both modes refresh Focus with the generator;
-    // Combat additionally directs manual Impales through the same owned aim/restore job.
-    // F3 ownership is Shadow 6-piece only and remains independent of DHStrafe state.
-    // Speed refreshes Focus near expiry; Combat adds targeted Impale at a 500 ms cadence.
+    // Combat additionally directs manual spender casts through the same owned aim/restore job.
+    // F3 excludes GoD builds; Impale retains the Shadow requirement.
+    // Speed refreshes Focus near expiry; Combat adds targeted spender casts at a 1,000 ms cadence.
     public class s7o_Impale : BasePlugin, IKeyEventHandler, IAfterCollectHandler, IInGameTopPainter, INewAreaHandler, IMouseClickHandler, IS7oAutoLootInputHandoff
     {
         private const uint ShadowSetSno = 916931u;
         private const uint GoDSetSno = 791249u;
         private const uint StrafeSno = 134030u;
         private const uint ImpaleSno = 131366u;
+        private const uint MultishotSno = 77649u;
+        private const uint EvasiveFireSno = 377450u, HungeringArrowSno = 129215u, EntanglingShotSno = 361936u;
+        private uint _lastSpenderSno;
         private const uint RapidFireSno = 131192u;
         private const uint BolasSno = 77552u;
         private const uint GrenadesSno = 86610u;
@@ -34,10 +36,10 @@ namespace Turbo.Plugins.s7o
 
         public Key ToggleHotkey = Key.F3;
         public Key ModeHotkey = Key.F2;
-        public bool RequireShadowSet = true;
+        public bool RequireShadowSet = true; // Applies to Impale; Multishot uses the equipped bow build.
         public bool AutoAimBolas = true; // Optional queued aim/cast/restore; other generators are unchanged.
         public int SpeedGeneratorIntervalMs = 500; // Retry/fallback cadence; active Focus suppresses unnecessary pulses.
-        public int CombatGeneratorIntervalMs = 500; // Retained public setting: now the Combat Impale interval.
+        public int CombatGeneratorIntervalMs = 750; // Compatibility name: manual aimed spender interval.
         public int SkillPulseHoldMs = 8;
         public int AutoLootPauseMs = 300; // Same bounded pickup pause as DHStrafe.
         public bool PauseNearUnoperatedPylon = true;
@@ -185,11 +187,15 @@ namespace Turbo.Plugins.s7o
             {
                 if (File.Exists(_settingsPath))
                     foreach (string line in File.ReadAllLines(_settingsPath))
-                        if (line.StartsWith("AutoAimBolas=", StringComparison.OrdinalIgnoreCase))
-                        {
-                            bool value;
-                            if (bool.TryParse(line.Substring(13), out value)) AutoAimBolas = value;
-                        }
+                    {
+                        int split = line.IndexOf('=');
+                        if (split < 0) continue;
+                        string key = line.Substring(0, split).Trim(), text = line.Substring(split + 1).Trim();
+                        bool aim; int interval;
+                        if (key.Equals("AutoAimBolas", StringComparison.OrdinalIgnoreCase) && bool.TryParse(text, out aim)) AutoAimBolas = aim;
+                        else if (key.Equals("CombatGeneratorIntervalMs", StringComparison.OrdinalIgnoreCase) && int.TryParse(text, out interval))
+                            CombatGeneratorIntervalMs = NormalizeCombatCastInterval(interval);
+                    }
             }
             catch { }
             _chatEditLine = Hud.Render.RegisterUiElement(
@@ -406,6 +412,14 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
+            if (_lastSpenderSno != impale.SnoPower.Sno)
+            {
+                CancelPulse("spender changed");
+                ReleaseStrafe();
+                _lastSpenderSno = impale.SnoPower.Sno;
+                _needsImpalePrime = true; _primePending = false; _primeAttempts = 0;
+                _nextPrimeTick = now;
+            }
             _areaResumePending = false;
 
             // Never re-acquire Strafe, standstill or generator input during a pickup.
@@ -449,7 +463,7 @@ namespace Turbo.Plugins.s7o
 
             // Observe while the pulse is still held: a short cast animation may finish
             // before the release frame. Successful input injection alone is not a cast.
-            if (_needsImpalePrime && _primePending && IsImpaleAnimation())
+            if (_needsImpalePrime && _primePending && IsSpenderAnimation(impale.SnoPower.Sno))
             {
                 _needsImpalePrime = false;
                 _primePending = false;
@@ -535,7 +549,25 @@ namespace Turbo.Plugins.s7o
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(_settingsPath));
-                File.WriteAllText(_settingsPath, "AutoAimBolas=" + enabled + Environment.NewLine);
+                File.WriteAllLines(_settingsPath, new[] { "AutoAimBolas=" + AutoAimBolas,
+                    "CombatGeneratorIntervalMs=" + NormalizeCombatCastInterval(CombatGeneratorIntervalMs) });
+            }
+            catch { }
+        }
+
+        private static int NormalizeCombatCastInterval(int value)
+        {
+            value = Math.Max(400, Math.Min(1000, value));
+            return 400 + ((value - 400 + 25) / 50) * 50;
+        }
+        public void SetCombatCastInterval(int value)
+        {
+            CombatGeneratorIntervalMs = NormalizeCombatCastInterval(value);
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(_settingsPath));
+                File.WriteAllLines(_settingsPath, new[] { "AutoAimBolas=" + AutoAimBolas,
+                    "CombatGeneratorIntervalMs=" + CombatGeneratorIntervalMs });
             }
             catch { }
         }
@@ -647,7 +679,7 @@ namespace Turbo.Plugins.s7o
                 || Hud == null || Hud.Game == null || Hud.Game.Me == null) return;
             var state = Hud.Game.Me.AnimationState;
             if ((_aimedSkillJob == AimedSkillJob.CombatImpale
-                    ? IsImpaleAnimation() && (Hud.Game.Me.Animation != _bolasPreInputAnimation
+                    ? IsSpenderAnimation(_aimedSkillSno) && (Hud.Game.Me.Animation != _bolasPreInputAnimation
                         || (Hud.Game.Me.LoopingAnimationStartTick > _aimedPreAnimationStartTick
                             && Hud.Game.Me.LoopingAnimationStartTick >= _aimedInputGameTick))
                     : Hud.Game.Me.Animation != _bolasPreInputAnimation)
@@ -823,7 +855,7 @@ namespace Turbo.Plugins.s7o
         {
             // Cadence follows handback; keep generator and spender deadlines independent.
             if (_aimedSkillJob == AimedSkillJob.CombatImpale)
-                _nextCombatImpaleTick = unchecked(now + Math.Max(50, CombatGeneratorIntervalMs));
+                _nextCombatImpaleTick = unchecked(now + NormalizeCombatCastInterval(CombatGeneratorIntervalMs));
             else _nextGeneratorTick = unchecked(now + Math.Max(50, SpeedGeneratorIntervalMs));
         }
 
@@ -1020,11 +1052,21 @@ namespace Turbo.Plugins.s7o
         private struct CursorPoint { public int X, Y; }
         [DllImport("user32.dll")] private static extern bool GetCursorPos(out CursorPoint point);
 
-        private bool IsImpaleAnimation()
+        private bool IsSpenderAnimation(uint sno)
         {
             var animation = Hud.Game.Me.Animation;
-            return animation == AnimSnoEnum._demonhunter_female_cast_impale_01
-                || animation == AnimSnoEnum._demonhunter_male_cast_impale_01;
+            if (sno == ImpaleSno)
+                return animation == AnimSnoEnum._demonhunter_female_cast_impale_01
+                    || animation == AnimSnoEnum._demonhunter_male_cast_impale_01;
+            if (sno != MultishotSno) return false;
+            return animation == AnimSnoEnum._demonhunter_female_dw_xbow_multishot_01
+                || animation == AnimSnoEnum._demonhunter_female_bow_multishot_01
+                || animation == AnimSnoEnum._demonhunter_male_xbow_multishot
+                || animation == AnimSnoEnum._demonhunter_male_dw_xbow_multishot
+                || animation == AnimSnoEnum._demonhunter_male_1hxbow_multishot
+                || animation == AnimSnoEnum._demonhunter_female_xbow_multishot_01
+                || animation == AnimSnoEnum._demonhunter_male_bow_multishot
+                || animation == AnimSnoEnum._demonhunter_female_1hxbow_multishot_01;
         }
 
         private void MaintainImpalePrime(IPlayerSkill impale, IPlayerSkill generator, int now)
@@ -1126,8 +1168,6 @@ namespace Turbo.Plugins.s7o
                 // F3 ownership is build-exclusive without referencing DHStrafe itself.
                 if (Hud.Game.Me.GetSetItemCount(GoDSetSno) >= 4)
                     return false;
-                if (RequireShadowSet && Hud.Game.Me.GetSetItemCount(ShadowSetSno) < 6)
-                    return false;
 
                 return TryGetSkills(out strafe, out impale, out generator);
             }
@@ -1143,8 +1183,7 @@ namespace Turbo.Plugins.s7o
             {
                 if (Hud.Game.Me.HeroClassDefinition == null
                     || Hud.Game.Me.HeroClassDefinition.HeroClass != HeroClass.DemonHunter
-                    || Hud.Game.Me.GetSetItemCount(GoDSetSno) >= 4
-                    || (RequireShadowSet && Hud.Game.Me.GetSetItemCount(ShadowSetSno) < 6))
+                    || Hud.Game.Me.GetSetItemCount(GoDSetSno) >= 4)
                     return false;
                 return TryGetSkills(out strafe, out impale, out generator);
             }
@@ -1153,29 +1192,33 @@ namespace Turbo.Plugins.s7o
 
         private bool TryGetSkills(out IPlayerSkill strafe, out IPlayerSkill impale, out IPlayerSkill generator)
         {
-            strafe = null;
-            impale = null;
-            generator = null;
-            IPlayerSkill grenades = null;
+            strafe = null; impale = null; generator = null;
+            IPlayerSkill multi = null, bolas = null, grenades = null, bowGenerator = null;
             try
             {
                 foreach (var skill in Hud.Game.Me.Powers.UsedSkills)
                 {
-                    if (skill == null || skill.SnoPower == null) continue;
+                    if (skill == null || skill.SnoPower == null || skill.Key == ActionKey.Unknown) continue;
                     uint sno = skill.SnoPower.Sno;
                     if (sno == StrafeSno) strafe = skill;
                     else if (sno == ImpaleSno) impale = skill;
-                    else if (sno == BolasSno) generator = skill;
+                    else if (sno == MultishotSno) multi = skill;
+                    else if (sno == BolasSno) bolas = skill;
                     else if (sno == GrenadesSno) grenades = skill;
+                    else if (sno == EvasiveFireSno || sno == HungeringArrowSno || sno == EntanglingShotSno)
+                    {
+                        if (bowGenerator == null || sno == EvasiveFireSno) bowGenerator = skill;
+                    }
                 }
+                bool shadow = Hud.Game.Me.GetSetItemCount(ShadowSetSno) >= 6;
+                // Prefer the existing Shadow build when both spenders are equipped.
+                if (multi != null && (impale == null || !shadow)) impale = multi;
+                if (impale == null || (impale.SnoPower.Sno == ImpaleSno && RequireShadowSet && !shadow)) return false;
+                generator = impale.SnoPower.Sno == MultishotSno ? bowGenerator ?? bolas ?? grenades : bolas ?? grenades;
+                return strafe != null && generator != null;
             }
             catch { return false; }
-
-            // Shadow requires a melee weapon; Bolas and Grenades are the compatible generators.
-            if (generator == null) generator = grenades;
-            return strafe != null && impale != null && generator != null;
         }
-
 
         private bool IsAlternateHatredSpenderDown(IPlayerSkill impale, IPlayerSkill strafe, IPlayerSkill generator)
         {
@@ -1185,7 +1228,7 @@ namespace Turbo.Plugins.s7o
                 {
                     if (skill == null || skill.SnoPower == null || skill.Key == ActionKey.Unknown) continue;
                     uint sno = skill.SnoPower.Sno;
-                    if (sno == ImpaleSno || sno == StrafeSno || sno == RapidFireSno
+                    if (sno == StrafeSno || sno == RapidFireSno
                         || skill == generator || skill == impale || skill == strafe)
                         continue;
 
@@ -1484,6 +1527,7 @@ namespace Turbo.Plugins.s7o
             _interactionPauseUntilTick = Environment.TickCount;
             _autoLootPauseUntilTick = _interactionPauseUntilTick;
             _nextGeneratorTick = _nextCombatImpaleTick = 0;
+            _lastSpenderSno = 0;
             _combatTargetAcd = 0u;
             _pylonPauseActive = false;
             _inputPauseReason = "idle";
