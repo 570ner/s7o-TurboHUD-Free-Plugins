@@ -30,7 +30,16 @@ namespace Turbo.Plugins.s7o
         public bool DropScreams { get; set; } = false;
         public bool DropGems { get; set; } = false;
 
-        public bool StoreStackables { get; set; } = true;
+        // Compatibility setter for old settings/customizers; new filters are independent.
+        public bool StoreStackables
+        {
+            get { return StoreGems || StoreScreams || StoreGifts || StoreOthers; }
+            set { StoreGems = StoreScreams = StoreGifts = StoreOthers = value; }
+        }
+        public bool StoreGems { get; set; } = true;
+        public bool StoreScreams { get; set; } = true;
+        public bool StoreGifts { get; set; } = true;
+        public bool StoreOthers { get; set; } = true;
         public bool StoreLegendaryGems { get; set; } = true;
         public bool StorePrimals { get; set; } = true;
         public bool StoreAncients { get; set; } = false;
@@ -85,10 +94,9 @@ namespace Turbo.Plugins.s7o
         private const int StashColumns = 7;
         private const int StashRowsPerTab = 10;
         private const uint PetrifiedScreamSno = 1051857800;
-        private const uint AngelicCrucibleSno = 2410396267u; // FreeHUD P74_Consumable_Sanctify_Legendary_Item.
         private const uint RamaladniGiftSno = 1844495708;
         private const ushort VkEscape = 0x1B;
-        private const int StorageSettingsVersion = 11;
+        private const int StorageSettingsVersion = 12;
         private const int SpecialTooltipProbeInitialDelayMs = 30;
         private const int SpecialTooltipProbePollMs = 30;
         private const int SpecialTooltipProbeTimeoutMs = 300;
@@ -108,7 +116,7 @@ namespace Turbo.Plugins.s7o
         private IUiElement[] _tooltipCostElements;
 
         private RectangleF _hotkeyButtonRect;
-        private RectangleF _stackablesRect;
+        private RectangleF _stackablesRect, _storeScreamsRect, _storeGiftsRect, _storeOthersRect;
         private RectangleF _legendaryGemsRect;
         private RectangleF _primalsRect;
         private RectangleF _ancientsRect;
@@ -326,7 +334,7 @@ namespace Turbo.Plugins.s7o
 
             if (_running)
             {
-                if (PointInRect(_stackablesRect, x, y) || PointInRect(_legendaryGemsRect, x, y) || PointInRect(_primalsRect, x, y) || PointInRect(_ancientsRect, x, y)
+                if (PointInRect(_storeScreamsRect, x, y) || PointInRect(_storeGiftsRect, x, y) || PointInRect(_storeOthersRect, x, y) || PointInRect(_stackablesRect, x, y) || PointInRect(_legendaryGemsRect, x, y) || PointInRect(_primalsRect, x, y) || PointInRect(_ancientsRect, x, y)
                     || PointInRect(_sellGiftsRect, x, y) || PointInRect(_sellScreamsRect, x, y) || PointInRect(_sellGemsRect, x, y) || PointInRect(_dropUnidentifiedRect, x, y)
                     || PointInRect(_tabMinusRect, x, y) || PointInRect(_tabPlusRect, x, y) || PointInRect(_tabValueRect, x, y))
                 {
@@ -370,33 +378,7 @@ namespace Turbo.Plugins.s7o
                 return false;
             }
 
-            if (PointInRect(_stackablesRect, x, y))
-            {
-                StoreStackables = !StoreStackables;
-                SaveSettings();
-                return true;
-            }
-
-            if (PointInRect(_legendaryGemsRect, x, y))
-            {
-                StoreLegendaryGems = !StoreLegendaryGems;
-                SaveSettings();
-                return true;
-            }
-
-            if (PointInRect(_primalsRect, x, y))
-            {
-                StorePrimals = !StorePrimals;
-                SaveSettings();
-                return true;
-            }
-
-            if (PointInRect(_ancientsRect, x, y))
-            {
-                StoreAncients = !StoreAncients;
-                SaveSettings();
-                return true;
-            }
+            if (TryToggleStoreFilter(x, y)) return true;
 
             if (PointInRect(_tabMinusRect, x, y))
             {
@@ -439,6 +421,19 @@ namespace Turbo.Plugins.s7o
             if (_runMode == RunMode.Merchant) AdvanceMerchantRun(now);
             else if (_runMode == RunMode.DropAll) AdvanceDropAllRun(now);
             else AdvanceStoreRun(now);
+        }
+
+        private bool TryToggleStoreFilter(int x, int y)
+        {
+            if (PointInRect(_stackablesRect,x,y)) StoreGems=!StoreGems;
+            else if (PointInRect(_legendaryGemsRect,x,y)) StoreLegendaryGems=!StoreLegendaryGems;
+            else if (PointInRect(_primalsRect,x,y)) StorePrimals=!StorePrimals;
+            else if (PointInRect(_ancientsRect,x,y)) StoreAncients=!StoreAncients;
+            else if (PointInRect(_storeScreamsRect,x,y)) StoreScreams=!StoreScreams;
+            else if (PointInRect(_storeGiftsRect,x,y)) StoreGifts=!StoreGifts;
+            else if (PointInRect(_storeOthersRect,x,y)) StoreOthers=!StoreOthers;
+            else return false;
+            SaveSettings(); return true;
         }
 
         private void BeginStoreRun()
@@ -1107,28 +1102,60 @@ namespace Turbo.Plugins.s7o
             return item.SnoItem.Sno.ToString(CultureInfo.InvariantCulture) + ":" + item.Seed.ToString(CultureInfo.InvariantCulture);
         }
 
+
         private static bool IsSpecialStackableSno(uint sno)
         {
-            // Seasonal Crucibles share the existing special-stack storage pipeline.
-            // Merchant selling and filtered-drop categories keep their explicit SNO checks.
-            return sno == RamaladniGiftSno || sno == PetrifiedScreamSno || sno == AngelicCrucibleSno;
+            return sno == RamaladniGiftSno || sno == PetrifiedScreamSno;
         }
+
 
         private static bool IsSpecialStackableItem(IItem item)
         {
-            return item != null && item.SnoItem != null && IsSpecialStackableSno(item.SnoItem.Sno);
+            return item != null && item.SnoItem != null
+                && (IsSpecialStackableSno(item.SnoItem.Sno) || IsOtherStoreStackable(item));
         }
+        private static bool IsOtherStoreStackable(IItem item)
+        {
+            if (item == null || item.SnoItem == null || item.SnoItem.StackSize <= 1
+                || IsSpecialStackableSno(item.SnoItem.Sno) || item.SnoItem.Kind == ItemKind.gem
+                || IsLegendaryGemItem(item) || IsWhisperOfAtonementItem(item)) return false;
+            var kind=item.SnoItem.Kind;
+            return kind!=ItemKind.goldcoin && kind!=ItemKind.healthglobe
+                && kind!=ItemKind.powerglobe && kind!=ItemKind.rift_orb;
+        }
+        private static bool NeedsConsumableIdentification(IItem item)
+        {
+            // Preserve tooltip/seed checks for Gifts, Screams and legendary crafting consumables.
+            return IsSpecialStackableSno(item.SnoItem.Sno)
+                || (item.IsLegendary && item.SnoItem.Kind == ItemKind.craft);
+        }
+        private bool ShouldStoreStackable(IItem item)
+        {
+            if (item == null || item.SnoItem == null) return false;
+            if (item.SnoItem.Sno == RamaladniGiftSno) return StoreGifts;
+            if (item.SnoItem.Sno == PetrifiedScreamSno) return StoreScreams;
+            if (IsNormalGemItem(item)) return StoreGems;
+            return IsOtherStoreStackable(item) && StoreOthers;
+        }
+        private static bool CompatibleStoreStack(IItem item, IItem other)
+        {
+            if (item==null || other==null || item.SnoItem==null || other.SnoItem==null
+                || item.SnoItem.Sno!=other.SnoItem.Sno) return false;
+            return NeedsConsumableIdentification(item) ? item.Seed==other.Seed
+                : item.AccountBound==other.AccountBound && !item.Unidentified && !other.Unidentified;
+        }
+
 
         private static bool HasSpecialStackableStorageBinding(IItem item)
         {
-            if (!IsSpecialStackableItem(item) || !item.AccountBound) return false;
-            if (item.BoundToMyAccount) return true;
-
-            // FreeHUD can report BoundToMyAccount=false for Crucibles even in the
-            // local inventory/stash (observed with Me.SummonerId=0). Accept only
-            // account-bound Crucibles in those locations; other items retain the check.
-            return item.SnoItem.Sno == AngelicCrucibleSno
-                && (item.Location == ItemLocation.Inventory || item.Location == ItemLocation.Stash);
+            if (!IsSpecialStackableItem(item)) return false;
+            if (item.SnoItem.Sno == RamaladniGiftSno)
+                return item.AccountBound && item.BoundToMyAccount;
+            bool local=item.Location==ItemLocation.Inventory || item.Location==ItemLocation.Stash;
+            if (item.SnoItem.Sno == PetrifiedScreamSno)
+                return item.AccountBound && (item.BoundToMyAccount || local);
+            // Native stackable consumables already in our inventory/stash need no tradeability guess.
+            return local;
         }
 
         private static bool IsKnownSpecialStackSource(IItem item)
@@ -1137,7 +1164,7 @@ namespace Turbo.Plugins.s7o
             if (item.Location != ItemLocation.Stash) return false;
             if (item.IsInventoryLocked) return false;
             if (item.Seed == 0) return false;
-            if (item.Quantity <= 0) return false;
+            if (item.Quantity <= 0 || item.Unidentified) return false;
             if (!HasSpecialStackableStorageBinding(item)) return false;
             return true;
         }
@@ -1148,7 +1175,10 @@ namespace Turbo.Plugins.s7o
             if (item.Location != ItemLocation.Inventory) return false;
             if (item.IsInventoryLocked) return false;
             if (item.Seed == 0) return false;
-            if (!HasSpecialStackableStorageBinding(item)) return false;
+            // This shortcut is used by merchant identification; keep its prior
+            // strict Scream binding even though F3 storage accepts local ownership.
+            if (!HasSpecialStackableStorageBinding(item)
+                || (item.SnoItem.Sno == PetrifiedScreamSno && !item.BoundToMyAccount)) return false;
             return plan.HasKnownSpecialSeed(item.SnoItem.Sno, item.Seed);
         }
 
@@ -1156,15 +1186,36 @@ namespace Turbo.Plugins.s7o
         {
             if (!IsSpecialStackableItem(item)) return false;
             if (item.Location != ItemLocation.Inventory || item.IsInventoryLocked) return false;
-            if (item.Seed == 0) return false;
+            if (item.Seed == 0 || item.Unidentified) return false;
             return HasSpecialStackableStorageBinding(item);
         }
 
-        private static bool IsSpecialStackableStorageSafe(IItem item, StashPlan plan)
+
+        private static bool NeedsStorageIdentificationProbe(IItem item)
         {
-            return HasSpecialStackableStorageBasics(item)
-                && plan != null
-                && plan.HasKnownSpecialSeed(item.SnoItem.Sno, item.Seed);
+            if(!IsSpecialStackableItem(item))return false;
+            if(NeedsConsumableIdentification(item))return true;
+            // Generic native definitions cover seasonal consumables without seasonal SNO exceptions.
+            return item.SnoItem.Kind!=ItemKind.craft
+                || (item.SnoItem.Code??string.Empty).IndexOf("consumable",StringComparison.OrdinalIgnoreCase)>=0
+                || (item.SnoItem.SnoActor!=null
+                    && item.SnoItem.SnoActor.Sno.ToString().IndexOf("consumable",StringComparison.OrdinalIgnoreCase)>=0);
+        }
+        private static bool HasStorageIdentificationEvidence(IItem item,StashPlan plan)
+        {
+            if(!NeedsStorageIdentificationProbe(item))return true;
+            // An actual merged stack is evidence. Separate singletons and a stash location are not.
+            if(item.Quantity>1)return true;
+            List<IItem> stacks;
+            return plan!=null && plan.StacksBySno.TryGetValue(item.SnoItem.Sno,out stacks) && stacks!=null
+                && stacks.Any(other=>other!=null && other.Seed==item.Seed && other.Quantity>1
+                    && IsKnownSpecialStackSource(other));
+        }
+
+private static bool IsSpecialStackableStorageSafe(IItem item, StashPlan plan)
+        {
+            return HasSpecialStackableStorageBasics(item) && !item.Unidentified
+                && HasStorageIdentificationEvidence(item,plan);
         }
 
         private static bool SameInventorySlot(IItem item, int x, int y)
@@ -1488,6 +1539,7 @@ namespace Turbo.Plugins.s7o
             {
                 foreach (var item in sorted)
                 {
+                    if (!ShouldStoreStackable(item)) continue;
                     if (IsSpecialStackableItem(item))
                     {
                         if (!HasSpecialStackableStorageBasics(item))
@@ -1629,7 +1681,7 @@ namespace Turbo.Plugins.s7o
             if (item.Location != ItemLocation.Inventory) return false;
             if (item.IsInventoryLocked) return false;
 
-            if (item.SnoItem.Kind == ItemKind.loot && item.IsLegendary)
+            if (item.SnoItem.Kind == ItemKind.loot && item.IsLegendary && item.SnoItem.StackSize <= 1)
             {
                 if (StorePrimals && item.AncientRank == 2)
                 {
@@ -1654,7 +1706,7 @@ namespace Turbo.Plugins.s7o
             if (item.Location != ItemLocation.Inventory) return false;
             if (item.IsInventoryLocked) return false;
 
-            if (StoreStackables && IsStoreStackable(item))
+            if (ShouldStoreStackable(item) && IsStoreStackable(item))
             {
                 kind = StoreKind.Stackable;
                 return true;
@@ -1687,7 +1739,7 @@ namespace Turbo.Plugins.s7o
 
             uint sno = item.SnoItem.Sno;
 
-            if (IsSpecialStackableSno(sno))
+            if (IsSpecialStackableItem(item))
                 return IsSpecialStackableStorageSafe(item, plan);
 
             return IsNormalGemItem(item);
@@ -1744,7 +1796,7 @@ namespace Turbo.Plugins.s7o
                 if (stashItem == null || stashItem.SnoItem == null)
                     continue;
 
-                if (IsSpecialStackableSno(sno) && stashItem.Seed != item.Seed)
+                if (IsSpecialStackableItem(item) && !CompatibleStoreStack(item,stashItem))
                     continue;
 
                 int tab = GetAbsoluteTab(stashItem);
@@ -1760,7 +1812,7 @@ namespace Turbo.Plugins.s7o
             if (item == null || item.SnoItem == null || plan == null)
                 return -1;
 
-            if (IsSpecialStackableSno(item.SnoItem.Sno))
+            if (IsSpecialStackableItem(item))
                 return ResolveSpecialStackableTargetTab(item, plan, false);
 
             int exactStackTab = FindMatchingStackTab(item, plan);
@@ -1840,7 +1892,7 @@ namespace Turbo.Plugins.s7o
             {
                 foreach (var stashItem in matches)
                 {
-                    if (stashItem == null || stashItem.SnoItem == null || stashItem.Seed != item.Seed)
+                    if (stashItem == null || stashItem.SnoItem == null || !CompatibleStoreStack(item,stashItem))
                         continue;
 
                     int tab = GetAbsoluteTab(stashItem);
@@ -1920,7 +1972,7 @@ namespace Turbo.Plugins.s7o
             if (item == null || item.SnoItem == null)
                 return false;
 
-            if (IsSpecialStackableSno(item.SnoItem.Sno))
+            if (IsSpecialStackableItem(item))
                 return IsKnownSpecialStackSource(item);
 
             return IsNormalGemItem(item);
@@ -2157,7 +2209,8 @@ namespace Turbo.Plugins.s7o
                 if (candidate.Kind != StoreKind.Stackable)
                     return false;
 
-                return SameSeedWhenKnown(item, candidate.Seed);
+                return ShouldStoreStackable(item) && HasSpecialStackableStorageBasics(item)
+                    && SameSeedWhenKnown(item, candidate.Seed);
             }
 
             if (!TryClassMatches(candidate.Kind, item))
@@ -2318,10 +2371,13 @@ namespace Turbo.Plugins.s7o
             DrawPillButton(_hotkeyButtonRect, _capturingHotkey ? "..." : StoreItemsHotkey.ToString(), _capturingHotkey);
             DrawText(YellowFont, "to store items", _headerTailX, _headerPressY);
 
-            DrawToggleButton(_stackablesRect, "Stacks", StoreStackables);
+            DrawToggleButton(_stackablesRect, "Gems", StoreGems);
             DrawToggleButton(_legendaryGemsRect, "Legendary Gems", StoreLegendaryGems);
             DrawToggleButton(_primalsRect, "Primals", StorePrimals);
             DrawToggleButton(_ancientsRect, "Ancients", StoreAncients);
+            DrawToggleButton(_storeScreamsRect, "Screams", StoreScreams);
+            DrawToggleButton(_storeGiftsRect, "Gifts", StoreGifts);
+            DrawToggleButton(_storeOthersRect, "Others", StoreOthers);
 
             DrawText(SmallFont, "Preferred item tab:", _tabLabelX, _tabLabelY);
             DrawSegmentedTabControl();
@@ -2368,6 +2424,7 @@ namespace Turbo.Plugins.s7o
         {
             _hotkeyButtonRect = RectangleF.Empty;
             _stackablesRect = RectangleF.Empty;
+            _storeScreamsRect = _storeGiftsRect = _storeOthersRect = RectangleF.Empty;
             _legendaryGemsRect = RectangleF.Empty;
             _primalsRect = RectangleF.Empty;
             _ancientsRect = RectangleF.Empty;
@@ -2465,129 +2522,80 @@ namespace Turbo.Plugins.s7o
             return false;
         }
 
+
         private bool UpdateStoragePanelLayout()
         {
-            _hotkeyButtonRect = RectangleF.Empty;
-            _stackablesRect = RectangleF.Empty;
-            _legendaryGemsRect = RectangleF.Empty;
-            _primalsRect = RectangleF.Empty;
-            _ancientsRect = RectangleF.Empty;
-            _sellGiftsRect = RectangleF.Empty;
-            _sellScreamsRect = RectangleF.Empty;
-            _sellGemsRect = RectangleF.Empty;
-            _dropUnidentifiedRect = RectangleF.Empty;
-            _tabMinusRect = RectangleF.Empty;
-            _tabValueRect = RectangleF.Empty;
-            _tabPlusRect = RectangleF.Empty;
-            _tabControlRect = RectangleF.Empty;
-            _headerPressX = _headerPressY = _headerTailX = 0.0f;
-            _tabLabelX = _tabLabelY = _statusY = 0.0f;
-
-            if (!IsStashVisible())
-                return false;
-
-            int maxTab = GetPreferredTabUiMax();
-            if (PreferredItemTab > maxTab)
-                PreferredItemTab = maxTab;
-
-            _storagePanelTwoRows = false;
-            var panel = GetStoragePanelRect();
-            if (panel.Width <= 0 || panel.Height <= 0)
-                return false;
-
-            float centerX = panel.X + panel.Width * 0.5f;
-
-            _headerPressY = panel.Y + 5.0f;
-            const float headerGap = 9.0f;
-            string hotkeyText = _capturingHotkey ? "..." : StoreItemsHotkey.ToString();
-            float pressW = MeasureTextWidth(YellowFont, "Press");
-            float tailW = MeasureTextWidth(YellowFont, "to store items");
-            float hotkeyW = Math.Max(HotkeyButtonWidth, MeasureTextWidth(ButtonFont, hotkeyText) + 18.0f);
-            float headerTotalW = pressW + headerGap + hotkeyW + headerGap + tailW;
-            _headerPressX = centerX - headerTotalW * 0.5f;
-            _hotkeyButtonRect = new RectangleF(_headerPressX + pressW + headerGap, _headerPressY - 2.0f, hotkeyW, SmallButtonHeight);
-            _headerTailX = _hotkeyButtonRect.Right + headerGap;
-
-            float toggleY = panel.Y + 28.0f;
-            float toggleGap = 16.0f;
-            float stackW = GetToggleWidth("Stacks");
-            float legendaryGemW = GetToggleWidth("Legendary Gems");
-            float primalW = GetToggleWidth("Primals");
-            float ancientW = GetToggleWidth("Ancients");
-            float toggleTotalW = stackW + toggleGap + legendaryGemW + toggleGap + primalW + toggleGap + ancientW;
-            float availableToggleW = Math.Max(1.0f, panel.Width - 20.0f);
-
-            if (toggleTotalW > availableToggleW)
+            _hotkeyButtonRect = _stackablesRect = _legendaryGemsRect = _primalsRect = _ancientsRect = RectangleF.Empty;
+            _storeScreamsRect = _storeGiftsRect = _storeOthersRect = RectangleF.Empty;
+            _sellGiftsRect = _sellScreamsRect = _sellGemsRect = _dropUnidentifiedRect = RectangleF.Empty;
+            _tabMinusRect = _tabValueRect = _tabPlusRect = _tabControlRect = RectangleF.Empty;
+            if (!IsStashVisible()) return false;
+            PreferredItemTab=Math.Min(PreferredItemTab,GetPreferredTabUiMax());
+            _storagePanelTwoRows=false;
+            var panel=GetStoragePanelRect();
+            if(panel.Width<=0 || panel.Height<=0)return false;
+            float gap=8f;
+            float gems=GetToggleWidth("Gems"), legendary=GetToggleWidth("Legendary Gems");
+            float primal=GetToggleWidth("Primals"), ancient=GetToggleWidth("Ancients");
+            float total=gems+legendary+primal+ancient+gap*3;
+            _storagePanelTwoRows=total>panel.Width-20;
+            panel=GetStoragePanelRect();
+            float center=panel.X+panel.Width*0.5f;
+            _headerPressY=panel.Y+5;
+            float press=MeasureTextWidth(YellowFont,"Press"), tail=MeasureTextWidth(YellowFont,"to store items");
+            float key=Math.Max(HotkeyButtonWidth,MeasureTextWidth(ButtonFont,_capturingHotkey ? "..." : StoreItemsHotkey.ToString())+18);
+            _headerPressX=center-(press+tail+key+18)*0.5f;
+            _hotkeyButtonRect=new RectangleF(_headerPressX+press+9,_headerPressY-2,key,SmallButtonHeight);
+            _headerTailX=_hotkeyButtonRect.Right+9;
+            float y=panel.Y+28;
+            if(!_storagePanelTwoRows)
             {
-                toggleGap = 6.0f;
-                toggleTotalW = stackW + toggleGap + legendaryGemW + toggleGap + primalW + toggleGap + ancientW;
-            }
-
-            float tabY;
-            if (toggleTotalW <= availableToggleW)
-            {
-                float toggleX = centerX - toggleTotalW * 0.5f;
-                _stackablesRect = new RectangleF(toggleX, toggleY, stackW, SmallButtonHeight);
-                _legendaryGemsRect = new RectangleF(_stackablesRect.Right + toggleGap, toggleY, legendaryGemW, SmallButtonHeight);
-                _primalsRect = new RectangleF(_legendaryGemsRect.Right + toggleGap, toggleY, primalW, SmallButtonHeight);
-                _ancientsRect = new RectangleF(_primalsRect.Right + toggleGap, toggleY, ancientW, SmallButtonHeight);
-                tabY = panel.Y + 52.0f;
+                float x=center-total*0.5f;
+                _stackablesRect=new RectangleF(x,y,gems,SmallButtonHeight);
+                _legendaryGemsRect=new RectangleF(_stackablesRect.Right+gap,y,legendary,SmallButtonHeight);
+                _primalsRect=new RectangleF(_legendaryGemsRect.Right+gap,y,primal,SmallButtonHeight);
+                _ancientsRect=new RectangleF(_primalsRect.Right+gap,y,ancient,SmallButtonHeight);
             }
             else
             {
-                _storagePanelTwoRows = true;
-                panel = GetStoragePanelRect();
-                centerX = panel.X + panel.Width * 0.5f;
-
-                const float rowGap = 10.0f;
-                float firstRowW = stackW + rowGap + legendaryGemW;
-                float secondRowW = primalW + rowGap + ancientW;
-                float firstX = centerX - firstRowW * 0.5f;
-                float secondX = centerX - secondRowW * 0.5f;
-
-                _stackablesRect = new RectangleF(firstX, toggleY, stackW, SmallButtonHeight);
-                _legendaryGemsRect = new RectangleF(_stackablesRect.Right + rowGap, toggleY, legendaryGemW, SmallButtonHeight);
-                _primalsRect = new RectangleF(secondX, toggleY + 19.0f, primalW, SmallButtonHeight);
-                _ancientsRect = new RectangleF(_primalsRect.Right + rowGap, toggleY + 19.0f, ancientW, SmallButtonHeight);
-                tabY = panel.Y + 70.0f;
+                float x=center-(gems+legendary+gap)*0.5f;
+                _stackablesRect=new RectangleF(x,y,gems,SmallButtonHeight);
+                _legendaryGemsRect=new RectangleF(_stackablesRect.Right+gap,y,legendary,SmallButtonHeight);
+                x=center-(primal+ancient+gap)*0.5f; y+=24;
+                _primalsRect=new RectangleF(x,y,primal,SmallButtonHeight);
+                _ancientsRect=new RectangleF(_primalsRect.Right+gap,y,ancient,SmallButtonHeight);
             }
-            float tabLabelW = MeasureTextWidth(SmallFont, "Preferred item tab:");
-            float tabGap = 11.0f;
-            float tabTotalW = tabLabelW + tabGap + TabControlWidth;
-            _tabLabelX = centerX - tabTotalW * 0.5f;
-            _tabLabelY = tabY + 2.0f;
-            float tabX = _tabLabelX + tabLabelW + tabGap;
-            float side = 28.0f;
-            _tabControlRect = new RectangleF(tabX, tabY, TabControlWidth, SmallButtonHeight);
-            _tabMinusRect = new RectangleF(tabX, tabY, side, SmallButtonHeight);
-            _tabValueRect = new RectangleF(tabX + side, tabY, Math.Max(1.0f, TabControlWidth - side * 2.0f), SmallButtonHeight);
-            _tabPlusRect = new RectangleF(_tabValueRect.Right, tabY, side, SmallButtonHeight);
-
-            _statusY = panel.Y + (_storagePanelTwoRows ? 89.0f : 69.0f);
+            y+=24;
+            float screams=GetToggleWidth("Screams"), gifts=GetToggleWidth("Gifts"), others=GetToggleWidth("Others");
+            float lowerX=center-(screams+gifts+others+gap*2)*0.5f;
+            _storeScreamsRect=new RectangleF(lowerX,y,screams,SmallButtonHeight);
+            _storeGiftsRect=new RectangleF(_storeScreamsRect.Right+gap,y,gifts,SmallButtonHeight);
+            _storeOthersRect=new RectangleF(_storeGiftsRect.Right+gap,y,others,SmallButtonHeight);
+            float tabY=y+24, label=MeasureTextWidth(SmallFont,"Preferred item tab:");
+            _tabLabelX=center-(label+11+TabControlWidth)*0.5f; _tabLabelY=tabY+2;
+            float tabX=_tabLabelX+label+11;
+            _tabControlRect=new RectangleF(tabX,tabY,TabControlWidth,SmallButtonHeight);
+            _tabMinusRect=new RectangleF(tabX,tabY,28,SmallButtonHeight);
+            _tabValueRect=new RectangleF(tabX+28,tabY,Math.Max(1,TabControlWidth-56),SmallButtonHeight);
+            _tabPlusRect=new RectangleF(_tabValueRect.Right,tabY,28,SmallButtonHeight);
+            _statusY=tabY+24;
             return true;
         }
 
+
         private RectangleF GetStoragePanelRect()
         {
-            var stash = Hud.Inventory.StashMainUiElement;
-            var r = stash != null ? stash.Rectangle : RectangleF.Empty;
-            if (r.Width <= 0 || r.Height <= 0)
-                return RectangleF.Empty;
-
-            float left = r.Left + Math.Max(0.0f, PanelLeftOffset);
-            float w = Math.Min(PanelWidth, Math.Max(300.0f, r.Width - Math.Max(0.0f, PanelLeftOffset) - Math.Max(0.0f, PanelRightClearance)));
-            float x = r.Left + (r.Width - w) * 0.5f + Math.Max(0.0f, PanelLeftOffset) * 0.5f;
-            float maxRight = r.Right - Math.Max(24.0f, PanelRightClearance);
-            if (x + w > maxRight)
-                x = maxRight - w;
-            if (x < left)
-                x = left;
-
-            float y = r.Top + PanelTopOffset;
-            float h = _storagePanelTwoRows
-                ? Math.Max(106.0f, PanelHeight + 20.0f)
-                : Math.Max(82.0f, PanelHeight);
-            return new RectangleF(x, y, w, h);
+            var stash=Hud.Inventory.StashMainUiElement;
+            var r=stash!=null ? stash.Rectangle : RectangleF.Empty;
+            if(r.Width<=0 || r.Height<=0)return RectangleF.Empty;
+            float clearance=Math.Max(24,PanelRightClearance), left=Math.Max(0,PanelLeftOffset);
+            float lower=GetToggleWidth("Screams")+GetToggleWidth("Gifts")+GetToggleWidth("Others")+36;
+            float pair=Math.Max(GetToggleWidth("Gems")+GetToggleWidth("Legendary Gems"),GetToggleWidth("Primals")+GetToggleWidth("Ancients"))+28;
+            float w=Math.Min(Math.Max(PanelWidth,Math.Max(lower,pair)),Math.Max(1,r.Width-left-clearance));
+            float x=Math.Max(r.Left+left,Math.Min(r.Right-clearance-w,r.Left+(r.Width-w)*0.5f+left*0.5f));
+            float h=_storagePanelTwoRows ? Math.Max(150,PanelHeight+64) : Math.Max(126,PanelHeight+40);
+            float y=Math.Max(r.Top,Math.Min(r.Top+PanelTopOffset,r.Bottom-h));
+            return new RectangleF(x,y,w,h);
         }
 
         private void DrawToggleButton(RectangleF rect, string label, bool on)
@@ -2988,17 +2996,20 @@ namespace Turbo.Plugins.s7o
             if (_settingsVersion >= StorageSettingsVersion)
                 return;
 
-            if (StoreItemsTabSwitchDelayMs == 140) StoreItemsTabSwitchDelayMs = 100;
-            if (StoreItemsClickDelayMs == 90) StoreItemsClickDelayMs = 30;
-            if (_settingsVersion == 10 && StoreItemsClickDelayMs == 50) StoreItemsClickDelayMs = 30;
-            if (_settingsVersion < 6) SellGems = true;
-            if (_settingsVersion < 8)
+            if (_settingsVersion < 11)
             {
-                DropNonAccountBoundLegendaries = false;
-                DropTrashItems = true;
-                DropGifts = true;
-                DropScreams = false;
-                DropGems = false;
+                if (StoreItemsTabSwitchDelayMs == 140) StoreItemsTabSwitchDelayMs = 100;
+                if (StoreItemsClickDelayMs == 90) StoreItemsClickDelayMs = 30;
+                if (_settingsVersion == 10 && StoreItemsClickDelayMs == 50) StoreItemsClickDelayMs = 30;
+                if (_settingsVersion < 6) SellGems = true;
+                if (_settingsVersion < 8)
+                {
+                    DropNonAccountBoundLegendaries = false;
+                    DropTrashItems = true;
+                    DropGifts = true;
+                    DropScreams = false;
+                    DropGems = false;
+                }
             }
             _settingsVersion = StorageSettingsVersion;
         }
@@ -3048,6 +3059,10 @@ namespace Turbo.Plugins.s7o
                     else if (key.Equals("DropScreams", StringComparison.OrdinalIgnoreCase)) DropScreams = ParseBool(value, DropScreams);
                     else if (key.Equals("DropGems", StringComparison.OrdinalIgnoreCase)) DropGems = ParseBool(value, DropGems);
                     else if (key.Equals("StoreStackables", StringComparison.OrdinalIgnoreCase)) StoreStackables = ParseBool(value, StoreStackables);
+                    else if (key.Equals("StoreGems", StringComparison.OrdinalIgnoreCase)) StoreGems = ParseBool(value, StoreGems);
+                    else if (key.Equals("StoreScreams", StringComparison.OrdinalIgnoreCase)) StoreScreams = ParseBool(value, StoreScreams);
+                    else if (key.Equals("StoreGifts", StringComparison.OrdinalIgnoreCase)) StoreGifts = ParseBool(value, StoreGifts);
+                    else if (key.Equals("StoreOthers", StringComparison.OrdinalIgnoreCase)) StoreOthers = ParseBool(value, StoreOthers);
                     else if (key.Equals("StoreLegendaryGems", StringComparison.OrdinalIgnoreCase)) StoreLegendaryGems = ParseBool(value, StoreLegendaryGems);
                     else if (key.Equals("StorePrimals", StringComparison.OrdinalIgnoreCase)) StorePrimals = ParseBool(value, StorePrimals);
                     else if (key.Equals("StoreAncients", StringComparison.OrdinalIgnoreCase)) StoreAncients = ParseBool(value, StoreAncients);
@@ -3085,7 +3100,10 @@ namespace Turbo.Plugins.s7o
                     "DropGifts=" + DropGifts + Environment.NewLine +
                     "DropScreams=" + DropScreams + Environment.NewLine +
                     "DropGems=" + DropGems + Environment.NewLine +
-                    "StoreStackables=" + StoreStackables + Environment.NewLine +
+                    "StoreGems=" + StoreGems + Environment.NewLine +
+                    "StoreScreams=" + StoreScreams + Environment.NewLine +
+                    "StoreGifts=" + StoreGifts + Environment.NewLine +
+                    "StoreOthers=" + StoreOthers + Environment.NewLine +
                     "StoreLegendaryGems=" + StoreLegendaryGems + Environment.NewLine +
                     "StorePrimals=" + StorePrimals + Environment.NewLine +
                     "StoreAncients=" + StoreAncients + Environment.NewLine +
