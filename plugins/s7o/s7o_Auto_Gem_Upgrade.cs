@@ -279,6 +279,126 @@ namespace Turbo.Plugins.s7o
             finally { if(prior!=IntPtr.Zero)SetThreadDpiAwarenessContext(prior); }
         }
 
+        [DllImport("user32.dll", EntryPoint="PostMessageW", SetLastError=true)]
+        private static extern bool PostUiMessage(IntPtr window,uint message,IntPtr keys,IntPtr point);
+        [DllImport("user32.dll", EntryPoint="GetClassNameW", CharSet=CharSet.Unicode)]
+        private static extern int MessageWindowClass(IntPtr window,StringBuilder text,int capacity);
+        [DllImport("user32.dll", EntryPoint="GetAsyncKeyState")]
+        private static extern short MessageMouseState(int key);
+        private static IntPtr _messageReleaseWindow, _messageReleasePoint;
+        private static int _messageInputFrame, _messageInputTick, _messageManualMask;
+        private static int _messageManualReleaseFrame = -1, _messageManualReleaseTick = int.MinValue;
+        private static int _messageDownFrame, _messageBalancedFrame = -1, _messageBalancedTick = int.MinValue;
+        private static bool _messageMouseKnown;
+        public static string MessageInputGate { get; private set; } = "not-observed";
+        public static bool MessageReleasePending { get { return _messageReleaseWindow != IntPtr.Zero; } }
+        public static bool MessagePairNeedsHandoff
+        {
+            get { return MessageReleasePending || (_messageBalancedFrame >= 0
+                && (_messageBalancedFrame == _messageInputFrame || _messageBalancedTick == _messageInputTick)); }
+        }
+
+        public static void BeginMessageInputFrame(IController hud)
+        {
+            unchecked { _messageInputFrame++; }
+            _messageInputTick = hud != null && hud.Game != null ? hud.Game.CurrentGameTick : int.MinValue;
+            MessageMouseHeld();
+            // Balance only our own deferred DOWN, after manual ownership has ended.
+            // This also runs when closing the pane means no further click is requested.
+            if (MessageReleasePending && hud != null && hud.Window != null && hud.Window.IsForeground
+                && GetForegroundWindow() == _messageReleaseWindow) CompleteMessageRelease();
+        }
+
+        public static bool MessageMouseHeld()
+        {
+            int mask = ((MessageMouseState(0x01) & 0x8000) != 0 ? 1 : 0)
+                | ((MessageMouseState(0x02) & 0x8000) != 0 ? 2 : 0)
+                | ((MessageMouseState(0x04) & 0x8000) != 0 ? 4 : 0);
+            if (!_messageMouseKnown || mask != _messageManualMask)
+            {
+                int previous = _messageManualMask;
+                if (_messageMouseKnown && previous != 0 && mask == 0)
+                {
+                    _messageManualReleaseFrame = _messageInputFrame;
+                    _messageManualReleaseTick = _messageInputTick;
+                }
+                _messageManualMask = mask;
+                _messageMouseKnown = true;
+            }
+            return mask != 0;
+        }
+
+        private static bool MessageInputAvailable()
+        {
+            bool held = MessageMouseHeld();
+            string reason = held ? "manual-held" : _messageInputFrame == 0 ? "not-observed"
+                : _messageManualReleaseFrame >= 0 && (_messageManualReleaseFrame == _messageInputFrame
+                    || _messageManualReleaseTick == _messageInputTick) ? "manual-release-handoff"
+                : !MessageReleasePending && MessagePairNeedsHandoff ? "synthetic-release-handoff" : "ready";
+            MessageInputGate = reason;
+            return reason == "ready";
+        }
+
+        private static bool CompleteMessageRelease()
+        {
+            if (!MessageInputAvailable()) return false;
+            if (_messageReleaseWindow == IntPtr.Zero) return true;
+            // The UP matches our original window and point; never release the OS mouse.
+            if (!PostUiMessage(_messageReleaseWindow, 0x0202, IntPtr.Zero, _messageReleasePoint)) return false;
+            if (_messageDownFrame != _messageInputFrame)
+            { _messageBalancedFrame = _messageInputFrame; _messageBalancedTick = _messageInputTick; }
+            _messageReleaseWindow = _messageReleasePoint = IntPtr.Zero;
+            return true;
+        }
+
+        public static bool MessageClickClient(IController hud, int x, int y)
+        {
+            if (hud == null || hud.Window == null || !hud.Window.IsForeground) return false;
+            if (!MessageInputAvailable() || !CompleteMessageRelease()) return false;
+            IntPtr window, point;
+            if (!TryMessagePoint(hud, x, y, false, out window, out point) || !MessageInputAvailable()) return false;
+            if (!PostUiMessage(window, 0x0201, new IntPtr(1), point)) return false;
+            _messageReleaseWindow = window; _messageReleasePoint = point;
+            _messageDownFrame = _messageInputFrame;
+            return CompleteMessageRelease();
+        }
+
+
+        private static IntPtr MessagePackedPoint(int x,int y)
+        {
+            return new IntPtr(unchecked((int)((uint)(ushort)x|((uint)(ushort)y<<16))));
+        }
+        private static bool TryMessagePoint(IController hud,int x,int y,bool screen,out IntPtr window,out IntPtr packed)
+        {
+            window=packed=IntPtr.Zero;
+            if(hud==null || hud.Window==null || !hud.Window.IsForeground || MessageMouseHeld())return false;
+            var size=hud.Window.Size;
+            if(size.Width<=0 || size.Height<=0 || x<0 || y<0 || x>=size.Width || y>=size.Height)return false;
+            IntPtr prior=IntPtr.Zero;
+            try
+            {
+                try { prior=SetThreadDpiAwarenessContext(new IntPtr(-4)); }
+                catch(EntryPointNotFoundException) { }
+                window=GetForegroundWindow();
+                var name=new StringBuilder(64);
+                if(window==IntPtr.Zero || MessageWindowClass(window,name,name.Capacity)==0
+                    || name.ToString()!="D3 Main Window Class")return false;
+                NativeRect rect;
+                if(!GetClientRect(window,out rect) || rect.Right<=rect.Left || rect.Bottom<=rect.Top)return false;
+                var point=new NativePoint {
+                    X=(int)Math.Round((double)x*(rect.Right-rect.Left)/size.Width),
+                    Y=(int)Math.Round((double)y*(rect.Bottom-rect.Top)/size.Height) };
+                if(screen && !ClientToScreen(window,ref point))return false;
+                if(point.X<short.MinValue || point.X>short.MaxValue || point.Y<short.MinValue || point.Y>short.MaxValue
+                    || GetForegroundWindow()!=window || !hud.Window.IsForeground || MessageMouseHeld())return false;
+                packed=MessagePackedPoint(point.X,point.Y);return true;
+            }
+            catch { return false; }
+            finally { if(prior!=IntPtr.Zero)SetThreadDpiAwarenessContext(prior); }
+        }
+
+
+
         public static bool MouseMoveClient(IController hud, int x, int y)
         {
             Point screen;
@@ -359,6 +479,8 @@ namespace Turbo.Plugins.s7o
 public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IInGameTopPainter, INewAreaHandler
     {
         public bool AutoStartEnabled { get; set; } = true;
+        // Experimental pane-only input; false retains the established physical-mouse path.
+        public bool UseWindowMessageInput { get; set; } = true;
 
         public bool PreferHighestNonMaxFirst { get; set; } = false;
 
@@ -507,7 +629,7 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
         private IUiElement _itemsList;
         private IUiElement _itemsContent;
         private IUiElement _stackPanel;
-        private IUiElement _scrollBar;
+        private IUiElement _scrollBar, _scrollThumb, _scrollUp, _scrollDown;
         private IUiElement _upgradeButton;
         private IUiElement _itemButton;
         private IUiElement _gemStatusText;
@@ -694,6 +816,9 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
             _itemsContent = Hud.Render.RegisterUiElement(root + ".items_list._content", null, null);
             _stackPanel = Hud.Render.RegisterUiElement(root + ".items_list._content._stackpanel", null, null);
             _scrollBar = Hud.Render.RegisterUiElement(root + ".items_list._scrollbar", null, null);
+            _scrollThumb = Hud.Render.RegisterUiElement(root + ".items_list._scrollbar.thumb", null, null);
+            _scrollUp = Hud.Render.RegisterUiElement(root + ".items_list._scrollbar.up", null, null);
+            _scrollDown = Hud.Render.RegisterUiElement(root + ".items_list._scrollbar.down", null, null);
             _upgradeButton = Hud.Render.RegisterUiElement(root + ".upgrade_button", null, null);
             _itemButton = Hud.Render.RegisterUiElement(root + ".item_button", null, null);
             _gemStatusText = Hud.Render.RegisterUiElement(root + ".gemStatusText", null, null);
@@ -703,6 +828,8 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
             RegisterNativeRows(24);
 
             _warningFont = Hud.Render.CreateFont("tahoma", 8, 255, 255, 70, 70, true, false, 220, 0, 0, 0, true);
+            _inventoryPortalWaitFill=Hud.Render.CreateBrush(62,200,15,15,0);
+            _inventoryPortalWaitBorder=Hud.Render.CreateBrush(210,255,65,65,2);
 
         }
 
@@ -750,8 +877,9 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
             _lastMenuSpecificName = specificName;
         }
 
-        public void AfterCollect()
+public void AfterCollect()
         {
+            FreeHudInput.BeginMessageInputFrame(Hud);
             // HUD cursor coordinates settle on the following collection after our input.
             // Refresh during the existing ignore window, without extending that window.
             if (NowTick() < _cursorIgnoreUntilTick)
@@ -820,6 +948,7 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
 
             _lastConversationCloseTick = int.MinValue;
 
+            if (WindowPaneInputActive()) ObserveMessageScroll();
             int upgrades = GetUpgradeAttempts();
             // Run-level portal clock survives gem changes. Never inject T during an owned
             // mouse drag or a pending key/mouse pulse; service it at the first free update.
@@ -827,6 +956,9 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
                 && _pendingInputKind == PendingInputKind.None
                 && TryRequestTimedPortalDuringRun(NowTick()))
                 return;
+            // Keep the existing portal clock active when this count read fails.
+            if (upgrades < 0) return;
+            if (upgrades > 0) _tailWaitAfterFinalAttempt = false;
             if (_tailWaitAfterFinalAttempt)
             {
                 ObserveFinalNativeAttempt(upgrades);
@@ -958,6 +1090,7 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
 
         private void HandleRunningState(int upgrades)
         {
+            if (upgrades < 0) return;
             int now = NowTick();
             int buttonAnim = SafeAnimState(_upgradeButton);
             bool buttonVisible = _upgradeButton != null && _upgradeButton.Visible;
@@ -987,14 +1120,29 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
             if (TryRequestTimedPortalDuringRun(now))
                 return;
 
-            if ((_autoAwaitingResolution || _lowestAwaitingResolution || _persistentAwaitingResolution)
-                && upgrades > 0)
+            if (_nativeAttemptKey != null && upgrades > 0)
             {
                 if (WaitForNativeAttempt(upgrades)) return;
                 if (buttonAnim==27 && upgrades<_nativeAttemptCount)
                 {
                     TryPrepositionForPlannedTarget(upgrades,"overlap");
                     if(TryPrepareConfirmedNativeSelection(upgrades))return;
+                }
+                if (upgrades < _nativeAttemptCount && !NativeAttemptResolved())
+                {
+                    // Navigation may overlap an unknown result only when both outcomes
+                    // choose the same ACD. No mode can spend the next attempt while unknown.
+                    if (buttonAnim != 27 && TryPrepareConfirmedNativeSelection(upgrades)) return;
+                    if (_nativeConsumedTick != int.MinValue && buttonAnim == 27
+                        && ElapsedMs(_nativeConsumedTick) >= 1600)
+                    {
+                        BeginCurrentTargetRecoveryFromRunning("upgrade UI did not settle; reacquiring");
+                        return;
+                    }
+
+                    // Preserve the original consumption bookkeeping during animation;
+                    // its 10ms retarget window must expire before readiness, not after it.
+                    if (buttonAnim != 27) return;
                 }
                 if (WasLastUpgradeSuccessful())
                 {
@@ -1157,15 +1305,7 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
                         if (TryHandleLowestSuccessNoReadyCapStop(upgrades))
                             return;
 
-                        // LOW has independently eligible gems. The consumed attempt's
-                        // result stays keyed to its ACD while the next gem is selected.
-                        // No next upgrade is allowed until native button readiness returns.
-                        GemTarget next = GetLowestBalancePlannedTarget();
-                        if (next != null && !SameGem(next, _target))
-                        {
-                            BeginPlannedRetarget(next);
-                            return;
-                        }
+                        if (TryPrepareConfirmedNativeSelection(upgrades)) return;
                         TryPrepositionForPlannedTarget(upgrades, "lowest");
                         return;
                     }
@@ -1175,13 +1315,6 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
                         return;
 
                     bool succeeded = WasLastUpgradeSuccessful();
-                    if (!succeeded && _nativeAttemptKey != null && _unconfirmedLowAttempts.ContainsKey(_nativeAttemptKey))
-                    {
-                        // Keep the portal scheduler active while waiting for either updated
-                        // native rank evidence or a different eligible gem.
-                        if (GetLowestBalancePlannedTarget() == null)
-                            return;
-                    }
                     _lowestAwaitingResolution = false;
                     _lowestUpgradeClickStartUpgrades = int.MinValue;
                     _lowestAttemptResolvedTick = int.MinValue;
@@ -1308,14 +1441,21 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
                 && upgrades != _lastRecoveryUpgradeAttempts;
             bool lowestHold = IsLowestBalanceMode() && _lowestAwaitingResolution;
             bool autoHold = AutoPercentMode && _autoAwaitingResolution;
+            bool priorAttemptConsumed = _nativeAttemptKey == null
+                || upgrades < _nativeAttemptCount;
             bool canClickUpgrade = buttonVisible
+                && (_nativeAttemptKey == null || NativeAttemptResolved())
+                && priorAttemptConsumed
                 && selectedReady
                 && loaded
                 && !lowestHold
                 && !autoHold
                 && ElapsedMs(_lastUpgradeClickTick) >= UpgradeClickDelayMs
-                && (!_retargetNeedsButtonReady || animReady)
-                && (firstClickPending || animReady || IgnoreUpgradeButtonAnimGate || recoveryReady);
+                // Preserve the original first-click/recovery exceptions. Selected ACD and
+                // attempt consumption are checked separately; animation alone cannot stall
+                // a capped transition forever.
+                && (firstClickPending || animReady || IgnoreUpgradeButtonAnimGate
+                    || (recoveryReady && (!_retargetNeedsButtonReady || PreviousNativeGemAtCap())));
 
             if (canClickUpgrade)
             {
@@ -1326,8 +1466,9 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
                 int nativePreRank = Math.Max(GetConfirmedLowRank(nativeGem.Item), directPreRank);
                 string nativeKey = BuildItemKey(nativeGem.Item);
                 if (!ClickUi(_upgradeButton)) return;
+                _nativeOutcome = NativeAttemptOutcome.Pending;
+                _nativeOutcomePrepared = false;
                 _nativeAttemptKey = nativeKey;
-                _nativeLowPendingUntil.Remove(nativeKey);
                 _nativeAttemptRank = nativePreRank;
                 _nativeDirectBaseline = directPreRank;
                 _nativeAttemptCount = upgrades;
@@ -1426,7 +1567,6 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
         private int _nativeConsumedTick = int.MinValue;
         private bool _nativeAttemptSucceeded;
         private readonly Dictionary<string, int> _confirmedLowRanks = new Dictionary<string, int>(StringComparer.Ordinal);
-        private readonly Dictionary<string, int> _unconfirmedLowAttempts = new Dictionary<string, int>(StringComparer.Ordinal);
 
         private static bool SameGem(GemTarget a, GemTarget b)
         {
@@ -1441,131 +1581,92 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
                 g != null && g.Item != null && BuildItemKey(g.Item) == key);
         }
 
-        private readonly Dictionary<string,int> _nativeLowPendingUntil = new Dictionary<string,int>(StringComparer.Ordinal);
 
-        private bool CanContinueWithoutRankWait(GemOrderEntry gem)
+
+
+
+        private static string NormalizeCompletedResult(string value)
         {
-            if (gem == null || gem.Item == null || !IsNativeTargetSelected(_target)
-                || !SafeUiVisible(_upgradeButton) || SafeAnimState(_upgradeButton) < 0
-                || SafeAnimState(_upgradeButton) == 27) return false;
-            // Bound every possible delayed success in this run, without inventing ranks.
-            // Near a cap or AUTO's 60% boundary, retain result-based planning.
-            int maxRank = gem.Item.JewelRank + Math.Max(1, _initialUpgradeAttemptsThisRun);
-            if (FastFallbackMode && gem.CanAttemptAt150Fallback && gem.Item.JewelRank >= 150)
-                return true;
-            if (maxRank >= gem.EffectiveStopCap) return false;
-            if (!string.IsNullOrWhiteSpace(ForcedGemNameExact))
-                return s7o_AutoGemUpgradeState.AutoGemSpecificSubMode == 1;
-            if (AutoPercentMode) return maxRank <= GetCurrentGreaterRiftLevel();
-            return PreferHighestNonMaxFirst || FastFallbackMode;
+            if (string.IsNullOrEmpty(value)) return string.Empty;
+            var normalized = value.Normalize(NormalizationForm.FormKC);
+            var result = new StringBuilder(normalized.Length);
+            foreach (char c in normalized)
+                if (char.IsLetterOrDigit(c)) result.Append(char.ToUpperInvariant(c));
+            return result.ToString();
         }
-
         private int ReadCompletedUiResult()
         {
             try
             {
                 if(_gemStatusText==null || !_gemStatusText.Visible)return 0;
-                string text=(_gemStatusText.ReadText(Encoding.UTF8,true) ?? "").Trim().TrimEnd('!','！','.');
+                string text=NormalizeCompletedResult(_gemStatusText.ReadText(Encoding.UTF8,true));
                 // Exact completed-result labels; unknown translations retain native fallback.
-                string[] success={"Upgrade Succeeded","강화 성공","강화 성공했습니다","升级成功","升級成功","強化成功","Mejora realizada","Mejora completada","Mejora conseguida","Aprimoramento realizado","Aprimoramento bem-sucedido","Amélioration réussie","Aufwertung erfolgreich","Potenziamento riuscito","Улучшение успешно","Улучшение удалось","Ulepszenie udane"};
-                string[] failure={"Upgrade Failed","강화 실패","강화 실패했습니다","升级失败","升級失敗","強化失敗","Mejora fallida","Aprimoramento falhou","Falha no aprimoramento","Échec de l’amélioration","Échec de l'amélioration","Aufwertung fehlgeschlagen","Potenziamento fallito","Улучшение не удалось","Ulepszenie nieudane"};
-                if(success.Any(x=>string.Equals(text,x,StringComparison.OrdinalIgnoreCase)))return 1;
-                if(failure.Any(x=>string.Equals(text,x,StringComparison.OrdinalIgnoreCase)))return -1;
+                string[] success={"Upgrade Succeeded","업그레이드 성공","강화 성공","강화 성공했습니다","升级成功","升級成功","強化成功","Mejora realizada","Mejora completada","Mejora conseguida","Aprimoramento realizado","Aprimoramento bem-sucedido","Amélioration réussie","Aufwertung erfolgreich","Potenziamento riuscito","Улучшение успешно","Улучшение удалось","Ulepszenie udane"};
+                string[] failure={"Upgrade Failed","업그레이드 실패","강화 실패","강화 실패했습니다","升级失败","升級失敗","強化失敗","Mejora fallida","Aprimoramento falhou","Falha no aprimoramento","Échec de l’amélioration","Échec de l'amélioration","Aufwertung fehlgeschlagen","Potenziamento fallito","Улучшение не удалось","Ulepszenie nieudane"};
+                if(success.Any(x=>string.Equals(text,NormalizeCompletedResult(x),StringComparison.Ordinal)))return 1;
+                if(failure.Any(x=>string.Equals(text,NormalizeCompletedResult(x),StringComparison.Ordinal)))return -1;
             }
             catch { }
             return 0;
         }
 
-        private bool WaitForNativeAttempt(int upgrades)
+private bool WaitForNativeAttempt(int upgrades)
         {
-            if (_nativeAttemptKey == null || upgrades >= _nativeAttemptCount) return false;
+            if (_nativeAttemptKey == null || NativeAttemptResolved()) return false;
+            int animation = SafeAnimState(_upgradeButton);
+            int uiResult = ReadCompletedUiResult();
+            if (upgrades >= _nativeAttemptCount) return false;
             if (_nativeConsumedTick == int.MinValue)
             {
                 _nativeConsumedTick = NowTick();
+                _nativeOutcome = NativeAttemptOutcome.Consumed;
+
             }
             var gem = FindNativeGem(_nativeAttemptKey);
             int directRank = gem == null ? -1 : ReadDirectGemRank(gem.Item);
-            int resultRank = gem == null ? -1 : Math.Max(gem.Item.JewelRank, directRank);
-            if (gem != null && resultRank > _nativeAttemptRank)
-            {
-                _nativeAttemptSucceeded = true;
-                int previous;
-                if (!_confirmedLowRanks.TryGetValue(_nativeAttemptKey, out previous) || resultRank > previous)
-                    _confirmedLowRanks[_nativeAttemptKey] = resultRank;
-                _unconfirmedLowAttempts.Remove(_nativeAttemptKey);
-                _nativeLowPendingUntil.Remove(_nativeAttemptKey);
-            }
-            // Use the completed UI result before waiting for inventory metadata.
-            // Bind it to this consumed attempt and require its animation cycle to finish.
-            if (gem!=null && _nativeConsumedTick!=int.MinValue
-                && _target!=null && _target.Source!=null && _target.Source.Item!=null
-                && BuildItemKey(_target.Source.Item)==_nativeAttemptKey
-                && IsNativeTargetSelected(_target) && SafeUiVisible(_upgradeButton)
-                && SafeAnimState(_upgradeButton)==24)
-            {
-                int uiResult=ReadCompletedUiResult();
-                if(uiResult!=0)
-                {
-                    _nativeAttemptSucceeded=uiResult>0;
-                    if(_nativeAttemptSucceeded)
-                    {
-                        int rank=Math.Max(resultRank,_nativeAttemptRank+1), previous;
-                        if(!_confirmedLowRanks.TryGetValue(_nativeAttemptKey,out previous) || rank>previous)
-                            _confirmedLowRanks[_nativeAttemptKey]=rank;
-                    }
-                    _unconfirmedLowAttempts.Remove(_nativeAttemptKey);
-                    _nativeLowPendingUntil.Remove(_nativeAttemptKey);
-                    return false;
-                }
-            }
-            // The direct attribute is read through IActor, not cached IItem.JewelRank.
-            // Require a valid pre-click baseline, the same selected gem and native ready state.
-            // An unavailable/inconsistent attribute never becomes an assumed failed roll.
-            bool directReady = DirectResultReady(_nativeDirectBaseline, _nativeAttemptRank, directRank,
-                _target != null && _target.Source != null && _target.Source.Item != null
-                    && BuildItemKey(_target.Source.Item)==_nativeAttemptKey && IsNativeTargetSelected(_target),
-                SafeUiVisible(_upgradeButton), SafeAnimState(_upgradeButton));
-            if (directReady)
-            {
-                _unconfirmedLowAttempts.Remove(_nativeAttemptKey);
-                _nativeLowPendingUntil.Remove(_nativeAttemptKey);
-                return false;
-            }
-            // Let each mode record consumption and preposition during animation.
-            // Its existing readiness gate still prevents the next upgrade/decision.
-            if (gem!=null && SafeUiVisible(_upgradeButton) && SafeAnimState(_upgradeButton)==27)
-                return false;
-            // Late native rank updates occur beyond 600ms. Delay only unresolved
-            // AUTO/HIGH/SPECIFIC results with a meaningful success chance; confirmed
-            // upgrades and the FAST 150-rank fallback keep their existing cadence.
-            bool selectionMode = AutoPercentMode || PreferHighestNonMaxFirst
-                || !string.IsNullOrWhiteSpace(ForcedGemNameExact);
-            int rankWaitMs = selectionMode && GetUpgradeChanceTier(GetCurrentGreaterRiftLevel(), _nativeAttemptRank) >= 60
-                ? 1250 : 600;
-            if (IsLowestBalanceMode() && !_nativeAttemptSucceeded && gem != null)
-            {
-                // Move to another eligible gem while this native rank update settles.
-                _unconfirmedLowAttempts[_nativeAttemptKey] = _nativeAttemptRank;
-                if (!_nativeLowPendingUntil.ContainsKey(_nativeAttemptKey))
-                    _nativeLowPendingUntil[_nativeAttemptKey] = NowTick() + 1250;
-                if (GetLowestBalancePlannedTarget() != null) return false;
-            }
-            if (!_nativeAttemptSucceeded && CanContinueWithoutRankWait(gem))
-            {
-                return false;
-            }
-            if (!_nativeAttemptSucceeded && ElapsedMs(_nativeConsumedTick) < rankWaitMs) return true;
-            if (IsLowestBalanceMode() && !_nativeAttemptSucceeded && gem != null)
-            {
-                _unconfirmedLowAttempts[_nativeAttemptKey] = _nativeAttemptRank;
-            }
+            int rank = gem == null ? -1 : Math.Max(gem.Item.JewelRank, directRank);
+            bool sameSelected = _target != null && _target.Source != null && _target.Source.Item != null
+                && BuildItemKey(_target.Source.Item) == _nativeAttemptKey && IsNativeTargetSelected(_target);
+            if (rank > _nativeAttemptRank)
+                ResolveNativeAttempt(true, rank);
+            // Completion belongs to the consumed attempt's native ready cycle.
+            // Consecutive failures/successes legitimately retain the same result label.
+            else if (sameSelected && animation == 24 && SafeUiVisible(_upgradeButton) && uiResult != 0)
+                ResolveNativeAttempt(uiResult > 0, uiResult > 0 ? _nativeAttemptRank + 1 : rank);
+            else if (DirectResultReady(_nativeDirectBaseline, _nativeAttemptRank,
+                directRank, sameSelected || _nativeOutcomePrepared, SafeUiVisible(_upgradeButton), animation))
+                ResolveNativeAttempt(directRank > _nativeAttemptRank, directRank);
+            if (NativeAttemptResolved()) return false;
             if (gem == null)
             {
                 BeginCurrentTargetRecoveryFromRunning("native upgrade item unavailable; reacquiring");
                 return true;
             }
+            // Uncertain outcomes permit preparation, never an assumed failed upgrade.
+            // The shared caller keeps the portal scheduler and native observations running.
             return false;
         }
+        private enum NativeAttemptOutcome { None, Pending, Consumed, Succeeded, Failed }
+        private NativeAttemptOutcome _nativeOutcome;
+        private bool _nativeOutcomePrepared;
+        private bool NativeAttemptResolved()
+        {
+            return _nativeOutcome == NativeAttemptOutcome.Succeeded || _nativeOutcome == NativeAttemptOutcome.Failed;
+        }
+        private void ResolveNativeAttempt(bool success, int rank)
+        {
+            _nativeAttemptSucceeded = success;
+            _nativeOutcome = success ? NativeAttemptOutcome.Succeeded : NativeAttemptOutcome.Failed;
+            if (success)
+            {
+                int previous;
+                rank = Math.Max(rank, _nativeAttemptRank + 1);
+                if (!_confirmedLowRanks.TryGetValue(_nativeAttemptKey, out previous) || rank > previous)
+                    _confirmedLowRanks[_nativeAttemptKey] = rank;
+            }
+
+        }
+
 
         private void ObserveFinalNativeAttempt(int upgrades)
         {
@@ -1583,10 +1684,7 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
             int resultRank = gem == null ? -1 : Math.Max(gem.Item.JewelRank, directRank);
             if (gem != null && resultRank > _nativeAttemptRank)
             {
-                _nativeAttemptSucceeded = true;
-                _confirmedLowRanks[_nativeAttemptKey] = resultRank;
-                _unconfirmedLowAttempts.Remove(_nativeAttemptKey);
-                _nativeLowPendingUntil.Remove(_nativeAttemptKey);
+                ResolveNativeAttempt(true, resultRank);
             }
         }
 
@@ -1615,38 +1713,15 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
         {
             _orderedGems.Clear();
             _orderedGems.AddRange(BuildOrderedGemEntries());
-            // If an attempt was consumed without conclusive rank confirmation, do not
-            // blindly reselect that same gem. The other known eligible gems are still actionable.
-            foreach (var g in _orderedGems)
-            {
-                if (g == null || g.Item == null) continue;
-                string key = BuildItemKey(g.Item);
-                int pendingRank;
-                int until;
-                if (_unconfirmedLowAttempts.ContainsKey(key))
-                {
-                    if (!_nativeLowPendingUntil.TryGetValue(key,out until))
-                        _nativeLowPendingUntil[key]=until=NowTick()+1250;
-                    if (unchecked(NowTick()-until)>=0)
-                    { _unconfirmedLowAttempts.Remove(key); _nativeLowPendingUntil.Remove(key); }
-                }
-                if (_unconfirmedLowAttempts.TryGetValue(key, out pendingRank) && g.Item.JewelRank > pendingRank)
-                {
-                    _unconfirmedLowAttempts.Remove(key);
-                    int earlier;
-                    if (!_confirmedLowRanks.TryGetValue(key, out earlier) || g.Item.JewelRank > earlier)
-                        _confirmedLowRanks[key] = g.Item.JewelRank;
-                }
-            }
             var chosen = _orderedGems
-                .Where(g => g != null && g.Item != null && !_unconfirmedLowAttempts.ContainsKey(BuildItemKey(g.Item))
+                .Where(g => g != null && g.Item != null
                     && GetConfirmedLowRank(g.Item) < g.EffectiveStopCap)
                 .OrderBy(g => GetConfirmedLowRank(g.Item))
                 .ThenBy(g => g.AbsoluteIndex)
                 .FirstOrDefault();
             if (chosen == null)
                 chosen = _orderedGems.Where(g => g != null && g.Item != null
-                        && !_unconfirmedLowAttempts.ContainsKey(BuildItemKey(g.Item)) && g.CanAttemptAt150Fallback)
+                        && g.CanAttemptAt150Fallback)
                     .OrderBy(g => g.AbsoluteIndex).FirstOrDefault();
             if (chosen == null) return null;
             return new GemTarget
@@ -1744,7 +1819,9 @@ public class s7o_AutoGemUpgradeNavigator : BasePlugin, IAfterCollectHandler, IIn
                 return;
             }
 
-            _lastObservedUpgradeAttempts = GetUpgradeAttempts();
+            int upgrades = GetUpgradeAttempts();
+            if (upgrades < 0) return;
+            _lastObservedUpgradeAttempts = upgrades;
             _initialUpgradeAttemptsThisRun = _lastObservedUpgradeAttempts;
             _lastUpgradeProgressTick = NowTick();
             _portalAnchorClickTick = int.MinValue;
@@ -1985,8 +2062,10 @@ private GemOrderEntry ChooseSpecificSubModeTarget(List<GemOrderEntry> forcedMatc
             {
                 if (AutoPercentMode)
                 {
+                    int upgrades = GetUpgradeAttempts();
+                    if (upgrades < 0) return false;
                     GemTarget plannedTarget;
-                    if (TryGetPlannedAutoTarget(GetUpgradeAttempts(), out plannedTarget) && plannedTarget?.Source != null)
+                    if (TryGetPlannedAutoTarget(upgrades, out plannedTarget) && plannedTarget?.Source != null)
                     {
                         chosen = plannedTarget.Source;
                         autoChosenChance = GetUpgradeChanceTier(GetCurrentGreaterRiftLevel(), chosen.Item.JewelRank);
@@ -3059,6 +3138,8 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             if (element == null)
                 return false;
 
+            if (WindowPaneInputActive() && object.ReferenceEquals(element,_upgradeButton)
+                && (_target==null || !IsNativeTargetSelected(_target))) return false;
             RectangleF rectangle;
             try { rectangle = element.Rectangle; }
             catch { return false; }
@@ -3081,7 +3162,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             }
             catch
             {
-                return 0;
+                return -1; // Unavailable is not a consumed final attempt.
             }
         }
 
@@ -3585,9 +3666,9 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             ResetCursorWatchToCurrent(Math.Max(0, delay));
         }
 
-        private bool BeginKeyPulse(ushort virtualKey, int holdMs = InputPulseMs)
+private bool BeginKeyPulse(ushort virtualKey, int holdMs = InputPulseMs)
         {
-            if (_pendingInputKind != PendingInputKind.None || virtualKey == 0)
+            if (_pendingInputKind != PendingInputKind.None || virtualKey == 0 || FreeHudInput.MessagePairNeedsHandoff)
                 return false;
 
             if (!FreeHudInput.KeyDown(virtualKey))
@@ -3603,6 +3684,14 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
 
         private bool BeginMousePulseAt(int x, int y, int holdMs, bool keepCursor)
         {
+            if (UseWindowMessageInput)
+            {
+                if (!WindowPaneInputActive() || _pendingInputKind != PendingInputKind.None || !NativeCellClickInsidePane(x,y)) return false;
+                bool sent=FreeHudInput.MessageClickClient(Hud,x,y);
+
+                return sent;
+            }
+
             if (_pendingInputKind != PendingInputKind.None)
                 return false;
 
@@ -3727,6 +3816,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
 
         private bool TryHoverUpgradeButton(string modeTag, GemTarget plannedTarget)
         {
+            if (UseWindowMessageInput) return false;
             if (!ShouldKeepCursorAtAutomationActionPoint())
                 return false;
             if (plannedTarget == null || _upgradeButton == null || !_upgradeButton.Visible)
@@ -3748,6 +3838,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
 
         private void MoveCursorToPointNoClick(PointF point, string reason)
         {
+            if (UseWindowMessageInput) return;
             if (!ShouldKeepCursorAtAutomationActionPoint())
                 return;
 
@@ -3774,15 +3865,47 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             }
             return planned;
         }
-        private bool TryPrepareConfirmedNativeSelection(int upgrades)
+
+private bool TryPrepareConfirmedNativeSelection(int upgrades)
         {
-            // Rank evidence is bound to the consumed gem. Prediction can scroll, never select.
-            if(!WasLastUpgradeSuccessful() || _pendingInputKind!=PendingInputKind.None)return false;
-            var planned=PlanNativeNextTarget(upgrades);
-            if(planned==null || SameGem(planned,_target))return false;
-            BeginPlannedRetarget(planned,true);
+            if (_pendingInputKind != PendingInputKind.None) return false;
+            GemTarget planned;
+            if (NativeAttemptResolved()) planned = PlanNativeNextTarget(upgrades);
+            else
+            {
+                // A live pre-click attribute lets us settle this consumed attempt after
+                // selection changes. Without it, keep selection until its result is known.
+                if (_nativeDirectBaseline < 0 || _nativeDirectBaseline != _nativeAttemptRank) return false;
+                var failed = PlanNativeOutcomeTarget(upgrades, false);
+                var succeeded = PlanNativeOutcomeTarget(upgrades, true);
+                if (!SameGem(failed, succeeded)) return false;
+                planned = failed;
+            }
+            if (planned == null || SameGem(planned, _target)) return false;
+            _nativeOutcomePrepared = !NativeAttemptResolved();
+
+            BeginPlannedRetarget(planned, true);
             return true;
         }
+        private GemTarget PlanNativeOutcomeTarget(int upgrades, bool success)
+        {
+            bool savedPrediction = _prepositionAssumeSuccess;
+            var savedPlan = _autoPlan.ToArray();
+            var savedOrder = _orderedGems.ToArray();
+            string savedSummary = _autoPlanSummary;
+            try
+            {
+                _prepositionAssumeSuccess = success;
+                return PlanNativeNextTarget(upgrades);
+            }
+            finally
+            {
+                _prepositionAssumeSuccess = savedPrediction;
+                _autoPlan.Clear(); _autoPlan.AddRange(savedPlan); _autoPlanSummary = savedSummary;
+                _orderedGems.Clear(); _orderedGems.AddRange(savedOrder);
+            }
+        }
+
         private bool _nativeConfirmedPreparation,_nativeClickDuringBusy;
         private uint _preparedScrollTarget;
         private int _preparedScrollSent=int.MinValue,_preparedScrollCount,_preparedScrollNoProgress;
@@ -3862,7 +3985,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             _preparedWindowSize=Hud.Window.Size;_preparedWindowOffset=Hud.Window.Offset;
             var area=NativeComfortable(cell,viewport)?RectangleF.Intersect(cell.Rect,viewport):viewport;
             int x=(int)Math.Round(area.Left+area.Width/2),y=(int)Math.Round(area.Top+area.Height/2);
-            if(Math.Abs(Hud.Window.CursorX-x)>2 || Math.Abs(Hud.Window.CursorY-y)>2)
+            if(!UseWindowMessageInput && (Math.Abs(Hud.Window.CursorX-x)>2 || Math.Abs(Hud.Window.CursorY-y)>2))
             {
                 if(!FreeHudInput.MouseMoveClient(Hud,x,y))return;
                 MarkAutomationInputAction();
@@ -3939,6 +4062,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
 
         private bool DetectUserInterference()
         {
+            if (WindowPaneInputActive()) return false;
             if (!HasActiveAutomationContext())
             {
                 if (!_softRestartPending)
@@ -4015,13 +4139,9 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             bool savedRetargetNeedsReady = _retargetNeedsButtonReady;
             int savedRetargetStarted = _retargetStartedTick;
             var savedConfirmedLowRanks = new Dictionary<string, int>(_confirmedLowRanks, StringComparer.Ordinal);
-            var savedUnconfirmedLowAttempts = new Dictionary<string, int>(_unconfirmedLowAttempts, StringComparer.Ordinal);
-            var savedNativeLowPendingUntil = new Dictionary<string, int>(_nativeLowPendingUntil, StringComparer.Ordinal);
 
             ResetState();
             foreach (var pair in savedConfirmedLowRanks) _confirmedLowRanks[pair.Key] = pair.Value;
-            foreach (var pair in savedUnconfirmedLowAttempts) _unconfirmedLowAttempts[pair.Key] = pair.Value;
-            foreach (var pair in savedNativeLowPendingUntil) _nativeLowPendingUntil[pair.Key] = pair.Value;
 
             // Restore run-level portal fields only when a run was already in progress.
             // Condition: savedInitialAttempts != int.MinValue means HandleRunningState
@@ -4064,12 +4184,15 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
 
         private void ResetState()
         {
+            ResetMessageScroll(false);
             _preparedAcd=0;_prepositionAssumeSuccess=false;
             _nativeConfirmedPreparation=false;_preparedScrollTarget=0;
             _preparedScrollSent=int.MinValue;_preparedScrollCount=_preparedScrollNoProgress=0;
             _preparedSince=_preparedTick=_preparedWheelTick=int.MinValue;
-            _nativeCellOffsetX=_nativeConfirmedOffsetX=0;
-            _nativeCalibrationPending=false; _nativeGeometryKnown=false;
+            // A confirmed offset survives another Urshi opening in the same window geometry.
+            // RefreshNativeCalibrationGeometry invalidates it on client, DPI or viewport changes.
+            _nativeCellOffsetX=_nativeConfirmedOffsetX;
+            _nativeCalibrationPending=false;
             ResetNativeNavigation();
             _stage = AutomationStage.Idle;
             _lastActionTick = int.MinValue;
@@ -4092,11 +4215,11 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             _autoRunning = false;
             _target = null;
             _nativeAttemptKey = null;
+            _nativeOutcome = NativeAttemptOutcome.None;
+            _nativeOutcomePrepared = false;
             _nativeAttemptSucceeded = false;
             _nativeConsumedTick = int.MinValue;
             _confirmedLowRanks.Clear();
-            _unconfirmedLowAttempts.Clear();
-            _nativeLowPendingUntil.Clear();
             _autoPlan.Clear();
             _autoPlanSummary = string.Empty;
             _autoConfirmedRankByAbs.Clear();
@@ -4133,11 +4256,34 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             _retargetStartedTick = int.MinValue;
         }
 
+        private IBrush _inventoryPortalWaitFill,_inventoryPortalWaitBorder;
+
+private void PaintInventoryPortalWait(ClipState clipState)
+        {
+            // Visual only: the first portal command can be rejected, so wait for native confirmation.
+            if(clipState!=ClipState.AfterClip || !AutoStartEnabled || !Hud.Game.IsInGame
+                || Hud.Game.IsInTown || Hud.Game.IsLoading || Hud.Game.IsPaused || !Hud.Window.IsForeground
+                || !SafeUiVisible(_gemUpgradePane) || _portalRequestedThisRun || _portalRetryExhaustedThisRun
+                || Hud.Game.Me==null || Hud.Game.Me.AnimationState==AcdAnimationState.CastingPortal
+                || _stage==AutomationStage.Failed || _stage==AutomationStage.VerificationComplete
+                || _inventoryPortalWaitFill==null || _inventoryPortalWaitBorder==null)return;
+            try {
+                var inventory=Hud.Inventory.InventoryItemsUiElement;
+                if(!SafeUiVisible(inventory))return;
+                var size=Hud.Window.Size;
+                var rect=RectangleF.Intersect(inventory.Rectangle,new RectangleF(0,0,size.Width,size.Height));
+                if(!NativeRectValid(rect))return;
+                _inventoryPortalWaitFill.DrawRectangle(rect);
+                _inventoryPortalWaitBorder.DrawRectangle(rect);
+            }catch { /* A transient native UI read cannot interrupt upgrading. */ }
+        }
+
         public void PaintTopInGame(ClipState clipState)
         {
             if (_gemUpgradePane?.Visible != true)
                 return;
 
+            PaintInventoryPortalWait(clipState);
             PaintPaneWarning();
         }
 
@@ -4278,6 +4424,12 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
         private int _nativeWheelSentAt=int.MinValue,_nativeWheelAimTick=int.MinValue;
         private float _nativeWheelStackTop,_nativeCellOffsetX;
         private bool _nativeCalibrationTried, _nativeCalibrationPending, _nativeGeometryKnown;
+        // One optional native-cell probe resolves a clipped edge target without guessing its offset.
+        private uint _nativeProbeAcd;
+        private bool _nativeProbeUsed;
+        private const int NativeSelectionPollMs = 32;
+        private const int NativeSelectionMaxClicks = 36;
+        private const int NativeCapFirstSelectionMs = 420;
         private float _nativeConfirmedOffsetX;
         private Size _nativeCalibrationSize;
         private Point _nativeCalibrationOffset;
@@ -4292,6 +4444,8 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             if (!_nativeCalibrationPending) return;
             _nativeCellOffsetX = _nativeConfirmedOffsetX;
             _nativeCalibrationPending = false;
+            // Preserve the per-target attempt budget after rollback. ResetNativeNavigation
+            // rearms it for a new target; this target retries verified geometry.
             
         }
         private void RefreshNativeCalibrationGeometry()
@@ -4302,6 +4456,7 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             if (_nativeGeometryKnown && (size != _nativeCalibrationSize || offset != _nativeCalibrationOffset
                 || dpi != _nativeCalibrationDpi || viewport != _nativeCalibrationViewport))
             {
+                ResetMessageScroll(true);
                 _nativeCalibrationPending = false;
                 _nativeCellOffsetX = _nativeConfirmedOffsetX = 0;
                 ResetNativeNavigation();
@@ -4331,9 +4486,15 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
         }
         private bool TryCalibrateNativeCell(NativeGemCell expected,List<NativeGemCell> cells)
         {
-            if(_nativeCalibrationTried || expected==null || SafeAnimState(_upgradeButton)!=24)return false;
-            uint selected=SafeItemButtonAcd();
-            if(!NativeValidAcd(selected) || selected==expected.Acd || selected==_nativeSelectionBeforeClick)return false;
+            if (_nativeCalibrationTried || expected == null) return false;
+            uint selected = SafeItemButtonAcd();
+            // A capped neighbor can leave the Upgrade button permanently in state 27.
+            // Selection ACD, not the Upgrade animation, authorizes a tentative correction.
+            if (!NativeValidAcd(selected) || selected == expected.Acd) return false;
+            // An ignored click during an upgrade is not evidence of a column offset.
+            // Capped-gem lockout retains its existing special calibration path.
+            if (_nativeClickDuringBusy && selected == _nativeSelectionBeforeClick
+                && !PreviousNativeGemAtCap()) return false;
             var actual=NativeFind(selected,cells);
             if(actual==null || actual.Row!=expected.Row || Math.Abs(actual.Column-expected.Column)!=1
                 || Math.Abs(actual.Rect.Width-expected.Rect.Width)>1
@@ -4353,11 +4514,35 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             return true;
         }
 
+        private bool TryProbeNativeEdgeCell(NativeGemCell target, List<NativeGemCell> cells,
+            RectangleF viewport, int now)
+        {
+            if (_nativeProbeUsed || _nativeCalibrationPending || target == null
+                || target.Column != UrshiCols - 1 || Math.Abs(_nativeCellOffsetX) > 0.5f)
+                return false;
+            var probe = cells.FirstOrDefault(c => c.Row == target.Row
+                && c.Column == target.Column - 1 && NativeComfortable(c, viewport));
+            if (probe == null || !NativeValidAcd(probe.Acd)) return false;
+            int x = (int)Math.Round(probe.Rect.Left + probe.Rect.Width / 2);
+            int y = (int)Math.Round(probe.Rect.Top + probe.Rect.Height / 2);
+            if (!NativeCellClickInsidePane(x, y) || (NativeMouseState(0x01) & 0x8000) != 0)
+                return false;
+            _nativeSelectionBeforeClick = SafeItemButtonAcd();
+            if (!BeginMousePulseAt(x, y, 0, ShouldKeepCursorAtAutomationActionPoint())) return false;
+            _nativeProbeUsed = true;
+            _nativeProbeAcd = probe.Acd;
+            _nativeClickDuringBusy = SafeAnimState(_upgradeButton) == 27;
+            _nativeClickAt = now;
+            _nativeClickCount++; _nativeTotalClicks++;
+            return true;
+        }
+
         private int _nativeMissingSince=int.MinValue, _nativeTargetMissingSince=int.MinValue;
+        private int _nativeTargetMissingTick=int.MinValue;
         private uint _nativeTarget;
         private int _nativeStarted = int.MinValue;
         private int _nativeStableSince = int.MinValue, _nativeStableTick = int.MinValue;
-        private int _nativeClickAt = int.MinValue, _nativeClickCount, _nativeScrollCount;
+        private int _nativeClickAt = int.MinValue, _nativeClickCount, _nativeScrollCount, _nativeTotalClicks;
         private int _nativeRegisteredRows, _nativeNoProgress, _nativeSearchDirection = -1;
         private RectangleF _nativePreviousRect;
         private Size _nativeWindowSize; private Point _nativeWindowOffset;
@@ -4380,15 +4565,174 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             RollbackNativeCalibration();
             _nativeWheelSentAt=_nativeWheelAimTick=int.MinValue;
             _nativeCalibrationTried=false;_nativeClickDuringBusy=false;
+            _nativeProbeAcd=0;_nativeProbeUsed=false;
             _nativeSelectionBeforeClick=0;
-            _nativeMissingSince=_nativeTargetMissingSince=int.MinValue;
+            _nativeMissingSince=_nativeTargetMissingSince=_nativeTargetMissingTick=int.MinValue;
             _nativeTarget = 0; _nativeStarted = int.MinValue;
             _nativeStableSince = _nativeStableTick = int.MinValue;
-            _nativeClickAt = int.MinValue; _nativeClickCount = _nativeScrollCount = _nativeNoProgress = 0;
+            _nativeClickAt = int.MinValue; _nativeClickCount = _nativeScrollCount = _nativeNoProgress = _nativeTotalClicks = 0;
             _nativePreviousRect = RectangleF.Empty;
             _nativeSearchDirection = -1;
             _nativeCells.Clear();
         }
+        // One bounded, pane-only scroll transaction for selection and preparation.
+        private int _messageScrollSentAt=int.MinValue, _messageScrollSentTick=int.MinValue;
+        private int _messageScrollObservedTick=int.MinValue, _messageScrollObservations;
+        private int _messageScrollClicks, _messageScrollFailures, _messageScrollDeferredAnim=int.MinValue;
+        private int _messageScrollLastAnim=int.MinValue;
+        private float _messageScrollTop, _messageScrollPlayerX, _messageScrollPlayerY;
+        private float _messageScrollQuantum, _messageScrollWantedThumb;
+        private bool _messageScrollDown, _messageScrollInterrupted;
+        private uint _messageScrollTarget;
+        private bool WindowPaneInputActive()
+        { return UseWindowMessageInput && SafeUiVisible(_gemUpgradePane); }
+        private void ResetMessageScroll(bool geometryChanged)
+        {
+            _messageScrollSentAt=_messageScrollSentTick=_messageScrollObservedTick=int.MinValue;
+            _messageScrollDeferredAnim=int.MinValue;
+            _messageScrollLastAnim=int.MinValue;
+            _messageScrollObservations=_messageScrollFailures=_messageScrollClicks=0;
+            _messageScrollInterrupted=false;_messageScrollTarget=0;
+            if(geometryChanged)_messageScrollQuantum=0;
+        }
+        private RectangleF MessageControlRect(IUiElement ui)
+        {
+            try {
+                if(ui==null || !ui.Visible || !NativeRectValid(ui.Rectangle))return RectangleF.Empty;
+                return _gemUpgradePane.Rectangle.Contains(ui.Rectangle)?ui.Rectangle:RectangleF.Empty;
+            } catch { return RectangleF.Empty; }
+        }
+        private static int NativeScrollBurst(float distance,float quantum)
+        {
+            if(float.IsNaN(distance)||float.IsInfinity(distance)||quantum<1)return 1;
+            return Math.Max(1,Math.Min(24,(int)Math.Ceiling(Math.Max(0,distance)/quantum)));
+        }
+        private float NativeScrollPitch(NativeGemCell cell)
+        {
+            float pitch=float.MaxValue;
+            if(cell!=null)foreach(var other in _nativeCells) {
+                int rows=Math.Abs(other.Row-cell.Row);
+                if(rows==0)continue;
+                float value=Math.Abs(other.Rect.Top-cell.Rect.Top)/rows;
+                if(value>=cell.Rect.Height && value<pitch)pitch=value;
+            }
+            if(pitch!=float.MaxValue)return pitch;
+            return cell!=null?Math.Max(1,cell.Rect.Height):Math.Max(1,NativeViewport().Height/3);
+        }
+        private bool MessageInventoryPointerActive()
+        {
+            try {
+                var grid=Hud.Inventory.InventoryItemsUiElement;
+                return grid!=null && grid.Visible && grid.Rectangle.Contains(Hud.Window.CursorX,Hud.Window.CursorY);
+            } catch { return false; }
+        }
+
+private void ObserveMessageScroll()
+        {
+            // Observe readiness even with no queued scroll, so a later busy
+            // phase cannot inherit a rejection from the previous animation cycle.
+            if(_messageScrollDeferredAnim!=int.MinValue
+                && SafeAnimState(_upgradeButton)!=_messageScrollDeferredAnim)
+                _messageScrollDeferredAnim=int.MinValue;
+            int tick=Hud.Game.CurrentGameTick;
+            if(_messageScrollSentAt==int.MinValue || tick==_messageScrollSentTick)return;
+            RectangleF stack;try { stack=_stackPanel.Rectangle; }catch{return;}
+            if(!NativeRectValid(stack))return;
+            if(_messageScrollObservedTick!=tick){_messageScrollObservedTick=tick;_messageScrollObservations++;}
+            float delta=stack.Top-_messageScrollTop;
+            bool moved=Math.Abs(delta)>=0.75f;
+            bool playerMoved=Math.Abs(Hud.Game.Me.FloorCoordinate.X-_messageScrollPlayerX)
+                +Math.Abs(Hud.Game.Me.FloorCoordinate.Y-_messageScrollPlayerY)>2;
+            if(!moved && _messageScrollObservations<2)return;
+            int anim=SafeAnimState(_upgradeButton);
+
+            if(moved && ((_messageScrollDown&&delta<0)||(!_messageScrollDown&&delta>0))) {
+                // A burst may stop when it reaches the thumb; never infer a smaller step from that partial burst.
+                if(_messageScrollClicks==1 && Math.Abs(delta)>=_messageScrollQuantum*0.75f)_messageScrollQuantum=Math.Abs(delta);
+                _messageScrollFailures=0;_messageScrollDeferredAnim=int.MinValue;
+            } else if(playerMoved || FreeHudInput.MessageMouseHeld()) {
+                _messageScrollInterrupted=true;_messageScrollFailures=0;
+                // Releasing the mouse does not unlock an unresponsive upgrade UI.
+                if(anim!=24)_messageScrollDeferredAnim=anim;
+                _nativeScrollCount=Math.Max(0,_nativeScrollCount-1);
+            } else if(anim!=24) {
+                // One probe during animation is useful; rejected probes retry on readiness, without poisoning navigation.
+                _messageScrollDeferredAnim=anim;
+                _nativeScrollCount=Math.Max(0,_nativeScrollCount-1);
+            } else {
+                _messageScrollFailures++;
+            }
+
+            _messageScrollSentAt=int.MinValue;
+        }
+
+private bool TryMessageScrollToCell(NativeGemCell cell,RectangleF viewport,RectangleF stack,int now,bool preparation)
+        {
+            viewport=NativeViewportForCell(cell,viewport);
+            if(cell!=null && NativeRectValid(viewport)
+                && Math.Min(cell.Rect.Right,viewport.Right)-Math.Max(cell.Rect.Left,viewport.Left)<cell.Rect.Width*0.80f)
+            {if(!preparation)Fail("native gem horizontally clipped");return true;}
+            if(PortalDueSoon(0)||_pendingInputKind!=PendingInputKind.None)return false;
+            if(FreeHudInput.MessageMouseHeld())return false;
+            ObserveMessageScroll();
+            if(_messageScrollSentAt!=int.MinValue)return true;
+            uint target=cell==null?0:cell.Acd;
+            if(target!=_messageScrollTarget){_messageScrollFailures=0;_messageScrollTarget=target;}
+            if(_messageScrollInterrupted) {
+                if(Hud.Game.Me.AnimationState==AcdAnimationState.Running)return false;
+                _messageScrollInterrupted=false;
+            }
+            int anim=SafeAnimState(_upgradeButton);
+            // Initial pane animation 27 can scroll. During a real outstanding
+            // upgrade, avoid speculative track clicks across inventory handling.
+            // Selection, result reads, ready upgrade clicks and portal input continue.
+            if(anim==27 && _nativeAttemptKey!=null && !NativeAttemptResolved() && MessageInventoryPointerActive())
+                return true;
+            if(anim!=_messageScrollLastAnim){_messageScrollFailures=0;_messageScrollLastAnim=anim;}
+            if(_messageScrollDeferredAnim!=int.MinValue) {
+                if(anim==_messageScrollDeferredAnim)return true;
+                _messageScrollDeferredAnim=int.MinValue;_messageScrollFailures=0;
+            }
+            if(_messageScrollFailures>=3)
+            {if(!preparation)Fail("native scrollbar made no progress while ready");return true;}
+            if(_nativeScrollCount>=Math.Max(4,MaxDownScrollClicks))
+            {if(!preparation)Fail("native scroll search limit");return true;}
+            var bar=MessageControlRect(_scrollBar);var thumb=MessageControlRect(_scrollThumb);
+            var up=MessageControlRect(_scrollUp);var downControl=MessageControlRect(_scrollDown);
+            if(!NativeRectValid(bar)||!NativeRectValid(thumb)||thumb.Right<=bar.Left||thumb.Left>=bar.Right)
+            {if(!preparation)Fail("native scrollbar geometry unavailable");return true;}
+            float top=NativeRectValid(up)&&bar.Contains(up)?up.Bottom:bar.Top;
+            float bottom=NativeRectValid(downControl)&&bar.Contains(downControl)?downControl.Top:bar.Bottom;
+            float travel=bottom-top-thumb.Height, span=stack.Height-viewport.Height;
+            if(travel<=1||span<=1)return true;
+            bool down=cell!=null?cell.Rect.Bottom>viewport.Bottom:_nativeSearchDirection>0;
+            if(cell==null&&!down&&stack.Top>=viewport.Top-1){_nativeSearchDirection=1;down=true;}
+            float distance=cell==null?viewport.Height:down?cell.Rect.Bottom-viewport.Bottom+4:viewport.Top-cell.Rect.Top+4;
+            float desired=cell!=null?viewport.Top-stack.Top+cell.Rect.Top+cell.Rect.Height/2
+                -(viewport.Top+viewport.Height/2):down?span:0;
+            float fraction=Math.Max(0,Math.Min(1,desired/span));
+            _messageScrollWantedThumb=top+fraction*travel+thumb.Height/2;
+            int x=(int)Math.Round(bar.Left+bar.Width/2),y=(int)Math.Round(_messageScrollWantedThumb);
+            // If the desired center is already under the thumb, page on the required side; never drag or use wheel input.
+            if(thumb.Contains(x,y))y=(int)Math.Round(down?Math.Min(bottom-1,thumb.Bottom+2):Math.Max(top+1,thumb.Top-2));
+            float quantum=_messageScrollQuantum>0?_messageScrollQuantum:NativeScrollPitch(cell);
+            _messageScrollQuantum=quantum;
+            int requested=NativeScrollBurst(distance,quantum),queued=0;
+            long scrollBurstBudget=System.Diagnostics.Stopwatch.GetTimestamp();
+            for(int i=0;i<requested;i++) {
+                if(i>0 && (System.Diagnostics.Stopwatch.GetTimestamp()-scrollBurstBudget)*1000.0/System.Diagnostics.Stopwatch.Frequency>=5)break;
+                if(!FreeHudInput.MessageClickClient(Hud,x,y))break;
+                queued++;
+            }
+            if(queued==0)return false;
+            _messageScrollClicks=queued;_messageScrollDown=down;_messageScrollTop=stack.Top;
+            _messageScrollPlayerX=Hud.Game.Me.FloorCoordinate.X;_messageScrollPlayerY=Hud.Game.Me.FloorCoordinate.Y;
+            _messageScrollSentAt=now;_messageScrollSentTick=Hud.Game.CurrentGameTick;
+            _messageScrollObservedTick=int.MinValue;_messageScrollObservations=0;_nativeScrollCount++;
+
+            return true;
+        }
+
         private static bool NativeValidAcd(uint acd) { return acd != 0u && acd != uint.MaxValue; }
         private static bool NativeRectValid(RectangleF r)
         {
@@ -4444,9 +4788,11 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
         }
         private static bool NativeComfortable(NativeGemCell cell,RectangleF viewport)
         {
-            if(!NativeVisible(cell,viewport))return false;
+            if(cell==null || !NativeRectValid(viewport) || !NativeRectValid(cell.Rect))return false;
             var visible=RectangleF.Intersect(cell.Rect,viewport);
-            return visible.Height>=cell.Rect.Height*0.80f && visible.Width>=cell.Rect.Width*0.80f;
+            // The clipped center must retain at least three pixels of inset.
+            return visible.Height>=Math.Max(6,cell.Rect.Height*0.55f)
+                && visible.Width>=Math.Max(6,cell.Rect.Width*0.80f);
         }
         private static bool NativeVisible(NativeGemCell cell, RectangleF viewport)
         {
@@ -4479,6 +4825,22 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             if (DetectUserInterference()) return; // The detector already schedules one restart.
             if (IsNativeTargetSelected(_target))
             {
+                // A right-edge probe can prove a one-column offset by selecting the
+                // intended gem from its left neighbor. Retain that verified geometry.
+                if (_nativeProbeAcd != 0)
+                {
+                    var probeCells = CaptureNativeCells();
+                    var probed = NativeFind(_nativeProbeAcd, probeCells);
+                    var intended = NativeFind(expected, probeCells);
+                    if (probed != null && intended != null && probed.Row == intended.Row
+                        && probed.Column + 1 == intended.Column)
+                    {
+                        float offset = probed.Rect.Left - intended.Rect.Left;
+                        if (Math.Abs(offset) <= intended.Rect.Width * 2)
+                            _nativeCellOffsetX = _nativeConfirmedOffsetX = offset;
+                    }
+                    _nativeProbeAcd = 0;
+                }
                 if (_nativeCalibrationPending)
                 {
                     _nativeConfirmedOffsetX = _nativeCellOffsetX;
@@ -4508,21 +4870,35 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             _nativeMissingSince=int.MinValue;
             var cell=NativeFind(expected,cells);
             viewport=NativeViewportForCell(cell,viewport);
-            if(cell==null && _nativeTargetMissingSince==int.MinValue)_nativeTargetMissingSince=now;
-            if(cell!=null)_nativeTargetMissingSince=int.MinValue;
+            // A present but ambiguous ACD is not a missing row: scrolling cannot
+            // establish which duplicate rectangle is authoritative.
+            if(cell==null && cells.Any(c=>c.Acd==expected))return;
+            if(cell==null && _nativeTargetMissingSince==int.MinValue)
+            { _nativeTargetMissingSince=now;_nativeTargetMissingTick=Hud.Game.CurrentGameTick; }
+            if(cell!=null)_nativeTargetMissingSince=_nativeTargetMissingTick=int.MinValue;
             if (_nativeClickAt != int.MinValue)
             {
-                // Wait for the selected ACD to update. A mismatch must never spend an attempt.
-                if (ElapsedMs(_nativeClickAt)<120
-                    && !(_nativeClickDuringBusy && SafeAnimState(_upgradeButton)!=27)) return;
-                // Keep the retry available until the previous upgrade unlocks.
-                // Apply in every mode, including after a soft restart. A capped/stuck
-                // button gets bounded recovery rather than an indefinite readiness wait.
-                if (SafeAnimState(_upgradeButton)==27 && ElapsedMs(_nativeClickAt)<1600) return;
-                _nativeClickAt=int.MinValue;
+                // Observe every HUD collection. The physical click is retried no sooner than
+                // one short confirmation window; no 120/1600 ms animation sleep is imposed.
+                int clickAge=ElapsedMs(_nativeClickAt);
+                bool stillBusy=_nativeClickDuringBusy && SafeAnimState(_upgradeButton)==27;
+                if (stillBusy && clickAge<NativeSelectionPollMs) return;
+                // Keep polling every collection. A changed selection or a ready button
+                // is actionable immediately; unchanged busy selection gets a bounded retry.
+                uint observed=SafeItemButtonAcd();
+                if(stillBusy && NativeValidAcd(observed) && observed==_nativeSelectionBeforeClick
+                    && !_nativeCalibrationPending && _nativeProbeAcd==0 && clickAge<96) return;
+                var calibrationCell = _nativeProbeAcd != 0
+                    ? NativeFind(_nativeProbeAcd, cells) : cell;
+                bool probeResult = _nativeProbeAcd != 0;
+                _nativeProbeAcd = 0;
+                _nativeClickAt = int.MinValue;
                 RollbackNativeCalibration();
-                if (TryCalibrateNativeCell(cell,cells)) _nativeClickCount=0;
-                if (_nativeClickCount>=2) { Fail("native gem selection mismatch; manual selection remains available"); return; }
+                if (TryCalibrateNativeCell(calibrationCell, cells)) _nativeClickCount = 0;
+                else if (!probeResult && cell != null && !NativeValidAcd(SafeItemButtonAcd())
+                    && TryProbeNativeEdgeCell(cell, cells, viewport, now)) return;
+                if (_nativeTotalClicks >= NativeSelectionMaxClicks)
+                { Fail("native selection retry budget exhausted; no unverified upgrade was sent"); return; }
                 
             }
             if (cell!=null && NativeComfortable(cell,viewport))
@@ -4538,8 +4914,11 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
                 var clipped=RectangleF.Intersect(cell.Rect,viewport);
                 int x=(int)Math.Round(clipped.Left+clipped.Width/2), y=(int)Math.Round(clipped.Top+clipped.Height/2);
                 // BeginMousePulseAt positions and clicks atomically; no extra aim frame.
-                if (_retargetNeedsButtonReady && !_nativeConfirmedPreparation && SafeAnimState(_upgradeButton)==27
-                    && ElapsedMs(_retargetStartedTick)<1600 && !PreviousNativeGemAtCap()) return;
+                // Navigation may overlap the previous Upgrade animation. Only a genuinely
+                // capped previous gem needs its documented initial selection-lockout guard.
+                if (_retargetNeedsButtonReady && PreviousNativeGemAtCap()
+                    && _retargetStartedTick != int.MinValue
+                    && ElapsedMs(_retargetStartedTick) < NativeCapFirstSelectionMs) return;
                 x += (int)Math.Round(_nativeCellOffsetX);
                 if (!NativeCellClickInsidePane(x,y)) { Fail("native cell point outside pane"); return; }
                 // Validate the same native element again at the final input boundary.
@@ -4552,12 +4931,13 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
                 if ((NativeMouseState(0x01) & 0x8000)!=0) return;
                 _nativeSelectionBeforeClick=SafeItemButtonAcd();
                 if (BeginMousePulseAt(x,y,0,ShouldKeepCursorAtAutomationActionPoint()))
-                { _nativeClickDuringBusy=SafeAnimState(_upgradeButton)==27; _nativeClickAt=now; _nativeClickCount++;  }
+                { _nativeClickDuringBusy=SafeAnimState(_upgradeButton)==27; _nativeClickAt=now; _nativeClickCount++; _nativeTotalClicks++; }
                 return;
             }
             _nativeStableSince=int.MinValue;
-            if (PortalDueSoon(90)) return;
-            if (cell==null && ElapsedMs(_nativeTargetMissingSince)<250) return;
+            if (PortalDueSoon(0)) return;
+            if (cell==null && (Hud.Game.CurrentGameTick==_nativeTargetMissingTick
+                || ElapsedMs(_nativeTargetMissingSince)<32)) return;
             if (_nativeScrollCount>=Math.Max(4,MaxDownScrollClicks)) { Fail("native scroll search limit"); return; }
             RectangleF stack;
             try { stack=_stackPanel.Rectangle; } catch { return; }
@@ -4566,6 +4946,8 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
         }
                 private bool TryNativeScrollToCell(NativeGemCell cell,RectangleF viewport,RectangleF stack,int now,bool preparation=false)
         {
+            if (UseWindowMessageInput) return WindowPaneInputActive()
+                && TryMessageScrollToCell(cell,viewport,stack,now,preparation);
             viewport=NativeViewportForCell(cell,viewport);
             if(cell!=null && NativeRectValid(viewport)
                 && Math.Min(cell.Rect.Right,viewport.Right)-Math.Max(cell.Rect.Left,viewport.Left)<cell.Rect.Width*0.80f)
@@ -4573,14 +4955,13 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
                 if(!preparation)Fail("native gem horizontally clipped; vertical scrolling cannot resolve it");
                 return true;
             }
-            if(PortalDueSoon(90) || (NativeMouseState(0x01)&0x8000)!=0)return false;
+            if(PortalDueSoon(0) || (NativeMouseState(0x01)&0x8000)!=0)return false;
             if(_nativeWheelSentAt!=int.MinValue)
             {
                 if(Math.Abs(stack.Top-_nativeWheelStackTop)<0.75f)
                 {
                     if(ElapsedMs(_nativeWheelSentAt)<120)return true;
-                    if(_retargetNeedsButtonReady && SafeAnimState(_upgradeButton)==27
-                        && ElapsedMs(_retargetStartedTick)<1600 && !PreviousNativeGemAtCap())return true;
+                    // Recheck scroll position each HUD tick; animation is not a scroll lock.
                     if(++_nativeNoProgress>=3){if(!preparation)Fail("native wheel made no progress");return true;}
                 }
                 else _nativeNoProgress=0;
@@ -4593,7 +4974,8 @@ private List<GemOrderEntry> BuildOrderedGemEntries()
             {if(!preparation)Fail("native scroll search limit");return true;}
             int x=(int)Math.Round(viewport.Left+viewport.Width/2);
             int y=(int)Math.Round(viewport.Top+viewport.Height/2);
-            if(_nativeWheelAimTick==int.MinValue || !viewport.Contains(Hud.Window.CursorX,Hud.Window.CursorY))
+            var wheelArea=viewport;wheelArea.Inflate(-3,-3);
+            if(!wheelArea.Contains(Hud.Window.CursorX,Hud.Window.CursorY))
             {
                 if(!FreeHudInput.MouseMoveClient(Hud,x,y))return true;
                 MarkAutomationInputAction();_nativeWheelAimTick=Hud.Game.CurrentGameTick;return true;
