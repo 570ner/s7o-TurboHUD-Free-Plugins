@@ -142,9 +142,9 @@ namespace Turbo.Plugins.s7o
         private const int AutoUrshiTalkLootCancelRetryMs = 70;
         private const int AutoUrshiTalkLootCancelMaxAttempts = 3;
         private const float AutoUrshiFarLootRiskYards = 55f;
-        private const float AutoUrshiBreadcrumbStepYards = 4f;
+
         private const float AutoUrshiReturnMinClickYards = 2f;
-        private const int AutoUrshiBreadcrumbMax = 64;
+
         private const float AutoUrshiUnknownApproachMaxYards = 120f;
         private const int AutoUrshiReturnClickDelayMs = 120;
         private const int AutoUrshiReturnMaxClicks = 10;
@@ -285,8 +285,8 @@ namespace Turbo.Plugins.s7o
         private int _autoUrshiObservedLegendaryRewardCount;
         private bool _autoUrshiBloodShardRewardObserved;
         private int _autoUrshiGreaterRiftRank;
-        private readonly List<AutoUrshiReturnPoint> _autoUrshiReturnTrail = new List<AutoUrshiReturnPoint>(AutoUrshiBreadcrumbMax);
-        private uint _autoUrshiTrailWorldId;
+
+        private uint _autoUrshiNavigationWorldId;
         private int _autoUrshiReturnProbeTick;
         private int _autoUrshiReturnProbeX;
         private int _autoUrshiReturnProbeY;
@@ -471,7 +471,8 @@ namespace Turbo.Plugins.s7o
             {
                 if (Hud == null || Hud.Game == null) return false;
                 long now = Hud.Game.CurrentRealTimeMilliseconds;
-                return (_pendingCursorRestore && now <= _pendingCursorRestoreExpireMs)
+                return (_lootNavKind!=null && Hud.Game.Me!=null && _lootNavWorld==Hud.Game.Me.WorldId && now-_lootNavProgressAt<3000 && !IsBlockingLootUiOpen())
+                    || (_pendingCursorRestore && now <= _pendingCursorRestoreExpireMs)
                     || (_itemRecoverySeed != 0 && now <= _itemRecoveryDeadlineMs)
                     || (_materialHoverSeed != 0 && _materialHoverExpireMs != 0 && now <= _materialHoverExpireMs)
                     || (_ultrawideStackedHoverSeed != 0 && now <= _ultrawideStackedHoverExpireMs)
@@ -488,6 +489,7 @@ namespace Turbo.Plugins.s7o
         // Release only our held pickup button, restore only our cursor, and keep loot/retry policy intact.
         public void CancelPendingPickupInput()
         {
+            ClearLootNavigation();
             long now = Hud != null && Hud.Game != null ? Hud.Game.CurrentRealTimeMilliseconds : 0;
             NativePoint cursor;
             bool ownsCursor = _hasIssuedPickupCursorPoint && Hud != null && Hud.Window != null &&
@@ -775,6 +777,7 @@ namespace Turbo.Plugins.s7o
         {
             // Cache only this collection: camera/window/world updates must reproject next time.
             _floorItemProjectionCache.Clear();
+            if(Hud!=null&&Hud.Game!=null&&Hud.Game.IsInGame&&IsBlockingLootUiOpen())ClearLootNavigation();
             if (Hud == null || Hud.Game == null || !Hud.Game.IsInGame)
             {
                 ClearItemRecoveryState(false);
@@ -859,9 +862,8 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
-            // Record the guardian-phase route even while stationary combat owns input.
-            // This observes travel only; it never clicks before the loot handoff.
-            TrackAutoUrshiReturnTrail();
+            // Invalidate navigation on a world change, without recording a second route history.
+            TrackAutoUrshiNavigationWorld();
 
             if (HandlePendingAccidentalUrshiRecovery(now, me))
             {
@@ -998,6 +1000,11 @@ namespace Turbo.Plugins.s7o
                 ClearItemRecoveryState(true);
             }
             TrackVisibleEligibleLootProgress(candidates.Count);
+            if(_lootNavKind=="loot") {
+                var routed=candidates.FirstOrDefault(c=>c.Item.AcdId==_lootNavAcd);
+                if(routed==null||!CanTry(routed.Item,routed.UrshiRisk,now))ClearLootNavigation();
+                else if(TryMapNavigateLootGoal(routed.Item.FloorCoordinate,routed.Item.AcdId,"loot",postRiftCleanup,now))return;
+            }
             if (postRiftCleanup && candidates.Count > 0)
             {
                 _autoUrshiReturning = false;
@@ -1013,12 +1020,14 @@ namespace Turbo.Plugins.s7o
                     if (!TryCommitAutoUrshiHandoff(now))
                         return;
 
+                    if(TryMapNavigateUrshi(now))return;
+
                     if ((_autoUrshiActorPathActive || _autoUrshiReturning) &&
                         !UpdateAutoUrshiApproachProgress(now))
                         return;
 
                     // An actor click hands movement to Diablo's pathfinder. Never replace
-                    // that command with a breadcrumb click if on-screen state flickers.
+                    // that command with a map waypoint if on-screen state flickers.
                     if (_autoUrshiActorPathActive)
                     {
                         if (!playerMoving && IsAutoUrshiTalkActorClickable(urshi))
@@ -1029,7 +1038,7 @@ namespace Turbo.Plugins.s7o
                     if (_autoUrshiReturning)
                     {
                         // Never pause the known return route merely because Urshi projects
-                        // on-screen. Issue the next breadcrumb/direct command normally, then
+                        // on-screen. Issue the next map/native command normally, then
                         // use the idle interval before the next ground click for a hover probe.
                         TryReturnTowardAutoUrshi(now);
                         bool hoverPending = _autoUrshiHoverClickAtMs != 0;
@@ -1139,6 +1148,9 @@ namespace Turbo.Plugins.s7o
                 _wideCleanupCommittedSeed = target.Item.Seed;
             else if (!wideCleanup || _wideCleanupCommittedSeed == target.Item.Seed)
                 _wideCleanupCommittedSeed = 0;
+
+            if(TryMapNavigateLootGoal(target.Item.FloorCoordinate,target.Item.AcdId,"loot",postRiftCleanup,now))
+            { _wideCleanupCommittedSeed=target.Item.Seed;return; }
 
             if (!target.UrshiRisk && NeedsItemRecovery(target.Item))
             {
@@ -1310,8 +1322,9 @@ namespace Turbo.Plugins.s7o
 
         private void ResetAutoUrshiReturnState()
         {
-            _autoUrshiReturnTrail.Clear();
-            _autoUrshiTrailWorldId = 0;
+            ClearLootNavigation();
+
+            _autoUrshiNavigationWorldId = 0;
             _autoUrshiReturnProbeTick = 0;
             _autoUrshiReturnProbeMs = 0;
             _autoUrshiHasLastSeenWorld = false;
@@ -1341,7 +1354,7 @@ namespace Turbo.Plugins.s7o
                     _autoUrshiLastSeenY = urshi.FloorCoordinate.Y;
                     _autoUrshiLastSeenZ = urshi.FloorCoordinate.Z;
                     _autoUrshiLastSeenMs = now;
-                    // Projection alone never owns movement. Keep the breadcrumb/direct
+                    // Projection alone never owns movement. Keep the map/native
                     // approach alive until a UI-safe hover actually selects Urshi and
                     // the actor click is issued.
                 }
@@ -1350,44 +1363,12 @@ namespace Turbo.Plugins.s7o
             catch { }
         }
 
-        private void TrackAutoUrshiReturnTrail()
+private void TrackAutoUrshiNavigationWorld()
         {
-            if (!_talkToUrshiAfterLoot || Hud.Game.SpecialArea != SpecialArea.GreaterRift ||
-                Hud.Game.RiftPercentage < 100.0d)
-                return;
-
-            var me = Hud.Game.Me;
-            if (me == null || me.FloorCoordinate == null || !me.FloorCoordinate.IsValid)
-                return;
-            if (_autoUrshiTrailWorldId != me.WorldId)
-            {
-                ResetAutoUrshiReturnState();
-                _autoUrshiTrailWorldId = me.WorldId;
+            if(!_talkToUrshiAfterLoot)return;
+            if(_autoUrshiNavigationWorldId!=Hud.Game.Me.WorldId) {
+                ResetAutoUrshiReturnState();_autoUrshiNavigationWorldId=Hud.Game.Me.WorldId;
             }
-            if (me.AnimationState == AcdAnimationState.Transform)
-            {
-                _autoUrshiReturnTrail.Clear(); // A teleport is not a traversed ground segment.
-                _autoUrshiReturnProbeTick = 0;
-                if (_autoUrshiReturning || _autoUrshiActorPathActive)
-                    AbortAutoUrshiApproach(Hud.Game.CurrentRealTimeMilliseconds);
-                return;
-            }
-            if (_autoUrshiReturning || _autoUrshiActorPathActive || _autoUrshiApproachAborted || _autoUrshiTalkDone)
-                return;
-
-            var position = me.FloorCoordinate;
-            if (_autoUrshiReturnTrail.Count > 0)
-            {
-                var last = _autoUrshiReturnTrail[_autoUrshiReturnTrail.Count - 1];
-                float distance = position.XYDistanceTo(last.X, last.Y);
-                if (distance < AutoUrshiBreadcrumbStepYards)
-                    return;
-                if (distance > 20f)
-                    _autoUrshiReturnTrail.Clear(); // Loading/jumps must not join disconnected paths.
-            }
-            _autoUrshiReturnTrail.Add(new AutoUrshiReturnPoint(position.X, position.Y, position.Z));
-            if (_autoUrshiReturnTrail.Count > AutoUrshiBreadcrumbMax)
-                _autoUrshiReturnTrail.RemoveAt(0);
         }
 
         private bool HasAutoUrshiFarLootRisk(List<LootCandidate> candidates)
@@ -4072,6 +4053,252 @@ namespace Turbo.Plugins.s7o
             catch { return false; }
         }
 
+        // One optional map consumer and one movement transaction for loot and Urshi.
+        private Func<string,object[],object> _lootMapGet;
+        private IPlugin _lootMapPlugin;
+        private int _lootMapAttachTick=int.MinValue;
+        private uint _lootNavWorld,_lootNavAcd;
+        private string _lootNavKind;
+        private IWorldCoordinate _lootNavGoal,_lootNavWaypoint;
+        private object _lootNavEpoch;
+        private long _lootNavProgressAt,_lootNavNextClick,_lootNavCastAt,_lootNavMobilityBlockedUntil;
+        private double _lootNavBestDistance=double.MaxValue;
+        private float _lootNavCastX,_lootNavCastY;
+        private int _lootNavCastTick,_lootNavProbeTick,_lootNavProbeX,_lootNavProbeY,_lootNavReplans;
+        private bool _lootNavCasting;
+        private uint _lootNavDoor;
+        [DllImport("user32.dll",EntryPoint="GetAsyncKeyState")]
+        private static extern short LootNavigationKeyState(int key);
+        private void ClearLootNavigation()
+        {
+            _lootNavKind=null;_lootNavGoal=_lootNavWaypoint=null;_lootNavEpoch=null;
+            _lootNavWorld=_lootNavAcd=_lootNavDoor=0;_lootNavProbeTick=0;_lootNavCasting=false;
+            _lootNavProgressAt=_lootNavNextClick=0;_lootNavBestDistance=double.MaxValue;_lootNavReplans=0;
+        }
+        private Dictionary<string,object> LootMapStatus()
+        {
+            try {
+                if(_lootMapPlugin==null||!_lootMapPlugin.Enabled||_lootMapGet==null) {
+                    int tick=Hud.Game.CurrentGameTick;
+                    if(_lootMapAttachTick!=int.MinValue&&unchecked(tick-_lootMapAttachTick)<60)return null;
+                    _lootMapAttachTick=tick;_lootMapGet=null;_lootMapPlugin=null;
+                    foreach(var plugin in Hud.AllPlugins) {
+                        if(plugin==null||!plugin.Enabled)continue;
+                        var exports=plugin as IEnumerable<KeyValuePair<string,Func<string,object[],object>>>;
+                        if(exports==null)continue;
+                        foreach(var export in exports)if(export.Key=="s7o.MapViewer.v1") {
+                            _lootMapGet=export.Value;_lootMapPlugin=plugin;break;
+                        }
+                        if(_lootMapGet!=null)break;
+                    }
+                }
+                if(_lootMapGet==null)return null;
+                var status=_lootMapGet("player",null) as Dictionary<string,object>;
+                if(status==null||!status.ContainsKey("ok")||!(status["ok"] is bool)||!(bool)status["ok"]
+                    ||!status.ContainsKey("epoch")||Convert.ToUInt32(status["worldId"])!=Hud.Game.Me.WorldId)return null;
+                return status;
+            }catch{_lootMapGet=null;_lootMapPlugin=null;return null;}
+        }
+        private Dictionary<string,object> LootMapQuery(string command,object epoch,IWorldCoordinate from,IWorldCoordinate to,float radius)
+        {
+            try{return _lootMapGet(command,new object[]{epoch,from.X,from.Y,from.Z,to.X,to.Y,to.Z,radius}) as Dictionary<string,object>;}
+            catch{return null;}
+        }
+        private static string LootMapState(Dictionary<string,object> answer)
+        {return answer!=null&&answer.ContainsKey("state")?answer["state"] as string:null;}
+        private IWorldCoordinate LootMapWaypoint(Dictionary<string,object> answer)
+        {
+            if(answer==null||!answer.ContainsKey("waypoint"))return null;
+            var xyz=answer["waypoint"] as float[];
+            if(xyz==null||xyz.Length!=3||xyz.Any(v=>float.IsNaN(v)||float.IsInfinity(v)))return null;
+            return Hud.Window.CreateWorldCoordinate(xyz[0],xyz[1],xyz[2]);
+        }
+        private bool TryMapNavigateUrshi(long now)
+        {
+            if(!_autoUrshiHasLastSeenWorld||_autoUrshiTalkDone||_autoUrshiApproachAborted)return false;
+            var goal=Hud.Window.CreateWorldCoordinate(_autoUrshiLastSeenX,_autoUrshiLastSeenY,_autoUrshiLastSeenZ);
+            if(Hud.Game.Me.FloorCoordinate.XYDistanceTo(goal)>AutoUrshiUnknownApproachMaxYards)return false;
+            bool handled=TryMapNavigateLootGoal(goal,0,"urshi",true,now);
+            if(handled){_autoUrshiActorPathActive=false;_autoUrshiReturning=false;_autoUrshiReturnProbeTick=0;}
+            return handled;
+        }
+        private bool TryMapNavigateLootGoal(IWorldCoordinate goal,uint acd,string kind,bool cleanup,long now)
+        {
+            var me=Hud.Game.Me;var from=me.FloorCoordinate;
+            if(goal==null||!goal.IsValid||from==null||!from.IsValid)return false;
+            double distance=from.XYDistanceTo(goal);
+            if(!_enabled||_paused||Hud.Game.IsLoading||Hud.Game.IsPaused||!Hud.Window.IsForeground||IsBlockingLootUiOpen())
+            {ClearLootNavigation();return false;}
+            if(s7o_InputReleaseArbiter.HasPendingRelease)return true;
+            var status=LootMapStatus();
+            if(status==null){ClearLootNavigation();return false;}
+            var corridor=LootMapQuery("corridor",status["epoch"],from,goal,0.6f);
+            string straight=LootMapState(corridor);
+            if(distance<=8&&straight!="BlockedCandidate"&&straight!="NoWalkCandidate")
+            {if(_lootNavKind==kind)ClearLootNavigation();return false;}
+            if(_lootNavKind!=kind||_lootNavAcd!=acd||_lootNavWorld!=me.WorldId||!Equals(_lootNavEpoch,status["epoch"])
+                ||_lootNavGoal==null||_lootNavGoal.XYDistanceTo(goal)>2) {
+                ClearLootNavigation();_lootNavKind=kind;_lootNavAcd=acd;_lootNavWorld=me.WorldId;
+                _lootNavEpoch=status["epoch"];_lootNavGoal=goal.Offset(0,0,0);_lootNavProgressAt=now;
+
+            }
+            if(_lootNavCasting) {
+                if(Hud.Game.CurrentGameTick==_lootNavCastTick)return true;
+                double dx=from.X-_lootNavCastX,dy=from.Y-_lootNavCastY;
+                if(dx*dx+dy*dy>=9) {
+                    _lootNavCasting=false;_lootNavProgressAt=now;_lootNavProbeTick=0;
+
+                }else if(now-_lootNavCastAt<900)return true;
+                else {
+                    _lootNavCasting=false;_lootNavMobilityBlockedUntil=now+1500;_lootNavProbeTick=0;
+
+                }
+            }
+            if((LootNavigationKeyState(1)&0x8000)!=0||(LootNavigationKeyState(2)&0x8000)!=0)return true;
+            if(cleanup&&distance>=22&&now>=_lootNavMobilityBlockedUntil) {
+                float reach;var skill=LootNavigationSkill(out reach);
+                if(skill!=null) {
+                    // The service's dash endpoint is capped at fifty yards; each skill may be shorter.
+                    for(int probe=0;probe<2;probe++) {
+                        double step=Math.Min(distance,probe==0?reach:Math.Min(reach,25f));
+                        var aim=from.Offset((float)((goal.X-from.X)*step/distance),(float)((goal.Y-from.Y)*step/distance),
+                            (float)((goal.Z-from.Z)*step/distance));
+                        var hop=LootMapQuery("dash",status["epoch"],from,aim,0.6f);
+                        var landing=LootMapWaypoint(hop);
+                        if(landing==null||from.XYDistanceTo(landing)<8||from.XYDistanceTo(landing)>reach+0.1
+                            ||landing.XYDistanceTo(goal)>distance-4)continue;
+                        int x,y;
+                        if(!TryProjectAutoUrshiGroundPoint(landing.X,landing.Y,landing.Z,out x,out y))continue;
+                        if(TryLootNavigationInput(landing,skill,null,now))return true;
+                    }
+                }
+            }
+            // Keep the original fast actor/item click in a known clear corridor.
+            if(straight=="ClearCandidate"&&_lootNavReplans==0) {ClearLootNavigation();return false;}
+            var route=LootMapQuery("path",status["epoch"],from,goal,0.6f);
+            var waypoint=LootMapWaypoint(route);
+            _lootNavDoor=route!=null&&route.ContainsKey("doorAcd")?Convert.ToUInt32(route["doorAcd"]):0;
+            IActor door=_lootNavDoor==0?null:Hud.Game.Actors.FirstOrDefault(a=>a!=null&&a.AcdId==_lootNavDoor&&a.WorldId==me.WorldId);
+            if(door!=null&&door.FloorCoordinate!=null&&from.XYDistanceTo(door.FloorCoordinate)<=10
+                &&now-_lootNavProgressAt<2500)
+                return TryLootNavigationInput(door.FloorCoordinate,null,door,now);
+            if(waypoint!=null) {
+                if(_lootNavWaypoint==null||_lootNavWaypoint.XYDistanceTo(waypoint)>2) {
+                    _lootNavWaypoint=waypoint.Offset(0,0,0);_lootNavBestDistance=from.XYDistanceTo(waypoint);
+                    _lootNavProgressAt=now;_lootNavProbeTick=0;
+                }
+                double remaining=from.XYDistanceTo(_lootNavWaypoint);
+                if(remaining<_lootNavBestDistance-0.75){_lootNavBestDistance=remaining;_lootNavProgressAt=now;}
+                if(now-_lootNavProgressAt<2500)return TryLootNavigationInput(waypoint,null,null,now);
+            } else if(straight!="BlockedCandidate"&&straight!="NoWalkCandidate") {
+                // Missing map coverage keeps bounded native recovery; it is not proof of a wall.
+                ClearLootNavigation();return false;
+            }
+            if(now-_lootNavProgressAt<1500)return true;
+            if(_lootNavReplans++==0) {
+                try{_lootMapGet("resetpath",new object[]{status["epoch"]});}catch{}
+                _lootNavProgressAt=now;_lootNavProbeTick=0;
+
+                return true;
+            }
+            // No movement or route after a bounded retry: release this goal rather than spam a wall.
+            if(kind=="urshi")AbortAutoUrshiApproach(now);
+            else {
+                var item=Hud.Game.Items.FirstOrDefault(i=>i!=null&&i.AcdId==acd&&i.Location==ItemLocation.Floor);
+                if(item!=null)_retryAfterMs[item.Seed]=now+StuckRetryCooldownMs;
+                _wideCleanupCommittedSeed=0;
+            }
+
+            ClearLootNavigation();return true;
+        }
+        private IPlayerSkill LootNavigationSkill(out float reach)
+        {
+            reach=0;
+            foreach(var skill in Hud.Game.Me.Powers.UsedSkills) {
+                if(skill==null||skill.SnoPower==null||skill.IsOnCooldown)continue;
+                uint sno=skill.SnoPower.Sno;float candidate=0;
+                if(sno==Hud.Sno.SnoPowers.Monk_DashingStrike.Sno){if(skill.Charges<=0)continue;candidate=49.5f;}
+                else if(sno==Hud.Sno.SnoPowers.Wizard_Teleport.Sno)candidate=49.5f;
+                else if(sno==Hud.Sno.SnoPowers.Necromancer_BloodRush.Sno){
+                    var defense=Hud.Game.Me.Defense;
+                    if(defense.HealthMax<=0||defense.HealthCur/defense.HealthMax<0.30f)continue;
+                    candidate=49.5f;
+                }
+                else if(sno==Hud.Sno.SnoPowers.Barbarian_Leap.Sno)candidate=34.5f;
+                else if(sno==Hud.Sno.SnoPowers.Crusader_FallingSword.Sno)candidate=34.5f;
+                if(candidate==0)continue;
+                if(sno!=Hud.Sno.SnoPowers.Monk_DashingStrike.Sno&&sno!=Hud.Sno.SnoPowers.Necromancer_BloodRush.Sno
+                    &&skill.GetResourceRequirement()>Hud.Game.Me.Stats.ResourceCurPri)continue;
+                reach=candidate;return skill;
+            }
+            return null; // Spirit Walk/Vault/charges never inherit terrain-teleport permission.
+        }
+        private bool TryLootNavigationInput(IWorldCoordinate point,IPlayerSkill skill,IActor door,long now)
+        {
+            if(now<_lootNavNextClick)return true;
+            int x,y;
+            if(!TryProjectAutoUrshiGroundPoint(point.X,point.Y,point.Z,out x,out y)) {
+                var from=Hud.Game.Me.FloorCoordinate;double length=from.XYDistanceTo(point);
+                if(skill!=null||door!=null||length<2)return true;
+                var close=from.Offset((float)((point.X-from.X)*Math.Min(12,length)/length),
+                    (float)((point.Y-from.Y)*Math.Min(12,length)/length),(float)((point.Z-from.Z)*Math.Min(12,length)/length));
+                if(LootMapState(LootMapQuery("corridor",_lootNavEpoch,from,close,0.6f))!="ClearCandidate"
+                    ||!TryProjectAutoUrshiGroundPoint(close.X,close.Y,close.Z,out x,out y))return true;
+            }
+            PauseDhStrafeForPickup();
+            if(_lootNavProbeTick==0||Math.Abs(x-_lootNavProbeX)>4||Math.Abs(y-_lootNavProbeY)>4) {
+                if(!TrySetCursorForWorldClick(x,y))return true;
+                _lootNavProbeX=x;_lootNavProbeY=y;_lootNavProbeTick=Hud.Game.CurrentGameTick;return true;
+            }
+            if(Hud.Game.CurrentGameTick==_lootNavProbeTick)return true;
+            _lootNavProbeTick=0;NativePoint cursor;
+            if(!Hud.Window.IsForeground||IsBlockingLootUiOpen()||!GetCursorPos(out cursor)
+                ||Math.Abs(cursor.X-x)>4||Math.Abs(cursor.Y-y)>4
+                ||(LootNavigationKeyState(1)&0x8000)!=0||(LootNavigationKeyState(2)&0x8000)!=0)return true;
+            if(skill==null) {
+                if(door!=null?!door.IsSelected:GetSelectedActorSafe()!=null||Hud.Game.SelectedMonster2!=null)return true;
+                MouseLeftClick();
+            } else {
+                if(GetSelectedActorSafe()!=null||Hud.Game.SelectedMonster2!=null)
+                {_lootNavMobilityBlockedUntil=now+1500;return false;}
+                if(!PulseLootNavigationSkill(skill)){_lootNavMobilityBlockedUntil=now+1500;return false;}
+                var from=Hud.Game.Me.FloorCoordinate;
+                _lootNavCasting=true;_lootNavCastAt=now;_lootNavCastTick=Hud.Game.CurrentGameTick;
+                _lootNavCastX=from.X;_lootNavCastY=from.Y;
+            }
+            _lootNavNextClick=now+AutoUrshiReturnClickDelayMs;
+            _lastClickMs=now;_lastCleanupClickFar=true;
+
+            return true;
+        }
+        [StructLayout(LayoutKind.Sequential)]
+        private struct LootNavigationKeyboard { public ushort Key,Scan;public uint Flags,Time;public IntPtr Extra; }
+        private bool SendLootNavigationKey(int code,bool mouse,bool up)
+        {
+            var packet=new PickupInput();packet.Type=mouse?0u:1u;
+            if(mouse)packet.Union.Mouse.Flags=code==1?(up?0x0004u:0x0002u):(up?0x0010u:0x0008u);
+            else packet.Union.Keyboard=new LootNavigationKeyboard{Key=(ushort)code,Flags=up?2u:0u};
+            return SendInput(1,new[]{packet},PickupInputSize)==1;
+        }
+        private bool PulseLootNavigationSkill(IPlayerSkill skill)
+        {
+            var bindings=Hud.GetPlugin<s7o_AutoSkill>();
+            bool mouse=skill.Key==ActionKey.LeftSkill||skill.Key==ActionKey.RightSkill;
+            int code=mouse?(skill.Key==ActionKey.LeftSkill?1:2):bindings!=null?bindings.GetCastVirtualKey(skill.Key):0;
+            int modifier=bindings!=null?bindings.ForceStandstillVirtualKey:0;
+            if(skill.Key==ActionKey.LeftSkill&&modifier==0)return false;
+            if(code==0||(LootNavigationKeyState(code)&0x8000)!=0||s7o_InputReleaseArbiter.HasPendingRelease)return false;
+            const string owner="s7o_AutoLoot.Navigation";int identity=mouse?(code==1?0x10001:0x10002):code;
+            bool ownModifier=modifier!=0&&modifier!=code&&(LootNavigationKeyState(modifier)&0x8000)==0;
+            if(ownModifier&&!s7o_InputReleaseArbiter.Down(owner,modifier,()=>SendLootNavigationKey(modifier,false,false)))return false;
+            try {
+                if(!s7o_InputReleaseArbiter.Down(owner,identity,()=>SendLootNavigationKey(code,mouse,false)))return false;
+                s7o_InputReleaseArbiter.Up(owner,identity,()=>SendLootNavigationKey(code,mouse,true));return true;
+            } finally {
+                if(ownModifier)s7o_InputReleaseArbiter.Up(owner,modifier,()=>SendLootNavigationKey(modifier,false,true));
+            }
+        }
+
         private bool TryReturnTowardAutoUrshi(long now)
         {
             if (_autoUrshiTalkDone || !_talkToUrshiAfterLoot || !_autoUrshiHasLastSeenWorld ||
@@ -4209,7 +4436,7 @@ namespace Turbo.Plugins.s7o
 
                     // A hover-confirmed actor click can still be swallowed by a UI mask or
                     // fail to start native pathing. Preserve the known outbound trail and
-                    // demote to the existing breadcrumb/direct approach instead of dead-ending.
+                    // demote to the existing map/native approach instead of dead-ending.
                     if (_autoUrshiStallFallbackUsed)
                     {
                         AbortAutoUrshiApproach(now);
@@ -4284,7 +4511,7 @@ namespace Turbo.Plugins.s7o
             _autoUrshiReturnProbeTick = 0;
             _autoUrshiActorPathActive = false;
             _autoUrshiReturning = false;
-            _autoUrshiReturnTrail.Clear();
+
             _autoUrshiReturnClicks = 0;
             _nextAutoUrshiReturnMs = 0;
             ResetAutoUrshiApproachSample();
@@ -4295,58 +4522,20 @@ namespace Turbo.Plugins.s7o
             RestoreAutoUrshiTalkCursor(now);
         }
 
-        private bool TryGetAutoUrshiReturnPoint(out int x, out int y)
+private bool TryGetAutoUrshiReturnPoint(out int x,out int y)
         {
-            x = 0;
-            y = 0;
-
-            try
-            {
-                var me = Hud != null && Hud.Game != null ? Hud.Game.Me : null;
-                if (me == null || me.FloorCoordinate == null || Hud.Window == null)
-                    return false;
-
-                float goalDistance = me.FloorCoordinate.XYDistanceTo(_autoUrshiLastSeenX, _autoUrshiLastSeenY);
-                if (_autoUrshiReturnTrail.Count > 0)
-                {
-                    // Trust the known route only when its retained origin ultimately lies
-                    // on the Urshi side of the current position. Once selected, replay
-                    // every waypoint in reverse; valid obstacle routes may temporarily
-                    // move sideways or farther from Urshi.
-                    var root = _autoUrshiReturnTrail[0];
-                    float rootDx = root.X - _autoUrshiLastSeenX;
-                    float rootDy = root.Y - _autoUrshiLastSeenY;
-                    float rootDistance = (float)Math.Sqrt(rootDx * rootDx + rootDy * rootDy);
-                    if (rootDistance < goalDistance - 0.1f)
-                    {
-                        while (_autoUrshiReturnTrail.Count > 0)
-                        {
-                            int index = _autoUrshiReturnTrail.Count - 1;
-                            var point = _autoUrshiReturnTrail[index];
-                            if (me.FloorCoordinate.XYDistanceTo(point.X, point.Y) >= AutoUrshiReturnMinClickYards)
-                                return TryProjectAutoUrshiGroundPoint(point.X, point.Y, point.Z, out x, out y);
-                            _autoUrshiReturnTrail.RemoveAt(index);
-                        }
-                    }
+            x=y=0;
+            try {
+                var me=Hud.Game.Me.FloorCoordinate;
+                float distance=me.XYDistanceTo(_autoUrshiLastSeenX,_autoUrshiLastSeenY);
+                if(distance<AutoUrshiReturnMinClickYards||distance>AutoUrshiUnknownApproachMaxYards)return false;
+                // Map navigation owns known obstacles; missing coverage keeps the bounded native fallback.
+                for(float step=Math.Min(18f,distance);step>=AutoUrshiReturnMinClickYards;step-=6f) {
+                    float fraction=step/distance;
+                    if(TryProjectAutoUrshiGroundPoint(me.X+(_autoUrshiLastSeenX-me.X)*fraction,
+                        me.Y+(_autoUrshiLastSeenY-me.Y)*fraction,me.Z,out x,out y))return true;
                 }
-
-                if (goalDistance < AutoUrshiReturnMinClickYards || goalDistance > AutoUrshiUnknownApproachMaxYards)
-                    return false;
-
-                // No usable known route points toward Urshi. Take a short directional
-                // step instead; the existing ground probe and movement watchdog abort
-                // if an actor or obstacle blocks progress.
-                for (float step = Math.Min(18f, goalDistance); step >= AutoUrshiReturnMinClickYards; step -= 6f)
-                {
-                    float fraction = step / goalDistance;
-                    float wx = me.FloorCoordinate.X + (_autoUrshiLastSeenX - me.FloorCoordinate.X) * fraction;
-                    float wy = me.FloorCoordinate.Y + (_autoUrshiLastSeenY - me.FloorCoordinate.Y) * fraction;
-                    if (TryProjectAutoUrshiGroundPoint(wx, wy, me.FloorCoordinate.Z, out x, out y))
-                        return true;
-                }
-            }
-            catch { }
-
+            }catch{}
             return false;
         }
 
@@ -5776,7 +5965,7 @@ namespace Turbo.Plugins.s7o
             public IntPtr ExtraInfo;
         }
         [StructLayout(LayoutKind.Explicit)]
-        private struct PickupInputUnion { [FieldOffset(0)] public PickupMouseInput Mouse; }
+        private struct PickupInputUnion { [FieldOffset(0)] public PickupMouseInput Mouse; [FieldOffset(0)] public LootNavigationKeyboard Keyboard; }
         [StructLayout(LayoutKind.Sequential)]
         private struct PickupInput { public uint Type; public PickupInputUnion Union; }
         [DllImport("user32.dll", SetLastError = true)]
@@ -5864,19 +6053,6 @@ namespace Turbo.Plugins.s7o
         }
 
         private struct NativePoint { public int X; public int Y; }
-        private struct AutoUrshiReturnPoint
-        {
-            public readonly float X;
-            public readonly float Y;
-            public readonly float Z;
-
-            public AutoUrshiReturnPoint(float x, float y, float z)
-            {
-                X = x;
-                Y = y;
-                Z = z;
-            }
-        }
         private struct DropSuppress
         {
             public readonly long Until;
