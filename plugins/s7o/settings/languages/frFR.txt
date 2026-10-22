@@ -2718,3 +2718,4 @@ help.plugin.zbarb.title=AutoSnap Z-Barbe
 help.plugin.zbarb.description=Aidez Ancient Spear à tirer tout en les gardant dans le cône configuré autour de votre objectif.
 help.plugin.zdh.title=Assistant ZDH
 help.plugin.zdh.description=Suivez les effets de soutien sur les élites et assistez éventuellement Entangling Shot, Multishot, Valley of Death et Guardian Sentry.
+overlay.inventory.others=Autres

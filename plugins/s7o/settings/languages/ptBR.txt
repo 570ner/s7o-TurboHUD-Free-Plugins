@@ -2716,3 +2716,4 @@ help.plugin.zbarb.title=Z-Barb AutoSnap
 help.plugin.zbarb.description=Auxilia as puxadas de Ancient Spear mantendo-as dentro do cone configurado ao redor da sua mira.
 help.plugin.zdh.title=Assistente ZDH
 help.plugin.zdh.description=Acompanha os efeitos de suporte nos elites e auxilia opcionalmente Entangling Shot, Multishot, Valley of Death e Guardian Sentry.
+overlay.inventory.others=Outros

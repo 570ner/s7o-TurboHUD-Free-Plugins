@@ -2718,3 +2718,4 @@ help.plugin.zbarb.title=Z-Barb AutoSnap
 help.plugin.zbarb.description=Pomaga przyciągać Ancient Spear, utrzymując kierunek w skonfigurowanym stożku wokół Twojego celu.
 help.plugin.zdh.title=Pomocnik ZDH
 help.plugin.zdh.description=Śledzi efekty wsparcia na elitach i opcjonalnie pomaga używać Entangling Shot, Multishot, Valley of Death oraz Guardian Sentry.
+overlay.inventory.others=Pozostałe

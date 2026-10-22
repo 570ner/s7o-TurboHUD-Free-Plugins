@@ -2718,3 +2718,4 @@ help.plugin.zbarb.title=Ajuste automático con púa Z
 help.plugin.zbarb.description=Ayuda a los tirones de Lanza antigua mientras los mantienes dentro del cono configurado alrededor de tu objetivo.
 help.plugin.zdh.title=Ayudante ZDH
 help.plugin.zdh.description=Realice un seguimiento de los efectos de apoyo en las élites y, opcionalmente, ayude a Entangling Shot, Multishot, Valley of Death y Guardian Sentry.
+overlay.inventory.others=Otros

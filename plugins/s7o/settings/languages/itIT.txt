@@ -2718,3 +2718,4 @@ help.plugin.zbarb.title=Z-Barb AutoSnap
 help.plugin.zbarb.description=Aiuta la lancia antica a tirare mantenendola all'interno del cono configurato attorno al tuo obiettivo.
 help.plugin.zdh.title=Assistente ZDH
 help.plugin.zdh.description=Tieni traccia degli effetti di supporto sulle élite e opzionalmente assisti Tiro avvincente, Tiro multiplo, Valle della morte e Sentinella guardiana.
+overlay.inventory.others=Altro

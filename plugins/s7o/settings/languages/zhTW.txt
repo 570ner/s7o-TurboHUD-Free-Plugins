@@ -2716,3 +2716,4 @@ help.plugin.zbarb.title=Z 型倒鉤自動捕捉
 help.plugin.zbarb.description=協助遠古矛拉動，同時將其保持在目標周圍配置的圓錐體內。
 help.plugin.zdh.title=ZDH 輔助工具
 help.plugin.zdh.description=追蹤對菁英的支援效果，並可選擇協助糾纏射擊、多重射擊、死亡之谷和守護哨兵。
+overlay.inventory.others=其他

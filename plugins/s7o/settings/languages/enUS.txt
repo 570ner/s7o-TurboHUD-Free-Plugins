@@ -2718,3 +2718,4 @@ help.plugin.zbarb.title=Z-Barb AutoSnap
 help.plugin.zbarb.description=Assist Ancient Spear pulls while keeping them within the configured cone around your aim.
 help.plugin.zdh.title=ZDH Helper
 help.plugin.zdh.description=Track support effects on elites and optionally assist Entangling Shot, Multishot, Valley of Death and Guardian Sentry.
+overlay.inventory.others=Others

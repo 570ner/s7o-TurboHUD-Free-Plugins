@@ -2716,3 +2716,4 @@ help.plugin.zbarb.title=Z-Barb AutoSnap
 help.plugin.zbarb.description=Помогите древнему копью вытащить, удерживая его в пределах настроенного конуса вокруг вашей цели.
 help.plugin.zdh.title=Помощник ZDH
 help.plugin.zdh.description=Отслеживайте эффекты поддержки на элитных персонажах и при необходимости помогайте «Опутывающему выстрелу», «Залповому выстрелу», «Долине смерти» и «Стражному стражу».
+overlay.inventory.others=Прочее

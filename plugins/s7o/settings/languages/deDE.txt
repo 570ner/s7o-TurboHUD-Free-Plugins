@@ -2718,3 +2718,4 @@ help.plugin.zbarb.title=Z-Barb AutoSnap
 help.plugin.zbarb.description=Unterstützen Sie Ancient Spear beim Ziehen, während Sie sie innerhalb des konfigurierten Kegels um Ihr Ziel halten.
 help.plugin.zdh.title=ZDH-Helfer
 help.plugin.zdh.description=Verfolgen Sie Unterstützungseffekte auf Eliteeinheiten und unterstützen Sie optional Entangling Shot, Multishot, Valley of Death und Guardian Sentry.
+overlay.inventory.others=Sonstiges

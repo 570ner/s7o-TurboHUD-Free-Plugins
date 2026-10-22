@@ -2716,3 +2716,4 @@ help.plugin.zbarb.title=Z-바브 AutoSnap
 help.plugin.zbarb.description=Assist Ancient Spear는 조준 주위에 구성된 원뿔 내에 유지하면서 당깁니다.
 help.plugin.zdh.title=ZDH 도우미
 help.plugin.zdh.description=엘리트에 대한 지원 효과를 추적하고 선택적으로 Entangling Shot, Multishot, Valley of Death 및 Guardian Sentry를 지원합니다.
+overlay.inventory.others=기타
