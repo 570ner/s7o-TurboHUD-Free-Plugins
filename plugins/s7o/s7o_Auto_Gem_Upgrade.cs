@@ -1465,7 +1465,9 @@ public void AfterCollect()
                 int directPreRank = ReadDirectGemRank(nativeGem.Item);
                 int nativePreRank = Math.Max(GetConfirmedLowRank(nativeGem.Item), directPreRank);
                 string nativeKey = BuildItemKey(nativeGem.Item);
+                int capResultBaseline = nativePreRank == 149 ? ReadCompletedUiResult() : 0;
                 if (!ClickUi(_upgradeButton)) return;
+                ResetNativeCapResult(capResultBaseline);
                 _nativeOutcome = NativeAttemptOutcome.Pending;
                 _nativeOutcomePrepared = false;
                 _nativeAttemptKey = nativeKey;
@@ -1547,6 +1549,8 @@ public void AfterCollect()
         private string _nativeAttemptKey;
         private int _nativeAttemptRank = -1, _nativeAttemptCount = -1;
         private int _nativeDirectBaseline = -1;
+        private int _nativeCapResultBaseline, _nativeCapClearSamples;
+        private int _nativeCapClearTick = int.MinValue;
 
         private int ReadDirectGemRank(IItem item)
         {
@@ -1594,12 +1598,25 @@ public void AfterCollect()
                 if (char.IsLetterOrDigit(c)) result.Append(char.ToUpperInvariant(c));
             return result.ToString();
         }
+
         private int ReadCompletedUiResult()
         {
+            bool readable, visible, blank;
+            return ReadCompletedUiResultSnapshot(out readable, out visible, out blank);
+        }
+
+        private int ReadCompletedUiResultSnapshot(out bool readable, out bool visible, out bool blank)
+        {
+            readable = visible = blank = false;
             try
             {
-                if(_gemStatusText==null || !_gemStatusText.Visible)return 0;
-                string text=NormalizeCompletedResult(_gemStatusText.ReadText(Encoding.UTF8,true));
+                if(_gemStatusText==null)return 0;
+                visible = _gemStatusText.Visible;
+                string raw = _gemStatusText.ReadText(Encoding.UTF8,true);
+                if (raw == null) return 0;
+                string text=NormalizeCompletedResult(raw);
+                readable = true; blank = text.Length == 0;
+                if (!visible) return 0;
                 // Exact completed-result labels; unknown translations retain native fallback.
                 string[] success={"Upgrade Succeeded","업그레이드 성공","강화 성공","강화 성공했습니다","升级成功","升級成功","強化成功","Mejora realizada","Mejora completada","Mejora conseguida","Aprimoramento realizado","Aprimoramento bem-sucedido","Amélioration réussie","Aufwertung erfolgreich","Potenziamento riuscito","Улучшение успешно","Улучшение удалось","Ulepszenie udane"};
                 string[] failure={"Upgrade Failed","업그레이드 실패","강화 실패","강화 실패했습니다","升级失败","升級失敗","強化失敗","Mejora fallida","Aprimoramento falhou","Falha no aprimoramento","Échec de l’amélioration","Échec de l'amélioration","Aufwertung fehlgeschlagen","Potenziamento fallito","Улучшение не удалось","Ulepszenie nieudane"};
@@ -1610,11 +1627,47 @@ public void AfterCollect()
             return 0;
         }
 
-private bool WaitForNativeAttempt(int upgrades)
+private void ResetNativeCapResult(int baseline)
+        {
+            _nativeCapResultBaseline = baseline;
+            _nativeCapClearSamples = 0;
+            _nativeCapClearTick = int.MinValue;
+        }
+
+        private bool ObserveFreshNativeCapResult(int upgrades, int animation, int result,
+            bool readable, bool visible, bool blank, bool sameSelected)
+        {
+            if (_nativeAttemptRank != 149) return false;
+            if (!sameSelected)
+            {
+                ResetNativeCapResult(0);
+                return false;
+            }
+            if (!readable) return false;
+            int tick = Hud.Game.CurrentGameTick;
+            if (animation == 27 && blank && tick != _nativeCapClearTick)
+            {
+                _nativeCapClearTick = tick;
+                _nativeCapClearSamples = Math.Min(2, _nativeCapClearSamples + 1);
+            }
+            // An unchanged old success cannot confirm a new attempt. Either the
+            // recognized failure changed to success, or the result field cleared
+            // on two distinct busy ticks and subsequently displayed a success.
+            return upgrades < _nativeAttemptCount && animation == 27 && visible && result > 0
+                && (_nativeCapResultBaseline < 0
+                    || (_nativeCapClearSamples >= 2 && tick != _nativeCapClearTick));
+        }
+
+        private bool WaitForNativeAttempt(int upgrades)
         {
             if (_nativeAttemptKey == null || NativeAttemptResolved()) return false;
             int animation = SafeAnimState(_upgradeButton);
-            int uiResult = ReadCompletedUiResult();
+            bool resultReadable, resultVisible, resultBlank;
+            int uiResult = ReadCompletedUiResultSnapshot(out resultReadable, out resultVisible, out resultBlank);
+            bool sameSelected = _target != null && _target.Source != null && _target.Source.Item != null
+                && BuildItemKey(_target.Source.Item) == _nativeAttemptKey && IsNativeTargetSelected(_target);
+            bool freshCapResult = ObserveFreshNativeCapResult(upgrades, animation, uiResult,
+                resultReadable, resultVisible, resultBlank, sameSelected);
             if (upgrades >= _nativeAttemptCount) return false;
             if (_nativeConsumedTick == int.MinValue)
             {
@@ -1625,10 +1678,13 @@ private bool WaitForNativeAttempt(int upgrades)
             var gem = FindNativeGem(_nativeAttemptKey);
             int directRank = gem == null ? -1 : ReadDirectGemRank(gem.Item);
             int rank = gem == null ? -1 : Math.Max(gem.Item.JewelRank, directRank);
-            bool sameSelected = _target != null && _target.Source != null && _target.Source.Item != null
-                && BuildItemKey(_target.Source.Item) == _nativeAttemptKey && IsNativeTargetSelected(_target);
+
             if (rank > _nativeAttemptRank)
                 ResolveNativeAttempt(true, rank);
+            else if (freshCapResult && gem != null && gem.EffectiveStopCap == 150)
+            {
+                ResolveNativeAttempt(true, 150);
+            }
             // Completion belongs to the consumed attempt's native ready cycle.
             // Consecutive failures/successes legitimately retain the same result label.
             else if (sameSelected && animation == 24 && SafeUiVisible(_upgradeButton) && uiResult != 0)
@@ -4219,6 +4275,7 @@ private bool TryPrepareConfirmedNativeSelection(int upgrades)
             _nativeOutcomePrepared = false;
             _nativeAttemptSucceeded = false;
             _nativeConsumedTick = int.MinValue;
+            ResetNativeCapResult(0);
             _confirmedLowRanks.Clear();
             _autoPlan.Clear();
             _autoPlanSummary = string.Empty;
@@ -4491,10 +4548,8 @@ private void PaintInventoryPortalWait(ClipState clipState)
             // A capped neighbor can leave the Upgrade button permanently in state 27.
             // Selection ACD, not the Upgrade animation, authorizes a tentative correction.
             if (!NativeValidAcd(selected) || selected == expected.Acd) return false;
-            // An ignored click during an upgrade is not evidence of a column offset.
-            // Capped-gem lockout retains its existing special calibration path.
-            if (_nativeClickDuringBusy && selected == _nativeSelectionBeforeClick
-                && !PreviousNativeGemAtCap()) return false;
+            // An unchanged selection cannot establish an offset after a busy click.
+            if (_nativeClickDuringBusy && selected == _nativeSelectionBeforeClick) return false;
             var actual=NativeFind(selected,cells);
             if(actual==null || actual.Row!=expected.Row || Math.Abs(actual.Column-expected.Column)!=1
                 || Math.Abs(actual.Rect.Width-expected.Rect.Width)>1
@@ -4514,14 +4569,26 @@ private void PaintInventoryPortalWait(ClipState clipState)
             return true;
         }
 
+        private bool CanProbeUnchangedNativeCapSelection()
+        {
+            uint selected = SafeItemButtonAcd();
+            // Retry the verified coordinates before probing a possible column offset.
+            return _nativeClickDuringBusy && _nativeTotalClicks >= 2 && PreviousNativeGemAtCap()
+                && NativeValidAcd(selected) && selected == _nativeSelectionBeforeClick;
+        }
+
         private bool TryProbeNativeEdgeCell(NativeGemCell target, List<NativeGemCell> cells,
             RectangleF viewport, int now)
         {
             if (_nativeProbeUsed || _nativeCalibrationPending || target == null
-                || target.Column != UrshiCols - 1 || Math.Abs(_nativeCellOffsetX) > 0.5f)
+                || (target.Column != UrshiCols - 1 && !CanProbeUnchangedNativeCapSelection())
+                || Math.Abs(_nativeCellOffsetX) > 0.5f)
                 return false;
             var probe = cells.FirstOrDefault(c => c.Row == target.Row
                 && c.Column == target.Column - 1 && NativeComfortable(c, viewport));
+            if (probe == null && CanProbeUnchangedNativeCapSelection())
+                probe = cells.FirstOrDefault(c => c.Row == target.Row
+                    && c.Column == target.Column + 1 && NativeComfortable(c, viewport));
             if (probe == null || !NativeValidAcd(probe.Acd)) return false;
             int x = (int)Math.Round(probe.Rect.Left + probe.Rect.Width / 2);
             int y = (int)Math.Round(probe.Rect.Top + probe.Rect.Height / 2);
@@ -4627,7 +4694,24 @@ private void PaintInventoryPortalWait(ClipState clipState)
             } catch { return false; }
         }
 
-private void ObserveMessageScroll()
+private bool NativeCapSelectionWindowElapsed()
+        {
+            // The cap lockout belongs to the consumed attempt, not to its later result.
+            // Retarget time remains the fallback when consumption was not observed.
+            int start = _nativeConsumedTick != int.MinValue ? _nativeConsumedTick : _retargetStartedTick;
+            return start != int.MinValue && ElapsedMs(start) >= NativeCapFirstSelectionMs;
+        }
+
+        private bool CanRetryNativeCapScroll(int anim)
+        {
+            // A capped gem can remain at animation 27 until a different gem is selected.
+            // Reuse the existing cap lockout and navigation budget instead of waiting for ready.
+            return anim == 27 && _retargetNeedsButtonReady
+                && NativeCapSelectionWindowElapsed()
+                && NativeAttemptResolved() && _nativeAttemptSucceeded && PreviousNativeGemAtCap();
+        }
+
+        private void ObserveMessageScroll()
         {
             // Observe readiness even with no queued scroll, so a later busy
             // phase cannot inherit a rejection from the previous animation cycle.
@@ -4656,9 +4740,10 @@ private void ObserveMessageScroll()
                 if(anim!=24)_messageScrollDeferredAnim=anim;
                 _nativeScrollCount=Math.Max(0,_nativeScrollCount-1);
             } else if(anim!=24) {
-                // One probe during animation is useful; rejected probes retry on readiness, without poisoning navigation.
+                // Ordinary busy probes wait for readiness; confirmed cap retries consume the navigation budget.
                 _messageScrollDeferredAnim=anim;
-                _nativeScrollCount=Math.Max(0,_nativeScrollCount-1);
+                if(!CanRetryNativeCapScroll(anim))
+                    _nativeScrollCount=Math.Max(0,_nativeScrollCount-1);
             } else {
                 _messageScrollFailures++;
             }
@@ -4690,7 +4775,7 @@ private bool TryMessageScrollToCell(NativeGemCell cell,RectangleF viewport,Recta
                 return true;
             if(anim!=_messageScrollLastAnim){_messageScrollFailures=0;_messageScrollLastAnim=anim;}
             if(_messageScrollDeferredAnim!=int.MinValue) {
-                if(anim==_messageScrollDeferredAnim)return true;
+                if(anim==_messageScrollDeferredAnim && !CanRetryNativeCapScroll(anim))return true;
                 _messageScrollDeferredAnim=int.MinValue;_messageScrollFailures=0;
             }
             if(_messageScrollFailures>=3)
@@ -4833,7 +4918,7 @@ private bool TryMessageScrollToCell(NativeGemCell cell,RectangleF viewport,Recta
                     var probed = NativeFind(_nativeProbeAcd, probeCells);
                     var intended = NativeFind(expected, probeCells);
                     if (probed != null && intended != null && probed.Row == intended.Row
-                        && probed.Column + 1 == intended.Column)
+                        && Math.Abs(probed.Column - intended.Column) == 1)
                     {
                         float offset = probed.Rect.Left - intended.Rect.Left;
                         if (Math.Abs(offset) <= intended.Rect.Width * 2)
@@ -4895,7 +4980,8 @@ private bool TryMessageScrollToCell(NativeGemCell cell,RectangleF viewport,Recta
                 _nativeClickAt = int.MinValue;
                 RollbackNativeCalibration();
                 if (TryCalibrateNativeCell(calibrationCell, cells)) _nativeClickCount = 0;
-                else if (!probeResult && cell != null && !NativeValidAcd(SafeItemButtonAcd())
+                else if (!probeResult && cell != null
+                    && (!NativeValidAcd(SafeItemButtonAcd()) || CanProbeUnchangedNativeCapSelection())
                     && TryProbeNativeEdgeCell(cell, cells, viewport, now)) return;
                 if (_nativeTotalClicks >= NativeSelectionMaxClicks)
                 { Fail("native selection retry budget exhausted; no unverified upgrade was sent"); return; }
@@ -4917,8 +5003,7 @@ private bool TryMessageScrollToCell(NativeGemCell cell,RectangleF viewport,Recta
                 // Navigation may overlap the previous Upgrade animation. Only a genuinely
                 // capped previous gem needs its documented initial selection-lockout guard.
                 if (_retargetNeedsButtonReady && PreviousNativeGemAtCap()
-                    && _retargetStartedTick != int.MinValue
-                    && ElapsedMs(_retargetStartedTick) < NativeCapFirstSelectionMs) return;
+                    && !NativeCapSelectionWindowElapsed()) return;
                 x += (int)Math.Round(_nativeCellOffsetX);
                 if (!NativeCellClickInsidePane(x,y)) { Fail("native cell point outside pane"); return; }
                 // Validate the same native element again at the final input boundary.
