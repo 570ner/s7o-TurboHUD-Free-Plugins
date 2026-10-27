@@ -19,7 +19,7 @@ namespace Turbo.Plugins.s7o
 {
     // s7o HUD MENU - FREEHUD in-game manager for plugin controls,
     // macros, visual helpers, hotkeys, and persistent global plugin states.
-    public class s7o_HUD_MENU : BasePlugin, IKeyEventHandler, IAfterCollectHandler, IInGameWorldPainter, IInGameTopPainter, IMouseClickHandler
+    public class s7o_HUD_MENU : BasePlugin, IKeyEventHandler, IAfterCollectHandler, IInGameWorldPainter, IInGameTopPainter, IMouseClickHandler, INewAreaHandler
     {
         private const string SettingsFileName = "s7o_HUD_MENU.ini";
         private const string LegacySettingsFileName = "s7o_HUD_MENU.settings.txt";
@@ -780,7 +780,6 @@ namespace Turbo.Plugins.s7o
         private bool _xpGrRewardPending;
         private int _xpGrRewardClosingTick = int.MinValue;
         private double _xpGrRewardBuffered;
-        private int _xpGrRewardBufferedTick;
         private bool _xpDirty;
         private int _xpLastSaveTick = int.MinValue;
         private IBrush _xpPanelBrush, _xpPanelBorder, _xpRowBrush, _xpResetBrush;
@@ -1280,6 +1279,20 @@ namespace Turbo.Plugins.s7o
             _startupPluginRefreshUntilTick = unchecked(_lastRefreshTick + StartupPluginRefreshDurationMs);
             _nextStartupPluginRefreshTick = int.MinValue;
             LogDebug("s7o_HUD_MENU loaded. Hotkey=" + MenuHotkey + ", debug=" + _debugLogging + ".");
+        }
+
+        public void OnNewArea(bool newGame, ISnoArea area)
+        {
+            if (!newGame) return;
+            // Unavailable/loading frames are not proof that the game session ended.
+            _xpGrRewardPending = false;
+            _xpGrRewardClosingTick = int.MinValue;
+            _xpGrRewardBuffered = 0d;
+            _xpGrComplete = false;
+            _xpGrStartTick = int.MinValue;
+            _xpGrLastGameTick = int.MinValue;
+            _xpLastWallTicks = 0L;
+            _xpNextSampleTick = int.MinValue;
         }
 
         public void AfterCollect()
@@ -8797,12 +8810,20 @@ namespace Turbo.Plugins.s7o
                 if(quest.SnoQuest.Sno==382695)return quest.State==QuestState.completed;
                 if(quest.SnoQuest.Sno==337492)fallback=quest;
             }
-            return fallback!=null && fallback.State==QuestState.completed;
+            // A valid collection without either rift quest confirms removal; null remains unknown.
+            return fallback==null || fallback.State==QuestState.completed;
         }
 
         private static bool XpTickPending(int now, int due)
         {
             return due != int.MinValue && unchecked(now - due) < 0;
+        }
+
+        private bool XpInGreaterRift()
+        {
+            // SpecialArea clears at guardian death; the player GR flag survives until town.
+            return Hud.Game.Me!=null && !Hud.Game.Me.IsInTown
+                && (Hud.Game.Me.InGreaterRift || Hud.Game.SpecialArea==SpecialArea.GreaterRift);
         }
 
         private void SampleXpTracker(int now)
@@ -8813,8 +8834,8 @@ namespace Turbo.Plugins.s7o
                     || Hud.Game.IsLoading || Hud.Game.Me == null)
                 {
                     _xpLastWallTicks = 0L;
-                    if (Hud == null || Hud.Game == null || !Hud.Game.IsInGame)
-                    { _xpGrRewardPending = false; _xpGrRewardClosingTick = int.MinValue; }
+                    // Preserve pending rewards through incomplete area-transition snapshots.
+                    // A native new-game event, hero change or new GR resets the lifecycle.
                     // Loading can republish a lower XP total. Do not forget a valid
                     // same-hero baseline and later count its correction as earnings.
                     _xpAllSourceSettling = _xpLastAll < 0d;
@@ -8831,9 +8852,12 @@ namespace Turbo.Plugins.s7o
                 _xpNextSampleTick = unchecked(now + XpSampleIntervalMs);
 
                 long wallTicks = DateTime.UtcNow.Ticks;
-                if (_xpLastWallTicks > 0L && wallTicks > _xpLastWallTicks)
+                double sampleSeconds = _xpLastWallTicks > 0L && wallTicks > _xpLastWallTicks
+                    ? (wallTicks - _xpLastWallTicks) / (double)TimeSpan.TicksPerSecond : 0d;
+                // Both counters start their clocks only after their first earned XP.
+                if (_xpAllGained > 0d && sampleSeconds > 0d)
                 {
-                    _xpAllSeconds += (wallTicks - _xpLastWallTicks) / (double)TimeSpan.TicksPerSecond;
+                    _xpAllSeconds += sampleSeconds;
                     _xpDirty = true;
                 }
                 _xpLastWallTicks = wallTicks;
@@ -8904,16 +8928,16 @@ namespace Turbo.Plugins.s7o
                     }
                 }
 
-                bool inGr = Hud.Game.Me.InGreaterRift
-                    && Hud.Game.SpecialArea == SpecialArea.GreaterRift;
+                bool inGr = XpInGreaterRift();
+                bool closingReward = _xpGrRewardPending && XpGreaterRiftRewardClosed();
                 if (inGr)
                 {
                     int startTick = Hud.Game.CurrentTimedEventStartTick;
                     int gameTick = Hud.Game.CurrentGameTick;
-                    if (_xpGrStartTick != startTick
+                    if (!closingReward && (_xpGrStartTick != startTick
                         || (_xpGrComplete && Hud.Game.RiftPercentage < 100d)
                         || (_xpGrLastGameTick != int.MinValue
-                            && gameTick < _xpGrLastGameTick))
+                            && gameTick < _xpGrLastGameTick)))
                     {
                         _xpGrStartTick = startTick;
                         _xpGrComplete = false;
@@ -8924,14 +8948,16 @@ namespace Turbo.Plugins.s7o
 
                     uint step = XpGreaterRiftStep();
                     bool dead = step == 5u || step == 10u || step == 34u || step == 46u;
+                    // Use the same interval as overall XP while physically in the GR.
+                    // Completion controls reward accounting; town/loading controls the timer.
+                    if (_xpGrGained > 0d && _xpGrLastGameTick != int.MinValue
+                        && gameTick >= _xpGrLastGameTick && sampleSeconds > 0d)
+                    {
+                        _xpGrSeconds += sampleSeconds;
+                        _xpDirty = true;
+                    }
                     if (!_xpGrComplete)
                     {
-                        if (_xpGrLastGameTick != int.MinValue && gameTick >= _xpGrLastGameTick)
-                        {
-                            _xpGrSeconds += (gameTick - _xpGrLastGameTick) / 60d;
-                            _xpDirty = true;
-                        }
-
                         if (xpValid && _xpLastGr >= 0d)
                         {
                             if (xp >= _xpLastGr)
@@ -8952,7 +8978,7 @@ namespace Turbo.Plugins.s7o
                             _xpGrRewardClosingTick = int.MinValue;
                         }
                     }
-                    _xpGrLastGameTick = _xpGrComplete ? int.MinValue : gameTick;
+                    _xpGrLastGameTick = gameTick;
                 }
                 else
                 {
@@ -8966,26 +8992,21 @@ namespace Turbo.Plugins.s7o
                     bool rewardPhase = rewardStep == 5u || rewardStep == 10u
                         || rewardStep == 34u || rewardStep == 46u;
                     bool inTown = Hud.Game.Me.IsInTown;
-                    if (!inGr && !inTown) _xpGrRewardPending = false;
-                    bool questClosed = XpGreaterRiftRewardClosed();
+                    // A party turn-in can arrive before this client reaches town.
+                    bool questClosed = closingReward || XpGreaterRiftRewardClosed();
                     if (rewardPhase && !questClosed) _xpGrRewardClosingTick = int.MinValue;
                     // Missing quest data is unknown; retain only a previously confirmed closure.
                     bool closed = questClosed || (rewardStep != 0u && !rewardPhase)
                         || (rewardStep == 0u && _xpGrRewardClosingTick != int.MinValue);
-                    if (inTown && xpValid && xp > _xpLastGr && _xpLastGr >= 0d)
+                    if (!inGr && (inTown || closed) && xpValid && xp > _xpLastGr && _xpLastGr >= 0d)
                     {
-                        if (unchecked(now-_xpGrRewardBufferedTick)>2000) _xpGrRewardBuffered=0;
                         _xpGrRewardBuffered += xp-_xpLastGr;
-                        _xpGrRewardBufferedTick=now;
                     }
                     if (closed && _xpGrRewardClosingTick == int.MinValue)
                         _xpGrRewardClosingTick = now;
-                    // Quest closure and cumulative XP can publish on adjacent samples.
-                    if (_xpGrRewardClosingTick != int.MinValue
-                        && unchecked(now-_xpGrRewardClosingTick)>2000)
-                        _xpGrRewardPending = false;
-                    if (_xpGrRewardPending && inTown && closed && _xpGrRewardBuffered>0
-                        && unchecked(now-_xpGrRewardBufferedTick)<=2000)
+                    // Retain closure and XP evidence until credited or the existing run/hero/game reset.
+                    // Reward publication and the trip to Orek are not limited to two seconds.
+                    if (_xpGrRewardPending && closed && _xpGrRewardBuffered>0)
                     {
                         _xpGrGained += _xpGrRewardBuffered;
                         _xpGrRewardBuffered=0;
@@ -9038,7 +9059,7 @@ namespace Turbo.Plugins.s7o
                     : _xpLastGr;
                 try
                 {
-                    _xpGrLastGameTick = Hud.Game.Me.InGreaterRift && !_xpGrComplete
+                    _xpGrLastGameTick = XpInGreaterRift()
                         ? Hud.Game.CurrentGameTick : int.MinValue;
                 }
                 catch { _xpGrLastGameTick = int.MinValue; }
