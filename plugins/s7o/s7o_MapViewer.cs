@@ -39,6 +39,79 @@ namespace Turbo.Plugins.s7o
         public bool ShowHeightSamplePreview = false; // Optional height preview; native cell boundaries are the default.
         public int NativeGridDrawStride = 2; // Preview spacing only; never decimate cell boundaries.
 
+
+        // Collection-owned indexes preserve the original first-match ordering.
+        private readonly HashSet<uint> _nativeBoxIds = new HashSet<uint>();
+        private readonly HashSet<uint> _obstacleIds = new HashSet<uint>();
+        private readonly Dictionary<uint,List<Obstacle>> _obstaclesBySno = new Dictionary<uint,List<Obstacle>>();
+        private long _terrainRevision;
+        private bool _fingerprintValid;
+        private long _fingerprintVersion, _fingerprintEpoch, _fingerprintTerrain, _fingerprintValue;
+
+        private void ClearNativeBoxes()
+        {
+            _nativeBoxes.Clear();_nativeBoxIds.Clear();
+        }
+        private void AddNativeBox(NativeBox box)
+        {
+            _nativeBoxes.Add(box);if(box.AcdId!=0)_nativeBoxIds.Add(box.AcdId);
+        }
+        private void ClearObstacles()
+        {
+            _obstacles.Clear();_obstacleIds.Clear();
+            foreach(var bucket in _obstaclesBySno.Values)bucket.Clear();
+            if(_obstaclesBySno.Count>512)_obstaclesBySno.Clear();
+        }
+        private void AddObservedObstacle(Obstacle obstacle)
+        {
+            _obstacles.Add(obstacle);_obstacleIds.Add(obstacle.AcdId);
+            List<Obstacle> bucket;
+            if(!_obstaclesBySno.TryGetValue(obstacle.Sno,out bucket)) {
+                bucket=new List<Obstacle>(4);_obstaclesBySno.Add(obstacle.Sno,bucket);
+            }
+            bucket.Add(obstacle);
+        }
+        private bool TryFindPoseObstacle(uint sno,float x,float y,float z,out Obstacle found)
+        {
+            List<Obstacle> bucket;
+            if(_obstaclesBySno.TryGetValue(sno,out bucket))foreach(var obstacle in bucket)
+                if(obstacle.FloorZKnown&&DistanceSquared(obstacle.FloorX,obstacle.FloorY,x,y)<0.25f*0.25f
+                    &&Math.Abs(obstacle.FloorZ-z)<0.25f) { found=obstacle;return true; }
+            found=default(Obstacle);return false;
+        }
+        private static void RouteHash(ref long hash,long value)
+        {
+            unchecked {hash=(hash^value)*1099511628211L;}
+        }
+        private long ComputeRouteFingerprint(long terrain)
+        {
+            long hash=1469598103934665603L;RouteHash(ref hash,terrain);
+            foreach(var p in _placements.Values) {
+                RouteHash(ref hash,p.SceneId);RouteHash(ref hash,p.NavMeshId);RouteHash(ref hash,p.Sno);
+                RouteHash(ref hash,p.X.GetHashCode());RouteHash(ref hash,p.Y.GetHashCode());RouteHash(ref hash,p.Z.GetHashCode());
+                RouteHash(ref hash,p.MaxX.GetHashCode());RouteHash(ref hash,p.MaxY.GetHashCode());
+                RouteHash(ref hash,p.OriginConflict?1:0);RouteHash(ref hash,p.Template!=null&&p.Template.Grid!=null?1:0);
+            }
+            foreach(var b in _nativeBoxes) {
+                RouteHash(ref hash,b.AcdId);RouteHash(ref hash,b.SceneId);RouteHash(ref hash,b.Definition.Sno);
+                RouteHash(ref hash,b.Definition.Flags);RouteHash(ref hash,(b.Definition.Kind??"").GetHashCode());
+                RouteHash(ref hash,b.Definition.Cylinder?1:0);
+                RouteHash(ref hash,b.X.GetHashCode());RouteHash(ref hash,b.Y.GetHashCode());
+                RouteHash(ref hash,b.MinZ.GetHashCode());RouteHash(ref hash,b.MaxZ.GetHashCode());RouteHash(ref hash,b.FloorZ.GetHashCode());
+                RouteHash(ref hash,b.HX.GetHashCode());RouteHash(ref hash,b.HY.GetHashCode());
+                RouteHash(ref hash,b.Cos.GetHashCode());RouteHash(ref hash,b.Sin.GetHashCode());
+            }
+            foreach(var o in _obstacles)if(!HasNativeBox(o)&&RoutePropBlocks(o)) {
+                RouteHash(ref hash,o.AcdId);RouteHash(ref hash,o.Sno);RouteHash(ref hash,o.SceneId);
+                RouteHash(ref hash,(o.Kind??"").GetHashCode());RouteHash(ref hash,o.FloorZKnown?1:0);
+                RouteHash(ref hash,o.Operated?1:0);RouteHash(ref hash,o.Clickable?1:0);
+                RouteHash(ref hash,o.X.GetHashCode());RouteHash(ref hash,o.Y.GetHashCode());RouteHash(ref hash,o.Z.GetHashCode());
+                RouteHash(ref hash,o.FloorX.GetHashCode());RouteHash(ref hash,o.FloorY.GetHashCode());
+                RouteHash(ref hash,o.FloorZ.GetHashCode());RouteHash(ref hash,o.Radius.GetHashCode());
+            }
+            return hash;
+        }
+
         private const int MaximumPlacements = 128;
         private const int MaximumActorScan = 2048;
         private const int MaximumQueryCells = 16384;
@@ -340,7 +413,7 @@ namespace Turbo.Plugins.s7o
         }
         private void CollectNativeBoxes()
         {
-            _nativeBoxes.Clear();TemplateCache cache=_placedCache;if(cache==null||cache.ShapeState!="Ready")return;
+            ClearNativeBoxes();TemplateCache cache=_placedCache;if(cache==null||cache.ShapeState!="Ready")return;
             int inspected=0;
             foreach(var scene in _placements.Values) {
                 BoxPose[] poses;if(scene.Template==null||scene.OriginConflict||!cache.BoxPoses.TryGetValue(scene.Sno,out poses))continue;
@@ -349,16 +422,14 @@ namespace Turbo.Plugins.s7o
                     float px=scene.X+pose.X,py=scene.Y+pose.Y,pz=scene.Z+pose.Z;
                     if(DistanceSquared(px,py,_playerX,_playerY)>140f*140f)continue;
                     uint acd=0;bool observed=false;
-                    foreach(var o in _obstacles)if(o.Sno==pose.Sno&&o.FloorZKnown&&DistanceSquared(o.FloorX,o.FloorY,px,py)<0.25f*0.25f&&Math.Abs(o.FloorZ-pz)<0.25f) {
-                        observed=true;acd=o.AcdId;
-                        break;
-                    }
+                    Obstacle matched;
+                    if(TryFindPoseObstacle(pose.Sno,px,py,pz,out matched)) {observed=true;acd=matched.AcdId;}
                     // Conditional chests/racks/doors/shrines need live confirmation. Pit fixtures may be absent from FreeHUD's Actors list.
                     // Marker-only pits stay explicitly unverified candidates until checked in-game; never declare all event markers solid.
                     if(!observed&&d.Kind!="TrapPit")continue;
                     float cx=px+pose.Cos*d.X-pose.Sin*d.Y,cy=py+pose.Sin*d.X+pose.Cos*d.Y;
                     float ground;uint groundFlags;int groundIndex;float floor=HeightAt(scene,px,py,out ground,out groundFlags,out groundIndex)?ground:pz;
-                    _nativeBoxes.Add(new NativeBox {Definition=d,SceneId=scene.SceneId,AcdId=acd,Presence=observed?"LiveActorMatched":"TrapMarkerCandidate",
+                    AddNativeBox(new NativeBox {Definition=d,SceneId=scene.SceneId,AcdId=acd,Presence=observed?"LiveActorMatched":"TrapMarkerCandidate",
                         X=cx,Y=cy,MinZ=pz+d.Z-d.HZ,MaxZ=pz+d.Z+d.HZ,HX=d.HX,HY=d.HY,Cos=pose.Cos,Sin=pose.Sin,FloorZ=floor});
                 }
             }
@@ -374,16 +445,15 @@ namespace Turbo.Plugins.s7o
                 // rotation of the native collider; label it instead of claiming an exact pose.
                 float extent=(d.Cylinder?d.HX:(float)Math.Sqrt(d.HX*d.HX+d.HY*d.HY))+(float)Math.Sqrt(d.X*d.X+d.Y*d.Y);
                 if(extent<=0||extent>50)continue;
-                _nativeBoxes.Add(new NativeBox {Definition=d,SceneId=o.SceneId,AcdId=o.AcdId,
+                AddNativeBox(new NativeBox {Definition=d,SceneId=o.SceneId,AcdId=o.AcdId,
                     Presence=d.Cylinder?"LiveActorNativeCylinderBounds":"LiveActorNativeRotationEnvelope",X=o.FloorX,Y=o.FloorY,
                     MinZ=o.FloorZ+d.Z-d.HZ,MaxZ=o.FloorZ+d.Z+d.HZ,HX=extent,HY=extent,
                     Cos=1,Sin=0,FloorZ=o.FloorZ});
             }
         }
-        private bool HasNativeBox(Obstacle o)
-        {
-            foreach(var b in _nativeBoxes)if(o.AcdId!=0&&b.AcdId==o.AcdId)return true;return false;
-        }
+
+private bool HasNativeBox(Obstacle o)
+        { return o.AcdId!=0&&_nativeBoxIds.Contains(o.AcdId); }
         private static bool BoxInterval(NativeBox b,float x,float y,float z,float tx,float ty,float tz,float radius,out Interval interval)
         {
             // Point/segment XYZ are floor positions. A slightly raised box still obstructs a standing actor.
@@ -457,10 +527,10 @@ namespace Turbo.Plugins.s7o
                         if(inflate.ReadByte()!=-1)throw new InvalidDataException("HeightTrailingData");
                     }
                     if(cache!=_cache)continue;
-                    template.Grid=grid;template.GridState="Ready";cache.LoadedHeights.Enqueue(template);cache.HeightBytes+=count*8L;
+                    template.Grid=grid;template.GridState="Ready";Interlocked.Increment(ref _terrainRevision);cache.LoadedHeights.Enqueue(template);cache.HeightBytes+=count*8L;
                     while(cache.LoadedHeights.Count>32||cache.HeightBytes>16L*1024*1024) {
                         Template old=cache.LoadedHeights.Dequeue();
-                        if(old.Grid!=null){cache.HeightBytes-=old.Grid.Heights.Length*8L;old.Grid=null;old.GridState="NotLoaded";}
+                        if(old.Grid!=null){cache.HeightBytes-=old.Grid.Heights.Length*8L;old.Grid=null;old.GridState="NotLoaded";Interlocked.Increment(ref _terrainRevision);}
                     }
                 } catch { template.GridState="LoadError"; }
                 finally { lock(_heightGate)template.GridQueued=false; }
@@ -523,7 +593,7 @@ namespace Turbo.Plugins.s7o
                 if(monster.Scene!=null&&_targets.Count<128)_targets.Add(new TargetSample {AcdId=monster.AcdId,SceneId=monster.Scene.SceneId,
                     X=coordinate.X,Y=coordinate.Y,Z=coordinate.Z,Elite=monster.IsElite});
             }
-            _obstacles.Clear();_footprintCandidates.Clear();int scanned=0;
+            ClearObstacles();_footprintCandidates.Clear();int scanned=0;
             foreach(var actor in Hud.Game.Actors) {
                 if(scanned++>=MaximumActorScan)break;
                 if(actor==null||actor.WorldId!=_worldId)continue;
@@ -560,7 +630,7 @@ namespace Turbo.Plugins.s7o
         {return DistanceSquared(x,y,Math.Max(p.X,Math.Min(x,p.MaxX)),Math.Max(p.Y,Math.Min(y,p.MaxY)));}
         private void RefreshDrawingPlacements()
         {
-            _drawingPlacements.Clear();
+            _drawingPlacements.Clear();if(!ShowGrid&&!Diagnostics)return;
             foreach(var p in _placements.Values)
                 if(PlacementGapSquared(p,_playerX,_playerY)<=DrawRadius*DrawRadius)_drawingPlacements.Add(p);
             _drawingPlacements.Sort((a,b)=>PlacementGapSquared(a,_playerX,_playerY).CompareTo(PlacementGapSquared(b,_playerX,_playerY)));
@@ -576,21 +646,23 @@ namespace Turbo.Plugins.s7o
         // Only a changed world/data source discards them; never guess an unreported neighbor.
         private void SuspendCoverage(string reason)
         {
+            _fingerprintValid=false;
             if(_valid) {
                 LogContextChange("Suspend",reason);
                 _suspendedTimestamp=Stopwatch.GetTimestamp();
                 Interlocked.Increment(ref _routeSerial);_pathSlot.Request=null;_pathSlot.Result=null;_approachSlot.Request=null;_approachSlot.Result=null;_corridorSnapshot=null;_epoch++;
             }
-            _valid=false;_drawingPlacements.Clear();_obstacles.Clear();_footprintCandidates.Clear();
-            _nativeBoxes.Clear();_targets.Clear();_lastCollectMs=0;
+            _valid=false;_drawingPlacements.Clear();ClearObstacles();_footprintCandidates.Clear();
+            ClearNativeBoxes();_targets.Clear();_lastCollectMs=0;
         }
         private void Invalidate(string reason)
         {
+            _fingerprintValid=false;
             LogContextChange("Discard",reason);
             _suspendedTimestamp=-1;
             Interlocked.Increment(ref _routeSerial);ResetRouteSlots();_corridorSnapshot=null;
             if(_valid||_placements.Count>0)_epoch++;
-            _valid=false;_placements.Clear();_drawingPlacements.Clear();_sceneCoverageLogged.Clear();_obstacles.Clear();_footprintCandidates.Clear();_nativeBoxes.Clear();_targets.Clear();_worldId=0;_worldSno=0;_lastCollectMs=0;
+            _valid=false;_placements.Clear();_drawingPlacements.Clear();_sceneCoverageLogged.Clear();ClearObstacles();_obstaclesBySno.Clear();_footprintCandidates.Clear();ClearNativeBoxes();_targets.Clear();_worldId=0;_worldSno=0;_lastCollectMs=0;
         }
         private void LogContextChange(string action,string reason)
         {
@@ -781,14 +853,14 @@ namespace Turbo.Plugins.s7o
             var pos=actor.CollisionCoordinate;
             if(pos==null||!pos.IsValid)pos=actor.FloorCoordinate;
             if(pos==null||!pos.IsValid||DistanceSquared(pos.X,pos.Y,_playerX,_playerY)>180f*180f)return;
-            foreach(var old in _obstacles)if(old.AcdId==actor.AcdId)return;
+            if(_obstacleIds.Contains(actor.AcdId))return;
             string radiusSource;float radius=GroundRadius(actor,out radiusSource);
             var obstacle=new Obstacle { AcdId=actor.AcdId,Sno=sno,SceneId=actor.Scene==null?0:actor.Scene.SceneId,Code=actor.SnoActor==null?"":actor.SnoActor.Code,
                 Kind=kind,X=pos.X,Y=pos.Y,Z=pos.Z,Radius=radius,RadiusSource=radiusSource,Operated=actor.IsOperated,Clickable=actor.IsClickable,
                 FloorZKnown=actor.FloorCoordinate!=null&&actor.FloorCoordinate.IsValid,
                 FloorX=actor.FloorCoordinate!=null&&actor.FloorCoordinate.IsValid?actor.FloorCoordinate.X:0,FloorY=actor.FloorCoordinate!=null&&actor.FloorCoordinate.IsValid?actor.FloorCoordinate.Y:0,
                 FloorZ=actor.FloorCoordinate!=null&&actor.FloorCoordinate.IsValid?actor.FloorCoordinate.Z:0 };
-            _obstacles.Add(obstacle);
+            AddObservedObstacle(obstacle);
             // Reported circles are conservative candidates, not reconstructed collision polygons.
             if(kind=="TrapLever"||kind=="TrapPit"||kind=="Pylon"||kind=="Shrine"||kind=="Chest"||kind=="Rack") {
                 if(_footprintCandidates.Count<32)_footprintCandidates.Add(obstacle);
@@ -908,9 +980,9 @@ namespace Turbo.Plugins.s7o
                 +";consumer="+consumer+";event="+action+";target="+target+";xyz="+F(Number(args[4]))+","+F(Number(args[5]))+","+F(Number(args[6])),false,true); }catch { }
         }
         private static float Number(object value) { if(value==null||value is bool||value is string)throw new ArgumentException();float n=Convert.ToSingle(value);if(!Finite(n))throw new ArgumentException();return n; }
-        private Dictionary<string,object> Envelope()
+        private Dictionary<string,object> Envelope(int capacity=16)
         {
-            return new Dictionary<string,object> { {"api",BridgeName},{"session",_session},{"epoch",_epoch},{"version",_version},
+            return new Dictionary<string,object>(capacity) { {"api",BridgeName},{"session",_session},{"epoch",_epoch},{"version",_version},
                 {"worldId",_worldId},{"worldSno",_worldSno},{"sampleMs",_sampleMs},{"authoritative",false},{"coverage","ObservedScenesOnly"},{"completeCollisionCoverage",false},{"shapeState",_placedCache==null?"Missing":_placedCache.ShapeState} };
         }
         private Dictionary<string,object> Error(string reason)
@@ -919,7 +991,7 @@ namespace Turbo.Plugins.s7o
         }
         private Dictionary<string,object> Status()
         {
-            var result=Envelope();TemplateCache cache=_cache;
+            var result=Envelope(32);TemplateCache cache=_cache;
             result["ok"]=Current();result["state"]=_cacheState;result["sceneId"]=_currentSceneId;
             result["position"]=new float[] {_playerX,_playerY,_playerZ};result["observedScenes"]=_placements.Count;
             result["loadedSceneSource"]=_loadedSceneState;result["loadedSceneCount"]=_loadedSceneCount;result["loadedSceneNearby"]=_loadedSceneNearby;
@@ -1412,17 +1484,15 @@ namespace Turbo.Plugins.s7o
         }
         private static long RouteBucket(float x,float y)
         { return ((long)(int)Math.Floor(x/10f)<<32)|(uint)(int)Math.Floor(y/10f); }
-        private long RouteFingerprint()
+
+private long RouteFingerprint()
         {
-            long hash=17;
-            foreach(var p in _placements.Values) {
-                hash^=(long)p.SceneId*397+(p.Template!=null&&p.Template.Grid!=null?1:0);
-            }
-            foreach(var b in _nativeBoxes)
-                hash^=(long)b.AcdId*31+b.Definition.Sno+b.X.GetHashCode()*17L+b.Y.GetHashCode()*13L;
-            foreach(var o in _obstacles)if(!HasNativeBox(o)&&RoutePropBlocks(o))
-                hash^=(long)o.AcdId*19+o.FloorX.GetHashCode()*11L+o.FloorY.GetHashCode()*7L;
-            return hash;
+            long terrain=Volatile.Read(ref _terrainRevision);
+            if(_fingerprintValid&&_fingerprintVersion==_version&&_fingerprintEpoch==_epoch
+                &&_fingerprintTerrain==terrain)return _fingerprintValue;
+            long hash=ComputeRouteFingerprint(terrain);
+            _fingerprintVersion=_version;_fingerprintEpoch=_epoch;_fingerprintTerrain=terrain;
+            _fingerprintValue=hash;_fingerprintValid=true;return hash;
         }
         private static bool RoutePropBlocks(Obstacle o)
         {
