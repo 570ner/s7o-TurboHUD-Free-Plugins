@@ -1152,7 +1152,8 @@ namespace Turbo.Plugins.s7o
             if(TryMapNavigateLootGoal(target.Item.FloorCoordinate,target.Item.AcdId,"loot",postRiftCleanup,now))
             { _wideCleanupCommittedSeed=target.Item.Seed;return; }
 
-            if (!target.UrshiRisk && NeedsItemRecovery(target.Item))
+            if (!target.UrshiRisk && (NeedsItemRecovery(target.Item)
+                || (target.Item.CentralXyDistanceToMe<=_normalPickupRangeYards && FindLootPickupShrine(target.Item.FloorCoordinate)!=null)))
             {
                 StartItemRecovery(target, wideCleanup, targetStacked, now);
                 return;
@@ -3085,6 +3086,7 @@ private void TrackAutoUrshiNavigationWorld()
 
             try
             {
+                if (actor is IShrine) return true;
                 switch (actor.GizmoType)
                 {
                     case GizmoType.Chest:
@@ -3204,7 +3206,18 @@ private void TrackAutoUrshiNavigationWorld()
                 return true;
             }
             int x, y;
-            if (!TryGetUrshiSafeFallbackClickPoint(item, urshi, probe, out x, out y))
+            if (!IsUrshiRecoveryUiVisible())
+            {
+                IItem current=GetConfirmedUrshiLoot(item,GetSelectedActorSafe(),now);
+                if(current!=null && TryGetCurrentItemHoverPoint(current,out x,out y))
+                {
+                    int currentTries;_attempts.TryGetValue(current.Seed,out currentTries);
+                    CommitItemRecoveryClick(new LootCandidate(current,WantedPriority(current),IsUrshiRisk(current,urshi)),
+                        currentTries,cleanup,stackedLoot,now,old,restore,new NativePoint{X=x,Y=y});
+                    return true;
+                }
+            }
+            if (!TryGetUrshiSafeFallbackClickPoint(item, urshi, probe, stackedLoot, out x, out y))
             {
                 _retryAfterMs[item.Seed] = now + UrshiRiskRetryCooldownMs;
                 _nextUrshiRiskClickMs = now + UrshiRiskRetryCooldownMs;
@@ -4059,10 +4072,9 @@ private void TrackAutoUrshiNavigationWorld()
         private int _lootMapAttachTick=int.MinValue;
         private uint _lootNavWorld,_lootNavAcd;
         private string _lootNavKind;
-        private IWorldCoordinate _lootNavGoal,_lootNavWaypoint;
+        private IWorldCoordinate _lootNavGoal,_lootNavWaypoint,_lootNavProgressPoint;
         private object _lootNavEpoch;
         private long _lootNavProgressAt,_lootNavNextClick,_lootNavCastAt,_lootNavMobilityBlockedUntil;
-        private double _lootNavBestDistance=double.MaxValue;
         private float _lootNavCastX,_lootNavCastY;
         private int _lootNavCastTick,_lootNavProbeTick,_lootNavProbeX,_lootNavProbeY,_lootNavReplans;
         private bool _lootNavCasting;
@@ -4071,9 +4083,9 @@ private void TrackAutoUrshiNavigationWorld()
         private static extern short LootNavigationKeyState(int key);
         private void ClearLootNavigation()
         {
-            _lootNavKind=null;_lootNavGoal=_lootNavWaypoint=null;_lootNavEpoch=null;
+            _lootNavKind=null;_lootNavGoal=_lootNavWaypoint=_lootNavProgressPoint=null;_lootNavEpoch=null;
             _lootNavWorld=_lootNavAcd=_lootNavDoor=0;_lootNavProbeTick=0;_lootNavCasting=false;
-            _lootNavProgressAt=_lootNavNextClick=0;_lootNavBestDistance=double.MaxValue;_lootNavReplans=0;
+            _lootNavProgressAt=_lootNavNextClick=0;_lootNavReplans=0;
         }
         private Dictionary<string,object> LootMapStatus()
         {
@@ -4122,6 +4134,27 @@ private void TrackAutoUrshiNavigationWorld()
             if(handled){_autoUrshiActorPathActive=false;_autoUrshiReturning=false;_autoUrshiReturnProbeTick=0;}
             return handled;
         }
+        // An item can be reachable from beside a shrine even when its centre is not walkable.
+        private IActor FindLootPickupShrine(IWorldCoordinate goal)
+        {
+            if(goal==null||!goal.IsValid)return null;
+            IActor nearest=null;double best=StackedLootWorldRadiusYards+0.8f;
+            foreach(var actor in Hud.Game.Shrines) {
+                if(actor==null||actor.WorldId!=Hud.Game.Me.WorldId
+                    ||actor.FloorCoordinate==null||!actor.FloorCoordinate.IsValid
+                    ||Math.Abs(actor.FloorCoordinate.Z-goal.Z)>4)continue;
+                double gap=actor.FloorCoordinate.XYDistanceTo(goal);
+                if(gap<=best){best=gap;nearest=actor;}
+            }
+            return nearest;
+        }
+        private Dictionary<string,object> LootMapPickupApproach(object epoch,IWorldCoordinate from,IWorldCoordinate goal,IActor shrine)
+        {
+            // The service accepts registered obstacle ACDs, not floor-item ACDs.
+            float reach=(float)(8-shrine.FloorCoordinate.XYDistanceTo(goal));
+            try{return _lootMapGet("approach",new object[]{epoch,from.X,from.Y,from.Z,shrine.AcdId,reach,0.6f}) as Dictionary<string,object>;}
+            catch{return null;}
+        }
         private bool TryMapNavigateLootGoal(IWorldCoordinate goal,uint acd,string kind,bool cleanup,long now)
         {
             var me=Hud.Game.Me;var from=me.FloorCoordinate;
@@ -4134,13 +4167,19 @@ private void TrackAutoUrshiNavigationWorld()
             if(status==null){ClearLootNavigation();return false;}
             var corridor=LootMapQuery("corridor",status["epoch"],from,goal,0.6f);
             string straight=LootMapState(corridor);
+            var pickupShrine=kind=="loot"&&(straight=="BlockedCandidate"||straight=="NoWalkCandidate")
+                ?FindLootPickupShrine(goal):null;
             if(distance<=8&&straight!="BlockedCandidate"&&straight!="NoWalkCandidate")
             {if(_lootNavKind==kind)ClearLootNavigation();return false;}
             if(_lootNavKind!=kind||_lootNavAcd!=acd||_lootNavWorld!=me.WorldId||!Equals(_lootNavEpoch,status["epoch"])
                 ||_lootNavGoal==null||_lootNavGoal.XYDistanceTo(goal)>2) {
                 ClearLootNavigation();_lootNavKind=kind;_lootNavAcd=acd;_lootNavWorld=me.WorldId;
-                _lootNavEpoch=status["epoch"];_lootNavGoal=goal.Offset(0,0,0);_lootNavProgressAt=now;
+                _lootNavEpoch=status["epoch"];_lootNavGoal=goal.Offset(0,0,0);_lootNavProgressPoint=from.Offset(0,0,0);_lootNavProgressAt=now;
 
+            }
+            // Changing a plan is not movement. Retain the same watchdog across waypoint churn.
+            if(_lootNavProgressPoint!=null&&from.XYDistanceTo(_lootNavProgressPoint)>0.75) {
+                _lootNavProgressPoint=from.Offset(0,0,0);_lootNavProgressAt=now;
             }
             if(_lootNavCasting) {
                 if(Hud.Game.CurrentGameTick==_lootNavCastTick)return true;
@@ -4175,7 +4214,12 @@ private void TrackAutoUrshiNavigationWorld()
             }
             // Keep the original fast actor/item click in a known clear corridor.
             if(straight=="ClearCandidate"&&_lootNavReplans==0) {ClearLootNavigation();return false;}
-            var route=LootMapQuery("path",status["epoch"],from,goal,0.6f);
+            var route=pickupShrine==null?LootMapQuery("path",status["epoch"],from,goal,0.6f)
+                :LootMapPickupApproach(status["epoch"],from,goal,pickupShrine);
+            if(pickupShrine!=null&&LootMapState(route)=="AtApproach"&&distance<=8) {
+                // Continue through the existing item-identity recovery, never click the shrine.
+                ClearLootNavigation();return false;
+            }
             var waypoint=LootMapWaypoint(route);
             _lootNavDoor=route!=null&&route.ContainsKey("doorAcd")?Convert.ToUInt32(route["doorAcd"]):0;
             IActor door=_lootNavDoor==0?null:Hud.Game.Actors.FirstOrDefault(a=>a!=null&&a.AcdId==_lootNavDoor&&a.WorldId==me.WorldId);
@@ -4184,11 +4228,9 @@ private void TrackAutoUrshiNavigationWorld()
                 return TryLootNavigationInput(door.FloorCoordinate,null,door,now);
             if(waypoint!=null) {
                 if(_lootNavWaypoint==null||_lootNavWaypoint.XYDistanceTo(waypoint)>2) {
-                    _lootNavWaypoint=waypoint.Offset(0,0,0);_lootNavBestDistance=from.XYDistanceTo(waypoint);
-                    _lootNavProgressAt=now;_lootNavProbeTick=0;
+                    _lootNavWaypoint=waypoint.Offset(0,0,0);
+                    _lootNavProbeTick=0;
                 }
-                double remaining=from.XYDistanceTo(_lootNavWaypoint);
-                if(remaining<_lootNavBestDistance-0.75){_lootNavBestDistance=remaining;_lootNavProgressAt=now;}
                 if(now-_lootNavProgressAt<2500)return TryLootNavigationInput(waypoint,null,null,now);
             } else if(straight!="BlockedCandidate"&&straight!="NoWalkCandidate") {
                 // Missing map coverage keeps bounded native recovery; it is not proof of a wall.
@@ -5856,7 +5898,7 @@ private bool TryGetAutoUrshiReturnPoint(out int x,out int y)
             catch { return 1f; }
         }
 
-        private bool TryGetUrshiSafeFallbackClickPoint(IItem item, IActor urshi, int attempt, out int x, out int y)
+        private bool TryGetUrshiSafeFallbackClickPoint(IItem item, IActor urshi, int attempt, bool stackedLoot, out int x, out int y)
         {
             x = 0;
             y = 0;
@@ -5871,6 +5913,9 @@ private bool TryGetAutoUrshiReturnPoint(out int x,out int y)
             int stepSmall = Math.Max(4, (int)Math.Round(6f * scale));
             int stepMed = Math.Max(8, (int)Math.Round(12f * scale));
             int stepWide = Math.Max(12, (int)Math.Round(18f * scale));
+            bool tallStack = stackedLoot && !IsNoSpaceMaterialPickup(item)
+                && item.CentralXyDistanceToMe <= _normalPickupRangeYards;
+            int rowStep = Math.Max(8, (int)Math.Round(18f * scale));
 
             for (int probe = 0; probe < 12; probe++)
             {
@@ -5878,6 +5923,26 @@ private bool TryGetAutoUrshiReturnPoint(out int x,out int y)
                 int candidateX = baseX;
                 int candidateY = baseY;
 
+                if (tallStack)
+                {
+                    // Probe displaced rows, then peel the stack using native item confirmation.
+                    switch (phase)
+                    {
+                        case 0: break;
+                        case 1: candidateY -= rowStep; break;
+                        case 2: candidateY += rowStep; break;
+                        case 3: candidateY -= rowStep*2; break;
+                        case 4: candidateY += rowStep*2; break;
+                        case 5: candidateY -= rowStep*3; break;
+                        case 6: candidateY += rowStep*3; break;
+                        case 7: candidateX -= stepWide; candidateY -= rowStep; break;
+                        case 8: candidateX += stepWide; candidateY -= rowStep; break;
+                        case 9: candidateX -= stepWide; candidateY -= rowStep*2; break;
+                        case 10: candidateX += stepWide; candidateY -= rowStep*2; break;
+                        default: candidateY -= rowStep*4; break;
+                    }
+                }
+                else
                 switch (phase)
                 {
                     case 0: break;
