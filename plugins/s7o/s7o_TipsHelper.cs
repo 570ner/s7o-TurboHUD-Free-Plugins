@@ -800,20 +800,20 @@ namespace Turbo.Plugins.s7o
             PrimalAlertArrowBrush = Hud.Render.CreateBrush(C(ItemAlertArrowAlpha), C(PrimalColorR), C(PrimalColorG), C(PrimalColorB), 0);
             PrimalAlertArrowOutlineBrush = Hud.Render.CreateBrush(255, 0, 0, 0, 0);
             PrimalAlertArrowHighlightBrush = Hud.Render.CreateBrush(C(ItemAlertArrowHighlightAlpha), C(PrimalColorR + ItemAlertArrowHighlightBoost), C(PrimalColorG + ItemAlertArrowHighlightBoost), C(PrimalColorB + ItemAlertArrowHighlightBoost), 0);
-            AncientFadeFonts = CreateFadeFonts(C(AncientTextColorR), C(AncientTextColorG), C(AncientTextColorB), AncientAlertTextSize);
-            PrimalFadeFonts = CreateFadeFonts(C(PrimalTextColorR), C(PrimalTextColorG), C(PrimalTextColorB), PrimalAlertTextSize);
+            AncientFadeFonts = CreateFadeFonts(C(AncientTextColorR), C(AncientTextColorG), C(AncientTextColorB), AncientAlertTextSize, true);
+            PrimalFadeFonts = CreateFadeFonts(C(PrimalTextColorR), C(PrimalTextColorG), C(PrimalTextColorB), PrimalAlertTextSize, true);
             AncientOutlineFadeFonts = CreateFadeFonts(0, 0, 0, AncientAlertTextSize);
             PrimalOutlineFadeFonts = CreateFadeFonts(0, 0, 0, PrimalAlertTextSize);
-            AncientPopFonts = CreatePopFonts(C(AncientTextColorR), C(AncientTextColorG), C(AncientTextColorB), AncientAlertTextSize);
-            PrimalPopFonts = CreatePopFonts(C(PrimalTextColorR), C(PrimalTextColorG), C(PrimalTextColorB), PrimalAlertTextSize);
+            AncientPopFonts = CreatePopFonts(C(AncientTextColorR), C(AncientTextColorG), C(AncientTextColorB), AncientAlertTextSize, true);
+            PrimalPopFonts = CreatePopFonts(C(PrimalTextColorR), C(PrimalTextColorG), C(PrimalTextColorB), PrimalAlertTextSize, true);
             AncientOutlinePopFonts = CreatePopFonts(0, 0, 0, AncientAlertTextSize);
             PrimalOutlinePopFonts = CreatePopFonts(0, 0, 0, PrimalAlertTextSize);
-            AncientMinimapFadeFonts = CreateFadeFonts(C(AncientTextColorR), C(AncientTextColorG), C(AncientTextColorB), ItemAlertMinimapTextSize);
-            PrimalMinimapFadeFonts = CreateFadeFonts(C(PrimalTextColorR), C(PrimalTextColorG), C(PrimalTextColorB), ItemAlertMinimapTextSize);
+            AncientMinimapFadeFonts = CreateFadeFonts(C(AncientTextColorR), C(AncientTextColorG), C(AncientTextColorB), ItemAlertMinimapTextSize, true);
+            PrimalMinimapFadeFonts = CreateFadeFonts(C(PrimalTextColorR), C(PrimalTextColorG), C(PrimalTextColorB), ItemAlertMinimapTextSize, true);
             AncientMinimapOutlineFadeFonts = CreateFadeFonts(0, 0, 0, ItemAlertMinimapTextSize);
             PrimalMinimapOutlineFadeFonts = CreateFadeFonts(0, 0, 0, ItemAlertMinimapTextSize);
-            AncientMinimapPopFonts = CreatePopFonts(C(AncientTextColorR), C(AncientTextColorG), C(AncientTextColorB), ItemAlertMinimapTextSize);
-            PrimalMinimapPopFonts = CreatePopFonts(C(PrimalTextColorR), C(PrimalTextColorG), C(PrimalTextColorB), ItemAlertMinimapTextSize);
+            AncientMinimapPopFonts = CreatePopFonts(C(AncientTextColorR), C(AncientTextColorG), C(AncientTextColorB), ItemAlertMinimapTextSize, true);
+            PrimalMinimapPopFonts = CreatePopFonts(C(PrimalTextColorR), C(PrimalTextColorG), C(PrimalTextColorB), ItemAlertMinimapTextSize, true);
             AncientMinimapOutlinePopFonts = CreatePopFonts(0, 0, 0, ItemAlertMinimapTextSize);
             PrimalMinimapOutlinePopFonts = CreatePopFonts(0, 0, 0, ItemAlertMinimapTextSize);
             PlayerCircleBlackBrush = Hud.Render.CreateBrush(C(PlayerCircleBlackOutlineAlpha), 0, 0, 0, PlayerCircleBlackOutlineWidth);
@@ -887,23 +887,28 @@ namespace Turbo.Plugins.s7o
             };
         }
 
-        private IFont[] CreateFadeFonts(int r, int g, int b, float size)
+private IFont[] CreateFadeFonts(int r,int g,int b,float size,bool nativeShadow=false)
         {
-            var fonts = new IFont[11];
-            var fontSize = Math.Max(6.0f, size);
-            for (var i = 0; i < fonts.Length; i++)
-                fonts[i] = Hud.Render.CreateFont("tahoma", fontSize, (int)Math.Round(255.0d * i / 10.0d), r, g, b, true, false, false);
+            var fonts=new IFont[11];var fontSize=Math.Max(6.0f,size);
+            for(int i=0;i<fonts.Length;i++) {
+                int alpha=(int)Math.Round(255.0d*i/10.0d);
+                fonts[i]=nativeShadow
+                    ? Hud.Render.CreateFont("tahoma",fontSize,alpha,r,g,b,true,false,alpha,0,0,0,true)
+                    : Hud.Render.CreateFont("tahoma",fontSize,alpha,r,g,b,true,false,false);
+            }
             return fonts;
         }
 
-        private IFont[] CreatePopFonts(int r, int g, int b, float size)
+private IFont[] CreatePopFonts(int r,int g,int b,float size,bool nativeShadow=false)
         {
-            var count = 31;
-            var fonts = new IFont[count];
-            var min = Math.Max(6.0f, size);
-            var max = Math.Max(min, size * 2.0f);
-            for (var i = 0; i < count; i++)
-                fonts[i] = Hud.Render.CreateFont("tahoma", min + ((max - min) * i / (count - 1)), 255, r, g, b, true, false, false);
+            const int count=31;var fonts=new IFont[count];
+            float min=Math.Max(6.0f,size),max=Math.Max(min,size*2.0f);
+            for(int i=0;i<count;i++) {
+                float fontSize=min+(max-min)*i/(count-1);
+                fonts[i]=nativeShadow
+                    ? Hud.Render.CreateFont("tahoma",fontSize,255,r,g,b,true,false,255,0,0,0,true)
+                    : Hud.Render.CreateFont("tahoma",fontSize,255,r,g,b,true,false,false);
+            }
             return fonts;
         }
 
@@ -3912,12 +3917,13 @@ namespace Turbo.Plugins.s7o
         private float DrawInventoryFullAlertLine(float centerX, float y, long elapsed, int alpha, bool minimap)
         {
             IFont font = GetAlertFont(PrimalRank, elapsed, alpha, false, minimap);
-            IFont outline = GetAlertFont(PrimalRank, elapsed, alpha, true, minimap);
             if (font == null)
                 return ItemAlertTextLineHeight;
 
+            var outline=GetAlertFont(PrimalRank,elapsed,alpha,true,minimap);
             var layout = font.GetTextLayout(_inventoryFullAlertText);
-            DrawOutlinedText(_inventoryFullAlertText, centerX - layout.Metrics.Width * 0.5f, y, font, outline);
+            DrawPopupOutline(_inventoryFullAlertText,centerX-layout.Metrics.Width*0.5f,y,outline);
+            font.DrawText(layout,centerX-layout.Metrics.Width*0.5f,y);
             return Math.Max(ItemAlertTextLineHeight, layout.Metrics.Height);
         }
 
@@ -4065,13 +4071,26 @@ namespace Turbo.Plugins.s7o
             }
         }
 
+        // Fixed eight-position outline: cached layout, no per-pixel draw grid.
+        private void DrawPopupOutline(string text,float x,float y,IFont outline)
+        {
+            if(outline==null || string.IsNullOrEmpty(text))return;
+            var layout=outline.GetTextLayout(text);
+            float r=Math.Max(1,Math.Min(6,ItemAlertTextOutlinePixels)),d=r*0.70710678f;
+            outline.DrawText(layout,x-r,y);outline.DrawText(layout,x+r,y);
+            outline.DrawText(layout,x,y-r);outline.DrawText(layout,x,y+r);
+            outline.DrawText(layout,x-d,y-d);outline.DrawText(layout,x+d,y-d);
+            outline.DrawText(layout,x-d,y+d);outline.DrawText(layout,x+d,y+d);
+
+        }
+
         private float DrawAlertLine(ItemAlert alert, float centerX, float y, bool centered, bool withDirectionArrow, bool minimapText = false)
         {
             if (alert == null)
                 return ItemAlertTextLineHeight;
 
             var font = minimapText ? GetAlertFont(alert.Marker.Rank, alert.ElapsedMs, alert.AlphaBucket, false, true) : alert.Font;
-            var outlineFont = minimapText ? GetAlertFont(alert.Marker.Rank, alert.ElapsedMs, alert.AlphaBucket, true, true) : alert.OutlineFont;
+            var outlineFont=minimapText?GetAlertFont(alert.Marker.Rank,alert.ElapsedMs,alert.AlphaBucket,true,true):alert.OutlineFont;
             var canDrawText = ShowItemAlertText && IsRankTextEnabled(alert.Marker.Rank) && font != null && !string.IsNullOrEmpty(alert.Text);
             float textCenterX = centerX;
             float textHeight = Math.Max(12.0f, ItemAlertTextLineHeight);
@@ -4082,7 +4101,8 @@ namespace Turbo.Plugins.s7o
                 var x = centered ? centerX - (layout.Metrics.Width * 0.5f) : centerX;
                 textCenterX = x + (layout.Metrics.Width * 0.5f);
                 textHeight = Math.Max(textHeight, layout.Metrics.Height);
-                DrawOutlinedText(alert.Text, x, y, font, outlineFont);
+                DrawPopupOutline(alert.Text,x,y,outlineFont);
+                font.DrawText(layout,x,y);
             }
 
             var lineHeight = Math.Max(ItemAlertTextLineHeight, textHeight);
@@ -4109,22 +4129,9 @@ namespace Turbo.Plugins.s7o
             DrawFilledSplitTailArrow(x + ((float)Math.Cos(angle) * pulse), y + ((float)Math.Sin(angle) * pulse), angle, ItemAlertArrowLength + pulse, ItemAlertArrowHeadSize, alert.ArrowBrush, alert.ArrowOutlineBrush, alert.ArrowHighlightBrush);
         }
 
-        private void DrawOutlinedText(string text, float x, float y, IFont font, IFont outline)
-        {
-            var radius = Math.Max(1, Math.Min(6, ItemAlertTextOutlinePixels));
-            if (outline != null)
-            {
-                for (var dx = -radius; dx <= radius; dx++)
-                {
-                    for (var dy = -radius; dy <= radius; dy++)
-                    {
-                        if ((dx != 0 || dy != 0) && (dx * dx) + (dy * dy) <= (radius * radius) + 2)
-                            outline.DrawText(text, x + dx, y + dy, false);
-                    }
-                }
-            }
-            font.DrawText(text, x, y, false);
-        }
+        private void DrawOutlinedText(string text,float x,float y,IFont font,IFont outline)
+        { DrawOutlinedText(text,x,y,font,outline,ItemAlertTextOutlinePixels); }
+
 
         private void UpdateItemMarkers()
         {
@@ -7123,23 +7130,19 @@ namespace Turbo.Plugins.s7o
             return Math.Max(10.0f, layout.Metrics.Height + 1.0f);
         }
 
-        private void DrawOutlinedText(string text, float x, float y, IFont font, IFont outline, int radius)
+        private void DrawOutlinedText(string text,float x,float y,IFont font,IFont outline,int radius)
         {
-            radius = Math.Max(1, Math.Min(6, radius));
-            if (outline != null)
-            {
-                for (var dx = -radius; dx <= radius; dx++)
-                {
-                    for (var dy = -radius; dy <= radius; dy++)
-                    {
-                        if ((dx != 0 || dy != 0) && (dx * dx) + (dy * dy) <= (radius * radius) + 2)
-                            outline.DrawText(text, x + dx, y + dy, false);
-                    }
-                }
+            if(string.IsNullOrEmpty(text))return;
+            radius=Math.Max(1,Math.Min(6,radius));
+            if(outline!=null)using(var layout=outline.GetTextLayoutManualDispose(text)) {
+                for(int dx=-radius;dx<=radius;dx++)for(int dy=-radius;dy<=radius;dy++)
+                    if((dx!=0||dy!=0)&&dx*dx+dy*dy<=radius*radius+2)
+                        outline.DrawText(layout,x+dx,y+dy);
             }
-            if (font != null)
-                font.DrawText(text, x, y, false);
+            if(font!=null)using(var layout=font.GetTextLayoutManualDispose(text))
+                font.DrawText(layout,x,y);
         }
+
 
         private static string FirstNonEmpty(params string[] values)
         {
