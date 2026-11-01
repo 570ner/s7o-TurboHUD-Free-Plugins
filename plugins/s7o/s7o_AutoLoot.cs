@@ -374,7 +374,14 @@ namespace Turbo.Plugins.s7o
             public uint Ann, Acd;
             public int LastClickTick, FastClicks, ConfirmedClicks, AbsentTicks;
             public bool Required;
+            public long UrshiWindowAt, UrshiLastRequestAt;
+            public int UrshiProgressSerial, UrshiRequests;
+            public float UrshiRequestX, UrshiRequestY;
+            public bool UrshiMovementOffered;
         }
+        private int _urshiMovementTargetSeed;
+        private uint _urshiMovementTargetAnn, _urshiMovementTargetAcd;
+        private long _urshiMovementTargetUntilMs;
         private readonly Dictionary<int, ItemRecoveryWatch> _itemRecoveryWatches = new Dictionary<int, ItemRecoveryWatch>();
         private readonly List<int> _itemRecoveryRetire = new List<int>();
         private int _itemRecoveryWatchTick = int.MinValue;
@@ -548,6 +555,8 @@ namespace Turbo.Plugins.s7o
             ClearActiveStuckPickupResync(true);
             ClearItemRecoveryState(true);
             _itemRecoveryWatches.Clear();
+            _urshiMovementTargetSeed=0;_urshiMovementTargetAnn=_urshiMovementTargetAcd=0;
+            _urshiMovementTargetUntilMs=0;
             _itemRecoveryWatchTick = int.MinValue;
             _attempts.Clear();
             _retryAfterMs.Clear();
@@ -639,6 +648,10 @@ namespace Turbo.Plugins.s7o
         {
             if (item == null) return;
             if (_itemRecoverySeed == item.Seed) ClearItemRecoveryState(true);
+            if(_urshiMovementTargetSeed==item.Seed&&_urshiMovementTargetAnn==item.AnnId
+                &&_urshiMovementTargetAcd==item.AcdId) {
+                _urshiMovementTargetSeed=0;_urshiMovementTargetUntilMs=0;
+            }
             _itemRecoveryWatches.Remove(item.Seed);
             if (!IsBloodShard(item))
                 MarkLootPickupProgress();
@@ -726,6 +739,7 @@ namespace Turbo.Plugins.s7o
 
         public void OnNewArea(bool newGame, ISnoArea area)
         {
+            ClearLootNavigation();
             uint sno = area != null ? area.Sno : 0;
             if (newGame || sno != _lastAreaSno)
             {
@@ -1122,6 +1136,8 @@ namespace Turbo.Plugins.s7o
                 : null;
             if (target == null)
                 target = GetHazardHoverCandidate(tryCandidates);
+            if (target == null && postRiftCleanup)
+                target = SelectUrshiMovementRecovery(tryCandidates, candidates, now);
             if (target == null)
                 target = GetCommittedWideCleanupCandidate(tryCandidates, wideCleanup, stackedLoot);
             if (target == null)
@@ -1323,7 +1339,8 @@ namespace Turbo.Plugins.s7o
 
         private void ResetAutoUrshiReturnState()
         {
-            ClearLootNavigation();
+            // Routine Urshi reset must not cancel an EN/ordinary-loot route.
+            if(_lootNavKind=="urshi")ClearLootNavigation();
 
             _autoUrshiNavigationWorldId = 0;
             _autoUrshiReturnProbeTick = 0;
@@ -1366,6 +1383,7 @@ namespace Turbo.Plugins.s7o
 
 private void TrackAutoUrshiNavigationWorld()
         {
+            if(_lootNavKind!=null&&_lootNavWorld!=Hud.Game.Me.WorldId)ClearLootNavigation();
             if(!_talkToUrshiAfterLoot)return;
             if(_autoUrshiNavigationWorldId!=Hud.Game.Me.WorldId) {
                 ResetAutoUrshiReturnState();_autoUrshiNavigationWorldId=Hud.Game.Me.WorldId;
@@ -2578,6 +2596,84 @@ private void TrackAutoUrshiNavigationWorld()
             _itemRecoveryTick = Hud.Game.CurrentGameTick;
         }
 
+
+        // These are pickup requests, not server acknowledgements or proof of desync.
+        private void NoteUrshiPickupRequest(LootCandidate actual,bool cleanup,long now)
+        {
+            if(!cleanup||!actual.UrshiRisk||_postRiftCleanupStartedMs==0
+                ||actual.Item.CentralXyDistanceToMe>_normalPickupRangeYards)return;
+            // Protect the first close-range request too; do not wait for a second click.
+            _pickupAcknowledgeUntilMs[actual.Item.Seed]=now+PickupAcknowledgeMs;
+            ItemRecoveryWatch watch;
+            if(!_itemRecoveryWatches.TryGetValue(actual.Item.Seed,out watch)
+                ||watch.Ann!=actual.Item.AnnId||watch.Acd!=actual.Item.AcdId)return;
+            var point=Hud.Game.Me.FloorCoordinate;
+            if(point==null||!point.IsValid)return;
+            double dx=point.X-watch.UrshiRequestX,dy=point.Y-watch.UrshiRequestY;
+            if(watch.UrshiWindowAt==0||watch.UrshiProgressSerial!=_lootProgressSerial
+                ||dx*dx+dy*dy>=MovementThresholdYards*MovementThresholdYards) {
+                watch.UrshiWindowAt=now;watch.UrshiRequests=0;
+            }
+            watch.UrshiRequests++;
+            watch.UrshiLastRequestAt=now;watch.UrshiProgressSerial=_lootProgressSerial;
+            watch.UrshiRequestX=point.X;watch.UrshiRequestY=point.Y;
+            DiagUrshiRecovery("URSHI_ACK_GUARD",actual.Item,null,now,watch.UrshiRequests);
+        }
+
+        private LootCandidate SelectUrshiMovementRecovery(List<LootCandidate> ready,
+            List<LootCandidate> candidates,long now)
+        {
+            if(_postRiftCleanupStartedMs==0||_autoUrshiHandoffCommitted||_autoUrshiTalkDone
+                ||_itemRecoverySeed!=0||_urshiRiskHoverSeed!=0||_pendingCursorRestore
+                ||_playerMoving||Hud.Game.Me.AnimationState!=AcdAnimationState.Idle
+                ||Hud.Game.Me.Powers==null||Hud.Game.Me.Powers.CantMove)return null;
+            var me=Hud.Game.Me;var point=me.FloorCoordinate;
+            if(point==null||!point.IsValid)return null;
+            foreach(var failed in candidates) {
+                ItemRecoveryWatch watch;
+                if(failed==null||failed.Item==null||!failed.UrshiRisk
+                    ||failed.Item.Location!=ItemLocation.Floor||failed.Item.WorldId!=me.WorldId
+                    ||failed.Item.CentralXyDistanceToMe>_normalPickupRangeYards
+                    ||!_itemRecoveryWatches.TryGetValue(failed.Item.Seed,out watch)
+                    ||watch.Ann!=failed.Item.AnnId||watch.Acd!=failed.Item.AcdId
+                    ||watch.UrshiMovementOffered||watch.UrshiRequests<2
+                    ||watch.UrshiProgressSerial!=_lootProgressSerial
+                    ||now<watch.UrshiWindowAt||now-watch.UrshiWindowAt<ItemRecoveryWatchdogMs
+                    ||now<watch.UrshiLastRequestAt||now-watch.UrshiLastRequestAt<PickupAcknowledgeMs
+                    ||Hud.Game.CurrentGameTick<=watch.LastClickTick)continue;
+                double dx=point.X-watch.UrshiRequestX,dy=point.Y-watch.UrshiRequestY;
+                if(dx*dx+dy*dy>=MovementThresholdYards*MovementThresholdYards)continue;
+                if(GetUrshiActor()==null)return null;
+                // Use the existing ready list and actor/item approach. Never inject an
+                // unverified ground click next to Urshi or loosen NPC click guards.
+                var alternate=ready.Where(c=>c!=null&&c.Item!=null&&c.Item.AcdId!=failed.Item.AcdId
+                    &&c.Item.Location==ItemLocation.Floor&&c.Item.WorldId==me.WorldId
+                    &&c.Item.FloorCoordinate!=null&&c.Item.FloorCoordinate.IsValid
+                    &&Math.Abs(c.Item.FloorCoordinate.Z-point.Z)<=4
+                    &&c.Item.CentralXyDistanceToMe>_normalPickupRangeYards
+                    &&c.Item.CentralXyDistanceToMe<=_normalPickupRangeYards+StuckResyncApproachStepYards)
+                    .OrderBy(c=>c.UrshiRisk?1:0).ThenBy(c=>c.Priority)
+                    .ThenBy(c=>c.Item.CentralXyDistanceToMe).FirstOrDefault();
+                if(alternate==null)continue;
+                watch.UrshiMovementOffered=true; // At most once per watched item identity.
+                _urshiMovementTargetSeed=alternate.Item.Seed;
+                _urshiMovementTargetAnn=alternate.Item.AnnId;_urshiMovementTargetAcd=alternate.Item.AcdId;
+                _urshiMovementTargetUntilMs=now+StuckResyncMoveMaxMs;
+                _wideCleanupCommittedSeed=alternate.Item.Seed;
+                DiagUrshiRecovery("URSHI_MOVEMENT_RECOVERY",failed.Item,alternate.Item,now,watch.UrshiRequests);
+                return alternate;
+            }
+            return null;
+        }
+
+        private bool RequireUrshiMovementTarget(IItem anchor,long now)
+        {
+            return anchor!=null&&now<_urshiMovementTargetUntilMs
+                &&anchor.Seed==_urshiMovementTargetSeed&&anchor.AnnId==_urshiMovementTargetAnn
+                &&anchor.AcdId==_urshiMovementTargetAcd;
+        }
+        private void DiagUrshiRecovery(string kind,IItem item,IItem alternate,long now,int requests) { }
+
         private void CommitItemRecoveryClick(LootCandidate actual, int tries, bool cleanup, bool stackedLoot,
             long now, NativePoint restorePoint, bool restore, NativePoint issuedPoint)
         {
@@ -2602,6 +2698,7 @@ private void TrackAutoUrshiNavigationWorld()
                 _pendingCursorRecoveryWidth = Hud.Window.Size.Width;
                 _pendingCursorRecoveryHeight = Hud.Window.Size.Height;
             }
+            NoteUrshiPickupRequest(actual,cleanup,now);
             if (!actual.UrshiRisk) return;
             // Fresh native Item identity provides the risk guard; preserve the existing
             // Urshi recovery/fallback bookkeeping without another cursor move.
@@ -3244,6 +3341,8 @@ private void TrackAutoUrshiNavigationWorld()
             foreach (IItem candidate in Hud.Game.Items)
             {
                 if (candidate == null || candidate.Location != ItemLocation.Floor
+                    || (RequireUrshiMovementTarget(anchor,now)
+                        &&(candidate.AcdId!=anchor.AcdId||candidate.AnnId!=anchor.AnnId))
                     || candidate.WorldId != anchor.WorldId
                     || (selected != null ? candidate.AnnId != selected.AnnId : !candidate.IsSelected)) continue;
                 if (candidate.FloorCoordinate == null || anchor.FloorCoordinate == null
@@ -4134,7 +4233,8 @@ private void TrackAutoUrshiNavigationWorld()
             if(handled){_autoUrshiActorPathActive=false;_autoUrshiReturning=false;_autoUrshiReturnProbeTick=0;}
             return handled;
         }
-        // An item can be reachable from beside a shrine even when its centre is not walkable.
+        // Loot can be reachable beside a persistent chest/shrine while its centre is blocked.
+
         private IActor FindLootPickupShrine(IWorldCoordinate goal)
         {
             if(goal==null||!goal.IsValid)return null;
@@ -4148,6 +4248,8 @@ private void TrackAutoUrshiNavigationWorld()
             }
             return nearest;
         }
+
+
         private Dictionary<string,object> LootMapPickupApproach(object epoch,IWorldCoordinate from,IWorldCoordinate goal,IActor shrine)
         {
             // The service accepts registered obstacle ACDs, not floor-item ACDs.
@@ -4155,6 +4257,84 @@ private void TrackAutoUrshiNavigationWorld()
             try{return _lootMapGet("approach",new object[]{epoch,from.X,from.Y,from.Z,shrine.AcdId,reach,0.6f}) as Dictionary<string,object>;}
             catch{return null;}
         }
+        private void DiagLootRoute(long now,Dictionary<string,object> status,Dictionary<string,object> corridor,Dictionary<string,object> route,IActor obstacle) { }
+        // Near chest loot, preserve the proven native item-click/pathfinder owner.
+        // This is the existing reward-pile vicinity, not a claimed collision radius.
+        private IActor FindNativePickupChest(IWorldCoordinate goal)
+        {
+            if(goal==null||!goal.IsValid)return null;
+            IActor nearest=null;double best=ProtectedChestRiskYards;
+            int scanned=0;
+            foreach(var actor in Hud.Game.Actors) {
+                if(++scanned>2048)break;
+                if(actor==null||actor.WorldId!=Hud.Game.Me.WorldId||actor.FloorCoordinate==null
+                    ||!actor.FloorCoordinate.IsValid||Math.Abs(actor.FloorCoordinate.Z-goal.Z)>4)continue;
+                uint sno=actor.SnoActor==null?0u:(uint)actor.SnoActor.Sno;
+                bool chest=actor.GizmoType==GizmoType.Chest||actor.GizmoType==GizmoType.LoreChest
+                    ||(actor.GizmoType==GizmoType.BreakableChest&&!actor.IsDisabled)
+                    ||sno==(uint)ActorSnoEnum._p73_chestreward||sno==(uint)ActorSnoEnum._p76_chest;
+                if(!chest)continue;
+                double gap=actor.FloorCoordinate.XYDistanceTo(goal);
+                if(gap<=best){best=gap;nearest=actor;}
+            }
+            return nearest;
+        }
+
+        // Only leave map routing when its own blocking geometry matches a nearby loaded pylon.
+        // The vicinity is the existing reward-pile limit, never a new collision radius.
+        private IActor FindNativePickupPylon(IWorldCoordinate from,IWorldCoordinate goal,
+            object epoch,Dictionary<string,object> corridor)
+        {
+            if(LootMapState(corridor)!="BlockedCandidate"||from==null||goal==null
+                ||!from.IsValid||!goal.IsValid)return null;
+            Dictionary<string,object> segment=null;
+            int scanned=0;
+            foreach(var pylon in Hud.Game.Shrines) {
+                if(++scanned>128)break;
+                if(pylon==null||!pylon.IsPylon||pylon.WorldId!=Hud.Game.Me.WorldId
+                    ||pylon.FloorCoordinate==null||!pylon.FloorCoordinate.IsValid
+                    ||Math.Abs(pylon.FloorCoordinate.Z-goal.Z)>4
+                    ||pylon.FloorCoordinate.XYDistanceTo(goal)>ProtectedChestRiskYards)continue;
+                if(segment==null)segment=LootMapQuery("segment",epoch,from,goal,0.6f);
+                object value;
+                if(segment==null||!segment.TryGetValue("nativeCollisionCandidates",out value))return null;
+                var boxes=value as object[];if(boxes==null)return null;
+                foreach(var candidate in boxes)
+                    if(NativePickupBoxMatchesPylon(candidate as Dictionary<string,object>,pylon))return pylon;
+            }
+            return null;
+        }
+        private static bool NativePickupBoxMatchesPylon(Dictionary<string,object> box,IShrine pylon)
+        {
+            if(box==null||pylon==null)return false;
+            try {
+                object value;
+                uint acd=box.TryGetValue("acdId",out value)?Convert.ToUInt32(value):0u;
+                if(acd!=0)return acd==pylon.AcdId;
+                // Static boxes have no live ACD: require matching type and native footprint.
+                if(pylon.SnoActor==null||!box.TryGetValue("sno",out value)
+                    ||Convert.ToUInt32(value)!=(uint)pylon.SnoActor.Sno)return false;
+                var position=box.TryGetValue("position",out value)?value as float[]:null;
+                var half=box.TryGetValue("halfExtents",out value)?value as float[]:null;
+                var rotation=box.TryGetValue("rotationCosSin",out value)?value as float[]:null;
+                if(position==null||position.Length!=3||half==null||half.Length!=2
+                    ||rotation==null||rotation.Length!=2||pylon.FloorCoordinate==null
+                    ||!pylon.FloorCoordinate.IsValid)return false;
+                for(int i=0;i<3;i++)if(float.IsNaN(position[i])||float.IsInfinity(position[i]))return false;
+                for(int i=0;i<2;i++)if(float.IsNaN(half[i])||float.IsInfinity(half[i])||half[i]<=0
+                    ||float.IsNaN(rotation[i])||float.IsInfinity(rotation[i]))return false;
+                double norm=rotation[0]*rotation[0]+rotation[1]*rotation[1];
+                if(norm<0.99||norm>1.01||Math.Abs(pylon.FloorCoordinate.Z-position[2])>4)return false;
+                double dx=pylon.FloorCoordinate.X-position[0],dy=pylon.FloorCoordinate.Y-position[1];
+                return Math.Abs(rotation[0]*dx+rotation[1]*dy)<=half[0]
+                    &&Math.Abs(-rotation[1]*dx+rotation[0]*dy)<=half[1];
+            } catch {return false;}
+        }
+
+        private void DiagNativePylon(long now,uint acd,IWorldCoordinate goal,IActor pylon) { }
+
+        private void DiagNativeChest(long now,uint acd,IWorldCoordinate goal,IActor chest) { }
+        private void DiagNavigationWait(string reason,IWorldCoordinate point,int x,int y,long now) { }
         private bool TryMapNavigateLootGoal(IWorldCoordinate goal,uint acd,string kind,bool cleanup,long now)
         {
             var me=Hud.Game.Me;var from=me.FloorCoordinate;
@@ -4163,10 +4343,28 @@ private void TrackAutoUrshiNavigationWorld()
             if(!_enabled||_paused||Hud.Game.IsLoading||Hud.Game.IsPaused||!Hud.Window.IsForeground||IsBlockingLootUiOpen())
             {ClearLootNavigation();return false;}
             if(s7o_InputReleaseArbiter.HasPendingRelease)return true;
+            if(kind=="loot") {
+                var chest=FindNativePickupChest(goal);
+                if(chest!=null) {
+                    // Do not suppress the normal ClickItem/recovery branch with a
+                    // chest-centred approach disk or a terrain-candidate veto.
+                    if(_lootNavKind!=null)ClearLootNavigation();
+                    DiagNativeChest(now,acd,goal,chest);
+                    return false;
+                }
+            }
             var status=LootMapStatus();
-            if(status==null){ClearLootNavigation();return false;}
+            if(status==null){DiagLootRoute(now,null,null,null,null);ClearLootNavigation();return false;}
             var corridor=LootMapQuery("corridor",status["epoch"],from,goal,0.6f);
             string straight=LootMapState(corridor);
+            if(kind=="loot"&&cleanup&&straight=="BlockedCandidate") {
+                var pylon=FindNativePickupPylon(from,goal,status["epoch"],corridor);
+                if(pylon!=null) {
+                    if(_lootNavKind!=null)ClearLootNavigation();
+                    DiagNativePylon(now,acd,goal,pylon);
+                    return false; // Preserve ClickItem identity checks and the existing recovery owner.
+                }
+            }
             var pickupShrine=kind=="loot"&&(straight=="BlockedCandidate"||straight=="NoWalkCandidate")
                 ?FindLootPickupShrine(goal):null;
             if(distance<=8&&straight!="BlockedCandidate"&&straight!="NoWalkCandidate")
@@ -4216,8 +4414,9 @@ private void TrackAutoUrshiNavigationWorld()
             if(straight=="ClearCandidate"&&_lootNavReplans==0) {ClearLootNavigation();return false;}
             var route=pickupShrine==null?LootMapQuery("path",status["epoch"],from,goal,0.6f)
                 :LootMapPickupApproach(status["epoch"],from,goal,pickupShrine);
+            DiagLootRoute(now,status,corridor,route,pickupShrine);
             if(pickupShrine!=null&&LootMapState(route)=="AtApproach"&&distance<=8) {
-                // Continue through the existing item-identity recovery, never click the shrine.
+                // Continue through item-identity recovery; never click the obstacle.
                 ClearLootNavigation();return false;
             }
             var waypoint=LootMapWaypoint(route);
@@ -4289,16 +4488,16 @@ private void TrackAutoUrshiNavigationWorld()
             }
             PauseDhStrafeForPickup();
             if(_lootNavProbeTick==0||Math.Abs(x-_lootNavProbeX)>4||Math.Abs(y-_lootNavProbeY)>4) {
-                if(!TrySetCursorForWorldClick(x,y))return true;
-                _lootNavProbeX=x;_lootNavProbeY=y;_lootNavProbeTick=Hud.Game.CurrentGameTick;return true;
+                if(!TrySetCursorForWorldClick(x,y)){DiagNavigationWait("cursor-stage-rejected",point,x,y,now);return true;}
+                _lootNavProbeX=x;_lootNavProbeY=y;_lootNavProbeTick=Hud.Game.CurrentGameTick;DiagNavigationWait("cursor-staged",point,x,y,now);return true;
             }
             if(Hud.Game.CurrentGameTick==_lootNavProbeTick)return true;
             _lootNavProbeTick=0;NativePoint cursor;
             if(!Hud.Window.IsForeground||IsBlockingLootUiOpen()||!GetCursorPos(out cursor)
                 ||Math.Abs(cursor.X-x)>4||Math.Abs(cursor.Y-y)>4
-                ||(LootNavigationKeyState(1)&0x8000)!=0||(LootNavigationKeyState(2)&0x8000)!=0)return true;
+                ||(LootNavigationKeyState(1)&0x8000)!=0||(LootNavigationKeyState(2)&0x8000)!=0){DiagNavigationWait("cursor-context-or-physical-input",point,x,y,now);return true;}
             if(skill==null) {
-                if(door!=null?!door.IsSelected:GetSelectedActorSafe()!=null||Hud.Game.SelectedMonster2!=null)return true;
+                if(door!=null?!door.IsSelected:GetSelectedActorSafe()!=null||Hud.Game.SelectedMonster2!=null){DiagNavigationWait("hover-blocked",point,x,y,now);return true;}
                 MouseLeftClick();
             } else {
                 if(GetSelectedActorSafe()!=null||Hud.Game.SelectedMonster2!=null)
