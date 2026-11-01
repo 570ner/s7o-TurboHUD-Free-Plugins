@@ -2830,6 +2830,9 @@ namespace Turbo.Plugins.s7o
 
         private void RegisterToggleHit(string action, RectangleF rect)
         {
+            if(_macroPaintClip.Width>0&&_macroPaintClip.Height>0)
+            {rect=RectangleF.Intersect(rect,_macroPaintClip);if(rect.Width<=0||rect.Height<=0)return;}
+
             RegisterHoverHelp(action,rect);
             if (string.IsNullOrWhiteSpace(action))
                 return;
@@ -4516,6 +4519,7 @@ namespace Turbo.Plugins.s7o
             }
 
             bool target = !SafePluginEnabled(plugin);
+            if(!target&&plugin is s7o_AutoSkill)((s7o_AutoSkill)plugin).StopMacroInputs();
             SetPluginEnabledPersistentWithBoundCompanions(plugin, target);
             SetPluginAliasOverrides(target, typeNames);
 
@@ -7028,29 +7032,29 @@ namespace Turbo.Plugins.s7o
                 thumbH);
         }
 
-
         private int VisibleMacroItemCount(RectangleF listRect)
         {
-            if (listRect.Height <= 0f)
-                return 1;
-
-            return Math.Max(1, (int)Math.Floor((listRect.Height - 4f) / MacroListSlotH));
+            if(_macroCurrentItems==null)return Math.Max(1,(int)Math.Floor((listRect.Height-4)/MacroListSlotH));
+            float used=0;int count=0,start=Math.Max(0,Math.Min(_macrosScroll,_macroCurrentItems.Count-1));
+            for(int i=start;i<_macroCurrentItems.Count;i++)
+            {float h=GetMacroListItemSlotHeight(_macroCurrentItems[i]);if(used+h>listRect.Height-4)break;used+=h;count++;}
+            return Math.Max(1,count);
         }
+
 
         private int MaxMacroScroll()
         {
-            return MaxIndexScroll(_macrosTotalItems, _macrosVisibleItems);
+            if(_macroCurrentItems==null||_macroViewportHeight<=0)return MaxIndexScroll(_macrosTotalItems,_macrosVisibleItems);
+            float used=0,available=Math.Max(1,_macroViewportHeight-4);
+            for(int i=_macroCurrentItems.Count-1;i>=0;i--)
+            {float h=GetMacroListItemSlotHeight(_macroCurrentItems[i]);if(used+h>available&&used>0)return i+1;used+=h;}
+            return 0;
         }
 
-        private void ClampMacroScroll()
-        {
-            _macrosScroll = ClampIndexScrollValue(_macrosScroll, _macrosTotalItems, _macrosVisibleItems);
-        }
+        private void ClampMacroScroll(){_macrosScroll=Math.Max(0,Math.Min(_macrosScroll,MaxMacroScroll()));}
 
-        private void ScrollMacrosBy(int delta)
-        {
-            ScrollIndexBy(ref _macrosScroll, delta, _macrosTotalItems, _macrosVisibleItems);
-        }
+        private void ScrollMacrosBy(int delta){_macrosScroll+=delta;ClampMacroScroll();}
+
 
         private void JumpMacrosScrollToCursor(float cursorY)
         {
@@ -12857,6 +12861,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             public string Title;
             public string Description;
             public string Code;
+            public string MacroDescriptionKey,MacroTitleSuffix;
+            public uint MacroPowerSno;
             public bool   IsBuff;        // true = AutoBuffProfile, false = ConditionalCastProfile
             public bool   IsPlugin;      // true = plugin row (DH Strafe, Exit Archon)
             public bool   IsOpenGrMapSelector;
@@ -12969,6 +12975,86 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
         private const float PestilenceChildSlotH = 36f;
         private const float ZdhHelperChildSlotH = 66f;
         private const float ZBarbConeChildSlotH = 84f;
+        private sealed class FullMacroLayout
+        {
+            public string[] Titles,Descriptions;
+            public float TitleStep,DescriptionStep,Height;
+        }
+        private readonly Dictionary<string,FullMacroLayout> _macroWrapCache=new Dictionary<string,FullMacroLayout>();
+        private List<MacroListItem> _macroCurrentItems;
+        private float _macroMeasureWidth=400,_macroViewportHeight;
+        private RectangleF _macroPaintClip=RectangleF.Empty;
+        private s7o_AutoSkill _macroRegistryOwner;
+        private List<s7o_AutoSkill.MacroDescriptor> _macroRegistryEntries;
+        private static float MacroTextWidth(float width,MacroEntry entry)
+        {
+            float extra=0;
+            bool expand=entry.IsPestilenceSelector||entry.IsInariusSelector||entry.IsAutoLootSelector||entry.IsInventoryDropSelector
+                ||entry.IsZBarbSelector||entry.IsZdhHelperSelector||entry.IsGenMonkSelector||entry.IsImpaleSelector;
+            if(expand)extra+=42;
+            if(entry.HasHotkeyButton)extra+=expand?96:94;
+            return Math.Max(40,width-205-extra);
+        }
+        private static float MeasureMacroText(IFont font,string text,out float height)
+        {
+            height=16;
+            if(font==null)return (text??"").Length*8;
+            using(var layout=font.GetTextLayoutManualDispose(string.IsNullOrEmpty(text)?" ":text))
+            {height=layout.Metrics.Height;return layout.Metrics.Width;}
+        }
+        private static string[] WrapMacroFull(IFont font,string text,float width)
+        {
+            var result=new List<string>();
+            foreach(string paragraph in (text??"").Replace("\r","").Split('\n'))
+            {
+                string rest=paragraph.Trim();
+                while(rest.Length>0)
+                {
+                    int[] starts=StringInfo.ParseCombiningCharacters(rest);
+                    int low=0,high=starts.Length;
+                    while(low<high)
+                    {
+                        int mid=(low+high+1)/2,end=mid==starts.Length?rest.Length:starts[mid];float height;
+                        if(MeasureMacroText(font,rest.Substring(0,end),out height)<=width)low=mid;else high=mid-1;
+                    }
+                    int count=Math.Max(1,low),take=count==starts.Length?rest.Length:starts[count];
+                    if(take<rest.Length)
+                    {int space=rest.LastIndexOf(' ',Math.Max(0,take-1),take);if(space>0)take=space;}
+                    result.Add(rest.Substring(0,take).TrimEnd());rest=rest.Substring(take).TrimStart();
+                }
+            }
+            return result.ToArray();
+        }
+        private FullMacroLayout MacroLayout(MacroEntry entry,float slotWidth)
+        {
+            string title=GetMacroTitleDisplay(entry),description=GetMacroDescriptionDisplay(entry);
+            float width=MacroTextWidth(slotWidth,entry);
+            string key=width.ToString("0.###",CultureInfo.InvariantCulture)+"\u001f"+title+"\u001f"+description;
+            FullMacroLayout layout;
+            if(_macroWrapCache.TryGetValue(key,out layout))return layout;
+            float titleHeight,descriptionHeight;
+            MeasureMacroText(_fRowTitle,"Ag",out titleHeight);MeasureMacroText(_fRowText,"Ag",out descriptionHeight);
+            layout=new FullMacroLayout{Titles=WrapMacroFull(_fRowTitle,title,width),Descriptions=WrapMacroFull(_fRowText,description,width),
+                TitleStep=Math.Max(21,titleHeight+2),DescriptionStep=Math.Max(16,descriptionHeight+2)};
+            layout.Height=Math.Max(MacroEntryH,7+Math.Max(1,layout.Titles.Length)*layout.TitleStep
+                +(layout.Descriptions.Length>0?4+layout.Descriptions.Length*layout.DescriptionStep:0)+8);
+            if(_macroWrapCache.Count>=512)_macroWrapCache.Clear();
+            _macroWrapCache[key]=layout;return layout;
+        }
+        private static string MacroClassKey(string value)
+        {return (value??"").Replace(" ","").Replace("_","").ToLowerInvariant();}
+        private void AddAutoSkillEntries(List<MacroEntry> entries,string className)
+        {
+            var owner=GetAutoSkillPlugin();if(owner==null)return;
+            if(!ReferenceEquals(owner,_macroRegistryOwner)||_macroRegistryEntries==null)
+            {_macroRegistryOwner=owner;_macroRegistryEntries=owner.GetMacroCatalog().ToList();}
+            string wanted=MacroClassKey(className);
+            foreach(var item in _macroRegistryEntries)
+                if(MacroClassKey(item.ClassName)==wanted)
+                    entries.Add(new MacroEntry{Code=item.Code,Title=item.Title,Description=item.Description,IsBuff=item.IsBuff,
+                        MacroDescriptionKey=item.DescriptionKey,MacroPowerSno=item.PowerSno,MacroTitleSuffix=item.TitleSuffix});
+        }
+
         private const float MacroEntryH = 76f;
         private const float MacroHeaderH = 36f;
 
@@ -12995,7 +13081,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             if (item.Entry.IsZdhHelperChild || item.Entry.IsGenMonkChild || item.Entry.IsImpaleAimOption)
                 return ZdhHelperChildSlotH;
 
-            return MacroListSlotH;
+            if(item.Kind==MacroListItemKind.Section)return MacroListSlotH;
+            return MacroLayout(item.Entry,_macroMeasureWidth).Height+8;
         }
 
 
@@ -13085,7 +13172,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             const float buttonGap = 8f;
             const float hotkeyExpandGap = 10f;
 
-            RectangleF rr = new RectangleF(slot.Left, slot.Top + 3f, slot.Width, MacroEntryH);
+            FullMacroLayout layout=MacroLayout(entry,slot.Width);
+            RectangleF rr = new RectangleF(slot.Left, slot.Top + 3f, slot.Width, layout.Height);
 
             bool enabled = false;
             bool installed = true;
@@ -13165,30 +13253,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             float textRight = entry.HasHotkeyButton ? hotkeyR.Left - 10f : ((entry.IsPestilenceSelector || entry.IsInariusSelector || entry.IsAutoLootSelector || entry.IsInventoryDropSelector || entry.IsZdhHelperSelector || entry.IsGenMonkSelector || entry.IsImpaleSelector) ? expandR.Left - 10f : stateR.Left - 10f);
             float textW = Math.Max(40f, textRight - textX);
 
-            string localizedTitle = GetMacroTitleDisplay(entry);
-            DrawOutlinedTextAtRaw(
-                _fRowTitle,
-                _fRowTitleShadow,
-                FitTextToWidth(_fRowTitle, localizedTitle, textW),
-                textX,
-                rr.Top + 7f);
-
-            if (!string.IsNullOrWhiteSpace(entry.Description))
-            {
-                string localizedDescription = GetMacroDescriptionDisplay(entry);
-                bool seasonal=entry.IsGenMonkSelector || entry.IsImpaleSelector;
-                string[] descLines = seasonal ? WrapMeasuredDescription(_fRowText,localizedDescription,textW,3)
-                    : WrapTextApprox(localizedDescription,ApproxCharsForToggleDescription(textW),3);
-
-                if (descLines.Length > 0)
-                    DrawOutlinedTextAtRaw(_fRowText, _fRowTextShadow, descLines[0], textX, rr.Top + 28f);
-
-                if (descLines.Length > 1)
-                    DrawOutlinedTextAtRaw(_fRowText, _fRowTextShadow, descLines[1], textX, rr.Top + 44f);
-
-                if (descLines.Length > 2)
-                    DrawOutlinedTextAtRaw(_fRowText, _fRowTextShadow, descLines[2], textX, rr.Top + 60f);
-            }
+            float textY=rr.Top+7f;
+            foreach(string line in layout.Titles)
+            {DrawOutlinedTextAtRaw(_fRowTitle,_fRowTitleShadow,line,textX,textY);textY+=layout.TitleStep;}
+            if(layout.Descriptions.Length>0)textY+=4;
+            foreach(string line in layout.Descriptions)
+            {DrawOutlinedTextAtRaw(_fRowText,_fRowTextShadow,line,textX,textY);textY+=layout.DescriptionStep;}
 
             string stateLabel;
             if (entry.IsOpenGrMapSelector)
@@ -13315,6 +13385,17 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
         private string GetMacroTitleDisplay(MacroEntry entry)
         {
+            if(entry.MacroPowerSno!=0)
+            {
+                string native=entry.Title;
+                var power=Hud.Sno.GetSnoPower(entry.MacroPowerSno);
+                if(power!=null&&!string.IsNullOrWhiteSpace(power.NameLocalized))native=power.NameLocalized;
+                if(entry.Code=="Skill_DrinkHealthPotion")return T("macro.title.potion","Potion: Health and Altar");
+                if(entry.Code=="Skill_DrinkHealthPotionArchonMeteorBuild")return T("macro.title.archon_potion","Potion: Archon/Meteor");
+                if(!string.IsNullOrEmpty(entry.MacroTitleSuffix))native+=": "+T("macro.suffix."+entry.MacroTitleSuffix,entry.MacroTitleSuffix);
+                return native;
+            }
+
             string english = entry.Title ?? string.Empty;
             string translated = DisplayText(english);
 
@@ -13353,6 +13434,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
         private string GetMacroDescriptionDisplay(MacroEntry entry)
         {
+            if(!string.IsNullOrEmpty(entry.MacroDescriptionKey))return T(entry.MacroDescriptionKey,entry.Description??"");
+
             string english = entry.Description ?? string.Empty;
             if (english.Length == 0)
                 return string.Empty;
@@ -14485,12 +14568,9 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 });
             }
 
+            AddAutoSkillEntries(allEntries,"AllClasses");
             int barbarianStart = allEntries.Count;
-
-            allEntries.AddRange(new []
-            {
-                // ── Barbarian ──────────────────────────────────────────────────
-                new MacroEntry {
+            allEntries.Add(new MacroEntry {
                     Title="Z-Barb Autosnap",
                     Description=T("hud.ui.spear_pull_assist", "Spear-pull assist.") + "\n" +
                         T("hud.indirect.spear_cone_drift", "Cone controls drift from aim."),
@@ -14501,94 +14581,37 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     PluginAction="toggles:plugin:zbarbautosnap",
                     HasHotkeyButton=true,
                     HotkeyAction="macro:hotkey:zbarbautosnap"
-                },
-                new MacroEntry { Title="War Cry",              Description="Keeps War Cry armor/resist buff active between casts.",              Code="Barbarian_WarCry_KeepUp",           IsBuff=false },
-                new MacroEntry { Title="Battle Rage",          Description="Maintains Battle Rage fury-spending buff for crit and damage.",      Code="Barbarian_BattleRage_KeepUp",       IsBuff=false },
-                new MacroEntry { Title="Sprint",               Description="Keeps Sprint active while monsters are nearby.",                     Code="Barbarian_Sprint_KeepUpMoving",     IsBuff=false },
-                new MacroEntry { Title="Ignore Pain",          Description="Casts Ignore Pain when health is low or elites are nearby.",         Code="Barbarian_IgnorePain_Defensive",    IsBuff=false },
-                new MacroEntry { Title="Wrath of the Berserker",Description="Activates WotB on elite/boss or high monster density.",           Code="Barbarian_WOTB_EliteOrDensity",     IsBuff=false },
-                new MacroEntry { Title="Call of the Ancients", Description="Summons Ancients in combat when elites or density are nearby.",       Code="Barbarian_COTA_Combat",             IsBuff=false },
-                // ── Crusader ──────────────────────────────────────────────────
-                new MacroEntry { Title="Laws of Valor",        Description="Activates Law of Valor near elites or bosses.",                      Code="Crusader_LawsOfValor_Elite",        IsBuff=false },
-                new MacroEntry { Title="Laws of Justice",      Description="Activates Law of Justice when health is low or elites are nearby.",  Code="Crusader_LawsOfJustice_Defensive",  IsBuff=false },
-                new MacroEntry { Title="Laws of Hope",         Description="Activates Law of Hope when health drops below threshold.",            Code="Crusader_LawsOfHope_Defensive",     IsBuff=false },
-                new MacroEntry { Title="Akarat's Champion",    Description="Casts Akarat's Champion on elite/boss or high density.",             Code="Crusader_AkaratsChampion_Combat",   IsBuff=false },
-                new MacroEntry { Title="Iron Skin",            Description="Casts Iron Skin when health is low or elites are close.",            Code="Crusader_IronSkin_Defensive",       IsBuff=false },
-                new MacroEntry { Title="Provoke",              Description="Casts Provoke when wrath is low and enemies are close.",             Code="Crusader_Provoke_ResourceOrDensity",IsBuff=false },
-                new MacroEntry { Title="Bombardment",          Description="Fires Bombardment on elites or dense packs (disabled by default).",  Code="Crusader_Bombardment_EliteOrDensity",IsBuff=false },
-                // ── Demon Hunter ──────────────────────────────────────────────
-                new MacroEntry { Title="Preparation: Disc/Life",Description="Casts Preparation when discipline is missing or life is low.",       Code="DH_Preparation_DisciplineOrLife",   IsBuff=false },
-                new MacroEntry { Title="Preparation: Punishment",Description="Punishment rune — casts when hatred is missing by ~75.",          Code="DH_Preparation_Punishment_Hatred",  IsBuff=false },
-                new MacroEntry { Title="Companion: Bat",       Description="Bat Companion — casts when hatred is very low.",                     Code="DH_Companion_Bat_Hatred",           IsBuff=false },
-                new MacroEntry { Title="Companion: Elite",     Description="Non-Bat Companion — activates near elites, bosses, or goblins.",     Code="DH_Companion_EliteOrBoss",          IsBuff=false },
-                new MacroEntry { Title="Vengeance: Combat",    Description="Maintains Vengeance combat buff with dark heart/seethe support.",    Code="DH_Vengeance_KeepCombatBuff",       IsBuff=false },
-                new MacroEntry { Title="Vengeance: Hatred",    Description="Hatred-return rune — casts Vengeance when hatred is below 30.",      Code="DH_Vengeance_HatredBurst",          IsBuff=false },
-                new MacroEntry { Title="Shadow Power: Defensive",Description="Casts Shadow Power when missing and danger/health conditions met.", Code="DH_ShadowPower_Defensive",          IsBuff=false },
-                new MacroEntry { Title="Shadow Power: Elusive",Description="Best-effort Elusive Ring upkeep using Shadow Power.",               Code="DH_ShadowPower_ElusiveRing",        IsBuff=false },
-                new MacroEntry { Title="DH Strafe",            Description="Continuous Strafe primary-skill macro. Requires s7o_DHStrafe plugin.",
+                });
+            AddAutoSkillEntries(allEntries,"Barbarian");
+            int crusaderStart = allEntries.Count;
+            AddAutoSkillEntries(allEntries,"Crusader");
+            int demonHunterStart = allEntries.Count;
+            allEntries.Add(new MacroEntry { Title="DH Strafe",            Description="Continuous Strafe primary-skill macro. Requires s7o_DHStrafe plugin.",
                     Code="dh_strafe_plugin", IsPlugin=true,
                     PluginTypeNames=new[]{"s7o_DHStrafePrimaryPlugin","s7o_DHStrafe"},
-                    PluginAction="toggles:plugin:dhstrafe" },
-                // ── Monk ──────────────────────────────────────────────────────
-                new MacroEntry { Title="Epiphany",             Description="Casts Epiphany near elites or high density for spirit regen.",       Code="Monk_Epiphany_Combat",              IsBuff=false },
-                new MacroEntry { Title="Sweeping Wind",        Description="Keeps Sweeping Wind active near enemies.",                           Code="Monk_SweepingWind_KeepUp",          IsBuff=false },
-                new MacroEntry { Title="Mantra of Conviction", Description="Refreshes the 3-second Conviction active only while attacking nearby enemies.",             Code="Monk_MantraConviction_Elite",       IsBuff=false },
-                new MacroEntry { Title="Mantra of Salvation",  Description="Refreshes the 3-second Salvation active near danger without repeating casts.",   Code="Monk_MantraSalvation_Defensive",    IsBuff=false },
-                new MacroEntry { Title="Mantra of Healing",    Description="While attacking or below 75% health, refreshes the 3-second Healing shield and recasts if its strength drops.",     Code="Monk_MantraHealing_Defensive",      IsBuff=false },
-                new MacroEntry { Title="Mystic Ally",          Description="Casts Mystic Ally when spirit is low or elite/boss is nearby.",      Code="Monk_MysticAlly_ResourceOrElite",   IsBuff=false },
-                new MacroEntry { Title="Serenity",             Description="Panic-button invulnerability when health is low or elites close.",   Code="Monk_Serenity_Defensive",           IsBuff=false },
-                // ── Necromancer ───────────────────────────────────────────────
-                new MacroEntry { Title="Pestilence RGK",     Description="AutoSiphon Power Shift + Pestilence target assist. Expand for options.",
+                    PluginAction="toggles:plugin:dhstrafe" });
+            AddAutoSkillEntries(allEntries,"DemonHunter");
+            int monkStart = allEntries.Count;
+            AddAutoSkillEntries(allEntries,"Monk");
+            int necromancerStart = allEntries.Count;
+            allEntries.Add(new MacroEntry { Title="Pestilence RGK",     Description="AutoSiphon Power Shift + Pestilence target assist. Expand for options.",
                     Code="pestilence_rgk_plugin", IsPlugin=true, IsPestilenceSelector=true,
                     PluginTypeNames=new[]{"s7o_Pestilence_RGK"},
-                    PluginAction="toggles:plugin:pestilencergk" },
-                new MacroEntry { Title="Inarius RGK",       Description="AutoSiphon Power Shift + 17-yard Inarius target assist. Expand for options.",
+                    PluginAction="toggles:plugin:pestilencergk" });
+            allEntries.Add(new MacroEntry { Title="Inarius RGK",       Description="AutoSiphon Power Shift + 17-yard Inarius target assist. Expand for options.",
                     Code="inarius_rgk_plugin", IsPlugin=true, IsInariusSelector=true,
                     PluginTypeNames=new[]{"s7o_Inarius_RGK"},
-                    PluginAction="toggles:plugin:inariusrgk" },
-                new MacroEntry { Title="Bone Armor",           Description="Casts Bone Armor near enemies when missing or expiring.",            Code="Necro_BoneArmor_NearEnemies",       IsBuff=false },
-                new MacroEntry { Title="Simulacrum",           Description="Casts Simulacrum near elites or dense packs.",                       Code="Necro_Simulacrum_EliteOrDensity",   IsBuff=false },
-                new MacroEntry { Title="Land of the Dead",     Description="Casts LotD on elites or dense packs (disabled by default).",         Code="Necro_LandOfTheDead_EliteOrDensity",IsBuff=false },
-                new MacroEntry { Title="Devour",               Description="Maintains Devour buffs/resources; fast-casts during Land of the Dead.",        Code="Necro_Devour_CorpseOrLotD",        IsBuff=false },
-                new MacroEntry { Title="Command Skeletons",    Description="Maintains Jesseth target commands; otherwise assists elite/RG targeting.",      Code="Necro_CommandSkeletons_Elite",      IsBuff=false },
-                new MacroEntry { Title="Nayr's Black Death",   Description="Maintains Nayr stacks after you start attacking with Siphon Blood.",           Code="Necro_NayrsBlackDeath",             IsBuff=false },
-                new MacroEntry { Title="Skeletal Mage",        Description="Casts Skeletal Mage when essence is high (disabled by default).",     Code="Necro_SkeletalMage_EssenceHigh",    IsBuff=false },
-                // ── Witch Doctor ──────────────────────────────────────────────
-                new MacroEntry { Title="Spirit Walk",          Description="Defensive Spirit Walk when health is critical or elites are close.",  Code="WD_SpiritWalk_Defensive",           IsBuff=false },
-                new MacroEntry { Title="Soul Harvest",         Description="Casts Soul Harvest near enemies when the buff needs upkeep.",         Code="WD_SoulHarvest_NearEnemies",        IsBuff=false },
-                new MacroEntry { Title="Horrify",              Description="Casts Horrify when enemies are close or health is low.",              Code="WD_Horrify_Defensive",              IsBuff=false },
-                new MacroEntry { Title="Fetish Army",          Description="Summons Fetish Army near elites or dense packs.",                    Code="WD_FetishArmy_Combat",              IsBuff=false },
-                new MacroEntry { Title="Gargantuan",           Description="Summons Gargantuan when missing and enemies are nearby.",             Code="WD_Gargantuan_KeepUp",              IsBuff=false },
-                new MacroEntry { Title="Zombie Dogs",          Description="Summons Zombie Dogs when missing and enemies are nearby.",            Code="WD_ZombieDogs_KeepUp",              IsBuff=false },
-                new MacroEntry { Title="Big Bad Voodoo",       Description="Casts Big Bad Voodoo on elites or dense packs (off by default).",     Code="WD_BigBadVoodoo_EliteOrDensity",    IsBuff=false },
-                // ── Wizard ────────────────────────────────────────────────────
-                new MacroEntry { Title="Magic Weapon",         Description="Maintains Magic Weapon elemental damage buff.",                       Code="Wizard_MagicWeapon",   IsBuff=true },
-                new MacroEntry { Title="Familiar",             Description="Maintains Familiar projectile attack buff.",                          Code="Wizard_Familiar",      IsBuff=true },
-                new MacroEntry { Title="Energy Armor",         Description="Maintains Energy Armor mitigation buff.",                             Code="Wizard_EnergyArmor",   IsBuff=true },
-                new MacroEntry { Title="Storm Armor",          Description="Maintains Storm Armor retaliation buff.",                             Code="Wizard_StormArmor",    IsBuff=true },
-                new MacroEntry { Title="Ice Armor",            Description="Maintains Ice Armor chilling aura buff.",                             Code="Wizard_IceArmor",      IsBuff=true },
-                new MacroEntry { Title="Diamond Skin",         Description="Casts Diamond Skin when health is low or elites are close.",          Code="Wizard_DiamondSkin_Defensive",  IsBuff=false },
-                new MacroEntry { Title="Mirror Image",         Description="Deploys Mirror Image when health is low or elites are nearby.",       Code="Wizard_MirrorImage_Defensive",  IsBuff=false },
-                new MacroEntry { Title="Frost Nova",           Description="Casts Frost Nova when enemies are within close range.",               Code="Wizard_FrostNova_CloseEnemies", IsBuff=false },
-                new MacroEntry { Title="Explosive Blast",      Description="Casts Explosive Blast when enemies are close (off by default).",      Code="Wizard_ExplosiveBlast_CloseEnemies",IsBuff=false },
-                new MacroEntry { Title="Archon",               Description="Activates Archon on elites or dense packs (off by default).",         Code="Wizard_Archon_EliteOrDensity",  IsBuff=false },
-                new MacroEntry { Title="Exit Archon",          Description="Clicks Archon buff icon to cancel Archon form early. Requires s7o_ExitArchon plugin.",
+                    PluginAction="toggles:plugin:inariusrgk" });
+            AddAutoSkillEntries(allEntries,"Necromancer");
+            int witchDoctorStart = allEntries.Count;
+            AddAutoSkillEntries(allEntries,"WitchDoctor");
+            int wizardStart = allEntries.Count;
+            allEntries.Add(new MacroEntry { Title="Exit Archon",          Description="Clicks Archon buff icon to cancel Archon form early. Requires s7o_ExitArchon plugin.",
                     Code="exit_archon_plugin", IsPlugin=true,
                     PluginTypeNames=new[]{"s7o_ExitArchon"},
-                    PluginAction="toggles:plugin:exitarchon" },
-            });
+                    PluginAction="toggles:plugin:exitarchon" });
+            AddAutoSkillEntries(allEntries,"Wizard");
 
-            // Class header boundaries: entry index where each class starts
-            int crusaderStart = barbarianStart + 7;
-            int demonHunterStart = crusaderStart + 7;
-            int monkStart = demonHunterStart + 9;
-            int necromancerStart = monkStart + 7;
-            int witchDoctorStart = necromancerStart + 8;
-            int wizardStart = witchDoctorStart + 7;
-
-            // Optional seasonal rows are discovered by type. Removing either module removes
-            // only its own row/options; HUD Menu has no compile-time seasonal dependency.
-            // Legacy action/code keys are retained so existing favorites/settings still resolve.
             if (FindPluginByTypeName("s7o_Impale") != null)
             {
                 allEntries.Insert(monkStart, new MacroEntry {
@@ -14647,10 +14670,13 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 sbW - 2f,
                 Math.Max(8f, _macrosScrollDownRect.Top - _macrosScrollUpRect.Bottom - 4f));
 
+            _macroCurrentItems=items;_macroMeasureWidth=listRect.Width;_macroViewportHeight=listRect.Height;
             _macrosVisibleItems = VisibleMacroItemCount(listRect);
             ClampMacroScroll();
 
             _hoverHelpClip=listRect;
+            _macroPaintClip=listRect;
+            try {
             int start = Math.Max(0, Math.Min(_macrosScroll, MaxMacroScroll()));
 
             float y = listRect.Top + 2f;
@@ -14677,6 +14703,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 y += slotH;
             }
 
+            } finally {_macroPaintClip=RectangleF.Empty;}
             DrawToggleViewportCover(detail, listRect);
             DrawMacrosFixedHeader(detail);
             DrawPluginsStyleMacrosScrollbar();
