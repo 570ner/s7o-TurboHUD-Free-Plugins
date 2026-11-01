@@ -818,10 +818,13 @@ private bool HasNativeBox(Obstacle o)
         private void ObserveObstacle(IActor actor)
         {
             if(actor==null||actor.WorldId!=_worldId||_obstacles.Count>=256)return;
-            // Activated shrines/pylons can still be physical blockers.
-            if(actor.IsDisabled&&!(actor is IShrine))return;
-            string kind=null;
             uint sno=actor.SnoActor==null?0:(uint)actor.SnoActor.Sno;
+            // Opened intact chests and activated shrines still occupy space.
+            // Disabled breakable containers/destroyables keep their previous exclusion.
+            bool persistentChest=actor.GizmoType==GizmoType.Chest||actor.GizmoType==GizmoType.LoreChest
+                ||sno==(uint)ActorSnoEnum._p76_chest||sno==(uint)ActorSnoEnum._p73_chestreward;
+            if(actor.IsDisabled&&!(actor is IShrine)&&!persistentChest)return;
+            string kind=persistentChest?"Chest":null;
             // Identified native actors, not a guessed radius or a blacklist of dungeon floors.
             if(sno==108266)kind="TrapPit"; // a1dun_Leor_Spike_TrapDoor
             else if(sno==105478||sno==454181)kind="TrapLever";
