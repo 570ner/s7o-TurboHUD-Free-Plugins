@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Collections.Generic;
 using Turbo.Plugins.Default;
 
@@ -97,6 +98,9 @@ namespace Turbo.Plugins.s7o
         public IBrush BossMeteorBackBrush { get; set; }
         public IBrush BossMeteorFrontBrush { get; set; }
         public float EchoingNightmareMeteorRadius { get; set; }
+        private const float EchoingNightmareMeteorCountdownSeconds = 3.0f;
+        public WorldDecoratorCollection EchoingNightmareMeteorTimerDecorator { get; set; }
+        // Retained for existing customizers; Ember now uses a static native dashed border.
         public int BossMeteorRotatingDashCount { get; set; }
         public float BossMeteorRotatingDashFill { get; set; }
         public float BossMeteorRotationSecondsPerTurn { get; set; }
@@ -140,6 +144,20 @@ namespace Turbo.Plugins.s7o
         public WorldDecoratorCollection PoisonEnchantedDecorator { get; set; }
 
         public WorldDecoratorCollection BossFallingRocksDecorator { get; set; }
+        // Shared Perendi/Kulle/Sand Shaper display: 2s warning, then 1s of inner pulses.
+        // Native actors can linger ~4s; this configured visual cutoff is not an exact damage event.
+        private const int FallingRocksWarningTicks = 120;
+        private const int FallingRocksEffectTicks = 180;
+        // Community Morlu timer precedent; verify Ember's warning against native impact logs.
+        private const int EmberMeteorWarningTicks = 120;
+        private WorldDecoratorCollection _fallingRocksTimerDecorator;
+        private WorldDecoratorCollection _emberMeteorTimerDecorator;
+        private IBrush _hazardPulseBrush;
+        private WorldDecoratorCollection _fallingRocksPostTimerDecorator, _emberPostTimerDecorator;
+        private readonly PhaseTimerActor _phaseTimerActor = new PhaseTimerActor();
+        private readonly HashSet<MeteorVisualKey> _paintedMeteorEffects = new HashSet<MeteorVisualKey>();
+        private double _hazardPulseSeconds;
+        private const int EmberPostImpactTicks = 120;
         public WorldDecoratorCollection BossKulleTwisterDecorator { get; set; }
         public WorldDecoratorCollection BossKulleBoulderDecorator { get; set; }
         public WorldDecoratorCollection BossKulleSlowTimeDecorator { get; set; }
@@ -182,6 +200,7 @@ namespace Turbo.Plugins.s7o
             AdriaOrTethrys = 1 << 6,
             Rime = 1 << 7,
             FireDot = 1 << 8,
+            ZoltunKulle = 1 << 9,
         }
 
         private sealed class CachedGroundCircle
@@ -262,7 +281,8 @@ namespace Turbo.Plugins.s7o
             // Bloodmaw's leap impact remains dangerous briefly after the landing marker ends.
             // 90 ticks is 1.5 seconds at Diablo III's normal 60 ticks/sec rate.
             BossLeapPostImpactLingerTicks = 90;
-            BossMeteorFallbackRadius = 22.0f;
+            // Configured meteor display radius; native collision bounds do not establish the damage radius.
+            BossMeteorFallbackRadius = 20.0f;
             EchoingNightmareMeteorRadius = 9.5f;
             BossMeteorRotatingDashCount = 52;
             BossMeteorRotatingDashFill = 0.42f;
@@ -489,9 +509,34 @@ namespace Turbo.Plugins.s7o
                 }
             );
 
+            // EN log: green pending-to-impact transitions are predominantly 180 game ticks.
+            // Use the existing compact native pie/label style; allocate resources only at Load.
+            EchoingNightmareMeteorTimerDecorator = new WorldDecoratorCollection(
+                new GroundTimerDecorator(Hud)
+                {
+                    CountDownFrom = EchoingNightmareMeteorCountdownSeconds,
+                    BackgroundBrushEmpty = Hud.Render.CreateBrush(128, 0, 0, 0, 0),
+                    BackgroundBrushFill = Hud.Render.CreateBrush(190, 117, 217, 117, 0),
+                    Radius = 25
+                },
+                new GroundLabelDecorator(Hud)
+                {
+                    CountDownFrom = EchoingNightmareMeteorCountdownSeconds,
+                    TextFont = Hud.Render.CreateFont("tahoma", 8, 255, 225, 255, 180,
+                        true, false, 255, 0, 0, 0, true),
+                    ForceOnScreen = false
+                }
+            );
+
             // Focal point is drawn manually with the same rotating segmented style as small Orbiters.
             // Prefer the native projectile_focus actor's FloorCoordinate to avoid screen-space drift.
             OrbiterFocalPointDecorator = new WorldDecoratorCollection();
+
+            _fallingRocksTimerDecorator = CreateBossWarningTimer(FallingRocksWarningTicks);
+            _fallingRocksPostTimerDecorator = CreateBossWarningTimer(FallingRocksEffectTicks - FallingRocksWarningTicks);
+            _emberPostTimerDecorator = CreateBossWarningTimer(EmberPostImpactTicks);
+            _emberMeteorTimerDecorator = CreateBossWarningTimer(EmberMeteorWarningTicks);
+            _hazardPulseBrush = Hud.Render.CreateBrush(160, 255, 55, 25, 2);
 
             BossFallingRocksDecorator = new WorldDecoratorCollection(
                 new GroundCircleDecorator(Hud)
@@ -685,12 +730,16 @@ namespace Turbo.Plugins.s7o
                 return;
 
             _paintedRatKingRatBallKeys.Clear();
+            _paintedMeteorEffects.Clear();
+            // Render-time clock affects only decorative ripples; hazard timers use native game ticks.
+            _hazardPulseSeconds = Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency;
 
             var actorList = _paintWorldActorBuffer;
             bool isPerendiRiftGuardianPresent = HasPaintBossContext(PaintBossContext.Perendi);
             bool isBloodmawRiftGuardianPresent = HasPaintBossContext(PaintBossContext.Bloodmaw);
             bool isEmberRiftGuardianPresent = HasPaintBossContext(PaintBossContext.Ember);
             bool isSandShaperRiftGuardianPresent = HasPaintBossContext(PaintBossContext.SandShaper);
+            bool isZoltunKulleBossPresent = HasPaintBossContext(PaintBossContext.ZoltunKulle);
             bool isBlighterRiftGuardianPresent = HasPaintBossContext(PaintBossContext.Blighter);
             bool isRatKingRiftGuardianPresent = HasPaintBossContext(PaintBossContext.RatKing);
             bool isAdriaOrTethrysBossPresent = HasPaintBossContext(PaintBossContext.AdriaOrTethrys);
@@ -737,8 +786,8 @@ namespace Turbo.Plugins.s7o
 
                     case ActorSnoEnum._x1_lr_boss_malletdemon_fallingrocks:
                     case ActorSnoEnum._a2dun_zolt_random_fallingrocks_c:
-                        if (ShowBossFallingRocks && (isPerendiRiftGuardianPresent || isSandShaperRiftGuardianPresent))
-                            PaintBossHazard(layer, actor, BossFallingRocksDecorator);
+                        if (ShowBossFallingRocks && (isPerendiRiftGuardianPresent || isSandShaperRiftGuardianPresent || isZoltunKulleBossPresent))
+                            PaintFallingRocks(layer, actor);
                         break;
 
                     case ActorSnoEnum._x1_westmarchbrute_leap_telegraph:
@@ -752,6 +801,7 @@ namespace Turbo.Plugins.s7o
                     case ActorSnoEnum._morluspellcast_meteor_castsphere:
                     case ActorSnoEnum._morluspellcaster_meteor_model:
                     case ActorSnoEnum._morluspellcaster_meteor_impact:
+                    case ActorSnoEnum._morluspellcaster_meteor_afterburn:
                         if (ShowBossMeteors && isEmberRiftGuardianPresent)
                             PaintBossMeteor(actor);
                         break;
@@ -1068,6 +1118,10 @@ namespace Turbo.Plugins.s7o
                     bossContext = PaintBossContext.Ember | PaintBossContext.FireDot;
                     return false;
 
+                case (ActorSnoEnum)80509: // Combat Kulle, confirmed in the supplied native captures.
+                    bossContext = PaintBossContext.ZoltunKulle;
+                    return false;
+
                 case ActorSnoEnum._x1_lr_boss_zoltunkulle:
                 case ActorSnoEnum._x1_lr_boss_sandmonster:
                 case ActorSnoEnum._p73_lr_boss_sandmonster:
@@ -1126,6 +1180,7 @@ namespace Turbo.Plugins.s7o
                 case ActorSnoEnum._morluspellcast_meteor_castsphere:
                 case ActorSnoEnum._morluspellcaster_meteor_model:
                 case ActorSnoEnum._morluspellcaster_meteor_impact:
+                case ActorSnoEnum._morluspellcaster_meteor_afterburn:
                 case ActorSnoEnum._belial_groundbomb_event_pending:
                 case ActorSnoEnum._zoltunkulle_energytwister:
                 case ActorSnoEnum._zoltunkulle_fieryboulder_model:
@@ -1258,10 +1313,9 @@ namespace Turbo.Plugins.s7o
                 float x1 = radius * (float)Math.Cos(a1);
                 float y1 = radius * (float)Math.Sin(a1);
 
-                var p0 = center.Offset(x0, y0, 0);
-                var p1 = center.Offset(x1, y1, 0);
-
-                brush.DrawLineWorld(p0, p1);
+                // Same world endpoints through the FreeHUD scalar overload; no temporary coordinates.
+                brush.DrawLineWorld(center.X + x0, center.Y + y0, center.Z,
+                    center.X + x1, center.Y + y1, center.Z);
             }
         }
 
@@ -1278,6 +1332,133 @@ namespace Turbo.Plugins.s7o
             if (decorator == null)
                 return;
             decorator.Paint(layer, actor, actor.FloorCoordinate, string.Empty);
+        }
+
+        private WorldDecoratorCollection CreateBossWarningTimer(int warningTicks)
+        {
+            return new WorldDecoratorCollection(
+                new GroundTimerDecorator(Hud)
+                {
+                    CountDownFrom = warningTicks / 60.0f,
+                    BackgroundBrushEmpty = Hud.Render.CreateBrush(128, 0, 0, 0, 0),
+                    BackgroundBrushFill = Hud.Render.CreateBrush(190, 255, 90, 40, 0),
+                    Radius = 30
+                },
+                new GroundLabelDecorator(Hud)
+                {
+                    CountDownFrom = warningTicks / 60.0f,
+                    TextFont = Hud.Render.CreateFont("tahoma", 9, 255, 255, 220, 180,
+                        true, false, 255, 0, 0, 0, true),
+                    ForceOnScreen = false
+                }
+            );
+        }
+
+        private void PaintPostImpactTimer(WorldDecoratorCollection timer, IActor actor, IWorldCoordinate coord, int offsetTicks)
+        {
+            _phaseTimerActor.Source = actor;
+            _phaseTimerActor.OffsetTicks = offsetTicks;
+            try { timer.Paint(WorldLayer.Ground, _phaseTimerActor, coord, null); }
+            finally { _phaseTimerActor.Source = null; }
+        }
+
+        private sealed class PhaseTimerActor : IActor
+        {
+            public IActor Source;
+            public int OffsetTicks;
+            public IWatch LastSpeak { get { return Source.LastSpeak; } set { Source.LastSpeak = value; } }
+            public ISnoActor SnoActor { get { return Source.SnoActor; } }
+            public GizmoType GizmoType { get { return Source.GizmoType; } }
+            public uint AcdId { get { return Source.AcdId; } }
+            public uint AnnId { get { return Source.AnnId; } }
+            public IWorldCoordinate FloorCoordinate { get { return Source.FloorCoordinate; } }
+            public IWorldCoordinate CollisionCoordinate { get { return Source.CollisionCoordinate; } }
+            public float RadiusScaled { get { return Source.RadiusScaled; } }
+            public float RadiusBottom { get { return Source.RadiusBottom; } }
+            public uint WorldId { get { return Source.WorldId; } }
+            public uint WorldSno { get { return Source.WorldSno; } }
+            public ISnoWorld SnoWorld { get { return Source.SnoWorld; } }
+            public IScene Scene { get { return Source.Scene; } }
+            public IScreenCoordinate ScreenCoordinate { get { return Source.ScreenCoordinate; } }
+            public bool IsOnScreen { get { return Source.IsOnScreen; } }
+            public double CentralXyDistanceToMe { get { return Source.CentralXyDistanceToMe; } }
+            public double NormalizedXyDistanceToMe { get { return Source.NormalizedXyDistanceToMe; } }
+            public double ZDistanceToMeAbsolute { get { return Source.ZDistanceToMeAbsolute; } }
+            public bool IsSelected { get { return Source.IsSelected; } }
+            public float Hitpoints { get { return Source.Hitpoints; } }
+            public uint SummonerId { get { return Source.SummonerId; } }
+            public uint SummonerAcdDynamicId { get { return Source.SummonerAcdDynamicId; } }
+            public bool Untargetable { get { return Source.Untargetable; } }
+            public bool IsClickable { get { return Source.IsClickable; } }
+            public bool IsDisabled { get { return Source.IsDisabled; } }
+            public bool IsOperated { get { return Source.IsOperated; } }
+            public bool DisplayOnOverlay { get { return Source.DisplayOnOverlay; } }
+            public uint Amount { get { return Source.Amount; } }
+            public int CreatedAtInGameTick { get { return Source.CreatedAtInGameTick + OffsetTicks; } }
+            public double GetAttributeValue(IAttribute a, uint m, double d = -1.0f) { return Source.GetAttributeValue(a, m, d); }
+            public int GetAttributeValueAsInt(IAttribute a, uint m, int d = int.MaxValue) { return Source.GetAttributeValueAsInt(a, m, d); }
+            public uint GetAttributeValueAsUInt(IAttribute a, uint m, uint d = uint.MaxValue) { return Source.GetAttributeValueAsUInt(a, m, d); }
+        }
+
+        private struct MeteorVisualKey : IEquatable<MeteorVisualKey>
+        {
+            private readonly uint _world;
+            private readonly int _created;
+            private readonly float _x, _y, _z;
+            public MeteorVisualKey(IActor actor, IWorldCoordinate coord)
+            { _world = actor.WorldId; _created = actor.CreatedAtInGameTick; _x = coord.X; _y = coord.Y; _z = coord.Z; }
+            public bool Equals(MeteorVisualKey other)
+            { return _world == other._world && _created == other._created && _x == other._x && _y == other._y && _z == other._z; }
+            public override bool Equals(object obj) { return obj is MeteorVisualKey && Equals((MeteorVisualKey)obj); }
+            public override int GetHashCode()
+            { unchecked { int h = (int)_world; h = h * 397 ^ _created; h = h * 397 ^ _x.GetHashCode(); h = h * 397 ^ _y.GetHashCode(); return h * 397 ^ _z.GetHashCode(); } }
+        }
+
+        private void PaintFallingRocks(WorldLayer layer, IActor actor)
+        {
+            if (actor == null || actor.IsDisabled || actor.WorldId != Hud.Game.Me.WorldId)
+                return;
+
+            IWorldCoordinate coord = GetBossHazardCoordinate(actor);
+            if (coord == null)
+                return;
+
+            // Anchor to creation, so entering view late never restarts the warning.
+            int ageTicks = unchecked(Hud.Game.CurrentGameTick - actor.CreatedAtInGameTick);
+            if (ageTicks < 0 || ageTicks >= FallingRocksEffectTicks)
+                return;
+
+            // Gate the outer circle as well as the countdown/ripples at the shared cutoff.
+            PaintBossHazard(layer, actor, BossFallingRocksDecorator);
+            if (ageTicks < FallingRocksWarningTicks)
+            {
+                if (_fallingRocksTimerDecorator != null)
+                    _fallingRocksTimerDecorator.Paint(layer, actor, coord, null);
+                return;
+            }
+
+            PaintPostImpactTimer(_fallingRocksPostTimerDecorator, actor, coord, FallingRocksWarningTicks);
+            PaintHazardInnerRipples(coord, BossFallingRocksFallbackRadius,
+                ageTicks - FallingRocksWarningTicks);
+        }
+
+        private void PaintHazardInnerRipples(IWorldCoordinate coord, float radius, int pulseTicks, bool reachBorder = false)
+        {
+            if (_hazardPulseBrush == null || coord == null || radius <= 0.0f || pulseTicks < 0)
+                return;
+
+            // Two staggered inner ripples, repeating every second with a smooth render-time phase.
+            // Shared Load-created brush; no per-frame resource allocation.
+            for (int i = 0; i < 2; i++)
+            {
+                float phase = (float)((_hazardPulseSeconds + i * 0.5d) % 1.0d);
+                float fraction = 0.15f + 0.78f * phase;
+                // Preserve Ember's previous ~20-yard pulse extent after tightening its border to 20.
+                // Existing falling-rock callers keep their original pulse shape and size.
+                if (reachBorder) fraction /= 0.93f;
+                float innerRadius = radius * fraction;
+                _hazardPulseBrush.DrawWorldEllipse(innerRadius, 48, coord);
+            }
         }
 
         private void PaintBossLeapTelegraph(IActor actor)
@@ -1416,28 +1597,45 @@ namespace Turbo.Plugins.s7o
 
         private void PaintBossMeteor(IActor actor)
         {
-            if (actor == null)
+            if (actor == null || actor.IsDisabled || actor.WorldId != Hud.Game.Me.WorldId)
                 return;
 
             IWorldCoordinate coord = GetBossHazardCoordinate(actor);
             if (coord == null)
                 return;
 
-            float radius = Math.Max(
-                BossMeteorFallbackRadius,
-                GetEffectiveBossHazardRadius(actor, BossMeteorFallbackRadius));
+            float radius = Math.Max(0.0f, BossMeteorFallbackRadius);
             if (radius <= 0.0f)
                 return;
 
-            int dashCount = Math.Max(12, BossMeteorRotatingDashCount);
-            float dashFill = Math.Max(0.10f, Math.Min(0.90f, BossMeteorRotatingDashFill));
-            float secondsPerTurn = Math.Max(1.0f, BossMeteorRotationSecondsPerTurn);
+            int ageTicks = unchecked(Hud.Game.CurrentGameTick - actor.CreatedAtInGameTick);
+            if (ageTicks < 0) return;
+            bool postImpact = actor.SnoActor.Sno == ActorSnoEnum._morluspellcaster_meteor_impact
+                || actor.SnoActor.Sno == ActorSnoEnum._morluspellcaster_meteor_afterburn;
+            if (postImpact)
+            {
+                if (ageTicks >= EmberPostImpactTicks) return;
+                // Only merge an identical native phase at the identical world position/creation tick.
+                if (!_paintedMeteorEffects.Add(new MeteorVisualKey(actor, coord))) return;
+            }
 
-            double tick = Hud.Game != null ? Hud.Game.CurrentGameTick : 0.0d;
-            double phase = (tick / (secondsPerTurn * 60.0d)) * Math.PI * 2.0d;
+            // Stock GroundCircleDecorator uses this native ellipse path with automatic sections.
+            // Brushes are created once in Load; no manual dash segments or offset coordinates here.
+            if (BossMeteorBackBrush != null) BossMeteorBackBrush.DrawWorldEllipse(radius, -1, coord);
+            if (BossMeteorFrontBrush != null) BossMeteorFrontBrush.DrawWorldEllipse(radius, -1, coord);
 
-            DrawRotatingDashedCircle(coord, radius, dashCount, dashFill, phase, BossMeteorBackBrush);
-            DrawRotatingDashedCircle(coord, radius, dashCount, dashFill, phase, BossMeteorFrontBrush);
+            if (actor.SnoActor.Sno == ActorSnoEnum._morluspellcaster_meteor_pending)
+            {
+                if (ageTicks < EmberMeteorWarningTicks && _emberMeteorTimerDecorator != null)
+                    _emberMeteorTimerDecorator.Paint(WorldLayer.Ground, actor, coord, null);
+            }
+            else if (actor.SnoActor.Sno == ActorSnoEnum._morluspellcaster_meteor_impact
+                || actor.SnoActor.Sno == ActorSnoEnum._morluspellcaster_meteor_afterburn)
+            {
+                // Native impact creation anchors the measured two-second post-impact display.
+                _emberPostTimerDecorator.Paint(WorldLayer.Ground, actor, coord, null);
+                PaintHazardInnerRipples(coord, radius, ageTicks, true);
+            }
         }
 
         private void PaintEchoingNightmareMeteor(IActor actor)
@@ -1458,6 +1656,16 @@ namespace Turbo.Plugins.s7o
 
             if (BossBlighterCreepMobArmFrontBrush != null)
                 BossBlighterCreepMobArmFrontBrush.DrawWorldEllipse(radius, -1, coord);
+
+            // Timer belongs only to the pending phase. At zero, keep the existing
+            // danger circle while the actor remains; no expired safe-looking timer.
+            int ageTicks = unchecked(Hud.Game.CurrentGameTick - actor.CreatedAtInGameTick);
+            if (actor.SnoActor != null
+                && actor.SnoActor.Sno == ActorSnoEnum._belial_groundbomb_event_pending
+                && !actor.IsDisabled && actor.WorldId == Hud.Game.Me.WorldId
+                && ageTicks >= 0 && ageTicks < EchoingNightmareMeteorCountdownSeconds * 60.0f
+                && EchoingNightmareMeteorTimerDecorator != null)
+                EchoingNightmareMeteorTimerDecorator.Paint(WorldLayer.Ground, actor, coord, null);
         }
 
         private void PaintBossButcherFire(IActor actor)
