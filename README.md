@@ -52,11 +52,13 @@ Use the HUD Menu to toggle plugins, change visual options, manage TTS alerts, se
 | **s7o_Localization**           | Shared localization helper for the HUD Menu and supported plugin overlays, with editable language files and persistent personal translation overrides.                 |
 | **s7o_MapCursor**              | Customizable minimap mouse cursor with town visibility, multi-monitor positioning, and HUD Menu controls for color, size, and line thickness.                          |
 | **s7o_MapViewer**             | Native map geometry and collision/path queries for compatible plugins. Grid/debug controls are in F8 > Visual; developer examples are in `MapViewerData/README.md`. |
+| **s7o_Minimap**               | Expanded map overlay with explored/unexplored contrast, zoom, and arrow-key positioning. Configure its hotkey, color, and opacity in F8 > Visual. |
 | **s7o_MysticEnchant**          | Mystic reroll helper. Select the stat you want to roll, then press the hotkey (**F3** by default).                                                                      |
 | **s7o_Oculus_Triune**          | Oculus/Triune circle visuals.                                                                                                                                           |
 | **s7o_Paragon_Builds**         | Saves and restores Paragon layouts per hero and Armory loadout.                                                 |
 | **s7o_ParagonHelper**          | Paragon point helper for faster profile-based point allocation.                                                                                                         |
 | **s7o_PartyInspector**         | Party portrait info, skill/cooldown-style visuals, gem info, and expanded party inspection. Default expanded inspector hotkey: **F12**.                                 |
+| **s7o_PauseRecovery**         | Automatically repairs a false paused state in multiplayer that can stop FreeHUD automation, with a recovery notification. |
 | **s7o_Pestilence_RGK**         | Necromancer Pestilence/RGK helper with adaptive elite/RG targeting, cached hover recovery, configurable targeting/teleport hotkeys, and optional Zei's 50-yard circle. |
 | **s7o_Pylon_Alerts_TTS**       | TTS alerts for pylons/shrines and related GR timing.                                                                                                                    |
 | **s7o_RiftFishing**            | Helps fish GR maps. Bad maps can be skipped/restarted, good maps can be announced and paused based on your map settings.                                                |
