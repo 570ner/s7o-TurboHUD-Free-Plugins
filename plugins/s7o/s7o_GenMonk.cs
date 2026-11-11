@@ -25,6 +25,7 @@ namespace Turbo.Plugins.s7o
         public bool ExperimentalLowHealthRecovery = false;
         public bool AvoidSkeletonMageFire = true; // Internal test; no HUD menu changes.
         public bool AutoDash = true;
+        public bool CycloneDashCarry = true; // Pre-pull before an eligible Oculus Dash.
         public bool SelfDash = true;
         public bool ShowCombinationCount = true;
         public bool RequireRaimentSet = true;
@@ -75,7 +76,7 @@ namespace Turbo.Plugins.s7o
         private uint _lastAssistMaintenanceSno;
         private readonly List<IPlayerSkill> _generators = new List<IPlayerSkill>(4);
         // Buff upkeep is not navigation: stationary renewal never resets wall recovery.
-        private bool _selfDashUpkeep, _dashUpkeepNeedsAttack;
+        private bool _selfDashUpkeep, _dashUpkeepNeedsAttack, _selfDashFrozenPulse;
         private int _dashConfirmedGameTick = int.MinValue, _dashUpkeepAttemptGameTick = int.MinValue;
         private uint _dashConfirmedWorld;
         private string _dashDeadlineReason = "none", _mapLandingReason = "none";
@@ -535,11 +536,10 @@ namespace Turbo.Plugins.s7o
         private readonly List<IActor> _assistPositionArcane = new List<IActor>(32);
         private readonly List<IActor> _assistDoors = new List<IActor>(16);
         private struct AssistDoorFailure
-        { public int Count; public float PlayerX, PlayerY, DoorX, DoorY; public uint World, DetourEliteAcd; public bool EarlyAttempted; }
+        { public int Count; public float PlayerX, PlayerY, PlayerZ, DoorX, DoorY; public uint World, Ann, DetourEliteAcd; public bool EarlyAttempted, PlanOnly, PathRecovery, RangedAttempt, CloseRecoveryUsed, TravelRecoveryUsed; }
         private readonly Dictionary<uint, AssistDoorFailure> _assistDoorFailures = new Dictionary<uint, AssistDoorFailure>();
         private IActor _assistDoorTarget;
-        private bool _assistRecoveryCombatOnly, _assistDoorCombatPaused;
-        private int _assistDoorDashFailures;
+        private bool _assistRecoveryCombatOnly;
         private int _assistDoorStage, _assistDoorSinceTick, _assistDoorAimGameTick;
         private bool _assistDoorDashSpent, _assistDoorEarlyAttempt;
         // Door travel owns a connected near-side route until interaction or recovery.
@@ -547,8 +547,7 @@ namespace Turbo.Plugins.s7o
         private string _assistDoorPathState = "none", _assistDoorPathReason = "none";
         private IWorldCoordinate _assistDoorApproachPoint, _assistDoorWaypoint;
         private double _assistDoorRemaining = double.NaN, _assistDoorBestRemaining = double.NaN;
-        private int _assistDoorWalkStage, _assistDoorWalkAimTick;
-        private IWorldCoordinate _assistDoorWalkPoint;
+        private int _assistDoorWalkStage;
         private int _assistRouteWalkStage, _assistRouteWalkAimTick;
         private IWorldCoordinate _assistRouteWalkPoint;
         private string _assistRouteWalkReason = "none";
@@ -556,10 +555,7 @@ namespace Turbo.Plugins.s7o
         private IWorldCoordinate _assistRouteWalkFailedPoint, _assistRouteWalkFailedOrigin;
         private uint _assistRouteWalkFailedWorld;
         private long _assistDoorRouteEpoch;
-        private string _assistDoorWalkReason = "none";
         private int _assistDoorProgressGameTick = int.MinValue;
-        private float _assistDoorNativeOriginX, _assistDoorNativeOriginY;
-        private double _assistDoorNativeMaxProgress;
         private IWorldCoordinate _assistDoorDashWaypoint;
         private double _assistDoorDashRemaining = double.NaN;
         private bool _assistDoorCombatDetour, _assistDoorReturnPending;
@@ -568,8 +564,6 @@ namespace Turbo.Plugins.s7o
         private uint _assistDoorReturnWorld;
         private int _assistDoorReturnUntil;
         // Door discovery is not click permission: exact native hover authorizes interaction.
-        private int _assistDoorRouteGameTick = int.MinValue;
-        private uint _assistDoorRouteTarget;
         private int _assistDoorAimX, _assistDoorAimY;
         private float _assistDoorBeforeHp;
 
@@ -615,7 +609,8 @@ namespace Turbo.Plugins.s7o
         private IWorldCoordinate _assistDashLanding;
         private bool _assistDashEscapeOnly;
         private uint _assistDashLandingWorldId;
-        private uint _assistHazardReturnAcd;
+        private uint _assistHazardReturnAcd, _assistHazardReturnAnn;
+        private bool _assistHazardReturnElite;
         private uint _assistHazardReturnWorld;
         private int _assistHazardReturnTick;
         private IWorldCoordinate _assistHazardReturnPoint;
@@ -623,8 +618,8 @@ namespace Turbo.Plugins.s7o
         private void RememberAssistHazardReturn(IMonster target)
         {
             var me = Hud.Game.Me.FloorCoordinate;
-            if (_assistHazardReturnAcd != 0 && _assistHazardReturnWorld == Hud.Game.Me.WorldId
-                && unchecked(Environment.TickCount - _assistHazardReturnTick) < 30000)
+            if(_assistHazardReturnAcd!=0)ResolveAssistHazardReturn(Environment.TickCount);
+            if (_assistHazardReturnAcd != 0 && _assistHazardReturnWorld == Hud.Game.Me.WorldId)
             {
                 // A later Molten escape must not retain an earlier reactive-only recovery policy.
                 if(!_assistHazardReturnMolten && (IsAssistMoltenOnlyEscape() || AssistFrozenEscapeDue() || AssistMalletEscapeDue() || AssistBossImpactEscapeDue()))
@@ -651,7 +646,7 @@ namespace Turbo.Plugins.s7o
                     && candidate.FloorCoordinate.XYDistanceTo(AssistTargetGround(target)) <= 20) nearby++;
             if (!IsAssistPositionElite(target) && nearby < 3) return;
             _assistHazardReturnMolten = (IsAssistMoltenOnlyEscape() || AssistFrozenEscapeDue() || AssistMalletEscapeDue() || AssistBossImpactEscapeDue());
-            _assistHazardReturnAcd = target.AcdId;
+            _assistHazardReturnAcd = target.AcdId;_assistHazardReturnAnn=target.AnnId;_assistHazardReturnElite=IsAssistPositionElite(target);
             _assistHazardReturnWorld = Hud.Game.Me.WorldId;
             _assistHazardReturnTick = Environment.TickCount;
             _assistHazardReturnPoint = AssistTargetGround(target).Offset(0,0,0);
@@ -659,33 +654,43 @@ namespace Turbo.Plugins.s7o
         }
         private IMonster ResolveAssistHazardReturn(int now)
         {
-            if (_assistHazardReturnAcd == 0) return null;
-            if (_assistHazardReturnWorld != Hud.Game.Me.WorldId || unchecked(now-_assistHazardReturnTick) >= 30000)
-            { _assistHazardReturnAcd = 0; _assistHazardReturnPoint = null; return null; }
-            var original = FindAssistCandidate(_assistHazardReturnAcd);
-            if (original != null && AssistTargetTier(original) >= 0)
-            { _assistHazardReturnPoint=original.FloorCoordinate.Offset(0,0,0);return original; }
-            if (_assistHazardReturnPoint == null) return null;
-            IMonster replacement = null; int nearby = 0;
-            foreach (var candidate in Hud.Game.AliveMonsters)
-                if (IsAssistMonsterValid(candidate) && AssistTargetTier(candidate) >= 0
-                    && Math.Abs(candidate.FloorCoordinate.Z-_assistHazardReturnPoint.Z) <= 8
-                    && candidate.FloorCoordinate.XYDistanceTo(_assistHazardReturnPoint) <= 20)
-                {
-                    nearby++;
-                    if (replacement == null || AssistTargetTier(candidate) > AssistTargetTier(replacement)
-                        || (AssistTargetTier(candidate) == AssistTargetTier(replacement)
-                            && candidate.NormalizedXyDistanceToMe < replacement.NormalizedXyDistanceToMe)) replacement = candidate;
-                }
-            if (replacement != null && (IsAssistPositionElite(replacement) || nearby >= 3))
-            { _assistHazardReturnAcd = replacement.AcdId; return replacement; }
-            // No stale-coordinate navigation. Retain memory briefly through unloaded actors.
-            bool dead = false;
-            foreach (var candidate in Hud.Game.Monsters)
-                if (candidate.AcdId == _assistHazardReturnAcd && !candidate.IsAlive) { dead = true; break; }
-            if (dead) { _assistHazardReturnAcd = 0; _assistHazardReturnPoint = null; }
+            if(_assistHazardReturnAcd==0)return null;
+            if(_assistHazardReturnWorld!=Hud.Game.Me.WorldId)
+            { ClearAssistHazardReturn("world-changed");return null; }
+            IMonster observed=null;
+            foreach(var body in Hud.Game.AliveMonsters)
+                if(body!=null && body.WorldId==_assistHazardReturnWorld && body.AcdId==_assistHazardReturnAcd)
+                { observed=body;break; }
+            if(observed==null && Hud.Game.Monsters!=null)foreach(var body in Hud.Game.Monsters)
+                if(body!=null && body.WorldId==_assistHazardReturnWorld && body.AcdId==_assistHazardReturnAcd)
+                { observed=body;break; }
+            if(observed!=null)
+            {
+                if((_assistHazardReturnAnn!=0u && observed.AnnId!=_assistHazardReturnAnn) || !observed.IsAlive)
+                { ClearAssistHazardReturn(!observed.IsAlive?"confirmed-dead":"native-identity-replaced");return null; }
+                _assistHazardReturnAnn=observed.AnnId;_assistHazardReturnElite=IsAssistPositionElite(observed);
+                if(IsAssistPositionWorldPoint(observed.FloorCoordinate))
+                    _assistHazardReturnPoint=observed.FloorCoordinate.Offset(0,0,0);
+                _assistHazardReturnTick=now; // Live observation renews memory, not a guessed location.
+                if(IsAssistMonsterValid(observed) && AssistTargetTier(observed)>=0)return observed;
+                TraceAssistHazardReturnDecision("original-temporarily-unavailable",observed);
+                return null; // Immunity, range, handoff or visibility is not death or a minion replacement.
+            }
+            if(unchecked(now-_assistHazardReturnTick)>=30000)
+            { ClearAssistHazardReturn("unobserved-memory-expired");return null; }
+            // Missing snapshots keep the original identity. Native loaded pursuit
+            // and bounded last-seen navigation remain separate from attack permission.
+            TraceAssistHazardReturnDecision("original-not-collected",null);
             return null;
         }
+
+        private void ClearAssistHazardReturn(string reason)
+        {
+            TraceAssistHazardReturnDecision(reason,null);
+            _assistHazardReturnAcd=_assistHazardReturnAnn=0u;_assistHazardReturnElite=false;
+            _assistHazardReturnPoint=null;_assistHazardReturnMolten=false;
+        }
+
 
 
         private string _assistPositionReason = "none", _assistPositionEscapeReason = "none";
@@ -763,7 +768,11 @@ namespace Turbo.Plugins.s7o
         {
             _assistCaptureSuppressed = value;
             _assistWaitForRelease = true;
-            if (value) ReleaseAssistAttack();
+            if (value)
+            {
+                if (_genMantraAssistPulse) ReleaseHealingMantraPulse();
+                ReleaseAssistAttack();
+            }
         }
 
         private void SaveOptions()
@@ -823,6 +832,7 @@ namespace Turbo.Plugins.s7o
             // Release only our inputs and complete our restore before handing it over.
             if (!Enabled || Hud == null || Hud.Game == null) return;
             if (_autoLoot == null) _autoLoot = Hud.GetPlugin<s7o_AutoLoot>();
+            ReleaseHealingMantraPulse();
             CancelAssistDoor();
             ReleaseAssistAttack();
             CancelTarget();
@@ -872,10 +882,13 @@ namespace Turbo.Plugins.s7o
         private void AfterCollectCore()
         {
             UpdateMonkTargetRings();
+            ObserveAssistDoorConfirmations();
+            FlushAssistDoorTrace();
             int now = Environment.TickCount;
             UpdateHealingMantraOwnership(now);
             if (Hud.Window.IsForeground) s7o_InputReleaseArbiter.RetryPending(now);
             if (!Enabled || !CanRun()) { PauseJuggerFocus(); Stop(); return; }
+            TraceAssistActivation("request");
             RefreshClickUiRects();
             RefreshPylonGuard();
             if (_autoLootYieldPending)
@@ -908,9 +921,28 @@ namespace Turbo.Plugins.s7o
                 Stop();
                 return;
             }
+            TraceAssistActivation("snapshot-ready");
             ObserveAssistWotHf();
+            if(Hud.Game.Me.AnimationState==AcdAnimationState.Attacking && _assistDoorTarget==null)
+                _assistDoorLastCombatGameTick=Hud.Game.CurrentGameTick;
+            if(_assistActive && _assistWotHfLastGameTick==Hud.Game.CurrentGameTick)TraceAssistActivation("native-primary-attempt");
             ObserveAssistSpiritContact();
             FinishPulse(now);
+            if (_genMantraPulseKey != ActionKey.Unknown && Due(now, _genMantraReleaseAt))
+                ReleaseHealingMantraPulse();
+            bool mantraAssistHeld = !_assistEnding && AssistRequested();
+            if (!mantraAssistHeld && _genMantraAssistPulse) ReleaseHealingMantraPulse();
+
+            RunCombatInputs(now, mantraAssistHeld);
+
+            // Service Mantra even when the combat path returns for a Dash or avoidance.
+            // Movement submits its input first if both actions are due this update.
+            if (mantraAssistHeld && !_assistEnding && AssistRequested())
+                TryAssistHealingMantra(now, true);
+        }
+
+        private void RunCombatInputs(int now, bool mantraAssistHeld)
+        {
             // Observe completed effects before target changes or a secondary animation
             // can discard the pending verification. This never creates a new input.
             if (_pulse == ActionKey.Unknown && TargetEffectsConfirmed()) CancelTarget();
@@ -926,6 +958,7 @@ namespace Turbo.Plugins.s7o
                     return;
                 }
             }
+            bool dashResolved = false;
             if (_selfDashKey != ActionKey.Unknown)
             {
                 bool assistDash = (_selfDashApproach && _assistActive) || AssistRequested();
@@ -933,6 +966,8 @@ namespace Turbo.Plugins.s7o
                 if (_assistEnding && _selfDashKey == ActionKey.Unknown)
                 { EndAssist(); return; }
                 if (_selfDashKey != ActionKey.Unknown || !assistDash) return;
+                dashResolved = true;
+                ObserveCycloneArcaneLanding(now);
                 // The assist transaction finished: acquire/attack in this same update.
                 // Manual Dash retains its separate confirmation/restore behavior.
             }
@@ -941,7 +976,7 @@ namespace Turbo.Plugins.s7o
             if (!_hasCombinationStrike && _targetKey != ActionKey.Unknown && !_targetForesight)
                 CancelTarget();
             _generators.Clear();
-            IPlayerSkill dash = null;
+            IPlayerSkill dash = null, cyclone = null;
             try
             {
                 foreach (var skill in Hud.Game.Me.Powers.UsedSkills)
@@ -949,9 +984,21 @@ namespace Turbo.Plugins.s7o
                     if (skill == null || skill.SnoPower == null) continue;
                     if (GeneratorIcon(skill) != 0) _generators.Add(skill);
                     if (skill.SnoPower.Sno == Hud.Sno.SnoPowers.Monk_DashingStrike.Sno) dash = skill;
+                    else if (_assistActive && skill.SnoPower.Sno == Hud.Sno.SnoPowers.Monk_CycloneStrike.Sno) cyclone = skill;
                 }
             }
             catch { Stop(); return; }
+
+            var cycloneAutoSkill = UpdateCycloneOwnership(cyclone, now);
+            _assistCycloneSkill=cycloneAutoSkill!=null?cyclone:null;
+            if (_assistCycloneSkill==null)
+            {
+                _oculusCarry=default(OculusCarry);
+                if (_cycloneOculusCircle!=0) ClearCycloneOculus();
+                if (_cycloneSetup.Kind==CycloneSetupKind.ArcaneExit && _cycloneSetup.CastAt==int.MinValue)
+                    RejectCycloneArcane();
+                else if (_cycloneSetup.Kind!=CycloneSetupKind.None) _cycloneSetup=default(CycloneSetup);
+            }
 
             // Escape is independent of target acquisition and outranks corpse/UI hover,
             // door handling, rune pulses and a no-target idle state. Key release still stops it.
@@ -987,7 +1034,19 @@ namespace Turbo.Plugins.s7o
                     || (AutoDash && CanApproachDash(dash) && DashDue(dash, now))))
                 CancelTarget();
 
-            if(TryAssistHealingMantra(now))return;
+            if(!mantraAssistHeld && TryAssistHealingMantra(now, false))return;
+            if (_assistCycloneSkill!=null)
+            {
+                try
+                {
+                    if (TryCycloneArcaneFollowup(now)) return;
+                    bool carryLanding=dashResolved && _oculusCarry.Phase==OculusCarryPhase.Dashing
+                        && _oculusCarry.DashSerial==_selfDashSerial;
+                    if (AdvanceOculusCarry(dash,now,dashResolved)) return;
+                    if (dashResolved && !carryLanding && TryCycloneLandingPull(now)) return;
+                }
+                catch { /* An optional pull must yield to normal combat. */ }
+            }
             try { if (UpdateMeleeAssist(dash, now)) return; }
             catch { Stop(); return; }
 
@@ -1076,7 +1135,9 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
-            SelectMaintenanceTarget(held, now);
+            if (SelectMaintenanceTarget(held, now) || cycloneAutoSkill == null) return;
+            try { TryAssistCyclone(cyclone, cycloneAutoSkill, now); }
+            catch { /* Cyclone is optional. Preserve the held primary if its data is unavailable. */ }
         }
 
         private bool SelectMaintenanceTarget(IPlayerSkill held, int now)
@@ -1636,8 +1697,8 @@ namespace Turbo.Plugins.s7o
 
             s7o_GenMonkInput.Up(Owner, _pulse);
             bool maintenanceEnded = _pulseIsMaintenance, retargetEnded = _pulseIsRetarget;
-            bool mantraEnded=_genMantraPulse;
-            _genMantraPulse=false;
+            bool cycloneEnded=_cyclonePulse;
+            _cyclonePulse=false;
             _pulse = ActionKey.Unknown;
             _pulseIsMaintenance = _pulseIsRetarget = false;
             if (_assistActive && (maintenanceEnded || retargetEnded))
@@ -1654,7 +1715,7 @@ namespace Turbo.Plugins.s7o
                 ? ForesightRetryGapMs : GeneratorRetryGapMs));
             // A self-dash must not restore its aim just because the keypress ended:
             // Diablo can still be consuming the queued cast. AdvanceSelfDash observes it.
-            if (_selfDashKey == ActionKey.Unknown && !retargetEnded && !mantraEnded) RestoreCursor();
+            if (_selfDashKey == ActionKey.Unknown && !retargetEnded && !cycloneEnded) RestoreCursor();
         }
 
         public int ActiveCombinationCount()
@@ -1911,7 +1972,7 @@ namespace Turbo.Plugins.s7o
 
         private void CancelTarget(bool preserveSubmittedDash = false)
         {
-            _genMantraPulse=false;
+            _cyclonePulse=false;
             if (_assistActive && TargetEffectsConfirmed()) _assistMaintenanceAttempts.Remove(_targetSno);
             bool keepDash = preserveSubmittedDash && _selfDashKey != ActionKey.Unknown
                 && _selfDashCastTick != int.MinValue;
@@ -1929,8 +1990,9 @@ namespace Turbo.Plugins.s7o
             {
                 _selfDashKey = ActionKey.Unknown;
                 _selfDashCastTick = int.MinValue;
-                _selfDashUpkeep = false;
+                _selfDashUpkeep = _selfDashFrozenPulse = false;
                 _selfDashCircleUpgrade = false;
+                _selfDashPositionUpgrade = false;
                 _selfDashContactQualified = false;
                 _selfDashBuffBefore = null;
                 _assistDashLanding = null;
@@ -2103,6 +2165,8 @@ namespace Turbo.Plugins.s7o
 
         private void ResetAssistMovementPolicy()
         {
+            _closerContactPoint=_closerContactProbeOrigin=_closerContactProbeTarget=_closerContactProbeGoal=null;
+            _closerContactProbe=_closerContactProbeSpent=_closerContactProbeWindowDone=false;_closerContactAnn=0;
             _assistMovementCasts.Clear(); _assistEnteredDamageCircles.Clear();
             _selfDashContactQualified=false;
             _assistMovementWorld=Hud.Game==null || Hud.Game.Me==null ? 0u : Hud.Game.Me.WorldId;
@@ -2369,12 +2433,18 @@ private uint AssistLandingDamageCircle(IWorldCoordinate point)
                 && landing.XYDistanceTo(_assistDashLanding)<=0.25
                 && ElapsedMs(now,_selfDashAimTick)<=250;
         }
-        private bool AllowAssistMovement(IMonster target, IWorldCoordinate landing, int now, bool escape, bool upkeep, bool circleUpgrade = false)
+        private bool AllowAssistMovement(IMonster target, IWorldCoordinate landing, int now, bool escape, bool upkeep, bool circleUpgrade = false, bool cyclonePull = false, bool frozenPulseContact = false)
         {
             _assistMovementDecision = "allowed";
             if (!_assistActive || landing == null) return true;
             if (_assistMovementWorld != Hud.Game.Me.WorldId) ResetAssistMovementPolicy();
             var me = Hud.Game.Me.FloorCoordinate;
+            if(frozenPulseContact)
+            {
+                if(IsAssistFrozenPulsePointFree(me,true) || !IsAssistFrozenPulseContact(landing,target))return false;
+                _assistMovementDecision="frozen-pulse-contact";
+                return true;
+            }
             bool emergency = AssistMovementEmergency(escape);
             if (emergency) { _assistMovementDecision = "verified-hazard-escape"; return true; }
             if(escape && IsAssistOrlashCorePoint(landing,target))
@@ -2389,10 +2459,29 @@ private uint AssistLandingDamageCircle(IWorldCoordinate point)
             if (upkeep) { _assistMovementDecision = "required-dash-buff"; return true; }
             if(!escape && HasAssistPendingMoltenRecovery() && !IsAssistPendingMoltenPointFree(landing))
             { _assistMovementDecision="molten-pending-warning-reentry";return false; }
+            if(!escape && target==null && IsAssistGuardianApproach(landing))
+            { _assistMovementDecision="guardian-spawn-contact";return true; }
+            if(!escape && IsAssistDoorTripLanding(target,landing))
+            { _assistMovementDecision=_assistDoorTarget!=null?"door-near-side-priority":"door-combat-return";return true; }
             if (!escape && AssistObstacleRecoveryRequired(target))
             { _assistMovementDecision="obstacle-recovery-walk-or-retarget"; return false; }
-            if(!escape && circleUpgrade && target!=null && !IsAssistUsefulCircleTarget(target,landing))
+            if(!escape && circleUpgrade && !cyclonePull && target!=null && !IsAssistUsefulCircleTarget(target,landing))
             { _assistMovementDecision="circle-without-eligible-elite";return false; }
+            if(!escape && IsAssistContactProbeLanding(target,landing,now))
+            { _assistMovementDecision="uncertain-contact-probe";return true; }
+            // Give this one admitted probe its existing primary-contact window before
+            // another optional position can undo it. Fresh proof, pulls and safety release it.
+            if(!escape && !upkeep && SameAssistContactProbe(target) && _closerContactProbeSpent && !_closerContactProbeWindowDone
+                && _closerContactProbeGoal!=null && _closerContactProbeTarget!=null
+                && unchecked(now-_closerContactAt)>=0 && unchecked(now-_closerContactAt)<=750
+                && _rangeTrialEligibleMs<AssistContactProbeMs
+                && me.XYDistanceTo(_closerContactProbeGoal)<=1
+                && target.FloorCoordinate.XYDistanceTo(_closerContactProbeTarget)<=3
+                && AssistBodyGap(landing,target)>=AssistBodyGap(me,target)-0.5
+                && !_assistDamageEscapePending && !AssistUrgentEscapeDue()
+                && CanAttackAssistFrom(me,target) && !MapAssistTargetBlocked(target)
+                && IsAssistPositionHazardFree(me) && IsAssistElectrifiedPointFree(me,target))
+            { _assistMovementDecision="contact-probe-await-primary";return false; }
             // Safety/recovery and required upkeep retain their earlier ownership.
             // A fresh circle ID cannot bypass productive current-engagement commitment.
             if(!escape && HoldAssistCircleCommitment(target,landing))
@@ -2440,15 +2529,16 @@ private uint AssistLandingDamageCircle(IWorldCoordinate point)
             int enteredAt;
             if (circle != 0 && _assistEnteredDamageCircles.TryGetValue(circle, out enteredAt)
                 && unchecked(now - enteredAt) >= AssistOculusTrialRevisitMs && AssistLandingDamageCircle(me)!=circle) _assistEnteredDamageCircles.Remove(circle);
+            bool usefulCircleLanding=landingContact || cyclonePull;
             bool freshCircleEntry = circleUpgrade && circle != 0 && AssistLandingDamageCircle(me) != circle
                 && _assistWotHfLastGameTick > _assistMovementGameTick
                 && !IsAssistFailedCircleContact(circle,target,landing)
-                && landingContact && IsAssistPositionHazardFree(landing)
+                && usefulCircleLanding && IsAssistPositionHazardFree(landing)
                 && (!_assistEnteredDamageCircles.TryGetValue(circle, out enteredAt)
                     || unchecked(now - enteredAt) >= 900);
             bool firstCircle = freshCircleEntry || (circle != 0
                 && !_assistEnteredDamageCircles.ContainsKey(circle)
-                && landingContact && IsAssistPositionHazardFree(landing));
+                && usefulCircleLanding && IsAssistPositionHazardFree(landing));
             // Target switches alone cannot renew circle priority. A safe re-entry
             // after productive attacks may use the existing 900 ms return window.
             if (!freshCircleEntry && circle != 0 && _assistEnteredDamageCircles.TryGetValue(circle,out enteredAt)
@@ -2461,7 +2551,9 @@ private uint AssistLandingDamageCircle(IWorldCoordinate point)
             bool reverse = _assistMovementOrigin != null && since < 2000
                 && me.XYDistanceTo(_assistMovementOrigin) > 6
                 && landing.XYDistanceTo(_assistMovementOrigin) < 3;
-            if (reverse && !targetMoved && !firstCircle
+            bool materialProposal=!escape && HasAssistSelectedPosition(target) && landingContact
+                && AssistOptionalLandingStillUseful(target,landing);
+            if (reverse && !targetMoved && !firstCircle && !materialProposal
                 && (escape || contact || !landingContact))
             { _assistMovementDecision = "reverse-held";  return false; }
             if (_assistMovementWasEscape && reverse && !IsAssistPositionHazardFree(landing))
@@ -2528,7 +2620,7 @@ private uint AssistLandingDamageCircle(IWorldCoordinate point)
                 && TryAssistPackVelocity(target,out followX,out followY)
                 && !CanAttackAssistFrom(me.Offset((float)(-followX*0.5),(float)(-followY*0.5),0),target))
             { _assistMovementDecision="intercept-departing-pack";return true; }
-            if (landingContact && AssistEliteMovementGain(target,landing))
+            if (landingContact && (materialProposal || AssistEliteMovementGain(target,landing)))
             { _assistMovementDecision="material-elite-coverage";return true; }
             if (since < 1200 || _assistMovementCasts.Count >= 2)
             { _assistMovementDecision = "productive-attack-window";  return false; }
@@ -2567,24 +2659,106 @@ private uint AssistLandingDamageCircle(IWorldCoordinate point)
         private uint _closerContactAcd, _closerContactWorld;
         private int _closerContactAt = int.MinValue;
         private IWorldCoordinate _closerContactPoint;
-        private bool TryQueueCloserContact(IMonster target, int now)
+
+        private const int AssistContactProbeMs=250;
+        private uint _closerContactAnn;
+        private bool _closerContactProbe, _closerContactProbeSpent, _closerContactProbeWindowDone;
+        private IWorldCoordinate _closerContactProbeOrigin, _closerContactProbeTarget, _closerContactProbeGoal;
+        private string _rangeContactEvidence="unknown";
+        private bool SameAssistContactProbe(IMonster target)
         {
+            return target!=null && _closerContactProbe && _closerContactAcd==target.AcdId
+                && _closerContactAnn==target.AnnId && _closerContactWorld==target.WorldId;
+        }
+        private bool AssistContactProbeSpent(IMonster target)
+        {
+            return SameAssistContactProbe(target) && _closerContactProbeSpent
+                && _closerContactProbeOrigin!=null && _closerContactProbeTarget!=null
+                && Hud.Game.Me.FloorCoordinate.XYDistanceTo(_closerContactProbeOrigin)<=8.5
+                && target.FloorCoordinate.XYDistanceTo(_closerContactProbeTarget)<=3;
+        }
+        private bool IsAssistContactProbeLanding(IMonster target,IWorldCoordinate point,int now)
+        {
+            return SameAssistContactProbe(target) && point!=null && _closerContactProbeGoal!=null
+                && unchecked(now-_closerContactAt)>=0 && unchecked(now-_closerContactAt)<=500
+                && point.XYDistanceTo(_closerContactProbeGoal)<=0.25
+                && point.XYDistanceTo(Hud.Game.Me.FloorCoordinate)<=8
+                && AssistBodyGap(point,target)<AssistBodyGap(Hud.Game.Me.FloorCoordinate,target)-0.5;
+        }
+        private void SeedAssistContactProbe(IMonster target,int now)
+        {
+            _closerContactAcd=target.AcdId;_closerContactAnn=target.AnnId;_closerContactWorld=target.WorldId;
+            _closerContactAt=now;_closerContactProbe=true;_closerContactProbeSpent=false;_closerContactProbeWindowDone=false;
+            _closerContactProbeOrigin=Hud.Game.Me.FloorCoordinate.Offset(0,0,0);
+            _closerContactProbeTarget=target.FloorCoordinate.Offset(0,0,0);_closerContactProbeGoal=null;
+        }
+        private void ConfirmAssistContactProbe(IMonster target)
+        {
+            if(!SameAssistContactProbe(target))return;
+            _closerContactProbe=false;_closerContactProbeSpent=false;_closerContactProbeWindowDone=false;
+            _closerContactPoint=_closerContactProbeGoal=null;
+            TraceAssistContactProbe("CONTACT_CONFIRMED",target,"fresh-own-evidence",null);
+        }
+
+        private void TraceAssistContactProbe(string kind,IMonster target,string reason,IWorldCoordinate goal) { }
+
+        private string _closerContactQueueReason="not-requested";
+        private string AssistCloserContactRetryReason(IMonster target,int now,bool contactProbe)
+        {
+            if(target==null || _closerContactAcd!=target.AcdId || _closerContactWorld!=target.WorldId
+                || _closerContactAnn!=target.AnnId)return null;
+            int age=unchecked(now-_closerContactAt);
+            if(age>=3000)return null;
+            // No admitted goal and no submitted Dash: retry planning, not movement.
+            // Submitted/queued corrections retain their original anti-repeat budget.
+            bool failedPlan=contactProbe && SameAssistContactProbe(target) && !_closerContactProbeSpent
+                && _closerContactPoint==null && _closerContactProbeGoal==null;
+            if(!failedPlan)return "correction-cooldown";
+            bool moved=(_closerContactProbeOrigin!=null
+                    && Hud.Game.Me.FloorCoordinate.XYDistanceTo(_closerContactProbeOrigin)>1)
+                || (_closerContactProbeTarget!=null
+                    && target.FloorCoordinate.XYDistanceTo(_closerContactProbeTarget)>1);
+            return age<250 && !moved?"planning-retry-wait":null;
+        }
+
+        private bool TryQueueCloserContact(IMonster target, int now, bool contactProbe=false)
+        {
+            _closerContactQueueReason="input-navigation-or-safety";
             if (target == null || _assistNavigationPending || _assistNavigationTravelBlocked
-                || !AutoDash || AssistMoltenEscapeDue() || AssistReactiveEscapeDue()
-                || (_closerContactAcd == target.AcdId && _closerContactWorld == target.WorldId
-                    && unchecked(now-_closerContactAt)<3000)) return false;
+                || !AutoDash || AssistMoltenEscapeDue() || AssistReactiveEscapeDue())return false;
+            if(contactProbe && AssistContactProbeSpent(target))
+            {_closerContactQueueReason="one-probe-spent";return false;}
+            var retryReason=AssistCloserContactRetryReason(target,now,contactProbe);
+            if(retryReason!=null){_closerContactQueueReason=retryReason;return false;}
+            if(_assistMovementWorld!=Hud.Game.Me.WorldId)ResetAssistMovementPolicy();
             var me=Hud.Game.Me.FloorCoordinate;
-            if(!AssistSameHeight(me,AssistTargetGround(target)))return false;
-            if (AssistBodyGap(me,target)>AssistDashTravelLimit+AssistAttackBodyReach()
-                || MapAssistAttackBlocked(me,target)) return false;
+            if(!AssistSameHeight(me,AssistTargetGround(target)))
+            {_closerContactQueueReason="floor-mismatch";return false;}
+            if (AssistBodyGap(me,target)>AssistDashTravelLimit+AssistAttackBodyReach())
+            {_closerContactQueueReason="beyond-dash-reach";return false;}
+            if(MapAssistAttackBlocked(me,target))
+            {_closerContactQueueReason="attack-path-blocked";return false;}
             uint originalCircle=AssistLandingDamageCircle(me);
             IWorldCoordinate best=null; double score=double.NegativeInfinity;
+            if(contactProbe)
+            {
+                double dx=AssistTargetGround(target).X-me.X,dy=AssistTargetGround(target).Y-me.Y;
+                double length=Math.Sqrt(dx*dx+dy*dy);
+                if(length>0.01)
+                {
+                    double step=Math.Min(3.0,Math.Max(0,length-0.5));
+                    var inward=me.Offset((float)(dx/length*step),(float)(dy/length*step),0);int ix,iy;
+                    if(inward.XYDistanceTo(me)>=1 && CanAttackAssistFrom(inward,target)
+                        && !MapAssistAttackBlocked(inward,target) && IsAssistDashPointSafe(inward,target,out ix,out iy))
+                        ConsiderAssistCloserContact(inward,target,originalCircle,ref best,ref score);
+                }
+            }
             float radius=target.RadiusScaled+(float)Math.Max(1,Math.Min(6.5,AssistAttackBodyReach()-1.0));
             for(int i=0;i<AssistEdgeX.Length;i++)
             {
                 var point=AssistTargetGround(target).Offset(AssistEdgeX[i]*radius,AssistEdgeY[i]*radius,0);
                 int x,y;
-                if (point.XYDistanceTo(me)<1 || MapAssistAttackBlocked(point,target)
+                if (point.XYDistanceTo(me)<1 || (contactProbe && point.XYDistanceTo(me)>8) || MapAssistAttackBlocked(point,target)
                     || !IsAssistDashPointSafe(point,target,out x,out y))continue;
                 ConsiderAssistCloserContact(point,target,originalCircle,ref best,ref score);
             }
@@ -2600,7 +2774,7 @@ private uint AssistLandingDamageCircle(IWorldCoordinate point)
                     float circleRadius=circleRing==0?AssistCircleCoverageRadius-0.2f:AssistCircleFootprintRadius(circle)-0.2f;
                     var point=center.Offset((float)(dx/length*circleRadius),(float)(dy/length*circleRadius),0);
                     int x,y;
-                    if(point.XYDistanceTo(me)<1 || AssistBodyGap(point,target)>AssistBodyGap(me,target)-0.5
+                    if(point.XYDistanceTo(me)<1 || (contactProbe && point.XYDistanceTo(me)>8) || AssistBodyGap(point,target)>AssistBodyGap(me,target)-0.5
                         || !CanAttackAssistFrom(point,target) || MapAssistAttackBlocked(point,target)
                         || !IsAssistDashPointSafe(point,target,out x,out y))continue;
                     ConsiderAssistCloserContact(point,target,originalCircle,ref best,ref score);
@@ -2610,17 +2784,35 @@ private uint AssistLandingDamageCircle(IWorldCoordinate point)
             // A rejected reach trial is already excluded by the shared contact checks.
             IWorldCoordinate planned;string plannedReason;int px,py;
             if(TryPickAssistDashPoint(target,false,out planned,out plannedReason,true)
-                && planned.XYDistanceTo(me)>=1
+                && planned.XYDistanceTo(me)>=1 && (!contactProbe || planned.XYDistanceTo(me)<=8)
                 && AssistBodyGap(planned,target)<AssistBodyGap(me,target)-0.5
                 && CanAttackAssistFrom(planned,target) && !MapAssistAttackBlocked(planned,target)
                 && IsAssistDashPointSafe(planned,target,out px,out py))
             {
                 ConsiderAssistCloserContact(planned,target,originalCircle,ref best,ref score);
             }
-            if(best==null)return false;
+            if(best==null)
+            {
+                _closerContactQueueReason="no-safe-inward-dash";
+                if(contactProbe)
+                {
+                    SeedAssistContactProbe(target,now); // No Dash spent: bounded planning retry, not the submitted-Dash cooldown.
+                    TraceAssistContactProbe("CONTACT_PROBE_SUPPRESSED",target,"no-safe-inward-dash",null);
+                }
+                return false;
+            }
+            _closerContactQueueReason="queued";
             TraceAssistCombatPosition(target,me,best,"contact-correction");
             _closerContactAcd=target.AcdId;_closerContactWorld=target.WorldId;
+            if(contactProbe)SeedAssistContactProbe(target,now);
+            else {_closerContactProbe=false;_closerContactProbeSpent=false;_closerContactProbeWindowDone=false;_closerContactAnn=target.AnnId;}
             _closerContactAt=now;_closerContactPoint=best;
+            if(contactProbe)
+            {
+                _closerContactProbeGoal=best;
+                TraceAssistContactProbe("CONTACT_PROBE_QUEUED",target,"uncertain-not-proven-miss",best);
+                return true; // First uncertainty probe never blacklists a circle or stops attacks.
+            }
             // Reject speculative reach before movement admission; this is missing contact.
             _rangeRejectedTarget=target.AcdId;_rangeRejectedWorld=target.WorldId;
             _rangeRejectedAt=now;_rangeRejectedPoint=me.Offset(0,0,0);
@@ -2631,6 +2823,7 @@ private uint AssistLandingDamageCircle(IWorldCoordinate point)
         private void ConsiderAssistCloserContact(IWorldCoordinate point,IMonster target,uint originalCircle,
             ref IWorldCoordinate best,ref double score)
         {
+            if(AssistBodyGap(point,target)>=AssistBodyGap(Hud.Game.Me.FloorCoordinate,target)-0.5)return;
             bool local=originalCircle!=0 && AssistLandingDamageCircle(point)==originalCircle;
             bool bestLocal=best!=null && originalCircle!=0 && AssistLandingDamageCircle(best)==originalCircle;
             double value=AssistCoverageValue(point,target)-point.XYDistanceTo(Hud.Game.Me.FloorCoordinate)*0.1;
@@ -2644,15 +2837,20 @@ private uint AssistLandingDamageCircle(IWorldCoordinate point)
             var point=_closerContactPoint;
             var target=FindAssistCandidate(_closerContactAcd);
             if(unchecked(now-_closerContactAt)>500 || !IsAssistEligible(target)
-                || target.WorldId!=_closerContactWorld || HasAssistAttackContact(target)
+                || target.WorldId!=_closerContactWorld || target.AnnId!=_closerContactAnn
+                || (!_closerContactProbe && HasAssistAttackContact(target))
                 || (selected!=null && selected.AcdId!=target.AcdId))
-            {_closerContactPoint=null;return false;}
-            if(!canDash || _pulse!=ActionKey.Unknown || _assistWotHfResumePending)return false;
+            {_closerContactPoint=null;if(_closerContactProbe)TraceAssistContactProbe("CONTACT_PROBE_SUPPRESSED",target,"actor-or-context-changed",point);return false;}
+            if(!canDash || _pulse!=ActionKey.Unknown || _assistWotHfResumePending)
+            { if(_closerContactProbe)TraceAssistContactProbe("CONTACT_PROBE_DEFERRED",target,
+                !canDash?"dash-unavailable":_pulse!=ActionKey.Unknown?"owned-cast":"resume-primary",point);return false; }
             int x,y;
-            _closerContactPoint=null; // One dispatch only; failure uses normal recovery.
-            if(!CanAttackAssistFrom(point,target) || MapAssistAttackBlocked(point,target)
+            bool contactProbe=IsAssistContactProbeLanding(target,point,now);
+            if((_closerContactProbe && !contactProbe) || !CanAttackAssistFrom(point,target) || MapAssistAttackBlocked(point,target)
                 || !IsAssistDashPointSafe(point,target,out x,out y)
-                || !AllowAssistMovement(target,point,now,false,false))return false;
+                || !AllowAssistMovement(target,point,now,false,false))
+            { _closerContactPoint=null;TraceAssistContactProbe("CONTACT_PROBE_SUPPRESSED",target,"landing-or-owner-changed",point);return false; }
+            _closerContactPoint=null; // Dash path only; retain probe identity through final aim checks.
             ReleaseAssistAttack();CancelTarget();
             _assistTargetAcd=target.AcdId;
             _mainKey=_assistMainKey;_combinationDisplayKey=_mainKey;
@@ -2660,6 +2858,8 @@ private uint AssistLandingDamageCircle(IWorldCoordinate point)
             _assistPositionReason="circle-closer-contact";
             _assistPositionWorldX=point.X;_assistPositionWorldY=point.Y;
             MaintainDash(dash,now,target,point);
+            if(contactProbe && _selfDashKey!=ActionKey.Unknown)
+            { _closerContactProbeSpent=true;TraceAssistContactProbe("CONTACT_PROBE_DISPATCH",target,"dash-owned",point); }
             if(_selfDashKey!=ActionKey.Unknown)_assistCorrectiveDashSpent=true;
             return _selfDashKey!=ActionKey.Unknown;
         }
@@ -3079,7 +3279,7 @@ private uint AssistLandingDamageCircle(IWorldCoordinate point)
             // destination only, never a target for a click or an asserted current position.
             if(_assistHazardReturnAcd!=0 && _assistHazardReturnWorld==world && _assistHazardReturnPoint!=null
                 && unchecked(now-_assistHazardReturnTick)<3000)
-            { goalId=_assistHazardReturnAcd;goal=_assistHazardReturnPoint; }
+            { goalId=_assistHazardReturnAcd;goalAnn=_assistHazardReturnAnn;goal=_assistHazardReturnPoint; }
             if(_groupCtrlMode && _assistMotionWorld==world)
             {
                 double nearest=double.MaxValue;uint retainedId=goalId;
@@ -3131,7 +3331,7 @@ private uint AssistLandingDamageCircle(IWorldCoordinate point)
                 if(!IsAssistPositionWorldPoint(point) || me.XYDistanceTo(point)<2 || me.XYDistanceTo(point)>AssistDashTravelLimit
                     || (!detour && point.XYDistanceTo(goal)+1>=distanceToGoal)
                     || !IsAssistDashPointSafe(point,null,out x,out y,mapTransit:true)
-                    || !AllowAssistMovement(null,point,now,false,false))return false;
+                    || !AllowAssistMovement(null,point,now,false,false) || !PrepareAssistDoorDash(point))return false;
                 ReleaseAssistAttack();CancelTarget();_mainKey=_assistMainKey;_combinationDisplayKey=_mainKey;
                 _assistPositionReason="remembered-elite-route:"+source;
                 _assistPositionWorldX=point.X;_assistPositionWorldY=point.Y;
@@ -3205,7 +3405,7 @@ private uint AssistLandingDamageCircle(IWorldCoordinate point)
                 || landing.XYDistanceTo(goal.FloorCoordinate)+2.0
                     >= Hud.Game.Me.FloorCoordinate.XYDistanceTo(goal.FloorCoordinate)
                 || !IsAssistDashPointSafe(landing,goal,out x,out y,mapTransit:true)
-                || !AllowAssistMovement(goal,landing,now,false,false)) { return false; }
+                || !AllowAssistMovement(goal,landing,now,false,false) || !PrepareAssistDoorDash(landing)) { return false; }
             ReleaseAssistAttack();CancelTarget();
             if (_assistTargetAcd != goal.AcdId)
             {
@@ -3586,7 +3786,7 @@ private uint AssistLandingDamageCircle(IWorldCoordinate point)
             // Bridge only a short, already-verified upkeep handoff. It does not
             // create or renew contact evidence during an uncertain range trial.
             if(!contact && _assistHitVerified && !_assistApproachPending && age>=0 && age<=6
-                && (_genMantraPulse || _pulseIsMaintenance || _assistWotHfResumePending))
+                && (_genMantraPulseKey != ActionKey.Unknown || _pulseIsMaintenance || _assistWotHfResumePending))
             {
                 var own=FindAssistOwnAttackBody();
                 contact=own!=null && CanAttackAssistFrom(me,own) && !MapAssistAttackBlocked(me,own)
@@ -4057,19 +4257,30 @@ private uint AssistLandingDamageCircle(IWorldCoordinate point)
                     || (_assistDamageEscapePending && _assistDamageEscapeTrigger=="low-health-rapid-loss");
             }
         }
-        private bool IsAssistFrozenPulsePointFree(IWorldCoordinate point)
+        private bool IsCycloneFrozenPulseReentry(IWorldCoordinate point)
         {
-            if(AssistShieldPylonActive() || _assistHealthFraction >= 0.75)return true;
+            return _assistCycloneSkill!=null && _lowHealthFields.Count!=0
+                && !IsAssistFrozenPulsePointFree(point,true)
+                && IsAssistFrozenPulsePointFree(Hud.Game.Me.FloorCoordinate,true)
+                && _cycloneOwner!=null && _cycloneOwner.Enabled && _cycloneOwner.EnableConditionalAutoCastProfiles
+                && _cycloneOwner.GetConditionalProfileEnabled(CycloneProfileCode)
+                && Hud.Game.Me.Powers.GetUsedSkill(Hud.Sno.SnoPowers.Monk_CycloneStrike)!=null;
+        }
+
+        private bool IsAssistFrozenPulsePointFree(IWorldCoordinate point,bool ignoreHealth=false,double margin=0)
+        {
+            if(AssistShieldPylonActive() || (!ignoreHealth && _assistHealthFraction>=0.75))return true;
             foreach(var field in _lowHealthFields)
-                if(!field.IsDisabled && field.SnoActor.Sno==ActorSnoEnum._x1_monsteraffix_frozenpulse_monster
+                if(field!=null && !field.IsDisabled && field.SnoActor?.Sno==ActorSnoEnum._x1_monsteraffix_frozenpulse_monster
                     && AssistSameHeight(point,field.FloorCoordinate)
-                    && point.XYDistanceTo(field.FloorCoordinate)<=LowHealthFieldRadius(field))return false;
+                    && point.XYDistanceTo(field.FloorCoordinate)<=LowHealthFieldRadius(field)+margin)return false;
             return true;
         }
 
         // Actual circle occupancy is a positional commitment, not an attack-range claim.
         // This state also recognizes a circle the player entered manually.
         private bool _selfDashCircleUpgrade, _selfDashContactQualified;
+        private bool _selfDashPositionUpgrade;
 
 
         private uint _assistCircleReturnElite, _assistCircleReturnCircle;
@@ -4259,7 +4470,7 @@ private bool HasDamageCircleBuff()
             var me=Hud.Game.Me;
             return identity!=0 && identity!=uint.MaxValue && (identity==me.AcdId || identity==me.AnnId);
         }
-        private bool ObserveAssistOwnTargetDamage(IMonster target,bool ownContact)
+        private bool ObserveAssistOwnTargetDamage(IMonster target,bool ownContact,bool damageSourceOnly=false)
         {
             int tick=Hud.Game.CurrentGameTick;
             if(tick==_rangeTrialDamageTick)return false;
@@ -4270,7 +4481,7 @@ private bool HasDamageCircleBuff()
             // other-to-self source transition plus HP loss during our exact primary context.
             bool sourceEdge=(_rangeTrialDamageSource!=0 && !AssistDamageIdentityIsMe(_rangeTrialDamageSource)
                     && AssistDamageIdentityIsMe(source))
-                || (_rangeTrialAttacker!=0 && !AssistDamageIdentityIsMe(_rangeTrialAttacker)
+                || (!damageSourceOnly && _rangeTrialAttacker!=0 && !AssistDamageIdentityIsMe(_rangeTrialAttacker)
                     && AssistDamageIdentityIsMe(attacker));
             bool result=fresh && ownContact && sourceEdge && target.CurHealth<_rangeTrialDamageHealth;
             _rangeTrialDamageTick=tick;_rangeTrialDamageSource=source;_rangeTrialAttacker=attacker;
@@ -4280,6 +4491,7 @@ private bool HasDamageCircleBuff()
 
         private void ResetAssistRangeTrial(string status)
         {
+            _rangeContactEvidence="unknown";
             _rangeTrialTarget=_rangeTrialWorld=_rangeTrialAnn=0;_rangeTrialEligibleMs=0;
             _rangeTrialOwnValidated=_rangeTrialDamageSeeded=false;_rangeTrialDamageTick=_rangeTrialBudgetGameTick=int.MinValue;
             _rangeTrialWasEligible=false;_rangeTrialOwnSamples=0;_rangeTrialOwnTick=_rangeTrialSpiritTick=int.MinValue;
@@ -4288,14 +4500,15 @@ private bool HasDamageCircleBuff()
 
         private void CorrectAssistRangeTrial(IMonster target,int now,bool speculative)
         {
-            var me=Hud.Game.Me.FloorCoordinate;
-            TraceAssistRange(target,"no-corroborated-contact-closer",now);
-            RememberAssistFailedCircleContact(target,me);
-            if(speculative)RejectAssistExtendedReach(target);
-            TryQueueCloserContact(target,now);
-            _rangeRejectedTarget=target.AcdId;_rangeRejectedWorld=Hud.Game.Me.WorldId;
-            _rangeRejectedPoint=me.Offset(0,0,0);_rangeRejectedTargetPoint=target.FloorCoordinate.Offset(0,0,0);_rangeRejectedAt=now;
-            _rangeTrialStatus="closer-contact-required";_assistPositionReplanPending=true;ReleaseAssistAttack();
+            TraceAssistRange(target,"uncorroborated-contact-probe",now);
+            _rangeTrialEligibleMs=0;
+            if(SameAssistContactProbe(target) && _closerContactProbeSpent)
+                _closerContactProbeWindowDone=true;
+            bool queued=TryQueueCloserContact(target,now,true);
+            _rangeTrialStatus=queued?"closer-contact-required":"contact-probe-unavailable";
+            TraceAssistContactProbe("CONTACT_PROBE_DECISION",target,
+                queued?"queued":_closerContactQueueReason,_closerContactPoint);
+            // Unknown contact is not a failed landing. Keep attacking until a safe Dash is admitted.
         }
         private void ObserveExtendedCircleContact(IMonster target,int now)
         {
@@ -4339,6 +4552,7 @@ private bool HasDamageCircleBuff()
                 if(_rangeTrialTarget!=0)TraceAssistRange(target,"trial-input-paused",now);
                 // Secondary casts, Dash and input resumption are not a failed range test.
                 // Freeze the eligible budget and discard source edges spanning that pause.
+                _rangeContactEvidence="input-paused";
                 _rangeTrialWasEligible=false;_rangeTrialSampleAt=now;_rangeTrialBudgetGameTick=Hud.Game.CurrentGameTick;
                 _rangeTrialDamageSeeded=false;_rangeTrialDamageTick=int.MinValue;
                 _rangeTrialOwnSamples=0;_rangeTrialOwnTick=int.MinValue;
@@ -4346,9 +4560,9 @@ private bool HasDamageCircleBuff()
                 _rangeTrialStatus="await-primary";return;
             }
             ObserveAssistOuterCircle(target,now);
-            if(!speculative && !AttackedIdentityMatches(target.AcdId,target.AnnId) && HasAssistPackContact(target))
-            { ResetAssistRangeTrial("nearby-player-contact");return; }
-            if(closeContact || !CanAttackAssistFrom(me,target))
+            if(closeContact && !AssistWotHfHeartbeatEnabled())
+            { ResetAssistRangeTrial("own-generator-observer-unavailable");return; }
+            if(!CanAttackAssistFrom(me,target))
             { ResetAssistRangeTrial("none");return; }
             if(_rangeTrialTarget==0)
             {
@@ -4372,9 +4586,21 @@ private bool HasDamageCircleBuff()
                 _rangeTrialSampleAt=now;_rangeTrialBudgetGameTick=sampleGameTick;
             }
             _rangeTrialWasEligible=true;
-            bool ownContact=Hud.Game.Me.AnimationState==AcdAnimationState.Attacking
-                && AttackedIdentityMatches(target.AcdId,target.AnnId) && _assistWotHfLastGameTick!=int.MinValue
+            bool primaryObserved=Hud.Game.Me.AnimationState==AcdAnimationState.Attacking
+                && _assistWotHfLastGameTick!=int.MinValue
+                && Hud.Game.CurrentGameTick>=_assistWotHfLastGameTick
                 && Hud.Game.CurrentGameTick-_assistWotHfLastGameTick<=3;
+            uint ownIdentity=AttackedIdentity();
+            bool ownTarget=ownIdentity!=0 && (ownIdentity==target.AcdId || ownIdentity==target.AnnId);
+            bool ownContact=primaryObserved && ownTarget;
+            bool laneContact=false;
+            if(primaryObserved && !ownTarget && ownIdentity!=0)
+            {
+                // Reuse the bounded acquisition shortlist; nearby trash alone is not elite contact.
+                var body=_assistCandidates.FirstOrDefault(m=>m!=null && (m.AcdId==ownIdentity || m.AnnId==ownIdentity));
+                laneContact=body!=null && CanAttackAssistFrom(me,body) && !MapAssistAttackBlocked(me,body)
+                    && AssistAttackLaneContains(me,body,target);
+            }
             int players=Hud.Game.Players.Count(),tick=Hud.Game.CurrentGameTick;
             bool partyContact=players>1 && ownContact && HasAssistPackContact(target);
             if(partyContact && _rangeTrialOwnTick!=tick)
@@ -4390,22 +4616,29 @@ private bool HasDamageCircleBuff()
             // own generator/identity/resource corroboration; capped or spent Spirit is unknown.
             // Ordinary boss contact can use fresh own Spirit or a target-specific
             // native source edge. Neither extends the boss's configured reach.
-            bool sourceContact=guardianTrial && !speculative && ObserveAssistOwnTargetDamage(target,ownContact);
+            bool sourceContact=(target.Rarity!=ActorRarity.Boss || !speculative)
+                && ObserveAssistOwnTargetDamage(target,ownContact || laneContact,target.Rarity!=ActorRarity.Boss);
             if(guardianTrial && !speculative && (spiritContact || sourceContact))_rangeTrialOwnValidated=true;
             bool retainedBossContact=guardianTrial && !speculative && _rangeTrialOwnValidated && ownContact;
             bool corroborated=guardianTrial ? (!speculative && (spiritContact || sourceContact || retainedBossContact))
-                : ((players==1 && ownContact && target.CurHealth<_rangeTrialHealth)
-                    || spiritContact || (partyContact && _rangeTrialOwnSamples>=2 && !speculative));
+                : ((players==1 && (ownContact || laneContact) && target.CurHealth<_rangeTrialHealth)
+                    || spiritContact || sourceContact);
+            _rangeContactEvidence=sourceContact?"fresh-own-target-source":spiritContact?"fresh-own-spirit"
+                :retainedBossContact?"retained-ordinary-guardian":corroborated?"solo-target-health"
+                :partyContact?"own-attempt-only":"unknown";
             if(corroborated)
             {
+                ConfirmAssistContactProbe(target);
                 _rangeTrialStatus=sourceContact?"own-target-damage-edge":spiritContact?"own-spirit-corroborated"
-                    :retainedBossContact?"own-contact-retained":players==1?"solo-corroborated":"party-own-contact-proxy";
+                    :retainedBossContact?"own-contact-retained":"solo-corroborated";
                 _rangeTrialSpiritTick=_assistSpiritGainTick;
                 TraceAssistRange(target,_rangeTrialStatus,now);
                 _rangeTrialTick=now;_rangeTrialEligibleMs=0;_rangeTrialHealth=target.CurHealth;
             }
+            if(!corroborated && _rangeTrialStatus!="closer-contact-required")
+                _rangeTrialStatus=partyContact?"attempted-contact-unconfirmed":"unconfirmed-primary-contact";
             TraceAssistRange(target,_rangeTrialStatus,now);
-            if(_rangeTrialEligibleMs<500)return;
+            if(_rangeTrialEligibleMs<AssistContactProbeMs)return;
             CorrectAssistRangeTrial(target,now,speculative);
         }
 
@@ -4423,7 +4656,7 @@ private bool HasDamageCircleBuff()
                 && !double.IsNaN(maximum) && !double.IsInfinity(maximum)
                 && !double.IsNaN(regen) && !double.IsInfinity(regen) && maximum>0;
             bool eligible=finite && _pulse==ActionKey.Unknown && _selfDashKey==ActionKey.Unknown
-                && !_assistWotHfResumePending && _assistMainKey!=ActionKey.Unknown
+                && _genMantraPulseKey==ActionKey.Unknown && !_assistWotHfResumePending && _assistMainKey!=ActionKey.Unknown
                 && _assistAttackKey==_assistMainKey && s7o_GenMonkInput.IsDown(_assistMainKey)
                 && me.AnimationState==AcdAnimationState.Attacking
                 && _assistWotHfLastGameTick!=int.MinValue && tick-_assistWotHfLastGameTick<=3
@@ -4846,10 +5079,10 @@ private bool HasDamageCircleBuff()
             _assistBlockedTargets[target.AcdId] = recovery;
         }
 
-        private void BeginAssistNativeNavigation(IMonster target, IWorldCoordinate origin, int now, bool failedTravel = false)
+        private void BeginAssistNativeNavigation(IMonster target, IWorldCoordinate origin, int now, bool failedTravel = false, bool recordObstacle = true)
         {
             if (target == null || !IsAssistPositionWorldPoint(origin)) return;
-            if (!failedTravel && TryQueueCloserContact(target,now)) return;
+            if (!failedTravel && recordObstacle && TryQueueCloserContact(target,now)) return;
             if (failedTravel) _assistNavigationTravelBlocked = true;
             if (_assistNavigationPending && _assistNavigationTargetAcd == target.AcdId) return;
             ReleaseAssistAttack(); // Releases owned standstill too; physical Shift is untouched.
@@ -4865,14 +5098,14 @@ private bool HasDamageCircleBuff()
             _assistNavigationFailedKeys = 0;
             _assistNavigationSinceTick = now;
             _assistNavigationFallbacks++;
-            _assistNavigationHoverConfirmed = false; _assistNavigationReason = "failed-approach";
+            _assistNavigationHoverConfirmed = false; _assistNavigationReason = recordObstacle?"failed-approach":"cast-unobserved";
             _assistNavigationHeldAcd = _assistNavigationHeldAnn = _assistNavigationProbeAcd = 0u;
             _assistNavigationFallbackSpent = false;
             _assistProbeTargetAcd = 0u; // Begin a bounded native hover acquisition for this recovery.
 
             _assistDashRetryNeedsAttack = true;
             _assistDashContinuationPending = _assistPositionReplanPending = false;
-            BlockAssistNavigationTarget(target);
+            if(recordObstacle)BlockAssistNavigationTarget(target);
             RefreshAssistNavigationProgress(target, now);
 
         }
@@ -5120,7 +5353,7 @@ private bool HasDamageCircleBuff()
                 if(!walkOnly && AutoDash && CanApproachDash(dash) && hop>=3.0
                     && !IsAssistBlockedApproachDirection(point)
                     && IsAssistDashPointSafe(point,target,out x,out y,false,true)
-                    && AllowAssistMovement(target, point, now, false, false)) {
+                    && AllowAssistMovement(target, point, now, false, false) && PrepareAssistDoorDash(point)) {
                     ReleaseAssistAttack();CancelTarget();
                     MaintainDash(dash,now,target,point,false,true);
                     if(_selfDashKey!=ActionKey.Unknown) {
@@ -5436,7 +5669,8 @@ private bool HasDamageCircleBuff()
 
             bool readable = RefreshAssistPositionActors();
             bool malletFree = readable && IsAssistMalletPointFree(actual);
-            bool hazardFree = readable && malletFree && IsAssistPositionHazardFree(actual);
+            bool hazardFree = readable && malletFree && IsAssistPositionHazardFree(actual)
+                && (!_selfDashFrozenPulse || IsAssistFrozenPulsePointFree(actual,true));
             bool electricalFree = readable && IsAssistElectrifiedPointFree(actual, FindAssistCandidate(_selfDashTargetAcd));
 
             _assistDashActualSafe = hazardFree && !_assistDamageEscapePending;
@@ -5471,6 +5705,40 @@ private bool HasDamageCircleBuff()
                 && !arrivedLanding && _assistDashTravelRequested>4f && actual.XYDistanceTo(_assistDashLanding)>2f
                 && _assistDashTravelObserved<_assistDashTravelRequested*0.75f && !verticalProgress;
             missedLanding |= stalledHop || partialHop || blockedExit;
+            // Native movement and arrival are separate from generic monster contact.
+            // The return controller and its outcome observer share the same tolerance.
+            bool outwardDoor=_assistDoorTarget!=null && _assistDoorStage==5 && _assistDoorDashWaypoint!=null
+                && _assistDashLanding.XYDistanceTo(_assistDoorDashWaypoint)<=0.25f;
+            bool reverseDoor=_assistDoorReturnPending && _assistDoorReturnHop!=null
+                && _assistDashLanding.XYDistanceTo(_assistDoorReturnHop)<=0.25f;
+            if(outwardDoor || reverseDoor)
+            {
+                bool accepted=reverseDoor?AssistDoorReturnArrived(actual,_assistDoorReturnHop):AssistDoorOutwardArrived(actual);
+                bool terminal=reverseDoor || _assistDoorFinalHop;
+                bool doorFailed=!_assistDashLandingConfirmed || (terminal?!accepted:littleTravel || missedLanding);
+                _assistDashMovementFailed=doorFailed;
+                _assistDashOutcome=doorFailed?"door-travel-failed":reverseDoor?"door-return-arrived":"door-near-side-landed";
+                TraceAssistDashOutcome(liveTarget,actual,doorFailed,now);
+                if(reverseDoor && doorFailed)_assistDoorReturnDashSpent=true;
+                TraceAssistPositionDecision("DOOR_LANDING",liveTarget,actual,"door="+(_assistDoorTarget==null?0u:_assistDoorTarget.AcdId)
+                    +" return="+reverseDoor+" accepted="+accepted+" confirmed="+_assistDashLandingConfirmed
+                    +" failed="+doorFailed+" requested="+_assistDashTravelRequested+" observed="+_assistDashTravelObserved
+                    +" gap="+actual.XYDistanceTo(reverseDoor?_assistDoorReturnHop:_assistDoorDashWaypoint));
+                return;
+            }
+            // A missing/rejected cast says nothing about wall geometry. Preserve the
+            // target, skip obstacle/failed-point feedback, and reuse native approach
+            // recovery until Dash availability or useful contact returns.
+            if(!AssistDashTravelFailureCanBlock(_selfDashCastTick!=int.MinValue,_selfDashObserved,
+                _assistDashFreshAnimation,_assistDashPositionObserved,_assistDashLandingConfirmed))
+            {
+                _assistDashMovementFailed=false;_assistDashOutcome="cast-unobserved";
+                _assistApproachPending=true;_assistDashRetryNeedsAttack=true;
+                TraceAssistPositionDecision("DASH_CAST_UNOBSERVED",liveTarget,_assistDashLanding,"no-collision-evidence");
+                if(liveTarget!=null && !_assistDashForHazard && !_assistDashEscapeOnly)
+                    BeginAssistNativeNavigation(liveTarget,actual,now,false,false);
+                return;
+            }
             bool failed = _assistDashMovementFailed = !_assistDashLandingConfirmed || littleTravel || missedLanding;
             TraceAssistDashOutcome(liveTarget,actual,failed,now);
             RecordAssistObstacleAttempt(liveTarget,actual,failed);
@@ -6061,13 +6329,55 @@ private bool HasDamageCircleBuff()
                     + 8.0 + Math.Max(0, extraTravel) * 0.1;
         }
 
+
+        // Position comparisons may span a local Dash. This does not widen hit
+        // evidence, attack reach, hazard relationships or encounter-return memory.
+        private bool AssistComparablePositionTarget(IMonster retained,IMonster candidate)
+        {
+            if(AssistSameEncounter(retained,candidate))return true;
+            return IsAssistPositionElite(retained) && IsAssistPositionElite(candidate)
+                && retained.Rarity!=ActorRarity.Boss && candidate.Rarity!=ActorRarity.Boss
+                && retained.WorldId==candidate.WorldId && candidate.WorldId==Hud.Game.Me.WorldId
+                && IsAssistEligible(candidate)
+                && AssistSameHeight(Hud.Game.Me.FloorCoordinate,AssistTargetGround(candidate))
+                && Hud.Game.Me.FloorCoordinate.XYDistanceTo(AssistTargetGround(candidate))<=AssistDashTravelLimit;
+        }
+        private static bool AssistDashTravelFailureCanBlock(bool pressed,bool observed,bool animation,bool position,bool landed)
+        { return pressed && (observed || animation || position || landed); }
+
+        // One update owns this proposal. The Dash transaction copies it only after
+        // admission; optional target selection never owns input or a second route.
+        private void SelectAssistPosition(IMonster target,IWorldCoordinate point,string reason)
+        {
+            _assistSelectedPositionTarget=target;_assistSelectedPositionPoint=point;
+            _assistSelectedPositionReason=reason;
+            TraceAssistPositionDecision("POSITION_SELECTED",target,point,reason);
+        }
+        private bool AssistOptionalLandingStillUseful(IMonster target,IWorldCoordinate point)
+        {
+            if(!RefreshAssistPositionActors())return false;
+            var me=Hud.Game.Me.FloorCoordinate;
+            if(!IsAssistEligible(target) || point==null || !CanAttackAssistFrom(point,target)
+                || MapAssistAttackBlocked(point,target))return false;
+            // Compare against our current lane as well as the new target. Own attack
+            // identity chooses an aim here; it is never damage or range proof.
+            var previous=FindAssistOwnAttackBody();
+            if(previous==null || AssistTargetTier(previous)!=AssistTargetTier(target)
+                || !CanAttackAssistFrom(me,previous) || MapAssistAttackBlocked(me,previous))previous=target;
+            return AssistCoverageOutweighs(point,target,me,previous);
+        }
+        [System.Diagnostics.Conditional("S7O_GENMONK_DIAGNOSTICS")]
+        private void TraceAssistPositionDecision(string kind,IMonster target,IWorldCoordinate point,string reason) { }
+        [System.Diagnostics.Conditional("S7O_GENMONK_DIAGNOSTIC")]
+        private void TraceAssistActivation(string stage,IMonster target=null) { }
+
         private IMonster PreferMovingElitePack(IMonster retained, int now, bool canDash)
         {
             var optional=BeginAssistOptionalSearch(retained,5,true);
             bool planning=BeginAssistPlanning("PreferMovingElitePack");
             try {
 
-            if (retained == null || _rangedCleanup || _assistSafetyCombatOnly
+            if (retained == null || HasAssistSelectedPosition(retained) || _rangedCleanup || _assistSafetyCombatOnly
                 || _assistHazardReturnSelecting || IsAssistHealingRecovery()
                 || (_groupCtrlMode && _juggerFocusAcd != 0u)
                 || AssistReactiveEscapeDue() || AssistMoltenEscapeDue()) return retained;
@@ -6075,10 +6385,11 @@ private bool HasDamageCircleBuff()
             if ((tier != (int)AssistPriority.Leader && tier != (int)AssistPriority.Minion
                     && tier != (int)AssistPriority.Trash)
                 || (_assistDensityFocusTick != int.MinValue
+                    && tier != (int)AssistPriority.Leader
                     && unchecked(now - _assistDensityFocusTick) < 1200
                     && HasAssistPackContact(retained))
                 || (_assistDensityScanTick != int.MinValue
-                    && unchecked(now - _assistDensityScanTick) < 350)) return retained;
+                    && unchecked(now - _assistDensityScanTick) < (tier==(int)AssistPriority.Leader?100:350))) return retained;
             _assistDensityScanTick = now;
             if(!AssistOptionalSearchAvailable(retained))return retained;
             var me = Hud.Game.Me.FloorCoordinate;
@@ -6091,6 +6402,7 @@ private bool HasDamageCircleBuff()
             AssistAttackCoverage(me, retained, out oldElites, out oldTrash);
             double oldMultiplier = AssistDamageCircleCoverageMultiplier(oldCircle,oldElites);
             IMonster best = retained;
+            IWorldCoordinate bestLanding=null;string bestLandingReason=null;
             int bestWeight = oldWeight;
             bool trash = tier == (int)AssistPriority.Trash;
             var oldProfile = trash ? AssistTrashProfileFor(retained) : default(AssistTrashProfile);
@@ -6119,7 +6431,7 @@ private bool HasDamageCircleBuff()
                 if (candidate.AcdId == retained.AcdId || AssistTargetTier(candidate) != tier
                     || candidate.NormalizedXyDistanceToMe > (canDash ? AssistVisibleTargetRange : Math.Max(NearbyTrashRange, 50.0))
                     || IsAssistTargetTemporarilyBlocked(candidate) || IsAssistRouteSuppressed(candidate)) continue;
-                if ((!trash || (pulled && !_groupCtrlMode)) && !AssistSameEncounter(retained,candidate)) continue;
+                if ((!trash || (pulled && !_groupCtrlMode)) && !AssistComparablePositionTarget(retained,candidate)) continue;
                 double distance = me.XYDistanceTo(candidate.FloorCoordinate);
                 int weight = AssistNearbyPackWeight(candidate);
                 var nextProfile = trash ? AssistTrashProfileFor(candidate) : default(AssistTrashProfile);
@@ -6158,17 +6470,19 @@ private bool HasDamageCircleBuff()
                 TraceAssistObjectiveComparison(retained,baseline,candidate,landing);
                 bestCoverage = coverage;
                 best = candidate; bestWeight = weight; bestProgress = nextProfile.Progression;
+                bestLanding=landing;bestLandingReason=landingReason;
 
             }
             if (best != retained)
             {
                 _assistDensityFocusTick = now; _assistDensityFocusTarget = best.AcdId;
+                SelectAssistPosition(best,bestLanding,bestLandingReason);
 
             }
 
             return best;
 
-            } finally { if(_assistOptionalQuery.Deferred)_assistDensityScanTick=unchecked(now-330);
+            } finally { if(_assistOptionalQuery.Deferred)_assistDensityScanTick=unchecked(now-350);
                 if(planning)EndAssistPlanning();EndAssistOptionalSearch(optional); }
         }
 
@@ -6490,10 +6804,7 @@ private bool HasDamageCircleBuff()
                 int optionalSlot=(optionalStart+optionalIndex)%optionalCount;
                 var candidate=_assistCandidates[optionalSlot];
                 if (candidate.AcdId == retained.AcdId || AssistTargetTier(candidate) != tier
-                    || (!AssistSameEncounter(retained,candidate)
-                        && !(_groupCtrlMode && IsAssistPositionElite(retained) && IsAssistPositionElite(candidate)
-                            && IsAssistEligible(candidate) && AssistSameHeight(Hud.Game.Me.FloorCoordinate,candidate.FloorCoordinate)
-                            && Hud.Game.Me.FloorCoordinate.XYDistanceTo(candidate.FloorCoordinate)<=AssistDashTravelLimit))
+                    || !AssistComparablePositionTarget(retained,candidate)
                     || IsAssistTargetTemporarilyBlocked(candidate) || IsAssistRouteSuppressed(candidate)
                     || !IsAssistCircleCandidateCompatible(candidate, retained)) continue;
                 if (!_assistPositionCircles.Any(c => c.Kind<2 && c.Actor != null && !c.Actor.IsDisabled
@@ -6513,8 +6824,7 @@ private bool HasDamageCircleBuff()
             }
             if(best!=retained && bestPoint!=null)
             {
-                _assistSelectedPositionTarget=best;_assistSelectedPositionPoint=bestPoint;
-                _assistSelectedPositionReason=bestReason;
+                SelectAssistPosition(best,bestPoint,bestReason);
             }
             return best;
         }
@@ -6608,7 +6918,8 @@ private bool HasDamageCircleBuff()
                 && AssistLandingNeedsPrimary(ElapsedMs(now,_assistMovementLastTick),_assistMovementWasEscape,
                     _assistWotHfLastGameTick,_assistMovementGameTick)
                 && IsAssistStationaryCombat(retained) && IsAssistPositionHazardFree(Hud.Game.Me.FloorCoordinate);
-            if(HasAssistSelectedPosition(selected) && !landed)return selected;
+            if(HasAssistSelectedPosition(selected) && (!landed
+                || AssistCoverageOutweighs(_assistSelectedPositionPoint,selected,Hud.Game.Me.FloorCoordinate,retained)))return selected;
             bool acquiring = landed || preparing || (_assistApproachPending && !_assistHitVerified && travelling)
                 || (_assistWotHfResumePending && _assistAttackKey != ActionKey.Unknown
                     && ElapsedMs(now,_assistAttackStartedTick) < 400);
@@ -6866,7 +7177,7 @@ private IMonster PickAssistAcquisitionContact(bool canDash, int now)
             // Molten recovery can finish on useful contact with another local body.
             // The original encounter is resolved from live actors before returning.
             if(AssistRecoveryCanRelease())_assistSafetyCombatPending=false;
-            var safeMoltenReturn=TryResumeAssistMoltenEncounter(canDash,now);
+            var safeMoltenReturn=TryResumeAssistHazardEncounter(canDash,now);
             if(safeMoltenReturn!=null)
                 return RecordAssistSelection(safeMoltenReturn,AssistTargetTier(safeMoltenReturn),"molten-safe-encounter-return");
             var immediateRecovery=PickAssistSafetyCombat();
@@ -6900,19 +7211,16 @@ private IMonster PickAssistAcquisitionContact(bool canDash, int now)
             var safetyApproach=PickAssistSafetyApproach(canDash,now);
             if(safetyApproach!=null)
                 return RecordAssistSelection(safetyApproach,AssistRecoveryTier(safetyApproach),"safety-approach");
-            var doorReturn = ResolveAssistDoorReturn(now);
-            if (doorReturn != null && IsAssistEligible(doorReturn) && !IsAssistHealingRecovery()
-                && CanEngageAssistPosition(doorReturn, canDash, now))
+            var doorReturn=ResolveAssistDoorReturn(now);
+            if(_assistDoorReturnPending && !IsAssistHealingRecovery())
             {
-                bool betterContact = false;
-                foreach (var candidate in _assistCandidates)
-                    if (IsAssistStationaryCombat(candidate)
-                        || AssistTargetTier(candidate) > AssistTargetTier(doorReturn))
-                    { betterContact = true; break; }
-                int rx, ry;
-                if (!betterContact && TryGetAssistAim(doorReturn, out rx, out ry))
-                    return RecordAssistSelection(doorReturn, AssistTargetTier(doorReturn), "door-combat-resume");
-                if (betterContact) ClearAssistDoorReturn();
+                var liveReturn=doorReturn==null?null:FindAssistCandidate(doorReturn.AcdId);
+                if(liveReturn!=null && liveReturn.AnnId==doorReturn.AnnId && IsAssistMonsterValid(liveReturn)
+                    && AssistTargetTier(liveReturn)>=0 && !IsAssistRouteSuppressed(liveReturn)
+                    && !IsAssistTargetTemporarilyBlocked(liveReturn) && CanEngageAssistPosition(liveReturn,canDash,now))
+                    return RecordAssistSelection(liveReturn,AssistTargetTier(liveReturn),"door-combat-resume");
+                // The saved reverse route remains available, but absent/blocked bodies
+                // cannot suppress ordinary live-target selection. Never attack a ghost.
             }
             var acquisitionContact = PickAssistAcquisitionContact(canDash, now);
             if (acquisitionContact != null)
@@ -6984,7 +7292,7 @@ private IMonster PickAssistAcquisitionContact(bool canDash, int now)
                 if (tier < bestTier) continue;
                 bool fromCurrentDamageCircle = CanAttackFromCurrentDamageCircle(monster);
                 if (retained != null && tier == bestTier && IsAssistPositionElite(retained)
-                    && !AssistSameEncounter(retained,monster)
+                    && !AssistComparablePositionTarget(retained,monster)
                     && !IsAssistTargetTemporarilyBlocked(retained)) continue;
                 bool circleUpgrade = tier == bestTier && !AssistDensityFocusActive(retained)
                     && fromCurrentDamageCircle && !bestFromCurrentDamageCircle
@@ -7248,6 +7556,7 @@ private IMonster PickAssistAcquisitionContact(bool canDash, int now)
                     if(sno==ActorSnoEnum._monsteraffix_molten_trail && AssistSameHeight(me,actor.FloorCoordinate))
                         _assistMoltenTrails.Add(actor);
                     if (LowHealthFieldRadius(actor) > 0) RetainAssistField(actor, me);
+                    TraceAssistBridgeCandidate(actor);
                     if (_assistDoors.Count < 32 && IsAssistClosedDoor(actor)) _assistDoors.Add(actor);
                     if (IsAssistArcaneActor(actor))
                     {
@@ -8072,10 +8381,11 @@ private IMonster PickAssistAcquisitionContact(bool canDash, int now)
                     && point.XYDistanceTo(core.FloorCoordinate)<AssistArcaneRecoveryClearance)return false;
             return true;
         }
-        private bool TryPickAssistArcaneRecoveryContact(bool walkingExit,out IWorldCoordinate point)
+        private bool TryPickAssistArcaneRecoveryContact(bool walkingExit,out IWorldCoordinate point,Func<IWorldCoordinate,bool> qualify=null)
         {
             // First reuse the bounded productive-circle search, in solo and groups.
-            if(TryPickAssistCircleRecovery(walkingExit,out point,true))return true;
+            if(qualify==null && TryPickAssistCircleRecovery(walkingExit,out point,true))return true;
+            point=null;
             int rank=-1,inspected=0,evaluated=0;double score=double.MinValue;
             var me=Hud.Game.Me.FloorCoordinate;
             foreach(var body in _assistCandidates)
@@ -8102,7 +8412,7 @@ private IMonster PickAssistAcquisitionContact(bool canDash, int now)
                 var candidate=center.Offset((float)(dx/length*edge),(float)(dy/length*edge),0);
                 if(!IsAssistArcaneRecoveryClear(candidate))continue;
                 if(++evaluated>6)break;
-                if(!CanAttackAssistFrom(candidate,body))continue;
+                if(!CanAttackAssistFrom(candidate,body) || (qualify!=null && !qualify(candidate)))continue;
                 ConsiderAssistReactiveContact(candidate,body,ref point,ref rank,ref score,walkingExit);
             }
             return point!=null; // Otherwise the existing local/ground escape continues.
@@ -8588,6 +8898,7 @@ private IMonster PickAssistAcquisitionContact(bool canDash, int now)
                     || (!IsAssistObstaclePointFree(point))
                     || ((point.XYDistanceTo(Hud.Game.Me.FloorCoordinate)>0.25f&&!MapAssistLandingAllowed(point)))
                     || (!IsAssistPositionHazardFree(point))
+                    || (!escapeOnly && IsCycloneFrozenPulseReentry(point))
                     || ((!explosionExit && (!IsAssistElectrifiedPointFree(point, target)
                         || AssistChainDistance(point, target) < 3.0))))) return false;
                 if(!IsAssistMalletPointFree(point))return false;
@@ -9307,9 +9618,12 @@ private bool TryPickAssistDashPointPlanningBody(IMonster target, bool hazardEsca
             return true;
         }
 
+        [System.Diagnostics.Conditional("S7O_GENMONK_DIAGNOSTICS")]
+        private void TraceAssistBridgeCandidate(IActor actor) { }
+
         private static bool IsAssistBridge(ActorSnoEnum sno)
         {
-            return sno == ActorSnoEnum._x1_westm_bridge
+            return sno == ActorSnoEnum._a3dun_keep_bridge || sno == ActorSnoEnum._x1_westm_bridge
                 || sno == ActorSnoEnum._a3dun_keep_siegetowerdoor_a
                 || sno == ActorSnoEnum._x1_westm_bridge_scoundrel
                 || sno == ActorSnoEnum._a3dun_keep_bridge_icy
@@ -9414,7 +9728,7 @@ private bool TryPickAssistDashPointPlanningBody(IMonster target, bool hazardEsca
         private bool IsAssistClosedDoor(IActor actor)
         {
             if (actor == null || actor.SnoActor == null || actor.SnoActor.Type != ActorType.Gizmo
-                || actor.IsDisabled || actor.IsOperated || AssistDoorBlacklist.Contains(actor.SnoActor.Sno)
+                || actor.IsDisabled || actor.IsOperated || (AssistDoorBlacklist.Contains(actor.SnoActor.Sno) && !(actor.SnoActor.Sno==ActorSnoEnum._a3dun_keep_bridge && actor.IsClickable))
                 || actor.WorldId != Hud.Game.Me.WorldId || !IsAssistPositionWorldPoint(actor.FloorCoordinate)
                 || actor.SnoActor.Kind == ActorKind.Shrine
                 || actor.SnoActor.Kind == ActorKind.Portal) return false;
@@ -9429,49 +9743,54 @@ private bool TryPickAssistDashPointPlanningBody(IMonster target, bool hazardEsca
 
         private bool IsAssistEarlyDoorSuppressed(IActor door)
         {
-            AssistDoorFailure failure;
-            if(!_assistDoorFailures.TryGetValue(door.AcdId,out failure) || !failure.EarlyAttempted)return false;
-            if(failure.World!=Hud.Game.Me.WorldId || door.FloorCoordinate.XYDistanceTo(failure.DoorX,failure.DoorY)>=2f) {
-                _assistDoorFailures.Remove(door.AcdId);return false;
-            }
-            if(Hud.Game.Me.FloorCoordinate.XYDistanceTo(door.FloorCoordinate)>12f)return true;
-            failure.EarlyAttempted=false;failure.Count=0;failure.DetourEliteAcd=0;
-            _assistDoorFailures[door.AcdId]=failure;return false;
+            AssistDoorFailure f;
+            bool recorded=_assistDoorFailures.TryGetValue(door.AcdId,out f);
+            foreach(var watch in _assistDoorConfirmations)
+                if(watch.SuppressRetry && watch.World==door.WorldId && watch.Acd==door.AcdId && watch.Ann==door.AnnId)return true;
+            if(!recorded)return false;
+            if(f.World!=door.WorldId || f.Ann!=door.AnnId || door.FloorCoordinate.XYDistanceTo(f.DoorX,f.DoorY)>=2)
+            { _assistDoorFailures.Remove(door.AcdId);return false; }
+            // A rejected plan did not spend an interaction attempt. Once local,
+            // exact native hover can recover without requiring four yards of walking.
+            if(f.PlanOnly && AssistDoorBodyGap(door)<=(IsAssistBreakableDoor(door)?AssistDoorAttackReachYards:4f))
+            { _assistDoorFailures.Remove(door.AcdId);return false; }
+            if(f.PlanOnly && !f.PathRecovery && HasAssistDoorCollision())
+            { _assistDoorFailures.Remove(door.AcdId);return false; }
+            var me=Hud.Game.Me.FloorCoordinate;
+            if(!f.EarlyAttempted && (me.XYDistanceTo(f.PlayerX,f.PlayerY)>4 || Math.Abs(me.Z-f.PlayerZ)>4))
+            { _assistDoorFailures.Remove(door.AcdId);return false; }
+            int x,y;
+            if(!f.EarlyAttempted && f.Count>0
+                && AssistDoorBodyGap(door)<=(IsAssistBreakableDoor(door)?AssistDoorAttackReachYards:4f)
+                && TryReuseAssistDoorHover(door,out x,out y))
+            { _assistDoorFailures.Remove(door.AcdId);return false; }
+            if(CanRecoverAssistDoor(door,f))return false;
+            if(f.EarlyAttempted || f.Count>0)TraceAssistDoorNative("range",door,0,0,"attempt-suppressed");
+            return f.EarlyAttempted || f.Count>0;
         }
 
         private void ReserveAssistEarlyDoor(IActor door)
         {
             if(_assistDoorFailures.Count>=32 && !_assistDoorFailures.ContainsKey(door.AcdId))
                 _assistDoorFailures.Remove(_assistDoorFailures.Keys.First());
+            AssistDoorFailure state;_assistDoorFailures.TryGetValue(door.AcdId,out state);
             var me=Hud.Game.Me.FloorCoordinate;var point=door.FloorCoordinate;
-            _assistDoorFailures[door.AcdId]=new AssistDoorFailure {World=Hud.Game.Me.WorldId,
-                PlayerX=me.X,PlayerY=me.Y,DoorX=point.X,DoorY=point.Y,EarlyAttempted=true};
+            state.World=door.WorldId;state.Ann=door.AnnId;state.PlayerX=me.X;state.PlayerY=me.Y;state.PlayerZ=me.Z;
+            state.DoorX=point.X;state.DoorY=point.Y;state.Count=0;state.PlanOnly=false;
+            // Reserving hover/route ownership is not a submitted travel or attack.
+            _assistDoorFailures[door.AcdId]=state;
         }
 
         private bool IsAssistEarlyDoorApproachReady(IActor door,IMonster combatTarget)
         {
-            if(_assistDoorPathState!="Ready" || _assistDoorApproachPoint==null)return false;
-            var me=Hud.Game.Me.FloorCoordinate;var goal=_assistDoorApproachPoint;var end=door.FloorCoordinate;
-            if(me.XYDistanceTo(end)>AssistDashTravelLimit-0.25 || me.XYDistanceTo(goal)>AssistDashTravelLimit-0.25
-                || goal.XYDistanceTo(end)>8f)return false;
-            var status=MapAssistStatus();if(status==null)return false;
-            int x,y;
-            if(!IsAssistDashPointSafe(goal,combatTarget,out x,out y,false,true))return false;
-            try {
-                if(!status.ContainsKey("epoch") || Convert.ToInt64(status["epoch"])!=_assistDoorRouteEpoch)return false;
-                var corridor=AssistMapRead("corridor",new object[]{status["epoch"],me.X,me.Y,me.Z,goal.X,goal.Y,goal.Z,0.6f}) as Dictionary<string,object>;
-                if(corridor==null || !corridor.ContainsKey("state") || (corridor["state"] as string)!="ClearCandidate")return false;
-            }catch{return false;}
-            if(IsAssistBreakableDoor(door)) {
-                // Only aim into this blocker when its connected approach is on our
-                // direct near-side ray. A path around a corner is not strike permission.
-                double dx=end.X-me.X,dy=end.Y-me.Y,len=dx*dx+dy*dy;
-                if(len<1)return false;
-                double along=((goal.X-me.X)*dx+(goal.Y-me.Y)*dy)/len;
-                double px=me.X+along*dx-goal.X,py=me.Y+along*dy-goal.Y;
-                if(along<=0 || along>=1 || px*px+py*py>1.0)return false;
-            }
-            return true;
+            if(door==null || !_assistDoorConnectedProof || _assistDoorApproachPoint==null
+                || (_assistDoorPathState!="Ready" && _assistDoorPathState!="AtApproach"))return false;
+            var me=Hud.Game.Me.FloorCoordinate;var goal=_assistDoorApproachPoint;var hop=AssistDoorNextHop();
+            var status=MapAssistStatus();
+            if(status==null || !status.ContainsKey("epoch") || Convert.ToInt64(status["epoch"])!=_assistDoorRouteEpoch
+                || me.XYDistanceTo(door.FloorCoordinate)>AssistDoorDiscoveryYards || me.XYDistanceTo(goal)>AssistDoorDiscoveryYards
+                || !AssistDoorInteractionPoint(door,goal) || hop==null || me.XYDistanceTo(hop)>AssistDashTravelLimit)return false;
+            int x,y;return AssistDoorLandingClear(status,hop,0.75f) && IsAssistDashPointSafe(hop,combatTarget,out x,out y,false,true);
         }
 
         private int AssistDoorFailureCount(IActor actor)
@@ -9493,12 +9812,29 @@ private bool TryPickAssistDashPointPlanningBody(IMonster target, bool hazardEsca
             return failure.Count;
         }
 
+        private void CommitAssistDoorAction(IActor door,bool interaction)
+        {
+            AssistDoorFailure state;
+            if(!_assistDoorFailures.TryGetValue(door.AcdId,out state))
+            { ReserveAssistEarlyDoor(door);state=_assistDoorFailures[door.AcdId]; }
+            state.EarlyAttempted=true;state.Count=0;state.PlanOnly=false;
+            if(interaction)
+            { if(_assistDoorCloseRecovery)state.CloseRecoveryUsed=true; }
+            else
+            { state.RangedAttempt=true;if(_assistDoorCloseRecovery)state.TravelRecoveryUsed=true; }
+            _assistDoorFailures[door.AcdId]=state;
+            TraceAssistDoorNative("action-submitted",door,_assistDoorAimX,_assistDoorAimY,
+                (interaction?"interaction":"travel")+" recovery="+_assistDoorCloseRecovery
+                +" travelUsed="+state.RangedAttempt+" localRecoveryUsed="+state.CloseRecoveryUsed
+                +" travelRecoveryUsed="+state.TravelRecoveryUsed);
+        }
+
         private void RecordAssistDoorFailure(IActor actor)
         {
             if (actor == null) return;
             int count = AssistDoorFailureCount(actor);
-            AssistDoorFailure previous;bool early=_assistDoorEarlyAttempt
-                || (_assistDoorFailures.TryGetValue(actor.AcdId,out previous) && previous.EarlyAttempted);
+            AssistDoorFailure previous;bool had=_assistDoorFailures.TryGetValue(actor.AcdId,out previous);
+            bool early=had && previous.EarlyAttempted;
             if (_assistDoorFailures.Count >= 32 && !_assistDoorFailures.ContainsKey(actor.AcdId))
             {
                 uint oldest = 0u;
@@ -9508,10 +9844,11 @@ private bool TryPickAssistDashPointPlanningBody(IMonster target, bool hazardEsca
             var me = Hud.Game.Me.FloorCoordinate;
             var point = actor.FloorCoordinate;
             _assistDoorFailures[actor.AcdId] = new AssistDoorFailure
-            { Count = _assistDoorEarlyAttempt ? 0 : _assistDoorCombatDetour ? Math.Max(2, count + 1) : count + 1, EarlyAttempted=early,
+            { Count = early ? 0 : _assistDoorCombatDetour ? Math.Max(2, count + 1) : count + 1, EarlyAttempted=early,PathRecovery=had && previous.PathRecovery
+                    || (_assistDoorConnectedProof && _assistDoorStage==5),RangedAttempt=had && previous.RangedAttempt,CloseRecoveryUsed=had && previous.CloseRecoveryUsed,TravelRecoveryUsed=had && previous.TravelRecoveryUsed,
                 DetourEliteAcd = !_assistDoorEarlyAttempt && _assistDoorCombatDetour ? _assistDoorReturnTargetAcd : 0u,
-                PlayerX = me.X, PlayerY = me.Y,
-                DoorX = point.X, DoorY = point.Y, World = Hud.Game.Me.WorldId };
+                PlayerX = me.X, PlayerY = me.Y, PlayerZ=me.Z,
+                DoorX = point.X, DoorY = point.Y, World = Hud.Game.Me.WorldId, Ann=actor.AnnId };
             if(_assistDoorEarlyAttempt)TraceAssistTrial("DOOR_EARLY","phase=unconfirmed door="+actor.AcdId
                 +" hp="+actor.Hitpoints+" distance="+me.XYDistanceTo(point));
             var combat=FindAssistCandidate(_assistTargetAcd);
@@ -9536,26 +9873,18 @@ private bool TryPickAssistDashPointPlanningBody(IMonster target, bool hazardEsca
             return true;
         }
 
-        private bool TryGetAssistDoorAim(IActor actor, out int x, out int y)
-        {
-            x = y = 0;
-            if (!IsAssistDoorPathSafe(actor)) return false;
-            var screen = actor.FloorCoordinate.ToScreenCoordinate(true, true);
-            if (screen == null || !AssistPositionFinite(screen.X) || !AssistPositionFinite(screen.Y)) return false;
-            double cx = Math.Round(screen.X), cy = Math.Round(screen.Y);
-            if (!IsLeftClickPointSafe(cx, cy)) return false;
-            long sx = (long)cx + Hud.Window.Offset.X, sy = (long)cy + Hud.Window.Offset.Y;
-            if (sx < int.MinValue || sx > int.MaxValue || sy < int.MinValue || sy > int.MaxValue) return false;
-            x = (int)sx; y = (int)sy;
-            return true;
-        }
+        private bool TryGetAssistDoorAim(IActor actor,out int x,out int y)
+        { return TryGetAssistDoorProbe(actor,_assistDoorAimPhase,out x,out y); }
 
         private bool IsAssistDoorHoverAuthorized(IActor hovered)
         {
-            return _assistDoorClickAuthorized && _assistActive && AssistRequested()
-                && !s7o_GenMonkInput.IsStandstillDown() && hovered != null
-                && _assistDoorTarget != null && hovered.AcdId == _assistDoorTarget.AcdId
-                && hovered.IsSelected && IsAssistClosedDoor(hovered);
+            if(!_assistActive || !AssistRequested() || !AssistDoorHoverMatches(_assistDoorTarget,hovered)
+                || !IsAssistClosedDoor(hovered))return false;
+            if(!_assistDoorClickAuthorized)return IsAssistDoorWalkHoverSafe(hovered);
+            int x,y;
+            return (!s7o_GenMonkInput.IsStandstillDown() || (IsAssistBreakableDoor(hovered)
+                && AssistDoorBodyGap(hovered)<=AssistDoorAttackReachYards))
+                && TryReuseAssistDoorHover(_assistDoorTarget,out x,out y);
         }
 
         private void BlockAssistDoorGoal(IMonster goal)
@@ -9571,14 +9900,7 @@ private bool TryPickAssistDashPointPlanningBody(IMonster target, bool hazardEsca
                     BlockAssistNavigationTarget(candidate,noProgress:true);
         }
 
-        private bool MapAssistTargetDoorBlocked(IActor door)
-        {
-            var status=MapAssistStatus();
-            if(status==null) return Hud.Game.Me.FloorCoordinate.XYDistanceTo(door.FloorCoordinate)>12f;
-            // Missing route geometry permits only a bounded local native attempt.
-            return _assistDoorPathState != "AtApproach"
-                && Hud.Game.Me.FloorCoordinate.XYDistanceTo(door.FloorCoordinate)>12f;
-        }
+
 
         private bool IsAssistReachableCombat(IMonster target)
         {
@@ -9587,11 +9909,15 @@ private bool TryPickAssistDashPointPlanningBody(IMonster target, bool hazardEsca
             return IsAssistStationaryCombat(target);
         }
 
-        private void CancelAssistDoor(bool preserveSubmittedDash = false)
+        private void CancelAssistDoor(bool preserveSubmittedDash = false, [System.Runtime.CompilerServices.CallerMemberName] string caller = null)
         {
+            if(_assistDoorTarget!=null)TraceAssistDoorNative("cancel",_assistDoorTarget,_assistDoorAimX,_assistDoorAimY,caller??"unknown-owner");
+            _assistDoorInputWaitAt=int.MinValue;_assistDoorInputWaitTotal=0;
             if (_assistDoorWalkStage != 0) ReleaseAssistAttack();
-            _assistDoorWalkStage = 0; _assistDoorWalkPoint=null; _assistDoorRouteEpoch=0;
-            _assistDoorWalkReason="none";
+            if(_assistDoorTarget!=null || _assistDoorBorrowedPrimary)ReleaseAssistScopedStandstill();
+            _assistDoorBorrowedPrimary=false;_assistDoorHopCount=0;_assistDoorBurstStartedAt=int.MinValue;_assistDoorFirstHop=null;_assistDoorFirstHopConnected=false;
+            _assistDoorConnectedProof=false;_assistDoorPlanAcd=0u;_assistDoorPlanOrigin=null;
+            _assistDoorWalkStage = 0; _assistDoorRouteEpoch=0;
             _assistDoorPathState = _assistDoorPathReason = "none"; _assistDoorApproachPoint = _assistDoorWaypoint = null;
             _assistDoorBestRemaining = _assistDoorRemaining = _assistDoorDashRemaining = double.NaN;
             _assistDoorDashWaypoint = null;
@@ -9599,37 +9925,19 @@ private bool TryPickAssistDashPointPlanningBody(IMonster target, bool hazardEsca
                 && _pulse == _assistDoorPulseKey && !_pulseIsMaintenance) CancelTarget(preserveSubmittedDash);
             if (_assistDoorCombatDetour) _assistDoorReturnPending = true;
             _assistDoorCombatDetour = false;
+            if(_assistDoorTarget!=null)ClearAssistDoorQuery();
+            _assistDoorRecoveryWalkPoint=null;_assistDoorCloseRecovery=false;
+            _assistDoorRequiredTrip=false;_assistDoorFollowPath=false;_assistDoorTravelOnly=false;_assistDoorFinalHop=false;
             _assistDoorTarget = null;
             _assistDoorDashSpent = false; _assistDoorEarlyAttempt=false;
             _assistDoorStage = 0;
             _assistDoorPulseKey = ActionKey.Unknown;
             _assistDoorClickAuthorized = false;
             _assistDoorStatus = "none";
-            _assistDoorCombatPaused = false;
-            _assistDoorDashFailures = 0;
         }
 
         // Forward preference applies to housekeeping; failed routes may recover via side doors.
-        private bool IsAssistForwardDoor(IActor door, IMonster combatTarget, bool singleDashOnly = false)
-        {
-            var me = Hud.Game.Me.FloorCoordinate;
-            var point = door.FloorCoordinate;
-            double dx = point.X - me.X, dy = point.Y - me.Y;
-            double distance = Math.Sqrt(dx * dx + dy * dy);
-            if (distance > (singleDashOnly ? AssistDashTravelLimit - 0.25 : AssistDoorApproachRange)) return false;
-            if (distance <= 8.0) return true; // Already beside it; no backtracking trip.
-            double hx = _assistTravelHeadingX, hy = _assistTravelHeadingY;
-            bool headingKnown = _assistTravelHeadingKnown;
-            if (combatTarget != null)
-            {
-                double tx = combatTarget.FloorCoordinate.X - me.X;
-                double ty = combatTarget.FloorCoordinate.Y - me.Y;
-                double targetDistance = Math.Sqrt(tx * tx + ty * ty);
-                if (targetDistance > 8.0)
-                { hx = tx / targetDistance; hy = ty / targetDistance; headingKnown = true; }
-            }
-            return !headingKnown || (dx * hx + dy * hy) / distance >= 0.25;
-        }
+
 
         private IPlayerSkill AssistDoorDashSkill()
         {
@@ -9639,89 +9947,113 @@ private bool TryPickAssistDashPointPlanningBody(IMonster target, bool hazardEsca
             return null;
         }
 
-        // Optional elite detours reserve two casts plus Spirit headroom. Raiment can
-        // refund a charge when Spirit funds the cast; ordinary travel keeps its old rules.
-        private bool CanReserveAssistDoorReturn(IPlayerSkill dash)
-        {
-            if (!AutoDash || !CanApproachDash(dash) || s7o_GenMonkInput.IsDown(dash.Key)) return false;
-            double cost = Math.Max(0, dash.ResourceCost);
-            bool raiment = Hud.Game.Me.GetSetItemCount(755275u) >= 4;
-            if (raiment) cost = Math.Max(cost, 75.0 * (1.0 - Math.Max(0.0,
-                Math.Min(1.0, Hud.Game.Me.Stats.ResourceCostReduction))));
-            double spirit = Hud.Game.Me.Stats.ResourceCurPri;
-            bool funded = spirit >= cost * 2.0 + (cost > 0 ? 25.0 : 0.0);
-            return funded && (dash.Charges >= 2 || (raiment && cost > 0));
-        }
+
 
         private void ClearAssistDoorReturn()
         {
+            _assistDoorRetainedBody=null;
             _assistDoorReturnPending = _assistDoorCombatDetour = false;
             _assistDoorReturnTargetAcd = _assistDoorReturnWorld = 0u;
+            _assistDoorReturnVia=_assistDoorReturnHop=null;_assistDoorReturnHopCount=0;_assistDoorReturnAnn=0u;_assistDoorReturnDashSpent=false;_assistDoorReturnDoorPoint=null;
             _assistDoorReturnPoint = null; _assistDoorReturnUntil = 0;
         }
 
         private IMonster ResolveAssistDoorReturn(int now)
         {
-            if (!_assistDoorReturnPending) return null;
-            if (!_assistActive || !AssistRequested() || _rangedCleanup
-                || _assistDoorReturnWorld != Hud.Game.Me.WorldId || Due(now, _assistDoorReturnUntil))
-            { ClearAssistDoorReturn(); return null; }
-            foreach (var monster in Hud.Game.AliveMonsters)
-                if (monster.AcdId == _assistDoorReturnTargetAcd)
-                {
-                    if (!monster.IsAlive || monster.WorldId != _assistDoorReturnWorld
-                        || IsAssistRouteSuppressed(monster) || IsAssistTargetTemporarilyBlocked(monster))
-                    { ClearAssistDoorReturn(); return null; }
-                    return IsAssistMonsterValid(monster) ? monster : null;
-                }
-            ClearAssistDoorReturn(); // Dead or unloaded objectives must not create a blind chase.
-            return null;
+            if(!_assistDoorReturnPending)return null;
+            if(!_assistActive || !AssistRequested() || _rangedCleanup || _assistDoorReturnWorld!=Hud.Game.Me.WorldId
+                || Due(now,_assistDoorReturnUntil))
+            {ClearAssistDoorReturnBecause("cancel-context-or-expiry");return null;}
+            IMonster original=null,best=null;
+            // Attack visibility is not transport identity. A known actor may leave
+            // the ordinary visible cache during a two-hop trip across floors.
+            foreach(var body in Hud.Game.AliveMonsters)
+            {
+                if(!AssistDoorReturnBodyValid(body))continue;
+                if(body.Rarity==ActorRarity.Boss && body.AcdId!=_assistDoorReturnTargetAcd
+                    && Hud.Game.Me.InGreaterRift && AssistGuardianCombatReady(body))
+                {ClearAssistDoorReturnBecause("guardian-combat-priority");return null;}
+                if(body.AcdId==_assistDoorReturnTargetAcd && body.AnnId==_assistDoorReturnAnn)original=body;
+                if(IsAssistPositionElite(body) && IsAssistDoorReturnSide(body) && _assistDoorReturnPoint!=null
+                    && body.FloorCoordinate.XYDistanceTo(_assistDoorReturnPoint)<=50
+                    && (best==null || AssistTargetTier(body)>AssistTargetTier(best)))best=body;
+            }
+            var target=original!=null && IsAssistPositionElite(original)?original:best??original;
+            if(target==null && _assistDoorRetainedBody!=null)
+            {
+                if(_assistDoorRetainedBody.AcdId!=_assistDoorReturnTargetAcd || _assistDoorRetainedBody.AnnId!=_assistDoorReturnAnn
+                    || !AssistDoorReturnBodyValid(_assistDoorRetainedBody))
+                {ClearAssistDoorReturnBecause("cancel-confirmed-body-invalid");return null;}
+                target=_assistDoorRetainedBody;
+            }
+            if(target!=null)
+            {
+                _assistDoorRetainedBody=target;_assistDoorReturnTargetAcd=target.AcdId;_assistDoorReturnAnn=target.AnnId;
+            }
+            // Missing collection data alone cannot erase the saved, bounded return
+            // route. It authorizes transit to the origin, never attacks on a ghost.
+            return target;
         }
 
-        private bool TryReturnAssistDoorCombat(int now, IMonster combatTarget)
+        private bool TryReturnAssistDoorCombat(int now,IMonster combatTarget)
         {
-            var target = ResolveAssistDoorReturn(now);
-            if (target == null) return false;
-            if (combatTarget != null && (IsAssistStationaryCombat(combatTarget)
-                || AssistTargetTier(combatTarget) > AssistTargetTier(target)))
-            { ClearAssistDoorReturn(); return false; }
-            if (IsAssistStationaryCombat(target))
-            { ClearAssistDoorReturn(); return false; }
-            // Survival owns the next contact. Temporary input/charge shortages retain
-            // the return objective while normal attacking/navigation continues.
-            if (IsAssistHealingRecovery() || _assistSafetyCombatOnly || _assistSafetyApproachAcd != 0u
-                || AssistReactiveEscapeDue() || AssistMoltenEscapeDue()
-                || s7o_GenMonkInput.IsStandstillDown() || s7o_InputReleaseArbiter.HasPendingRelease
-                || _selfDashKey != ActionKey.Unknown || _pulse != ActionKey.Unknown
-                || !Due(now, _nextDashAimTick)) return false;
-            var point = _assistDoorReturnPoint;
-            if (point == null || Hud.Game.Me.FloorCoordinate.XYDistanceTo(point) < 3f)
-            { ClearAssistDoorReturn(); return false; }
-            var dash = AssistDoorDashSkill();
-            if (!AutoDash || !CanApproachDash(dash) || s7o_GenMonkInput.IsDown(dash.Key)) return false;
-            int x, y;
-            if (!IsAssistDashPointSafe(point, target, out x, out y, false, true)
-                || !AllowAssistMovement(target, point, now, false, false)) return false;
-            ReleaseAssistAttack(); CancelTarget();
-            MaintainDash(dash, now, target, point, false, true);
-            if (_selfDashKey == ActionKey.Unknown) return false;
-            _assistTargetAcd = target.AcdId; 
-            if (IsAssistPositionElite(target)) RememberAssistHazardReturn(target);
-            ClearAssistDoorReturn(); // The submitted transaction now owns completion/recovery.
-            _assistDoorStatus = _assistStatus = "door-return-dash";
+            if(!_assistDoorReturnPending)return false;
+            if(_assistDoorReturnDashSpent || _assistDoorReturnHopCount>=2)
+            {ClearAssistDoorReturnBecause("reverse-budget-finished");return false;}
+            var target=ResolveAssistDoorReturn(now);
+            if(!_assistDoorReturnPending)return false;
+            var origin=_assistDoorReturnPoint;var me=Hud.Game.Me.FloorCoordinate;
+            if(origin==null){ClearAssistDoorReturnBecause("cancel-missing-origin");return false;}
+            if(AssistDoorReturnArrived(me,origin))
+            {ClearAssistDoorReturnBecause("arrived-origin");return false;}
+            if(IsAssistHealingRecovery() || _assistSafetyCombatOnly || _assistSafetyApproachAcd!=0u
+                || AssistUrgentEscapeDue())
+            {TraceAssistDoorReturnState("yield-safety",target);return false;}
+            if((s7o_GenMonkInput.IsStandstillDown() && _assistScopedStandstill==0)
+                || s7o_InputReleaseArbiter.HasPendingRelease || _selfDashKey!=ActionKey.Unknown
+                || _pulse!=ActionKey.Unknown || !Due(now,_nextDashAimTick))
+            {TraceAssistDoorReturnState("wait-input",target);return false;}
+            var dash=AssistDoorDashSkill();
+            if(!AutoDash || !CanApproachDash(dash) || s7o_GenMonkInput.IsDown(dash.Key))
+            {TraceAssistDoorReturnState("wait-dash-resource",target);return false;}
+            // Retrace the admitted journey before optimizing the next attack point.
+            var point=_assistDoorReturnHopCount==0 && _assistDoorReturnVia!=null
+                && me.XYDistanceTo(_assistDoorReturnVia)>3f?_assistDoorReturnVia:origin;
+            if(me.XYDistanceTo(point)>AssistDashTravelLimit)
+            {TraceAssistDoorReturnState("reverse-hop-out-of-range",target);return false;}
+            _assistDoorReturnHop=point;
+            int x,y;
+            if(!IsAssistDashPointSafe(point,null,out x,out y,false,true)
+                || !AllowAssistMovement(null,point,now,false,false))
+            {TraceAssistDoorReturnState("reverse-hop-unsafe",target);return false;}
+            ReleaseAssistAttack();CancelTarget();
+            MaintainDash(dash,now,null,point,false,true);
+            if(_selfDashKey==ActionKey.Unknown){TraceAssistDoorReturnState("reverse-input-not-admitted",target);return false;}
+            if(target!=null)_assistTargetAcd=target.AcdId;
+            // Arrival (or a native failed outcome), not submission, ends the route.
+            _assistDoorReturnDashSpent=false;
+            _assistDoorStatus=_assistStatus="door-return-dash";
+            TraceAssistDoorReturnState(point==origin?"reverse-origin-submitted":"reverse-via-submitted",target);
             return true;
         }
 
         private bool CompleteAssistDoor(IMonster combatTarget,int now)
         {
-            var door=_assistDoorTarget;
+            var door=_assistDoorTarget;bool travel=_assistDoorTravelOnly;
             if(door==null)return false;
             bool opened=door.WorldId==Hud.Game.Me.WorldId && (door.IsOperated || door.IsDisabled
                 || (IsAssistBreakableDoor(door)&&door.Hitpoints<=0));
-            _assistDoorFailures.Remove(door.AcdId);
+            bool pending=!opened && (_assistDoorClicks>0 || _assistDoorBorrowedPrimary) && ArmAssistDoorConfirmation(door);
+            if(opened)
+            {
+                _assistDoorFailures.Remove(door.AcdId);
+                ResolveAssistDoorConfirmation(door); // Positive native state is final.
+            }
             CancelAssistDoor(); // Release only the owned door pulse, immediately.
             _assistDoorCompletedAcd=door.AcdId;_assistDoorCompletedGameTick=Hud.Game.CurrentGameTick;
-            _assistDoorLastResult=opened?"opened-resume":"unavailable-resume";
+            _assistDoorLastResult=opened?"opened-resume":pending?"awaiting-native-confirmation":"unavailable-resume";
+            TraceAssistDoorNative("confirmation",door,0,0,opened?"native-opened":pending?"pending-native-state":"actor-unavailable");
+            TraceAssistDoorResume(opened?"opened":pending?"awaiting-confirmation":"unavailable",door,travel);
             if(opened)
             {
                 // Opening another passage may rearm route failures, but must not
@@ -9747,452 +10079,1128 @@ private bool TryPickAssistDashPointPlanningBody(IMonster target, bool hazardEsca
                 ResetMapAssist();
                 _nextDashAimTick=now; // Successful opening is not a failed-Dash retry.
             }
+            if(travel)return FinishAssistDoorTravel();
             return TryReturnAssistDoorCombat(now, combatTarget); // False continues normal combat this update.
         }
 
-        private bool UpdateAssistDoor(IMonster combatTarget, int now, bool canDashNow = false)
+        private uint _assistDoorReturnAnn,_assistDoorPlanAcd,_assistDoorPlanWorld;
+        private bool _assistDoorReturnDashSpent;
+        private long _assistDoorPlanEpoch;
+        private IWorldCoordinate _assistDoorPlanOrigin;
+        private IWorldCoordinate _assistDoorReturnDoorPoint;
+        private bool _assistDoorConnectedProof;
+        private bool _assistDoorBorrowedPrimary;
+        private int _assistDoorPlanStartedAt=int.MinValue;
+        private static bool AssistDoorReserve(bool available,int charges,double spirit,double maximum)
         {
-            // Confirmation preempts standstill/input guards: an opened door no longer
-            // owns input or a closed-door route, even if combat already resumed nearby.
-            if (_assistDoorTarget != null && !IsAssistClosedDoor(_assistDoorTarget))
-                return CompleteAssistDoor(combatTarget,now);
-            if (!_assistActive || !AssistRequested() || s7o_GenMonkInput.IsStandstillDown()
-                || s7o_InputReleaseArbiter.HasPendingRelease)
-            { CancelAssistDoor(); return TryReturnAssistDoorCombat(now, combatTarget); }
-            if (_selfDashKey != ActionKey.Unknown) return _assistDoorTarget != null;
-            bool allowEarlyCombat=_assistDoorEarlyAttempt || (_assistDoorTarget==null && _assistDoors.Count>0
-                && combatTarget!=null && canDashNow && !_rangedCleanup
-                && !IsAssistHealingRecovery() && !_assistSafetyCombatOnly && _assistSafetyApproachAcd==0u
-                && !_assistHazardReturnSelecting && HasAssistPackContact(combatTarget)
-                && CanReserveAssistDoorReturn(AssistDoorDashSkill()));
-            if (IsAssistReachableCombat(combatTarget) && !allowEarlyCombat)
+            // User-approved one-hop policy: retain a charge, or fund the
+            // Raiment refund with the conservative 20-Spirit test threshold.
+            return available && (charges>=2 || (charges>=1 && spirit>=20.0));
+        }
+        private double AssistDoorBodyGap(IActor door)
+        { return Math.Max(0,Hud.Game.Me.FloorCoordinate.XYDistanceTo(door.FloorCoordinate)-Math.Max(0,Math.Min(3f,door.RadiusScaled))); }
+        private bool IsAssistDoorReturnSide(IMonster body)
+        {
+            if(body==null || _assistDoorReturnPoint==null)return false;
+            if(_assistDoorReturnDoorPoint==null)return true;
+            double dx=_assistDoorReturnDoorPoint.X-_assistDoorReturnPoint.X,dy=_assistDoorReturnDoorPoint.Y-_assistDoorReturnPoint.Y;
+            return (body.FloorCoordinate.X-_assistDoorReturnDoorPoint.X)*dx
+                +(body.FloorCoordinate.Y-_assistDoorReturnDoorPoint.Y)*dy<=0;
+        }
+        private bool FailAssistDoorAttempt(IMonster combatTarget,int now,string reason)
+        {
+            var door=_assistDoorTarget;bool travel=_assistDoorTravelOnly;
+            TraceAssistPositionDecision("DOOR_FAILED",combatTarget,door==null?null:door.FloorCoordinate,reason);
+            // A completed local hover search consumes the one recovery attempt
+            // even when no click could be authorized. Input interruptions and
+            // the initial ranged attempt do not consume that local budget.
+            if(_assistDoorCloseRecovery && door!=null
+                && (reason=="hover-burst-unconfirmed" || reason=="hover-probes-exhausted"))
             {
-                if (_assistDoorTarget != null)
+                AssistDoorFailure state;
+                if(_assistDoorFailures.TryGetValue(door.AcdId,out state)
+                    && state.World==door.WorldId && state.Ann==door.AnnId && state.RangedAttempt)
                 {
-                    if (_assistDoorWalkStage != 0) ReleaseAssistAttack();
-                    if (_assistDoorPulseKey != ActionKey.Unknown && _pulse == _assistDoorPulseKey) CancelTarget();
-                    _assistDoorPulseKey = ActionKey.Unknown; _assistDoorClickAuthorized = false;
-                    _assistDoorStage = 1; _assistDoorCombatPaused = true;
-                    _assistDoorStatus = "door-paused-combat";
+                    state.CloseRecoveryUsed=true;_assistDoorFailures[door.AcdId]=state;
+                    TraceAssistDoorNative("recovery-finished",door,_assistDoorAimX,_assistDoorAimY,reason);
                 }
-                return false;
             }
-            if (_assistDoorCombatPaused)
+            RecordAssistDoorFailure(door);CancelAssistDoor();_nextDashAimTick=now;
+            TraceAssistDoorResume("failed:"+reason,door,travel);
+            if(travel)return FinishAssistDoorTravel();
+            return TryReturnAssistDoorCombat(now,combatTarget);
+        }
+        private void DeferAssistDoorPlan(IActor door)
+        {
+            AssistDoorFailure prior;
+            if(_assistDoorFailures.TryGetValue(door.AcdId,out prior) && prior.EarlyAttempted)
             {
-                _assistDoorCombatPaused = false;
-                _assistDoorProgressGameTick = Hud.Game.CurrentGameTick;
-                _assistDoorSinceTick = now;
+                // A fresh recovery route that itself fails must not spin forever.
+                // The independent close-range interaction remains available.
+                if(prior.PathRecovery){prior.TravelRecoveryUsed=true;_assistDoorFailures[door.AcdId]=prior;}
+                return;
             }
-            // Door presence alone cannot preempt a first bounded shortcut attempt.
-            if (_assistDoorTarget == null && combatTarget != null && canDashNow
-                && !_assistNavigationPending && !IsAssistTargetTemporarilyBlocked(combatTarget)
-                && (!CanAttackAssistFrom(Hud.Game.Me.FloorCoordinate, combatTarget)
-                    || MapAssistTargetBlocked(combatTarget))) return false;
-            // Failed door travel yields to actual reachable damage instead of repeatedly
-            // pulling the character back from nearby combat toward an unchanged wall.
-            if (_assistDoorTarget!=null && AssistDoorFailureCount(_assistDoorTarget)>0
-                && combatTarget!=null && CanAttackAssistFrom(Hud.Game.Me.FloorCoordinate,combatTarget)
-                && !MapAssistTargetBlocked(combatTarget))
-            { CancelAssistDoor();return false; }
-            // Accessible elites preempt optional door trips, including trips already underway.
-            // A mapped blocking door retains recovery priority when the elite is inaccessible.
-            if (!allowEarlyCombat && IsAssistPositionElite(combatTarget) && !IsAssistRouteSuppressed(combatTarget)
-                && !MapAssistTargetBlocked(combatTarget)
-                && (_assistMapDoorAcd == 0u
-                    || CanAttackAssistFrom(Hud.Game.Me.FloorCoordinate, combatTarget)))
+            if(_assistDoorFailures.Count>=32 && !_assistDoorFailures.ContainsKey(door.AcdId))
+                _assistDoorFailures.Remove(_assistDoorFailures.Keys.First());
+            var me=Hud.Game.Me.FloorCoordinate;var at=door.FloorCoordinate;
+            _assistDoorFailures[door.AcdId]=new AssistDoorFailure {World=door.WorldId,Ann=door.AnnId,Count=1,
+                PlayerX=me.X,PlayerY=me.Y,PlayerZ=me.Z,DoorX=at.X,DoorY=at.Y,EarlyAttempted=false,PlanOnly=true,PathRecovery=_assistDoorFollowPath};
+        }
+        private bool IsAssistDoorTripLanding(IMonster target,IWorldCoordinate point)
+        {
+            if(point==null || AssistUrgentEscapeDue() || IsAssistHealingRecovery() || _assistDamageEscapePending
+                || !IsAssistPositionHazardFree(point))return false;
+            if(_assistDoorTarget!=null && _assistDoorStage==5 && _assistDoorDashWaypoint!=null
+                && point.XYDistanceTo(_assistDoorDashWaypoint)<=0.25)
+                return IsAssistEarlyDoorApproachReady(_assistDoorTarget,target);
+            return _assistDoorReturnPending && _assistDoorReturnWorld==Hud.Game.Me.WorldId
+                && _assistDoorReturnHop!=null && point.XYDistanceTo(_assistDoorReturnHop)<=0.25
+                && point.XYDistanceTo(Hud.Game.Me.FloorCoordinate)<=AssistDashTravelLimit;
+        }
+
+        private const float AssistDoorDiscoveryYards=100f;
+        private const int AssistDoorBurstMs=100;
+        private int _assistDoorHopCount,_assistDoorReturnHopCount,_assistDoorAimPhase,_assistDoorBurstStartedAt=int.MinValue;
+        private int _assistDoorLastCombatGameTick=int.MinValue,_assistDoorClicks;
+        private bool _assistDoorTravelOnly,_assistDoorFirstHopConnected;
+        private IWorldCoordinate _assistDoorFirstHop,_assistDoorReturnVia,_assistDoorReturnHop;
+        private static bool AssistDoorTripReserve(bool available,int charges,double spirit,double maximum,int hops,bool combat)
+        {
+            if(!available || hops<1 || hops>2 || maximum<=0)return false;
+            if(hops==1)return AssistDoorReserve(available,charges,spirit,maximum);
+            if(!combat && charges>=hops+1)return true;
+            return charges>=hops && spirit>=maximum*(combat?0.50:0.25);
+        }
+        private bool AssistDoorRecentCombat()
+        {
+            int age=Hud.Game.CurrentGameTick-_assistDoorLastCombatGameTick;
+            return _assistDoorLastCombatGameTick!=int.MinValue && age>=0 && age<=180;
+        }
+        private bool CanFundAssistDoorTrip(IActor door,bool combat)
+        {
+            var dash=AssistDoorDashSkill();
+            int hops=Hud.Game.Me.FloorCoordinate.XYDistanceTo(door.FloorCoordinate)>AssistDashTravelLimit?2:1;
+            bool available=dash!=null && AutoDash && CanApproachDash(dash) && !s7o_GenMonkInput.IsDown(dash.Key);
+            // Required progress follows one verified walking segment at a time.
+            // This is not an optional detour away from productive combat.
+            if(_assistDoorFollowPath)return AssistDoorReserve(available,dash==null?0:dash.Charges,
+                Hud.Game.Me.Stats.ResourceCurPri,Hud.Game.Me.Stats.ResourceMaxPri);
+            if(_assistDoorRequiredTrip)
             {
-                CancelAssistDoor();
-                _assistDoorReturnPending = false;
-                return false;
+                double distance=Hud.Game.Me.FloorCoordinate.XYDistanceTo(door.FloorCoordinate);
+                if(_assistDoorConnectedProof && _assistDoorPlanAcd==door.AcdId && _assistDoorApproachPoint!=null)
+                    distance=Hud.Game.Me.FloorCoordinate.XYDistanceTo(_assistDoorApproachPoint);
+                else distance=Math.Max(0,distance-(IsAssistBreakableDoor(door)?AssistDoorAttackReachYards:4f)
+                    -Math.Max(0,Math.Min(3f,door.RadiusScaled)));
+                hops=distance>AssistDashTravelLimit?2:1;
+                return hops==1?AssistDoorReserve(available,dash==null?0:dash.Charges,
+                    Hud.Game.Me.Stats.ResourceCurPri,Hud.Game.Me.Stats.ResourceMaxPri)
+                    :AssistDoorRequiredReserve(available,dash==null?0:dash.Charges,hops);
             }
-            if (TryReturnAssistDoorCombat(now, combatTarget)) return true;
-            if (_assistDoorReturnPending) return false; // Normal combat continues; do not replace a deferred return with another door.
-            if (_assistDoorCombatDetour && (_assistDoorStage == 4
-                || (_assistDoorStage == 5 && (_assistDashMovementFailed
-                    || !_assistDashLandingConfirmed
-                    || Hud.Game.Me.FloorCoordinate.XYDistanceTo(_assistDoorTarget.FloorCoordinate) > 8f))))
+            return dash!=null && AssistDoorTripReserve(AutoDash && CanApproachDash(dash)
+                && !s7o_GenMonkInput.IsDown(dash.Key),dash.Charges,Hud.Game.Me.Stats.ResourceCurPri,
+                Hud.Game.Me.Stats.ResourceMaxPri,hops,combat);
+        }
+        private void PlanAssistDoorFirstHop()
+        {
+            if(_assistDoorFollowPath)return; // Recovery never asks for another wall shortcut.
+            if(!_assistDoorConnectedProof || _assistDoorApproachPoint==null)return;
+            var me=Hud.Game.Me.FloorCoordinate;var goal=_assistDoorApproachPoint;
+            if(me.XYDistanceTo(goal)<=AssistDashTravelLimit)return;
+            var status=MapAssistStatus();if(status==null)return;
+            var hop=AssistMapRead("dash",new object[]{status["epoch"],me.X,me.Y,me.Z,goal.X,goal.Y,goal.Z,0.6f}) as Dictionary<string,object>;
+            var xyz=hop!=null && hop.ContainsKey("waypoint")?hop["waypoint"] as float[]:null;
+            if(hop==null || !hop.ContainsKey("state") || (hop["state"] as string)!="Ready" || xyz==null || xyz.Length!=3)return;
+            var point=Hud.Window.CreateWorldCoordinate(xyz[0],xyz[1],xyz[2]);
+            if(me.XYDistanceTo(point)>AssistDashTravelLimit || point.XYDistanceTo(goal)>AssistDashTravelLimit
+                || me.XYDistanceTo(point)<3)return;
+            // A native Dash suggestion proves floor/clearance and no crossed closed
+            // door; the separate walking route proves the intermediate connected side.
+            var route=AssistInvokeMap(_assistMapGet,"path",new object[]{status["epoch"],me.X,me.Y,me.Z,point.X,point.Y,point.Z,0.6f}) as Dictionary<string,object>;
+            if(route==null || !route.ContainsKey("state") || (route["state"] as string)!="Ready"
+                || !route.ContainsKey("requiresDoor") || Convert.ToBoolean(route["requiresDoor"]))return;
+            _assistDoorFirstHop=point;_assistDoorFirstHopConnected=true;
+        }
+        private IWorldCoordinate AssistDoorNextHop()
+        {
+            if(_assistDoorApproachPoint==null)return null;
+            if(_assistDoorFollowPath)
             {
-                RecordAssistDoorFailure(_assistDoorTarget); CancelAssistDoor();
-                return TryReturnAssistDoorCombat(now, combatTarget);
+                // RouteShortcut already follows the player's walking component;
+                // recheck the segment before allowing this exact Dash endpoint.
+                var status=MapAssistStatus();var point=_assistDoorWaypoint;
+                return status!=null && point!=null && Hud.Game.Me.FloorCoordinate.XYDistanceTo(point)<=AssistDashTravelLimit
+                    && AssistDoorConnectedSegment(status,Hud.Game.Me.FloorCoordinate,point,0.75f)?point:null;
             }
-            if (_assistDoorStage == 5)
+            if(_assistDoorStage==5 && _assistDoorDashWaypoint!=null)return _assistDoorDashWaypoint;
+            if(Hud.Game.Me.FloorCoordinate.XYDistanceTo(_assistDoorApproachPoint)<=AssistDashTravelLimit)
+                return _assistDoorApproachPoint;
+            return _assistDoorHopCount==0 && _assistDoorFirstHopConnected?_assistDoorFirstHop:null;
+        }
+        private static void AssistDoorProbeOffset(int phase,out int x,out int y)
+        {
+            x=y=0;
+            switch(phase){case 2:y=-8;break;case 3:y=8;break;case 4:x=-8;break;case 5:x=8;break;}
+        }
+        private static bool AssistDoorHoverMatches(IActor door,IActor hovered)
+        {
+            return door!=null && hovered!=null && hovered.IsSelected && door.WorldId==hovered.WorldId
+                && door.AcdId==hovered.AcdId && door.AnnId==hovered.AnnId;
+        }
+        private bool TryGetAssistDoorProbe(IActor actor,int phase,out int x,out int y)
+        {
+            x=y=0;if(!IsAssistDoorPathSafe(actor) || phase<0 || phase>=AssistDoorProbeCount)return false;
+            // The marker and the first input probe share the same native ground
+            // position and explicit raw/precise projection. Cached screen/body
+            // height is diagnostic data, not a guaranteed interaction hotspot.
+            var floor=actor.FloorCoordinate;var point=floor;
+            var collision=actor.CollisionCoordinate;
+            if(phase==1 && collision!=null && AssistPositionFinite(collision.X) && AssistPositionFinite(collision.Y))
+                point=floor.Offset(collision.X-floor.X,collision.Y-floor.Y,0);
+            var screen=point.ToScreenCoordinate(true,true);
+            if(screen==null || !AssistPositionFinite(screen.X) || !AssistPositionFinite(screen.Y))return false;
+            int dx,dy;AssistDoorProbeOffset(phase,out dx,out dy);
+            double cx=Math.Round(screen.X)+dx,cy=Math.Round(screen.Y)+dy;
+            if(!IsLeftClickPointSafe(cx,cy))return false;
+            long sx=(long)cx+Hud.Window.Offset.X,sy=(long)cy+Hud.Window.Offset.Y;
+            if(sx<int.MinValue || sx>int.MaxValue || sy<int.MinValue || sy>int.MaxValue)return false;
+            x=(int)sx;y=(int)sy;return true;
+        }
+        private bool AdvanceAssistDoorProbe(IMonster combatTarget,int now)
+        {
+            if(++_assistDoorAimPhase>=AssistDoorProbeCount || ElapsedMs(now,_assistDoorBurstStartedAt)>=AssistDoorBurstMs)
+                return DeferAssistDoorConfirmation(combatTarget,now);
+            _assistDoorStage=1;return true;
+        }
+        private bool FinishAssistDoorTravel()
+        {
+            // No forced backward return/cursor restore after a travel interaction.
+            // The held assist key remains usable for the next combat decision.
+            _assistCursorOwned=false;_assistDoorTravelOnly=false;
+            _assistStatus="door-travel-resume";
+            return false;
+        }
+
+        [System.Diagnostics.Conditional("S7O_GENMONK_DIAGNOSTICS")]
+        private void TraceAssistDoorReturnState(string reason,IMonster target) { }
+
+        private IMonster _assistDoorRetainedBody;
+        private float _assistDoorPlanClearance=1.25f;
+        private bool _assistDoorFinalHop;
+        private static float AssistDoorApproachReach(float radius,bool breakable)
+        {
+            // Match the existing interaction region, with half a yard of margin.
+            // The old arbitrary 2.75-yard core requirement could exclude every
+            // clear native route point outside a large door's collision footprint.
+            return (breakable?AssistDoorAttackReachYards:4f)-0.5f+Math.Max(0f,Math.Min(3f,radius));
+        }
+        private bool AssistDoorReturnBodyValid(IMonster body)
+        {
+            return body!=null && body.IsAlive && !body.Illusion && body.WorldId==_assistDoorReturnWorld
+                && IsAssistPositionWorldPoint(body.FloorCoordinate);
+        }
+        private void RememberAssistDoorEncounter(IMonster selected)
+        {
+            var best=selected;
+            foreach(var body in _assistCandidates)
+                if(IsAssistMonsterValid(body) && IsAssistPositionElite(body) && IsAssistDoorReturnSide(body)
+                    && body.FloorCoordinate.XYDistanceTo(_assistDoorReturnPoint)<=50
+                    && (best==null || !IsAssistPositionElite(best) || AssistTargetTier(body)>AssistTargetTier(best)))best=body;
+            if(best==null)return;
+            _assistDoorRetainedBody=best;_assistDoorReturnTargetAcd=best.AcdId;_assistDoorReturnAnn=best.AnnId;
+            TraceAssistDoorReturnState("captured",best);
+        }
+        private void ClearAssistDoorReturnBecause(string reason)
+        { TraceAssistDoorReturnState(reason,_assistDoorRetainedBody);ClearAssistDoorReturn(); }
+        private bool HoldAssistDoorReturnContact(int now)
+        {
+            IMonster best=null;
+            foreach(var body in _assistCandidates)
+                if(IsAssistStationaryCombat(body) && IsAssistPositionHazardFree(body.FloorCoordinate)
+                    && (best==null || AssistTargetTier(body)>AssistTargetTier(best)))best=body;
+            if(best==null){TraceAssistDoorReturnState("yield-normal-approach",null);return false;}
+            if(_assistTargetAcd!=best.AcdId)
             {
-                // A short confirmed Dash somewhere else is not door-route progress.
-                // The next hop requires arrival at this route's requested waypoint.
-                bool arrived = _assistDoorDashWaypoint != null && _assistDashLandingConfirmed
-                    && !_assistDashMovementFailed && Hud.Game.Me.FloorCoordinate.XYDistanceTo(_assistDoorDashWaypoint)<=2.5f;
-                _assistDoorDashSpent = !arrived;
-                _assistDoorDashFailures = arrived ? 0 : _assistDoorDashFailures + 1;
-                if (arrived) _assistDoorDashWaypoint = null;
-                _assistDashContinuationPending = _assistPositionReplanPending = false;
-                _assistDoorStage = 1; _assistDoorSinceTick = now;
+                ReleaseAssistAttack();CancelTarget();_assistTargetAcd=best.AcdId;
+                _assistAimPending=true;_assistAimGameTick=Hud.Game.CurrentGameTick;
+                _assistHitVerified=false;_assistApproachPending=true;
             }
-            if (_assistDoorTarget == null)
+            if(_assistNavigationPending){ReleaseAssistAttack();ResetAssistContactRecovery();}
+            _mainKey=_combinationDisplayKey=_assistMainKey;
+            return HoldAssistAttack(best,now,AssistAttackReachYards,true,false);
+        }
+        [System.Diagnostics.Conditional("S7O_GENMONK_DIAGNOSTICS")]
+        private void TraceAssistGuardianGate(string reason,IMonster boss) { }
+
+        private bool AssistGuardianCombatReady(IMonster boss)
+        {
+            return boss!=null && boss.Attackable && !boss.Invulnerable && !boss.Untargetable
+                && !boss.Hidden && !boss.Invisible && !boss.Stealthed
+                && boss.AnimationState!=AcdAnimationState.Spawn && boss.AnimationState!=AcdAnimationState.Transform
+                && boss.AnimationState!=AcdAnimationState.Cutscene && IsAssistBaseEligible(boss);
+        }
+        private bool AssistGuardianSpawnCandidate(IMonster boss)
+        {
+            if(boss==null || boss.Rarity!=ActorRarity.Boss || boss.Illusion || boss.WorldId!=Hud.Game.Me.WorldId
+                || !IsAssistPositionWorldPoint(boss.FloorCoordinate) || boss.AnimationState==AcdAnimationState.Dead
+                || (boss.SnoActor!=null && boss.SnoActor.Sno==ActorSnoEnum._x1_lr_boss_terrordemon_a_breathminion))return false;
+            if(boss.IsAlive)return true;
+            int age=Hud.Game.CurrentGameTick-boss.CreatedAtInGameTick;
+            return age>=0 && age<=600 && (boss.AnimationState==AcdAnimationState.Spawn || boss.Untargetable || boss.Invulnerable);
+        }
+
+        [System.Diagnostics.Conditional("S7O_GENMONK_DIAGNOSTICS")]
+        private void TraceAssistDoorNative(string action,IActor door,int x,int y,string reason) { }
+
+        private const int AssistDoorProbeCount=6;
+        private int _assistDoorInputWaitAt=int.MinValue,_assistDoorInputWaitTotal;
+        private bool AssistDoorNeedsPathRecovery(IActor door)
+        {
+            AssistDoorFailure failure;
+            return door!=null && _assistDoorFailures.TryGetValue(door.AcdId,out failure)
+                && failure.World==door.WorldId && failure.Ann==door.AnnId && failure.PathRecovery;
+        }
+        private bool InterruptAssistDoorInput(int now)
+        {
+            var door=_assistDoorTarget;bool travel=_assistDoorTravelOnly;
+            if(door==null)return false;
+            AssistDoorFailure state;
+            if(_assistDoorFailures.TryGetValue(door.AcdId,out state)
+                && state.World==door.WorldId && state.Ann==door.AnnId)
             {
-                if (_pulse != ActionKey.Unknown || (!canDashNow && s7o_GenMonkInput.IsDown(ActionKey.LeftSkill)
-                    && !s7o_GenMonkInput.Owns(ActionKey.LeftSkill))) return TryReturnAssistDoorCombat(now, combatTarget);
-                if (!RefreshAssistPositionActors()) return TryReturnAssistDoorCombat(now, combatTarget);
-                // Recovery must work even when geometry cannot resolve the door.
-                // Native door approach has its own progress watchdog and failure cap.
-                bool recoverUnmappedDoor = combatTarget != null
-                    && (_assistNavigationPending || IsAssistRouteSuppressed(combatTarget))
-                    && (!CanAttackAssistFrom(Hud.Game.Me.FloorCoordinate, combatTarget)
-                        || MapAssistTargetBlocked(combatTarget));
-                // Recover the intervening door from the walking route even when
-                // physical failure suppresses all further shortcut attempts.
-                if (combatTarget != null && !CanAttackAssistFrom(Hud.Game.Me.FloorCoordinate, combatTarget)
-                    && (_assistDoorRouteTarget != combatTarget.AcdId
-                        || Hud.Game.CurrentGameTick < _assistDoorRouteGameTick
-                        || Hud.Game.CurrentGameTick - _assistDoorRouteGameTick >= 6))
+                // Input interruption supplies no evidence that the route failed.
+                // Any later ranged resume must use fresh connected path waypoints;
+                // CommitAssistDoorAction spends the existing one recovery budget.
+                state.PathRecovery|=_assistDoorConnectedProof;
+                _assistDoorFailures[door.AcdId]=state;
+            }
+            TraceAssistDoorNative("input-interrupted",door,0,0,"bounded-wait-expired-no-route-failure");
+            CancelAssistDoor();_nextDashAimTick=now;
+            _assistDoorLastResult="input-interrupted";
+            TraceAssistDoorResume("input-interrupted",door,travel);
+            return false; // Normal combat may continue; never release physical input.
+        }
+
+        private bool WaitAssistDoorInput(IMonster combatTarget,int now)
+        {
+            if(_assistDoorTarget==null)return false;
+            if(_assistDoorInputWaitAt==int.MinValue)_assistDoorInputWaitAt=now;
+            TraceAssistDoorNative("wait-input",_assistDoorTarget,0,0,"pending-release");
+            if(_assistDoorInputWaitTotal+ElapsedMs(now,_assistDoorInputWaitAt)>=200)
+                return InterruptAssistDoorInput(now);
+            _assistDoorStatus=_assistStatus="door-input-handoff";
+            return true;
+        }
+        private void FinishAssistDoorInputWait(int now)
+        {
+            if(_assistDoorInputWaitAt==int.MinValue)return;
+            int elapsed=ElapsedMs(now,_assistDoorInputWaitAt);
+            _assistDoorInputWaitTotal+=elapsed;
+            if(_assistDoorBurstStartedAt!=int.MinValue)_assistDoorBurstStartedAt=unchecked(_assistDoorBurstStartedAt+elapsed);
+            _assistDoorInputWaitAt=int.MinValue;
+        }
+        private bool TryReuseAssistDoorHover(IActor door,out int x,out int y)
+        {
+            x=y=0;CursorPoint cursor;
+            if(!AssistDoorHoverMatches(door,Hud.Game.SelectedActor) || !GetCursorPos(out cursor)
+                || !IsLeftClickPointSafe((long)cursor.X-Hud.Window.Offset.X,(long)cursor.Y-Hud.Window.Offset.Y)
+                || Math.Abs((long)Hud.Window.CursorX+Hud.Window.Offset.X-cursor.X)>2
+                || Math.Abs((long)Hud.Window.CursorY+Hud.Window.Offset.Y-cursor.Y)>2)return false;
+            x=cursor.X;y=cursor.Y;return true;
+        }
+
+        private sealed class AssistDoorConfirmation
+        {
+            public IActor Actor,Fresh;
+            public uint World,Acd,Ann;
+            public int StartedTick; public bool SuppressRetry;
+        }
+        private readonly List<AssistDoorConfirmation> _assistDoorConfirmations=new List<AssistDoorConfirmation>(8);
+        private AssistDoorConfirmation _assistDoorLatestConfirmation;
+        private int _assistDoorConfirmationPollTick=int.MinValue;
+        private bool ArmAssistDoorConfirmation(IActor door,bool suppressRetry=true)
+        {
+            if(door==null || door.WorldId!=Hud.Game.Me.WorldId)return false;
+            foreach(var prior in _assistDoorConfirmations)
+                if(prior.World==door.WorldId && prior.Acd==door.AcdId && prior.Ann==door.AnnId)
                 {
-                    _assistDoorRouteTarget = combatTarget.AcdId;
-                    _assistDoorRouteGameTick = Hud.Game.CurrentGameTick;
-                    var status = MapAssistStatus();
-                    if (status != null)
+                    if(suppressRetry && !prior.SuppressRetry)
+                    { prior.StartedTick=Hud.Game.CurrentGameTick;_assistDoorConfirmationPollTick=int.MinValue; }
+                    prior.SuppressRetry|=suppressRetry;_assistDoorLatestConfirmation=prior;return true;
+                }
+            if(_assistDoorConfirmations.Count>=8)
+            {
+                var old=_assistDoorConfirmations[0];TraceAssistDoorConfirmationResult(old,"observation-capacity-exceeded");
+                TraceAssistDoorNative("confirmation",old.Actor,0,0,"unconfirmed-watch-capacity");
+                _assistDoorConfirmations.RemoveAt(0);
+            }
+            var watch=new AssistDoorConfirmation {Actor=door,World=door.WorldId,Acd=door.AcdId,Ann=door.AnnId,
+                StartedTick=Hud.Game.CurrentGameTick,SuppressRetry=suppressRetry};
+            _assistDoorConfirmations.Add(watch);_assistDoorLatestConfirmation=watch;
+            return true;
+        }
+        private bool DeferAssistDoorConfirmation(IMonster combatTarget,int now)
+        {
+            var door=_assistDoorTarget;bool travel=_assistDoorTravelOnly;
+            if(door==null)return false;
+            if(_assistDoorClicks==0 && !_assistDoorBorrowedPrimary)
+                return FailAssistDoorAttempt(combatTarget,now,"hover-burst-unconfirmed");
+            if(ArmAssistDoorConfirmation(door))_assistDoorLastResult="awaiting-native-confirmation";
+            TraceAssistDoorNative("confirmation",door,_assistDoorAimX,_assistDoorAimY,"pending-native-state");
+            CancelAssistDoor(); // Input is finished; the passive watch owns no keys or movement.
+            TraceAssistDoorResume("awaiting-confirmation",door,travel);
+            if(travel)return FinishAssistDoorTravel();
+            return TryReturnAssistDoorCombat(now,combatTarget);
+        }
+        private void ObserveAssistDoorConfirmations()
+        {
+            try { ObserveAssistDoorConfirmationsCore(); }
+            catch
+            {
+                foreach(var watch in _assistDoorConfirmations)TraceAssistDoorConfirmationResult(watch,"collection-read-error-unconfirmed");
+                if(_assistDoorLatestConfirmation!=null)_assistDoorLastResult="confirmation-read-error";
+                _assistDoorConfirmations.Clear();_assistDoorLatestConfirmation=null;_assistDoorConfirmationPollTick=int.MinValue;
+            }
+        }
+        private void ObserveAssistDoorConfirmationsCore()
+        {
+            if(_assistDoorConfirmations.Count==0)return;
+            if(!Enabled || Hud.Game==null || Hud.Game.Me==null || !Hud.Game.IsInGame)
+            { foreach(var watch in _assistDoorConfirmations)TraceAssistDoorConfirmationResult(watch,"plugin-or-game-context-ended");_assistDoorConfirmations.Clear();_assistDoorLatestConfirmation=null;_assistDoorConfirmationPollTick=int.MinValue;return; }
+            int tick=Hud.Game.CurrentGameTick;uint world=Hud.Game.Me.WorldId;
+            for(int i=_assistDoorConfirmations.Count-1;i>=0;i--)
+                if(_assistDoorConfirmations[i].World!=world || tick<_assistDoorConfirmations[i].StartedTick)
+                {
+                    if(ReferenceEquals(_assistDoorLatestConfirmation,_assistDoorConfirmations[i]))
+                    { _assistDoorLatestConfirmation=null;_assistDoorLastResult="confirmation-context-changed"; }
+                    TraceAssistDoorConfirmationResult(_assistDoorConfirmations[i],"confirmation-context-changed");
+                    _assistDoorConfirmations.RemoveAt(i);
+                }
+            if(_assistDoorConfirmations.Count==0){_assistDoorConfirmationPollTick=int.MinValue;return;}
+            if(_assistDoorConfirmationPollTick!=int.MinValue && tick>=_assistDoorConfirmationPollTick
+                && tick-_assistDoorConfirmationPollTick<6)return;
+            _assistDoorConfirmationPollTick=tick;
+            foreach(var watch in _assistDoorConfirmations)watch.Fresh=null;
+            // One native actor pass at most ten times per game second, only while
+            // a bounded watch exists. Never infer opening from disappearance.
+            if(Hud.Game.Actors!=null)foreach(var actor in Hud.Game.Actors)if(actor!=null)
+                for(int i=0;i<_assistDoorConfirmations.Count;i++)
+                {
+                    var watch=_assistDoorConfirmations[i];
+                    if(actor.WorldId==watch.World && actor.AcdId==watch.Acd && actor.AnnId==watch.Ann)watch.Fresh=actor;
+                }
+            for(int i=_assistDoorConfirmations.Count-1;i>=0;i--)
+            {
+                var watch=_assistDoorConfirmations[i];bool done=false;
+                try
+                {
+                    var live=watch.Fresh;
+                    bool opened=live!=null && (live.IsOperated || live.IsDisabled || (IsAssistBreakableDoor(live)&&live.Hitpoints<=0));
+                    if(opened)
                     {
-                        try
-                        {
-                            var from = Hud.Game.Me.FloorCoordinate;
-                            var to = _assistMapGoal != null && _assistMapGoalAcd == combatTarget.AcdId
-                                ? _assistMapGoal : combatTarget.FloorCoordinate;
-                            var hop = AssistInvokeMap(_assistMapGet,"dash", new object[]{status["epoch"], from.X, from.Y, from.Z,
-                                to.X, to.Y, to.Z, Math.Max(0f, Math.Min(3f, MapWallClearance))}) as Dictionary<string,object>;
-                            if (hop != null && hop.ContainsKey("doorAcd"))
-                                _assistMapDoorAcd = Convert.ToUInt32(hop["doorAcd"]);
-                            var route = AssistInvokeMap(_assistMapGet,"path", new object[]{status["epoch"], from.X, from.Y, from.Z,
-                                to.X, to.Y, to.Z, 0.6f}) as Dictionary<string,object>;
-                            if (route != null && route.ContainsKey("doorAcd") && Convert.ToUInt32(route["doorAcd"]) != 0u)
-                                _assistMapDoorAcd = Convert.ToUInt32(route["doorAcd"]);
-                            // A failed route may not identify its door. Heading is only
-                            // an optional detour preference, never a recovery restriction.
-                            recoverUnmappedDoor = recoverUnmappedDoor || (_assistMapDoorAcd == 0u && route != null
-                                && route.ContainsKey("state") && (route["state"] as string) == "NoRoute");
-                        }
-                        catch { _assistMapGet = null; _assistMapPlugin = null; }
+                        done=true;
+                        if(_assistDoorTarget!=null && _assistDoorTarget.WorldId==watch.World
+                            && _assistDoorTarget.AcdId==watch.Acd && _assistDoorTarget.AnnId==watch.Ann)_assistDoorTarget=live;
+                        InvalidateAssistDoorAccess(live);AssistDoorFailure failure;
+                        if(_assistDoorFailures.TryGetValue(watch.Acd,out failure) && failure.World==watch.World && failure.Ann==watch.Ann)
+                            _assistDoorFailures.Remove(watch.Acd);
+                        if(ReferenceEquals(watch,_assistDoorLatestConfirmation))
+                        { _assistDoorLastResult="opened-confirmed";_assistDoorCompletedAcd=watch.Acd;_assistDoorCompletedGameTick=tick; }
+                        TraceAssistDoorConfirmationResult(watch,"opened-confirmed");
+                        TraceAssistDoorNative("confirmation",live,0,0,"native-opened");
+                    }
+                    else if(tick-watch.StartedTick>=360)
+                    {
+                        done=true;
+                        if(ReferenceEquals(watch,_assistDoorLatestConfirmation))_assistDoorLastResult="opening-unconfirmed";
+                        TraceAssistDoorConfirmationResult(watch,"opening-unconfirmed");
+                        TraceAssistDoorNative("confirmation",live??watch.Actor,0,0,"native-state-unconfirmed");
                     }
                 }
-                bool eliteFight = IsAssistPositionElite(combatTarget)
-                    && !IsAssistRouteSuppressed(combatTarget) && !MapAssistTargetBlocked(combatTarget);
-                bool returnReserved = !eliteFight || (canDashNow
-                    && CanReserveAssistDoorReturn(AssistDoorDashSkill()));
-                IActor best = null;
-                bool bestOpenAhead = false;
-                var me = Hud.Game.Me.FloorCoordinate;
-                foreach (var door in _assistDoors)
+                catch { done=true;TraceAssistDoorConfirmationResult(watch,"native-state-read-error-unconfirmed"); } // Never interrupt combat.
+                if(done)
                 {
-                    bool openAhead = canDashNow && returnReserved && IsAssistForwardDoor(door, combatTarget, eliteFight);
-                    // Do not walk away from a reachable elite for optional housekeeping.
-                    if (eliteFight && door.AcdId != _assistMapDoorAcd && !(allowEarlyCombat && openAhead)) continue;
-                    // Travel may use confirmed successive hops; an elite detour stays within one Dash.
-                    // Existing mapped/failed-route recovery remains available without Dash.
-                    double doorRange = door.AcdId == _assistMapDoorAcd ? AssistPositionScanRange
-                        : openAhead ? (eliteFight ? AssistDashTravelLimit : AssistDoorApproachRange)
-                        : (_assistNavigationPending || recoverUnmappedDoor) ? AssistDoorApproachRange : 12f;
-                    if(IsAssistEarlyDoorSuppressed(door))continue;
-                    int failures=AssistDoorFailureCount(door);
-                    if (!IsAssistClosedDoor(door) || me.XYDistanceTo(door.FloorCoordinate) > doorRange
-                        || failures >= 2 || (failures>0 && combatTarget!=null
-                            && CanAttackAssistFrom(me,combatTarget) && !MapAssistTargetBlocked(combatTarget))) continue;
-                    // Local interaction is independent of heading and Dash readiness.
-                    // Failed travel can also try a nearby visible door using native pathing.
-                    bool recoveryDoor = !eliteFight && (me.XYDistanceTo(door.FloorCoordinate) <= 12f
-                        || (recoverUnmappedDoor && me.XYDistanceTo(door.FloorCoordinate) <= AssistDoorApproachRange));
-                    if (combatTarget != null && !openAhead && !recoveryDoor)
-                    {
-                        var end = combatTarget.FloorCoordinate;
-                        double dx = end.X - me.X, dy = end.Y - me.Y;
-                        double lengthSquared = dx * dx + dy * dy;
-                        if (lengthSquared < 4.0) continue;
-                        double along = ((door.FloorCoordinate.X - me.X) * dx
-                            + (door.FloorCoordinate.Y - me.Y) * dy) / lengthSquared;
-                        if (door.AcdId!=_assistMapDoorAcd&&(along <= 0 || along >= 1)) continue;
-                        double px = me.X + along * dx - door.FloorCoordinate.X;
-                        double py = me.Y + along * dy - door.FloorCoordinate.Y;
-                        double corridor = Math.Max(2.0, Math.Min(5.0, door.RadiusScaled + 1.5));
-                        if (door.AcdId!=_assistMapDoorAcd&&px * px + py * py > corridor * corridor) continue;
-                    }
-                    int x, y;
-                    if (!TryGetAssistDoorAim(door, out x, out y)) continue;
-                    if (best == null || door.CentralXyDistanceToMe < best.CentralXyDistanceToMe)
-                    { best = door; bestOpenAhead = openAhead; }
-                }
-                if (best == null || (!bestOpenAhead && combatTarget != null && MainGeneratorAnimation()
-                    && HasAssistAttackContact(combatTarget))) return TryReturnAssistDoorCombat(now, combatTarget);
-                bool earlyAttempt=bestOpenAhead && me.XYDistanceTo(best.FloorCoordinate)>12f;
-                if(IsAssistReachableCombat(combatTarget) && !earlyAttempt)return false;
-                if(s7o_GenMonkInput.IsDown(ActionKey.LeftSkill) && !s7o_GenMonkInput.Owns(ActionKey.LeftSkill)
-                    && (!earlyAttempt || !IsAssistBreakableDoor(best)))return false;
-                if(earlyAttempt) {
-                    PlanAssistDoorApproach(best);
-                    if(!IsAssistEarlyDoorApproachReady(best,combatTarget))return false;
-                }
-                ReleaseAssistAttack();
-                CancelTarget();
-                _assistDoorTarget = best;
-                _assistDoorEarlyAttempt=earlyAttempt;
-                if(earlyAttempt) {
-                    ReserveAssistEarlyDoor(best);
-                    TraceAssistTrial("DOOR_EARLY","phase=reserved door="+best.AcdId+" breakable="+IsAssistBreakableDoor(best)
-                        +" distance="+me.XYDistanceTo(best.FloorCoordinate)+" target="+(combatTarget==null?0u:combatTarget.AcdId));
-                }
-                _assistDoorStage = 1;
-                _assistDoorSinceTick = now;
-                _assistDoorBeforeHp = best.Hitpoints;
-                _assistDoorProgressGameTick = Hud.Game.CurrentGameTick;
-                _assistDoorNativeOriginX = me.X; _assistDoorNativeOriginY = me.Y; _assistDoorNativeMaxProgress = 0;
-                ClearAssistDoorReturn();
-                if (combatTarget != null && best.AcdId != _assistMapDoorAcd && !recoverUnmappedDoor)
-                {
-                    // Housekeeping returns to combat; a blocking-door route goes forward.
-                    _assistDoorReturnWorld = Hud.Game.Me.WorldId;
-                    _assistDoorReturnUntil = unchecked(now + 12000);
-                    _assistDoorCombatDetour = true;
-                    _assistDoorReturnTargetAcd = combatTarget.AcdId;
-                    var origin = Hud.Game.Me.FloorCoordinate;
-                    _assistDoorReturnPoint = Hud.Window.CreateWorldCoordinate(origin.X, origin.Y, origin.Z);
+                    if(ReferenceEquals(watch,_assistDoorLatestConfirmation))_assistDoorLatestConfirmation=null;
+                    _assistDoorConfirmations.RemoveAt(i);
                 }
             }
-            var target = _assistDoorTarget;
-            if (!IsAssistClosedDoor(target)) return CompleteAssistDoor(combatTarget,now);
-            // Own the route to this blocker before ordinary combat can plan another
-            // shortcut to a target behind it. The endpoint is an interaction region,
-            // not an offset chosen by which direction the player happens to stand.
-            if (_assistDoorStage != 2 && _assistDoorStage != 3 && !(_assistDoorEarlyAttempt && IsAssistBreakableDoor(target)))
+        }
+
+        // One bounded walking-route query, shared by selection and final dispatch.
+        // A clear landing across a wall is not proof that its room is accessible.
+        private IWorldCoordinate _assistDoorAccessGoal,_assistDoorAccessOrigin,_assistDoorBlockedGoal;
+        private uint _assistDoorAccessWorld,_assistDoorBlockingAcd,_assistDoorBlockingAnn;
+        private long _assistDoorAccessEpoch;
+        private int _assistDoorAccessTick=int.MinValue;
+        private Dictionary<string,object> _assistDoorAccessRoute,_assistDoorBlockingRoute;
+        private string _assistDoorAccessState="none",_assistDoorAccessReason="none";
+        private bool _assistDoorRequiredTrip,_assistDoorFollowPath;
+
+        private void ResetAssistDoorAccess()
+        {
+            _assistDoorAccessGoal=_assistDoorAccessOrigin=_assistDoorBlockedGoal=null;
+            _assistDoorAccessWorld=_assistDoorBlockingAcd=_assistDoorBlockingAnn=0;
+            _assistDoorAccessEpoch=0;_assistDoorAccessTick=int.MinValue;
+            _assistDoorAccessRoute=_assistDoorBlockingRoute=null;
+            _assistDoorAccessState=_assistDoorAccessReason="none";
+        }
+        private bool AssistDoorConnectedSegment(Dictionary<string,object> status,IWorldCoordinate a,IWorldCoordinate b,float radius=0.6f)
+        {
+            if(a==null || b==null)return false;
+            var answer=AssistMapRead("corridor",new object[]{status["epoch"],a.X,a.Y,a.Z,b.X,b.Y,b.Z,radius}) as Dictionary<string,object>;
+            return answer!=null && answer.ContainsKey("state") && (answer["state"] as string)=="ClearCandidate";
+        }
+        private IActor AssistBlockingDoor(IWorldCoordinate destination=null)
+        {
+            if(_assistDoorBlockingAcd==0 || _assistDoorAccessWorld!=Hud.Game.Me.WorldId)return null;
+            IActor found=null;
+            foreach(var door in _assistDoors)
+                if(door.AcdId==_assistDoorBlockingAcd && door.AnnId==_assistDoorBlockingAnn
+                    && door.WorldId==_assistDoorAccessWorld && IsAssistClosedDoor(door)){found=door;break;}
+            if(found==null)
             {
-                PlanAssistDoorApproach(target);
-                if (_assistDoorPathState == "Ready" && _assistDoorWaypoint != null)
-                {
-                    if (_assistDoorStage == 4) { CancelTarget(); _assistDoorPulseKey=ActionKey.Unknown; }
-                    if (_assistDoorWalkStage != 0 && Hud.Game.CurrentGameTick-_assistDoorProgressGameTick>=30)
-                    {
-                        ReleaseAssistAttack();
-                        RecordAssistDoorFailure(target);
-                        MapAssistFeedback("door-route-no-progress",target.AcdId,Hud.Game.Me.FloorCoordinate,true);
-                        _assistDoorDashSpent=true;_assistDoorDashWaypoint=null;
-                        _assistDoorStage=1;_assistDoorSinceTick=now;
-                        _assistDoorProgressGameTick=Hud.Game.CurrentGameTick;
-                        if (AssistDoorFailureCount(target)>=2)
-                        { if(combatTarget!=null)BlockAssistDoorGoal(combatTarget);CancelAssistDoor();return false; }
-                        _assistDoorStatus="door-progress-yield";
-                        return false;
-                    }
-                    else
-                    {
-                        if (TryDashToAssistDoor(target,combatTarget,now)) return true;
-                        if (WalkAssistDoorWaypoint(now)) return true;
-                        if (_assistDoorWalkStage != 0) ReleaseAssistAttack();
-                        _assistDoorStage=1;_assistDoorSinceTick=now;
-                        if (_assistDoorWalkReason=="unsafe-waypoint-hover" || _assistDoorWalkReason=="unsafe-held-hover"
-                            || _assistDoorWalkReason=="unsafe-waypoint")
-                        {
-                            RecordAssistDoorFailure(target);
-                            if (AssistDoorFailureCount(target)>=2)
-                            { if(combatTarget!=null)BlockAssistDoorGoal(combatTarget);CancelAssistDoor();return false; }
-                        }
-                        _assistDoorStatus="door-waypoint-yield";
-                        return false; // Local combat may take over this update; keep the route objective.
-                    }
-                }
-                else if (_assistDoorPathState=="Pending"
-                    &&Hud.Game.Me.FloorCoordinate.XYDistanceTo(target.FloorCoordinate)>8f
-                    &&ElapsedMs(now,_assistDoorSinceTick)<250) {
-                    // The bounded route worker is already running. Do not issue a
-                    // backwards native chase to the door while its next hop refreshes.
-                    _assistDoorStatus=_assistStatus="door-route-planning";
+                _assistDoorBlockingAcd=_assistDoorBlockingAnn=0;_assistDoorBlockedGoal=null;_assistDoorBlockingRoute=null;
+                _assistDoorAccessGoal=null;_assistDoorAccessTick=int.MinValue;return null;
+            }
+            if(destination!=null)
+            {
+                var status=MapAssistStatus();
+                if(status==null || Convert.ToInt64(status["epoch"])!=_assistDoorAccessEpoch || _assistDoorBlockedGoal==null)return null;
+                if(destination.XYDistanceTo(_assistDoorBlockedGoal)>0.25f
+                    && !AssistDoorConnectedSegment(status,_assistDoorBlockedGoal,destination))return null;
+            }
+            return found;
+        }
+        private static bool AssistDoorRequiredReserve(bool available,int charges,int hops)
+        { return available && hops>=1 && hops<=2 && charges>=hops; }
+
+        private bool HasAssistDoorCollision()
+        {
+            var me=Hud.Game.Me.FloorCoordinate;
+            foreach(var failure in _assistFailedLandings)
+                if(failure.World==Hud.Game.Me.WorldId && me.XYDistanceTo(failure.PlayerX,failure.PlayerY)<=4f
+                    && Math.Abs(me.Z-failure.PlayerZ)<=4f && me.XYDistanceTo(failure.X,failure.Y)>=8f)
                     return true;
-                }
-                else if (_assistDoorPathState == "AtApproach")
+            return false;
+        }
+        private void ResolveAssistDoorConfirmation(IActor door)
+        {
+            for(int i=_assistDoorConfirmations.Count-1;i>=0;i--)
+            {
+                var watch=_assistDoorConfirmations[i];
+                if(watch.World!=door.WorldId || watch.Acd!=door.AcdId || watch.Ann!=door.AnnId)continue;
+                TraceAssistDoorConfirmationResult(watch,"opened-confirmed");
+                if(ReferenceEquals(watch,_assistDoorLatestConfirmation))_assistDoorLatestConfirmation=null;
+                _assistDoorConfirmations.RemoveAt(i);
+            }
+            InvalidateAssistDoorAccess(door);
+        }
+
+        private bool IsAssistDoorAccessAllowed(IWorldCoordinate destination)
+        {
+            try { return IsAssistDoorAccessAllowedCore(destination); }
+            catch
+            {
+                _assistDoorAccessState="Unavailable";_assistDoorAccessReason="query-failed";
+                TraceAssistDoorAccess("query-unavailable",destination);return _assistDoorBlockingAcd==0u;
+            }
+        }
+        private bool IsAssistDoorAccessAllowedCore(IWorldCoordinate destination)
+        {
+            if(destination==null || destination.XYDistanceTo(Hud.Game.Me.FloorCoordinate)<=0.25f)return true;
+            if(!RefreshAssistPositionActors())return true; // Optional map data never impersonates a known wall.
+            bool nearby=false;
+            foreach(var door in _assistDoors)
+                if(IsAssistClosedDoor(door) && Hud.Game.Me.FloorCoordinate.XYDistanceTo(door.FloorCoordinate)<=AssistDoorDiscoveryYards)
+                {nearby=true;break;}
+            if(!nearby){ResetAssistDoorAccess();return true;}
+            var status=MapAssistStatus();if(status==null)return true;
+            var me=Hud.Game.Me.FloorCoordinate;long epoch=Convert.ToInt64(status["epoch"]);
+            if(_assistDoorAccessWorld!=Hud.Game.Me.WorldId || _assistDoorAccessEpoch!=epoch)
+            {ResetAssistDoorAccess();_assistDoorAccessWorld=Hud.Game.Me.WorldId;_assistDoorAccessEpoch=epoch;}
+            // A known walking segment is sufficient. It also lets recovery approach
+            // the blocker without waiting for an unrelated far-target route.
+            if(AssistDoorConnectedSegment(status,me,destination))return true;
+            var blocking=AssistBlockingDoor(destination);
+            if(blocking!=null)
+            {
+                // Re-read the retained destination once per native tick so another
+                // opened route cannot leave a closed but bypassable door latched.
+                if(_assistDoorAccessGoal==null)_assistDoorAccessGoal=_assistDoorBlockedGoal;
+            }
+            if(_assistDoorAccessOrigin!=null && me.XYDistanceTo(_assistDoorAccessOrigin)>3f
+                && !AssistDoorConnectedSegment(status,me,_assistDoorAccessOrigin))
+            {
+                // Provider routes cache their origin; invalidate only after actual
+                // relocation into a context not connected by the retained short ray.
+                AssistInvokeMap(_assistMapGet,"resetpath",new object[]{epoch});
+                ResetAssistDoorAccess();_assistDoorAccessWorld=Hud.Game.Me.WorldId;_assistDoorAccessEpoch=epoch;
+            }
+            bool compatible=_assistDoorAccessGoal!=null && (destination.XYDistanceTo(_assistDoorAccessGoal)<=0.25f
+                || AssistDoorConnectedSegment(status,_assistDoorAccessGoal,destination));
+            int tick=Hud.Game.CurrentGameTick;
+            // Do not restart an unfinished worker for every changing monster/angle.
+            bool pinned=_assistDoorAccessGoal!=null && _assistDoorAccessState=="Pending";
+            if(!compatible && !pinned)
+            {
+                _assistDoorAccessGoal=destination.Offset(0,0,0);_assistDoorAccessOrigin=me.Offset(0,0,0);
+                _assistDoorAccessRoute=null;_assistDoorAccessTick=int.MinValue;_assistDoorAccessState="Pending";
+                compatible=true;
+            }
+            if(_assistDoorAccessTick!=tick)
+            {
+                var goal=_assistDoorAccessGoal;
+                _assistDoorAccessRoute=AssistInvokeMap(_assistMapGet,"path",new object[]{epoch,me.X,me.Y,me.Z,goal.X,goal.Y,goal.Z,0.6f}) as Dictionary<string,object>;
+                _assistDoorAccessTick=tick;
+                var answer=_assistDoorAccessRoute;
+                _assistDoorAccessState=answer!=null && answer.ContainsKey("state")?Convert.ToString(answer["state"]):"Unknown";
+                _assistDoorAccessReason=answer!=null && answer.ContainsKey("reason")?Convert.ToString(answer["reason"]):"no-route-result";
+                uint acd=answer!=null && answer.ContainsKey("doorAcd")?Convert.ToUInt32(answer["doorAcd"]):0u;
+                bool needs=answer!=null && answer.ContainsKey("requiresDoor") && Convert.ToBoolean(answer["requiresDoor"]);
+                if(needs && acd!=0)foreach(var door in _assistDoors)
+                    if(door.AcdId==acd && IsAssistClosedDoor(door))
+                    {
+                        _assistDoorBlockingAcd=acd;_assistDoorBlockingAnn=door.AnnId;
+                        _assistDoorBlockedGoal=goal.Offset(0,0,0);_assistDoorBlockingRoute=answer;break;
+                    }
+                if(_assistDoorAccessState=="Ready" && answer.ContainsKey("requiresDoor") && !needs)
+                { _assistDoorBlockingAcd=_assistDoorBlockingAnn=0;_assistDoorBlockedGoal=null;_assistDoorBlockingRoute=null; }
+            }
+            var route=_assistDoorAccessRoute;
+            bool allowed=compatible && route!=null && _assistDoorAccessState=="Ready"
+                && route.ContainsKey("requiresDoor") && !Convert.ToBoolean(route["requiresDoor"]);
+            bool dependency=route!=null && route.ContainsKey("requiresDoor") && Convert.ToBoolean(route["requiresDoor"])
+                && route.ContainsKey("doorAcd") && Convert.ToUInt32(route["doorAcd"])!=0u;
+            // A worker unable to prove any route is not evidence that a nearby
+            // unrelated door blocks a legitimate wall/gap shortcut. Preserve the
+            // established native fallback and its failure memory in that case.
+            bool unresolved=compatible && !dependency && AssistBlockingDoor(destination)==null
+                && (_assistDoorAccessState=="NoRoute" || _assistDoorAccessState=="Unavailable" || _assistDoorAccessState=="Unknown");
+            bool failedShortcut=unresolved && HasAssistDoorCollision();
+            allowed|=unresolved && !failedShortcut;
+            if(!compatible && _assistDoorAccessState!="Pending")
+                _assistDoorAccessGoal=null; // The next call may request the new destination.
+            TraceAssistDoorAccess(failedShortcut?"failed-shortcut-needs-door-route":unresolved?"unresolved-native-fallback":allowed?"connected-walking-route":"shortcut-not-proven",destination);
+            return allowed;
+        }
+        private bool AssistDoorLandingClear(Dictionary<string,object> status,IWorldCoordinate point,float radius)
+        { return AssistDoorConnectedSegment(status,point,point,radius); }
+        private bool AssistDoorInteractionPoint(IActor door,IWorldCoordinate point)
+        {
+            return point!=null && point.XYDistanceTo(door.FloorCoordinate)
+                <=(IsAssistBreakableDoor(door)?AssistDoorAttackReachYards:4f)+Math.Max(0,Math.Min(3f,door.RadiusScaled));
+        }
+        private bool TryAssistDoorWalkPrefix(IActor door,Dictionary<string,object> status)
+        {
+            // The route's last clear waypoint lies before its first closed door.
+            // It supplies the approach side; no facing/normal or door-core Dash is inferred.
+            var route=_assistDoorBlockingRoute;
+            if(_assistDoorAccessEpoch!=Convert.ToInt64(status["epoch"]) || AssistBlockingDoor()==null || _assistDoorBlockingAcd!=door.AcdId || route==null
+                || !route.ContainsKey("doorAcd") || Convert.ToUInt32(route["doorAcd"])!=door.AcdId)return false;
+            var xyz=route.ContainsKey("waypoint")?route["waypoint"] as float[]:null;
+            if(xyz==null || xyz.Length!=3)return false;
+            var point=Hud.Window.CreateWorldCoordinate(xyz[0],xyz[1],xyz[2]);
+            if(!AssistDoorInteractionPoint(door,point) || !AssistDoorConnectedSegment(status,Hud.Game.Me.FloorCoordinate,point,0.75f)
+                || !AssistDoorLandingClear(status,point,0.75f))return false;
+            _assistDoorApproachPoint=_assistDoorWaypoint=point;_assistDoorConnectedProof=true;
+            _assistDoorRouteEpoch=Convert.ToInt64(status["epoch"]);
+            _assistDoorPathState="Ready";_assistDoorPathReason="connected-walk-prefix";
+            PlanAssistDoorFirstHop();return true;
+        }
+
+        [System.Diagnostics.Conditional("S7O_GENMONK_DIAGNOSTICS")]
+        private void TraceAssistDoorAccess(string reason,IWorldCoordinate destination) { }
+
+
+        private void ClearAssistDoorQuery()
+        {
+            // Retain an identified, still-closed blocker; discard only unfinished
+            // query ownership. A failed interaction does not unlock its room.
+            _assistDoorAccessGoal=_assistDoorAccessOrigin=null;
+            _assistDoorAccessRoute=null;_assistDoorAccessTick=int.MinValue;
+            _assistDoorAccessState=_assistDoorAccessReason="none";
+        }
+        private void InvalidateAssistDoorAccess(IActor opened)
+        {
+            if(opened==null || opened.WorldId!=_assistDoorAccessWorld)return;
+            if(_assistDoorBlockingAcd==0 || (_assistDoorBlockingAcd==opened.AcdId && _assistDoorBlockingAnn==opened.AnnId))
+                ResetAssistDoorAccess();
+            else ClearAssistDoorQuery();
+        }
+        private IActor FindAssistLocalDoor()
+        {
+            if(!RefreshAssistPositionActors())return null;
+            IActor best=null;double gap=double.MaxValue;
+            foreach(var door in _assistDoors)
+            {
+                if(!IsAssistClosedDoor(door))continue;
+                double current=AssistDoorBodyGap(door);
+                if(current>(IsAssistBreakableDoor(door)?AssistDoorAttackReachYards:4f)
+                    || current>=gap || IsAssistEarlyDoorSuppressed(door) || !IsAssistDoorPathSafe(door))continue;
+                best=door;gap=current;
+            }
+            return best;
+        }
+        private bool PrepareAssistDoorDash(IWorldCoordinate point,bool escape=false)
+        {
+            if(!_assistActive || point==null || escape || _guardianStageAcd!=0u
+                || IsAssistDoorTripLanding(null,point))return true;
+            bool allowed=IsAssistDoorAccessAllowed(point);
+            if(!allowed)_assistMapPlanReason="closed-door-access:"+_assistDoorAccessState;
+            return allowed;
+        }
+        private bool DeferCompetingAssistDoorPath(Func<string,object[],object> provider,string operation,object[] args)
+        {
+            if(operation!="path" || !ReferenceEquals(provider,_assistMapGet) || args==null || args.Length!=8
+                || _assistDoorTarget!=null || _assistDoorReturnPending || _assistDoorAccessGoal==null
+                || _assistDoorAccessState!="Pending" || _assistDoorAccessWorld!=Hud.Game.Me.WorldId
+                || Convert.ToInt64(args[0])!=_assistDoorAccessEpoch)return false;
+            var goal=_assistDoorAccessGoal;
+            if(goal.XYDistanceTo(Convert.ToSingle(args[4]),Convert.ToSingle(args[5]))<=0.25f
+                && Math.Abs(goal.Z-Convert.ToSingle(args[6]))<=1f)return false;
+            // Both users share MapViewer's walking-route slot. Poll its existing
+            // request before another target can replace the unfinished worker.
+            bool allowed=IsAssistDoorAccessAllowed(goal);
+            if(allowed && _assistDoorAccessState=="Pending")ClearAssistDoorQuery();
+            return _assistDoorAccessState=="Pending";
+        }
+
+        [System.Diagnostics.Conditional("S7O_GENMONK_DIAGNOSTICS")]
+        private void TraceAssistDoorResume(string outcome,IActor door,bool travel) { }
+
+
+        private IWorldCoordinate _assistDoorRecoveryWalkPoint;
+        private bool _assistDoorCloseRecovery;
+        private static bool AssistDoorQuietWalkAllowed(double yards,int trash,bool elite)
+        { return !elite && trash<=2 && yards>=0 && yards<=15; }
+        private bool AssistDoorQuietContext()
+        {
+            int trash=0;var me=Hud.Game.Me.FloorCoordinate;
+            foreach(var body in Hud.Game.AliveMonsters)
+            {
+                if(body==null || !IsAssistMonsterValid(body))continue;
+                bool elite=IsAssistPositionElite(body) || body.Rarity==ActorRarity.Boss;
+                bool contact=CanAttackAssistFrom(me,body);
+                if((!elite || me.XYDistanceTo(body.FloorCoordinate)>AssistDoorDiscoveryYards) && !contact)continue;
+                // A known wall/closed-door dependency is not an available fight to
+                // abandon. Unknown map data retains the conservative combat veto.
+                if(MapAssistTargetBlocked(body) || AssistBlockingDoor(AssistTargetGround(body))!=null)continue;
+                if(elite || (contact && ++trash>2))
                 {
-                    _assistDoorFailures.Remove(target.AcdId);
-                    if (_assistDoorWalkStage != 0) ReleaseAssistAttack();
-                    if (_assistDoorStage==4) CancelTarget();
-                    _assistDoorPulseKey=ActionKey.Unknown;
-                    _assistDoorStage=1;_assistDoorSinceTick=now;
-                }
-                else if (_assistDoorPathState == "NoRoute" || _assistDoorPathState == "Unavailable"
-                    || (_assistDoorPathState == "Pending" && ElapsedMs(now,_assistDoorSinceTick)>=250))
-                {
-                    RecordAssistDoorFailure(target);
-                    if (!_assistDoorCombatDetour && combatTarget != null && !IsAssistReachableCombat(combatTarget))
-                        BlockAssistDoorGoal(combatTarget);
-                    CancelAssistDoor();
+                    TraceAssistDoorNative("walk-veto",_assistDoorTarget,0,0,
+                        (elite?"available-elite":"reachable-trash-count="+trash)+" acd="+body.AcdId+" ann="+body.AnnId);
                     return false;
                 }
-                else if (_assistDoorWalkStage != 0)
-                { ReleaseAssistAttack();_assistDoorStage=1;_assistDoorSinceTick=now; }
             }
+            return true;
+        }
+        private bool TryAssistQuietDoorWalk(IActor door,out IWorldCoordinate point)
+        {
+            point=null;
+            if(!AssistDoorQuietContext() || !IsAssistDoorPathSafe(door))return false;
+            var me=Hud.Game.Me.FloorCoordinate;var at=door.FloorCoordinate;
+            double distance=me.XYDistanceTo(at);
+            double reach=(IsAssistBreakableDoor(door)?AssistDoorAttackReachYards:4f)+Math.Max(0,Math.Min(3f,door.RadiusScaled));
+            double travel=Math.Max(0,distance-reach+0.5);
+            if(distance<0.01 || !AssistDoorQuietWalkAllowed(travel,0,false))return false;
+            float fraction=(float)(travel/distance);
+            var candidate=me.Offset((at.X-me.X)*fraction,(at.Y-me.Y)*fraction,(at.Z-me.Z)*fraction);
+            var status=MapAssistStatus();
+            if(status==null || !AssistDoorConnectedSegment(status,me,candidate,0.75f)
+                || !IsAssistPositionHazardFree(candidate) || !AssistTrailWalkFree(me,candidate)
+                || !IsAssistSkeletonFireWalkFree(me,candidate) || !IsAssistMalletWalkFree(me,candidate))return false;
+            point=candidate;return true;
+        }
+        private bool CanRecoverAssistDoor(IActor door,AssistDoorFailure failure)
+        {
+            if(!failure.RangedAttempt || failure.CloseRecoveryUsed)return false;
+            foreach(var watch in _assistDoorConfirmations)
+                if(watch.SuppressRetry && watch.World==door.WorldId && watch.Acd==door.AcdId && watch.Ann==door.AnnId)return false;
+            if(AssistDoorBodyGap(door)<=(IsAssistBreakableDoor(door)?AssistDoorAttackReachYards:4f))return true;
+            if(failure.TravelRecoveryUsed)return false;
+            // A recorded door-trip failure resumes once through a fresh walking
+            // route. The ordinary quiet-context rule still owns optional walking.
+            if(failure.PathRecovery)
+            {
+                var recoveryDash=AssistDoorDashSkill();
+                if(Hud.Game.Me.FloorCoordinate.XYDistanceTo(door.FloorCoordinate)<=AssistDoorDiscoveryYards
+                    && recoveryDash!=null && AssistDoorReserve(AutoDash && CanApproachDash(recoveryDash)
+                        && !s7o_GenMonkInput.IsDown(recoveryDash.Key),recoveryDash.Charges,
+                        Hud.Game.Me.Stats.ResourceCurPri,Hud.Game.Me.Stats.ResourceMaxPri))return true;
+            }
+            if(!AssistDoorQuietContext())return false;
+            var dash=AssistDoorDashSkill();
+            if(Hud.Game.Me.FloorCoordinate.XYDistanceTo(door.FloorCoordinate)<=AssistDashTravelLimit
+                && dash!=null && AssistDoorReserve(AutoDash && CanApproachDash(dash)
+                    && !s7o_GenMonkInput.IsDown(dash.Key),dash.Charges,
+                    Hud.Game.Me.Stats.ResourceCurPri,Hud.Game.Me.Stats.ResourceMaxPri))return true;
+            IWorldCoordinate point;return TryAssistQuietDoorWalk(door,out point);
+        }
+        private bool IsAssistDoorWalkHoverSafe(IActor intended)
+        {
+            if(intended==null || _assistDoorTarget==null || intended.WorldId!=_assistDoorTarget.WorldId
+                || intended.AcdId!=_assistDoorTarget.AcdId || intended.AnnId!=_assistDoorTarget.AnnId
+                || !AssistDoorHoverMatches(_assistDoorTarget,Hud.Game.SelectedActor) || !IsAssistClosedDoor(Hud.Game.SelectedActor)
+                || !_assistActive || !AssistRequested() || _assistDoorWalkStage==0 || _assistDoorRecoveryWalkPoint==null
+                || s7o_GenMonkInput.IsStandstillDown() || !AssistDoorQuietContext())return false;
+            var me=Hud.Game.Me.FloorCoordinate;var point=_assistDoorRecoveryWalkPoint;var status=MapAssistStatus();int x,y;
+            return me.XYDistanceTo(point)<=15f && status!=null && AssistDoorConnectedSegment(status,me,point,0.75f)
+                && IsAssistDoorPathSafe(intended) && AssistTrailWalkFree(me,point) && IsAssistSkeletonFireWalkFree(me,point)
+                && IsAssistMalletWalkFree(me,point) && TryReuseAssistDoorHover(_assistDoorTarget,out x,out y);
+        }
 
-            if (_assistDoorCombatDetour && !_assistDoorEarlyAttempt && _assistDoorStage == 1
-                && Hud.Game.Me.FloorCoordinate.XYDistanceTo(target.FloorCoordinate) > 8f)
-            {
-                RecordAssistDoorFailure(target); CancelAssistDoor();
-                return TryReturnAssistDoorCombat(now, combatTarget);
-            }
-            if (_assistDoorStage == 4)
-            {
-                _assistDoorStatus = _assistStatus = "door-navigate";
-                // Hold one acknowledged native target; do not spam clicks or Dash.
-                // The timer measures lack of progress, not a delay before action.
-                var me = Hud.Game.Me.FloorCoordinate;
-                double outward = me.XYDistanceTo(_assistDoorNativeOriginX,_assistDoorNativeOriginY);
-                if (outward >= _assistDoorNativeMaxProgress+1.0)
-                {
-                    _assistDoorNativeMaxProgress=outward;
+        private bool AssistDoorWalkCursorPending()
+        {
+            CursorPoint cursor;
+            if(!AssistDoorHoverMatches(_assistDoorTarget,Hud.Game.SelectedActor) || !GetCursorPos(out cursor)
+                || s7o_GenMonkInput.IsStandstillDown() || !IsAssistCursorUiSafe())return false;
+            long dx=Math.Abs((long)Hud.Window.CursorX+Hud.Window.Offset.X-cursor.X);
+            long dy=Math.Abs((long)Hud.Window.CursorY+Hud.Window.Offset.Y-cursor.Y);
+            return dx<=12 && dy<=12 && (dx>2 || dy>2);
+        }
 
-                    _assistDoorSinceTick=now;
-                    _pulseReleaseTick=unchecked(now+1000);
-                }
-                int x, y;
-                if (!TryGetAssistDoorAim(target, out x, out y)
-                    || (_assistDoorPulseKey == ActionKey.LeftSkill && !IsLeftClickSafe()))
-                { CancelAssistDoor(); return TryReturnAssistDoorCombat(now, combatTarget); }
-                double bodyGap = Math.Max(0, me.XYDistanceTo(target.FloorCoordinate)
-                    - Math.Max(0, Math.Min(3f, target.RadiusScaled)));
-                double interactionReach = IsAssistBreakableDoor(target) ? AssistDoorAttackReachYards : 4f;
-                if (bodyGap <= interactionReach)
-                {
-                    CancelTarget();
-                    _assistDoorPulseKey = ActionKey.Unknown;
-                    _assistDoorClickAuthorized = false;
-                    _assistDoorStage = 1;
-                    _assistDoorSinceTick = now;
-                    _assistDoorBeforeHp = target.Hitpoints;
-                    // Reacquire the exact door for its short attack/open pulse.
-                }
-                else
-                {
-                    if (_pulse != _assistDoorPulseKey || ElapsedMs(now, _assistDoorSinceTick) >= 500)
-                    { RecordAssistDoorFailure(target); CancelAssistDoor(); return TryReturnAssistDoorCombat(now, combatTarget); }
-                    return true;
-                }
-            }
-            if (_assistDoorStage == 2)
-            {
-                _assistDoorStatus = "door-click";
-                if (_pulse != ActionKey.Unknown) return true;
-                _assistDoorClickAuthorized = false;
-                if (IsAssistBreakableDoor(target) && target.Hitpoints < _assistDoorBeforeHp)
-                { if(!_assistDoorEarlyAttempt)_assistDoorFailures.Remove(target.AcdId); CancelAssistDoor(); return TryReturnAssistDoorCombat(now, combatTarget); }
-                if (ElapsedMs(now, _assistDoorSinceTick) < 250)
-                {
-                    // Keep the acknowledgement watchdog, but give combat this update.
-                    // No pulse is held, so there is no reason to idle while data settles.
-                    _assistDoorStatus="door-confirming";return false;
-                }
-                RecordAssistDoorFailure(target);
-                CancelAssistDoor();
-                return TryReturnAssistDoorCombat(now, combatTarget);
-            }
-            if (ElapsedMs(now, _assistDoorSinceTick) >= 250)
-            { RecordAssistDoorFailure(target); CancelAssistDoor(); return TryReturnAssistDoorCombat(now, combatTarget); }
-            int aimX, aimY;
-            if (!TryGetAssistDoorAim(target, out aimX, out aimY))
-            { CancelAssistDoor(); return TryReturnAssistDoorCombat(now, combatTarget); }
-            CursorPoint current;
-            if (!GetCursorPos(out current)) { CancelAssistDoor(); return TryReturnAssistDoorCombat(now, combatTarget); }
-            if (_assistDoorStage == 3
-                && (Math.Abs((long)current.X - _assistDoorAimX) > 12
-                    || Math.Abs((long)current.Y - _assistDoorAimY) > 12))
-            { CancelAssistDoor(); return TryReturnAssistDoorCombat(now, combatTarget); }
-            if (_assistDoorStage == 1 || _assistDoorAimX != aimX || _assistDoorAimY != aimY)
-            {
-                if (!SetCursorPos(aimX, aimY)) { CancelAssistDoor(); return TryReturnAssistDoorCombat(now, combatTarget); }
-                _assistDoorAimX = _assistAimX = aimX; _assistDoorAimY = _assistAimY = aimY;
-                _assistCursorOwned = true;
-                _assistDoorAimGameTick = Hud.Game.CurrentGameTick;
-                _assistDoorStage = 3;
-                _assistDoorStatus = _assistStatus = "door-aim";
-                return true;
-            }
-            var hovered = Hud.Game.SelectedActor;
-            if (Hud.Game.CurrentGameTick == _assistDoorAimGameTick || hovered == null
-                || hovered.AcdId != target.AcdId || !hovered.IsSelected) return true;
-            double doorGap = Math.Max(0, Hud.Game.Me.FloorCoordinate.XYDistanceTo(target.FloorCoordinate)
-                - Math.Max(0, Math.Min(3f, target.RadiusScaled)));
-            bool breakable = IsAssistBreakableDoor(target);
-            bool earlyBreakDash=_assistDoorEarlyAttempt && breakable;
-            var earlyDash=earlyBreakDash?AssistDoorDashSkill():null;
-            if(earlyBreakDash && (!AutoDash || !CanApproachDash(earlyDash) || s7o_GenMonkInput.IsDown(earlyDash.Key)
-                || !IsAssistEarlyDoorApproachReady(target,combatTarget))) {
-                RecordAssistDoorFailure(target);CancelAssistDoor();return TryReturnAssistDoorCombat(now,combatTarget);
-            }
-            bool approachDoor = !earlyBreakDash && doorGap > (breakable ? AssistDoorAttackReachYards : 4f);
-            if (approachDoor && _assistDoorCombatDetour)
-            { RecordAssistDoorFailure(target); CancelAssistDoor(); return TryReturnAssistDoorCombat(now, combatTarget); }
-            if (approachDoor && MapAssistTargetDoorBlocked(target))
-            { RecordAssistDoorFailure(target); CancelAssistDoor(); return false; }
-            if (approachDoor && breakable)
-            {
-                // Keyboard generators permit native pathing without synthetic LMB.
-                var navigation = AssistNavigationGenerator(0);
-                if (navigation == null) { CancelAssistDoor(); return TryReturnAssistDoorCombat(now, combatTarget); }
-                _assistDoorPulseKey = navigation.Key;
-            }
-            else _assistDoorPulseKey = earlyBreakDash ? earlyDash.Key : breakable ? _assistMainKey : ActionKey.LeftSkill;
-            _assistDoorClickAuthorized = _assistDoorPulseKey == ActionKey.LeftSkill;
-            if (!StartPulse(_assistDoorPulseKey, now, approachDoor ? 1000 : 50, false))
-            { CancelAssistDoor(); return TryReturnAssistDoorCombat(now, combatTarget); }
-            if(earlyBreakDash)TraceAssistTrial("DOOR_EARLY","phase=dash-pressed door="+target.AcdId
-                +" hpBefore="+_assistDoorBeforeHp+" x="+Hud.Game.Me.FloorCoordinate.X+" y="+Hud.Game.Me.FloorCoordinate.Y);
-            _assistDoorStage = approachDoor ? 4 : 2;
-            _assistDoorSinceTick = now;
-            _assistDoorNativeOriginX = Hud.Game.Me.FloorCoordinate.X;
-            _assistDoorNativeOriginY = Hud.Game.Me.FloorCoordinate.Y;
-            _assistDoorNativeMaxProgress = 0;
-            _assistDoorStatus = _assistStatus = approachDoor ? "door-navigate" : "door-click";
+        private bool WaitAssistDoorHoverAcknowledgement(IActor door,CursorPoint cursor,int now)
+        {
+            if(!AssistDoorHoverMatches(door,Hud.Game.SelectedActor) || !IsAssistCursorUiSafe()
+                || ElapsedMs(now,_assistDoorBurstStartedAt)>=AssistDoorBurstMs
+                || Math.Abs((long)Hud.Window.CursorX+Hud.Window.Offset.X-cursor.X)>12
+                || Math.Abs((long)Hud.Window.CursorY+Hud.Window.Offset.Y-cursor.Y)>12)return false;
+            // Wait for the current exact native hover, without moving the user's
+            // cursor or relaxing the two-pixel DOWN authorization. No budget reset.
+            _assistDoorAimX=_assistAimX=cursor.X;_assistDoorAimY=_assistAimY=cursor.Y;
+            _assistDoorAimGameTick=Hud.Game.CurrentGameTick;_assistDoorStage=3;
+            _assistDoorStatus=_assistStatus="door-hover-ack";
+            TraceAssistDoorNative("hover-wait",door,cursor.X,cursor.Y,"same-door-await-current-native-cursor");
             return true;
         }
 
-        private bool TryDashToAssistDoor(IActor door, IMonster combatTarget, int now)
+        private static bool AssistDoorReturnArrived(IWorldCoordinate actual,IWorldCoordinate origin)
+        { return actual!=null && origin!=null && actual.XYDistanceTo(origin)<3f && Math.Abs(actual.Z-origin.Z)<=4f; }
+
+        private bool AssistDoorOutwardArrived(IWorldCoordinate actual)
         {
-            if (_assistDoorPathState != "Ready" || (_assistDoorDashSpent && _assistDoorDashFailures >= 1)) return false;
-            var dash = AssistDoorDashSkill();
-            if (!AutoDash || !CanApproachDash(dash) || s7o_GenMonkInput.IsDown(dash.Key)) return false;
-            var me = Hud.Game.Me.FloorCoordinate;
-            // The connected interaction region establishes the side. Dash may skip
-            // static walls on the way there; the door-aware query still vetoes doors.
-            var landing = _assistDoorWaypoint;
-            var status = MapAssistStatus();
-            if (_assistDoorApproachPoint != null && status != null)
+            if(!_assistDoorFinalHop || _assistDoorTarget==null || _assistDoorDashWaypoint==null
+                || !AssistDoorInteractionPoint(_assistDoorTarget,actual)
+                || Math.Abs(actual.Z-_assistDoorTarget.FloorCoordinate.Z)>8f)return false;
+            if(actual.XYDistanceTo(_assistDoorDashWaypoint)<=0.5f && Math.Abs(actual.Z-_assistDoorDashWaypoint.Z)<=2f)return true;
+            var status=MapAssistStatus();
+            return status!=null && status.ContainsKey("epoch") && Convert.ToInt64(status["epoch"])==_assistDoorRouteEpoch
+                && AssistDoorConnectedSegment(status,actual,_assistDoorDashWaypoint,0.6f);
+        }
+
+        private bool WalkAssistDoorRecovery(IMonster combatTarget,int now)
+        {
+            var point=_assistDoorRecoveryWalkPoint;
+            if(point==null || !AssistDoorQuietContext())return FailAssistDoorAttempt(combatTarget,now,"walk-yield-combat");
+            var me=Hud.Game.Me.FloorCoordinate;var status=MapAssistStatus();
+            if(status==null || !AssistDoorConnectedSegment(status,me,point,0.75f)
+                || !IsAssistPositionHazardFree(point) || !AssistTrailWalkFree(me,point))
+                return FailAssistDoorAttempt(combatTarget,now,"walk-route-changed");
+            double remaining=me.XYDistanceTo(point);
+            if(double.IsNaN(_assistDoorBestRemaining) || remaining<_assistDoorBestRemaining-0.5)
+            { _assistDoorBestRemaining=remaining;_assistDoorSinceTick=now;_assistDoorProgressGameTick=Hud.Game.CurrentGameTick; }
+            if(_assistDoorWaypoint!=null && AssistRouteWalkAttemptExpired(Hud.Game.CurrentGameTick,
+                _assistDoorProgressGameTick,ElapsedMs(now,_assistDoorSinceTick)))
+                return FailAssistDoorAttempt(combatTarget,now,"walk-no-progress");
+            string reason;
+            if(!WalkAssistGroundWaypoint(point,now,"door-recovery-walk",ref _assistDoorWalkStage,
+                ref _assistDoorAimGameTick,ref _assistDoorWaypoint,out reason,intendedDoor:_assistDoorTarget))
             {
-                try
+                if((reason=="unsafe-waypoint-hover" || reason=="unsafe-held-hover") && AssistDoorWalkCursorPending())
+                { _assistDoorStatus=_assistStatus="door-walk-hover-ack";TraceAssistDoorNative("walk-hover-wait",_assistDoorTarget,0,0,"same-door-await-current-native-cursor");return true; }
+                return FailAssistDoorAttempt(combatTarget,now,"walk-"+reason);
+            }
+            if(_assistDoorWalkStage==2)CommitAssistDoorAction(_assistDoorTarget,false);
+            _assistDoorStatus=_assistStatus;return true;
+        }
+
+
+        [System.Diagnostics.Conditional("S7O_GENMONK_DIAGNOSTICS")]
+        private void BeginAssistDoorTrace() { }
+        [System.Diagnostics.Conditional("S7O_GENMONK_DIAGNOSTICS")]
+        private void FlushAssistDoorTrace() { }
+        [System.Diagnostics.Conditional("S7O_GENMONK_DIAGNOSTICS")]
+        private void TraceAssistDoorConfirmationResult(AssistDoorConfirmation watch,string outcome) { }
+
+        private bool UpdateAssistDoor(IMonster combatTarget,int now,bool canDashNow=false)
+        {
+            if(_assistDoorTarget!=null && !IsAssistClosedDoor(_assistDoorTarget))
+                return CompleteAssistDoor(combatTarget,now);
+            if(!_assistActive || !AssistRequested())
+            { TraceAssistDoorNative("gate",_assistDoorTarget,0,0,"inactive-or-key-release");return false; }
+            if(AssistUrgentEscapeDue() || IsAssistHealingRecovery() || _assistSafetyCombatPending
+                || _assistSafetyCombatOnly || _assistSafetyApproachAcd!=0u || _rangedCleanup)
+            {
+                TraceAssistDoorNative("gate",_assistDoorTarget,0,0,"safety-or-explicit-mode");
+                if(_assistDoorTarget!=null)CancelAssistDoor();
+                return false;
+            }
+            // An owned UP may still be awaiting acknowledgement. Retain an active
+            // door transaction before classifying the old Shift state as physical.
+            if(s7o_InputReleaseArbiter.HasPendingRelease)return WaitAssistDoorInput(combatTarget,now);
+            FinishAssistDoorInputWait(now);
+            if(_selfDashKey!=ActionKey.Unknown)return _assistDoorTarget!=null;
+            var localDoor=_assistDoorTarget==null?FindAssistLocalDoor():null;
+            var standstillDoor=_assistDoorTarget??localDoor;
+            if(s7o_GenMonkInput.IsStandstillDown() && _assistScopedStandstill==0
+                && (standstillDoor==null || !IsAssistBreakableDoor(standstillDoor)
+                    || AssistDoorBodyGap(standstillDoor)>AssistDoorAttackReachYards))
+            {
+                TraceAssistDoorNative("gate",standstillDoor,0,0,"physical-standstill-needs-movement-or-interaction");
+                if(_assistDoorTarget!=null)return WaitAssistDoorInput(combatTarget,now);
+                return false;
+            }
+            if(_assistDoorReturnPending && _assistDoorTarget==null && localDoor==null
+                && TryReturnAssistDoorCombat(now,combatTarget))return true;
+            // A return that yielded has no input ownership. Keep its encounter
+            // memory, but allow a reachable door recovery to make progress.
+            if(_assistDoorTarget==null)
+            {
+                _assistDoorRequiredTrip=false;_assistDoorFollowPath=false;
+                if(!RefreshAssistPositionActors())return false;
+                bool retainReturn=_assistDoorReturnPending;
+                IActor required=null;
+                if(localDoor==null && combatTarget!=null && Hud.Game.Me.FloorCoordinate.XYDistanceTo(AssistTargetGround(combatTarget))<=120f
+                    && (!CanAttackAssistFrom(Hud.Game.Me.FloorCoordinate,combatTarget) || MapAssistTargetBlocked(combatTarget))
+                    && !IsAssistDoorAccessAllowed(AssistTargetGround(combatTarget)))required=AssistBlockingDoor(AssistTargetGround(combatTarget));
+                // A native-confirmed wall failure is sufficient to try a nearby
+                // reachable door; it does not prove which door blocks that target.
+                bool pathRecovery=HasAssistDoorCollision() && (combatTarget==null
+                    || !CanAttackAssistFrom(Hud.Game.Me.FloorCoordinate,combatTarget)
+                    || MapAssistTargetBlocked(combatTarget)
+                    || IsAssistBlockedApproachDirection(AssistTargetGround(combatTarget)));
+                IActor best=localDoor;
+                if(best==null)foreach(var door in _assistDoors)
                 {
-                    var goal = _assistDoorApproachPoint;
-                    var hop = AssistInvokeMap(_assistMapGet,"dash", new object[]{status["epoch"], me.X, me.Y, me.Z,
-                        goal.X, goal.Y, goal.Z, 0.6f}) as Dictionary<string,object>;
-                    var xyz = hop != null && hop.ContainsKey("waypoint") ? hop["waypoint"] as float[] : null;
-                    if (hop != null && hop.ContainsKey("state") && (hop["state"] as string) == "Ready"
-                        && xyz != null && xyz.Length == 3)
+                    if(!IsAssistClosedDoor(door) || IsAssistEarlyDoorSuppressed(door)
+                        || Hud.Game.Me.FloorCoordinate.XYDistanceTo(door.FloorCoordinate)>AssistDoorDiscoveryYards
+                        || !IsAssistDoorPathSafe(door))continue;
+                    if(door==required){best=door;break;}
+                    if(best==null || Hud.Game.Me.FloorCoordinate.XYDistanceTo(door.FloorCoordinate)
+                        <Hud.Game.Me.FloorCoordinate.XYDistanceTo(best.FloorCoordinate))best=door;
+                }
+                if(best==null)return false;
+                pathRecovery|=AssistDoorNeedsPathRecovery(best);
+                _assistDoorRequiredTrip=best==required;_assistDoorFollowPath=pathRecovery;
+                double gap=AssistDoorBodyGap(best);
+                bool combat=combatTarget!=null && IsAssistMonsterValid(combatTarget)
+                    && (AssistDoorRecentCombat() || (IsAssistPositionElite(combatTarget) && _assistTargetAcd==combatTarget.AcdId));
+                bool local=gap<=(IsAssistBreakableDoor(best)?AssistDoorAttackReachYards:4f);
+                // While charging a trip, normal attacks continue. A nearby interaction
+                // consumes no Dash and must not be hidden by trash/elite contact.
+                IWorldCoordinate walkPoint=null;
+                if(!local && (!canDashNow || !CanFundAssistDoorTrip(best,combat)) && !TryAssistQuietDoorWalk(best,out walkPoint))
+                {TraceAssistDoorNative("range",best,0,0,"dash-or-reserve-unavailable");return false;}
+                if(_pulse!=ActionKey.Unknown){TraceAssistDoorNative("range",best,0,0,"existing-input-pulse");return false;}
+                if(!local && walkPoint==null)
+                {
+                    PlanAssistDoorApproach(best);
+                    if(!IsAssistEarlyDoorApproachReady(best,combatTarget) && !TryAssistQuietDoorWalk(best,out walkPoint))
                     {
-                        var candidate = Hud.Window.CreateWorldCoordinate(xyz[0],xyz[1],xyz[2]);
-                        int cx, cy;
-                        if (me.XYDistanceTo(candidate) >= 3 && me.XYDistanceTo(candidate) <= AssistDashTravelLimit - 0.25
-                            && candidate.XYDistanceTo(goal) + 2 < me.XYDistanceTo(goal)
-                            && IsAssistDashPointSafe(candidate,combatTarget,out cx,out cy,false,true)) landing = candidate;
+                        TraceAssistDoorNative("range",best,0,0,_assistDoorPathState+":"+_assistDoorPathReason);
+                        if(_assistDoorPathState=="NoRoute" || _assistDoorPathState=="map-unavailable"
+                            || _assistDoorPathState=="Unavailable"
+                            || ElapsedMs(now,_assistDoorPlanStartedAt)>=250)DeferAssistDoorPlan(best);
+                        return false;
                     }
                 }
-                catch { _assistMapGet = null; _assistMapPlugin = null; }
+                ReleaseAssistAttack();CancelTarget();
+                _assistDoorTarget=best;_assistDoorEarlyAttempt=true;_assistDoorStage=1;_assistDoorRequiredTrip=best==required;_assistDoorFollowPath=pathRecovery;_assistDoorTravelOnly=(!combat || pathRecovery) && !_assistDoorRequiredTrip && !retainReturn;
+                _assistDoorInputWaitAt=int.MinValue;_assistDoorInputWaitTotal=0;
+                _assistDoorHopCount=0;_assistDoorAimPhase=0;_assistDoorClicks=0;_assistDoorBurstStartedAt=int.MinValue;
+                _assistDoorSinceTick=now;_assistDoorBeforeHp=best.Hitpoints;
+                _assistDoorProgressGameTick=Hud.Game.CurrentGameTick;
+                AssistDoorFailure prior;_assistDoorCloseRecovery=_assistDoorFailures.TryGetValue(best.AcdId,out prior) && prior.RangedAttempt;
+                ReserveAssistEarlyDoor(best);_assistDoorRecoveryWalkPoint=walkPoint;
+                if(walkPoint!=null){_assistDoorBestRemaining=double.NaN;_assistDoorWalkStage=0;}
+                if(!retainReturn)ClearAssistDoorReturn();
+                if(combat && !_assistDoorRequiredTrip && !pathRecovery && !retainReturn)
+                {
+                    _assistDoorReturnWorld=Hud.Game.Me.WorldId;_assistDoorReturnUntil=unchecked(now+12000);
+                    _assistDoorCombatDetour=true;_assistDoorReturnTargetAcd=combatTarget.AcdId;
+                    _assistDoorReturnAnn=combatTarget.AnnId;
+                    _assistDoorReturnPoint=Hud.Game.Me.FloorCoordinate.Offset(0,0,0);
+                    _assistDoorReturnDoorPoint=best.FloorCoordinate.Offset(0,0,0);
+                    _assistDoorReturnVia=_assistDoorFirstHop;
+                    RememberAssistDoorEncounter(combatTarget);
+                }
+                BeginAssistDoorTrace();
+                TraceAssistPositionDecision("DOOR_SELECTED",combatTarget,best.FloorCoordinate,"door="+best.AcdId+" sno="+best.SnoActor.Sno+" local="+local+" travel="+_assistDoorTravelOnly+" pathFallback="+_assistDoorFollowPath);
             }
-            if (landing == null || (_assistDoorDashSpent && _assistDoorDashWaypoint != null
-                && landing.XYDistanceTo(_assistDoorDashWaypoint) <= 2.5f)) return false;
-            double travel = me.XYDistanceTo(landing);
-            if (travel < 4 || travel > AssistDashTravelLimit - 0.25) return false;
+            var target=_assistDoorTarget;
+            if(s7o_InputReleaseArbiter.HasPendingRelease)return WaitAssistDoorInput(combatTarget,now);
+            FinishAssistDoorInputWait(now);
+            if(_assistDoorStage==5)
+            {
+                _assistDashContinuationPending=false;
+                if(!_assistDashLandingConfirmed || _assistDashMovementFailed || _assistDoorDashWaypoint==null
+                    )
+                    return FailAssistDoorAttempt(combatTarget,now,"dash-not-arrived");
+                if(_assistDoorHopCount==1 && _assistDoorReturnVia!=null)
+                    _assistDoorReturnVia=Hud.Game.Me.FloorCoordinate.Offset(0,0,0);
+                if(_assistDoorFinalHop && !AssistDoorInteractionPoint(_assistDoorTarget,Hud.Game.Me.FloorCoordinate))
+                    return FailAssistDoorAttempt(combatTarget,now,"final-landing-outside-interaction");
+                _assistDoorStage=1;_assistDoorSinceTick=now;
+                if(_assistDoorHopCount<(_assistDoorFollowPath?4:2))_assistDoorDashSpent=false;
+            }
+            if(_assistDoorStage==2)
+            {
+                if(_pulse!=ActionKey.Unknown)return true;
+                _assistDoorClickAuthorized=false;
+                // Breakable doors may need several normal attacks; hold one owned
+                // attack for the existing bounded transaction, never retry a trip.
+                if(IsAssistBreakableDoor(target))
+                {
+                    if(ElapsedMs(now,_assistDoorSinceTick)<250){_assistDoorStatus=_assistStatus="door-confirming";return true;}
+                    return DeferAssistDoorConfirmation(combatTarget,now);
+                }
+                if(_assistDoorBorrowedPrimary || _assistDoorClicks>=4)
+                {
+                    if(ElapsedMs(now,_assistDoorBurstStartedAt)<AssistDoorBurstMs)return true;
+                    return DeferAssistDoorConfirmation(combatTarget,now);
+                }
+                return AdvanceAssistDoorProbe(combatTarget,now);
+            }
+            double bodyGap=AssistDoorBodyGap(target);
+            bool breakable=IsAssistBreakableDoor(target);
+            if(bodyGap>(breakable?AssistDoorAttackReachYards:4f))
+            {
+                if(_assistDoorFollowPath)
+                {
+                    // After actual arrival, obtain the next connected walking
+                    // waypoint from the new position, not the stale final goal.
+                    PlanAssistDoorApproach(target);
+                    if(_assistDoorPathState=="Pending" && ElapsedMs(now,_assistDoorSinceTick)<250)
+                    { _assistDoorStatus=_assistStatus="door-path-refresh";return true; }
+                }
+                if(_assistDoorRecoveryWalkPoint!=null)return WalkAssistDoorRecovery(combatTarget,now);
+                if(_assistDoorDashSpent)return FailAssistDoorAttempt(combatTarget,now,"landing-outside-interaction");
+                if(!CanFundAssistDoorTrip(target,!_assistDoorTravelOnly))
+                    return FailAssistDoorAttempt(combatTarget,now,"reserve-changed");
+                if(!IsAssistEarlyDoorApproachReady(target,combatTarget))
+                    return FailAssistDoorAttempt(combatTarget,now,"near-side-proof-changed");
+                if(TryDashToAssistDoor(target,combatTarget,now))return true;
+                return FailAssistDoorAttempt(combatTarget,now,"dash-not-admitted");
+            }
+            if(_assistDoorWalkStage!=0){ReleaseAssistAttack();_assistDoorWalkStage=0;_assistDoorRecoveryWalkPoint=null;}
+            if(_assistDoorBurstStartedAt==int.MinValue)_assistDoorBurstStartedAt=now;
+            if(ElapsedMs(now,_assistDoorBurstStartedAt)>=AssistDoorBurstMs)
+                return DeferAssistDoorConfirmation(combatTarget,now);
             int x,y;
-            if (!IsAssistDashPointSafe(landing,combatTarget,out x,out y,false,true)) return false;
-            ReleaseAssistAttack(); CancelTarget();
-            _assistDoorDashWaypoint = landing.Offset(0f,0f,0f);
-            _assistDoorDashRemaining = _assistDoorRemaining;
-            MaintainDash(dash,now,combatTarget,landing,false,true);
-            if (_selfDashKey == ActionKey.Unknown) return false;
-            _assistDoorDashSpent = true;
-            _assistDoorStage = 5;
-            _assistDoorStatus = _assistStatus = "door-route-dash";
+            if(_assistDoorStage==1 && TryReuseAssistDoorHover(target,out x,out y))
+            {
+                _assistDoorAimX=_assistAimX=x;_assistDoorAimY=_assistAimY=y;_assistCursorOwned=true;
+                _assistDoorAimGameTick=unchecked(Hud.Game.CurrentGameTick-1);_assistDoorStage=3;
+                TraceAssistDoorNative("reuse-hover",target,x,y,"exact-current-hover");
+            }
+            if(_assistDoorStage==3){x=_assistDoorAimX;y=_assistDoorAimY;}
+            else if(!TryGetAssistDoorAim(target,out x,out y))return AdvanceAssistDoorProbe(combatTarget,now);
+            while(_assistDoorStage==1 && _assistDoorAimPhase>0 && x==_assistDoorAimX && y==_assistDoorAimY)
+            {
+                if(++_assistDoorAimPhase>=AssistDoorProbeCount)return FailAssistDoorAttempt(combatTarget,now,"hover-probes-exhausted");
+                if(!TryGetAssistDoorAim(target,out x,out y))return AdvanceAssistDoorProbe(combatTarget,now);
+            }
+            CursorPoint cursor;
+            if(!GetCursorPos(out cursor))return FailAssistDoorAttempt(combatTarget,now,"cursor-unavailable");
+            if(_assistDoorStage==3 && (Math.Abs((long)cursor.X-_assistDoorAimX)>12 || Math.Abs((long)cursor.Y-_assistDoorAimY)>12))
+            {
+                int hx,hy;
+                if(TryReuseAssistDoorHover(target,out hx,out hy))
+                {
+                    x=_assistDoorAimX=_assistAimX=hx;y=_assistDoorAimY=_assistAimY=hy;
+                    _assistDoorAimGameTick=unchecked(Hud.Game.CurrentGameTick-1);
+                    TraceAssistDoorNative("reuse-hover",target,x,y,"user-confirmed-same-door");
+                }
+                else
+                {
+                    if(WaitAssistDoorHoverAcknowledgement(target,cursor,now))return true;
+                    TraceAssistDoorNative("cursor-cancel",target,_assistDoorAimX,_assistDoorAimY,"cursor-left-owned-probe");
+                    return FailAssistDoorAttempt(combatTarget,now,"cursor-left-owned-probe");
+                }
+            }
+            if(_assistDoorStage==1 || x!=_assistDoorAimX || y!=_assistDoorAimY)
+            {
+                if(!SetCursorPos(x,y))return FailAssistDoorAttempt(combatTarget,now,"cursor-failed");
+                _assistDoorAimX=_assistAimX=x;_assistDoorAimY=_assistAimY=y;_assistCursorOwned=true;
+                _assistDoorAimGameTick=Hud.Game.CurrentGameTick;_assistDoorStage=3;
+                _assistDoorStatus=_assistStatus="door-aim";TraceAssistDoorNative("aim",target,x,y,"native-ground-probe");return true;
+            }
+            var hovered=Hud.Game.SelectedActor;
+            if(Hud.Game.CurrentGameTick==_assistDoorAimGameTick)return true;
+            if(Math.Abs((long)Hud.Window.CursorX+Hud.Window.Offset.X-_assistDoorAimX)>2
+                || Math.Abs((long)Hud.Window.CursorY+Hud.Window.Offset.Y-_assistDoorAimY)>2)
+            {TraceAssistDoorNative("hover-wait",target,_assistDoorAimX,_assistDoorAimY,"native-cursor-not-acknowledged");return true;}
+            if(!AssistDoorHoverMatches(target,hovered))
+            {
+                TraceAssistDoorNative("hover-miss",target,_assistDoorAimX,_assistDoorAimY,"selected-actor-mismatch");
+                TraceAssistPositionDecision("DOOR_PROBE",combatTarget,target.FloorCoordinate,"door="+target.AcdId
+                    +" phase="+_assistDoorAimPhase+" hovered="+(hovered==null?0u:hovered.AcdId));
+                return AdvanceAssistDoorProbe(combatTarget,now);
+            }
+            if(!TryReuseAssistDoorHover(target,out x,out y))
+            {
+                if(GetCursorPos(out cursor) && WaitAssistDoorHoverAcknowledgement(target,cursor,now))return true;
+                return FailAssistDoorAttempt(combatTarget,now,"final-native-hover-not-acknowledged");
+            }
+            _assistDoorAimX=_assistAimX=x;_assistDoorAimY=_assistAimY=y;
+            _assistDoorPulseKey=breakable?_assistMainKey:ActionKey.LeftSkill;
+            _assistDoorClickAuthorized=_assistDoorPulseKey==ActionKey.LeftSkill;
+            if(s7o_GenMonkInput.IsDown(_assistDoorPulseKey) && !s7o_GenMonkInput.Owns(_assistDoorPulseKey))
+            {
+                // The same borrowed-primary rule as ordinary assist: steer only the
+                // confirmed actor, never manufacture UP/DOWN on a physical button.
+                if(breakable && !EnsureAssistScopedStandstill())return true;
+                CommitAssistDoorAction(target,true);
+                _assistDoorBorrowedPrimary=true;_assistDoorStage=2;_assistDoorSinceTick=now;ArmAssistDoorConfirmation(target);
+                _assistDoorStatus=_assistStatus="door-held-primary";
+                TraceAssistPositionDecision("DOOR_INTERACT",combatTarget,target.FloorCoordinate,"door="+target.AcdId+" input=physical-held");
+                return true;
+            }
+            TraceAssistDoorNative("click",target,_assistDoorAimX,_assistDoorAimY,"exact-hover-authorized");
+            if(!StartPulse(_assistDoorPulseKey,now,breakable?180:15,false))
+                return FailAssistDoorAttempt(combatTarget,now,"interaction-input-busy");
+            CommitAssistDoorAction(target,true);
+            _assistDoorStage=2;_assistDoorSinceTick=now;_assistDoorClicks++;ArmAssistDoorConfirmation(target);
+            _assistDoorStatus=_assistStatus="door-click";
+            TraceAssistPositionDecision("DOOR_INTERACT",combatTarget,target.FloorCoordinate,"door="+target.AcdId+" breakable="+breakable+" phase="+_assistDoorAimPhase+" clicks="+_assistDoorClicks);
+            return true;
+        }
+
+        private void CommitAssistDoorDashPress()
+        {
+            if(!_selfDashApproach || _selfDashCastTick==int.MinValue || _selfDashTargetAcd!=0u
+                || _assistDashLanding==null || _assistDashLandingWorldId!=Hud.Game.Me.WorldId)return;
+            if(_assistDoorTarget!=null && _assistDoorStage==5 && _assistDoorDashWaypoint!=null
+                && _assistDoorTarget.WorldId==Hud.Game.Me.WorldId
+                && _assistDashLanding.XYDistanceTo(_assistDoorDashWaypoint)<=0.25f)
+            {
+                _assistDoorHopCount++;
+                CommitAssistDoorAction(_assistDoorTarget,false);
+            }
+            else if(_assistDoorReturnPending && _assistDoorReturnWorld==Hud.Game.Me.WorldId
+                && _assistDoorReturnHop!=null && _assistDashLanding.XYDistanceTo(_assistDoorReturnHop)<=0.25f)
+                _assistDoorReturnHopCount++;
+        }
+
+        private bool TryDashToAssistDoor(IActor door,IMonster combatTarget,int now)
+        {
+            if(_assistDoorDashSpent || (_assistDoorCloseRecovery && _assistDoorHopCount>=1) || _assistDoorHopCount>=(_assistDoorFollowPath?4:2) || !IsAssistEarlyDoorApproachReady(door,combatTarget))return false;
+            var dash=AssistDoorDashSkill();if(!CanFundAssistDoorTrip(door,!_assistDoorTravelOnly))return false;
+            var landing=AssistDoorNextHop();var me=Hud.Game.Me.FloorCoordinate;
+            if(me.XYDistanceTo(landing)<1 || me.XYDistanceTo(landing)>AssistDashTravelLimit)return false;
+            int x,y;if(!IsAssistDashPointSafe(landing,combatTarget,out x,out y,false,true))return false;
+            ReleaseAssistAttack();CancelTarget();
+            _assistDoorFinalHop=_assistDoorFollowPath?AssistDoorInteractionPoint(door,landing):landing.XYDistanceTo(_assistDoorApproachPoint)<=0.25;
+            _assistDoorDashWaypoint=landing.Offset(0,0,0);_assistDoorDashSpent=true;_assistDoorStage=5;
+            MaintainDash(dash,now,null,landing,false,true); // Door trip owns ground, not the retained monster.
+            if(_selfDashKey==ActionKey.Unknown)return false;
+            _assistDoorStatus=_assistStatus="door-near-side-dash";
             return true;
         }
 
         private void PlanAssistDoorApproach(IActor door)
         {
-            var previousWaypoint=_assistDoorWaypoint;
+            bool previousProof=_assistDoorConnectedProof;
             var previousGoal=_assistDoorApproachPoint;
             _assistDoorApproachPoint = _assistDoorWaypoint = null;
             _assistDoorRemaining = double.NaN;
@@ -10202,23 +11210,41 @@ private bool TryPickAssistDashPointPlanningBody(IMonster target, bool hazardEsca
             {
                 var me = Hud.Game.Me.FloorCoordinate;
                 long epoch=Convert.ToInt64(status["epoch"]);
+                if(_assistDoorPlanAcd!=door.AcdId || _assistDoorPlanWorld!=door.WorldId || _assistDoorPlanEpoch!=epoch
+                    || _assistDoorPlanOrigin==null || me.XYDistanceTo(_assistDoorPlanOrigin)>3)
+                {
+                    previousProof=false;ClearAssistDoorQuery();
+                    AssistInvokeMap(_assistMapGet,"resetpath",new object[]{epoch});
+                    _assistDoorPlanAcd=door.AcdId;_assistDoorPlanWorld=door.WorldId;_assistDoorPlanEpoch=epoch;
+                    _assistDoorPlanOrigin=me.Offset(0,0,0);_assistDoorPlanClearance=2f;_assistDoorConnectedProof=false;_assistDoorFirstHop=null;_assistDoorFirstHopConnected=false;_assistDoorPlanStartedAt=Environment.TickCount;
+                }
                 float body = Math.Max(0f,Math.Min(3f,door.RadiusScaled));
-                float reach = Math.Min(8f,(IsAssistBreakableDoor(door)?AssistDoorAttackReachYards:4f)+body-0.75f);
+                float reach=AssistDoorApproachReach(body,IsAssistBreakableDoor(door));
                 // The two-yard preference is not a veto in narrow door corridors.
-                var route = AssistInvokeMap(_assistMapGet,"approach",new object[]{status["epoch"],me.X,me.Y,me.Z,door.AcdId,reach,0.6f})
+                var route = AssistInvokeMap(_assistMapGet,"approach",new object[]{status["epoch"],me.X,me.Y,me.Z,door.AcdId,reach,_assistDoorPlanClearance})
                     as Dictionary<string,object>;
                 _assistDoorPathState = route != null && route.ContainsKey("state") ? route["state"] as string : "map-unavailable";
                 if (route == null) return;
+                _assistDoorConnectedProof=(_assistDoorPathState=="Ready" || _assistDoorPathState=="AtApproach")
+                    && route.ContainsKey("requiresDoor") && !Convert.ToBoolean(route["requiresDoor"]);
+                if(_assistDoorPathState=="NoRoute" && TryAssistDoorWalkPrefix(door,status))return;
+                if(_assistDoorPathState=="NoRoute" && _assistDoorPlanClearance>1.25f)
+                { _assistDoorPlanClearance=1.25f;_assistDoorPathState="Pending";return; }
+                if(_assistDoorPathState=="NoRoute" && _assistDoorPlanClearance>0.75f)
+                { _assistDoorPlanClearance=0.75f;_assistDoorPathState="Pending";return; }
+                if(!_assistDoorConnectedProof && _assistDoorPathState!="Pending")
+                { _assistDoorPathReason="no-connected-walk-prefix:"+(route.ContainsKey("reason")?Convert.ToString(route["reason"]):_assistDoorPathState);_assistDoorPathState="NoRoute";return; }
                 _assistDoorPathReason = route.ContainsKey("reason") ? Convert.ToString(route["reason"]) : "none";
-                if(_assistDoorPathState=="Pending"&&previousWaypoint!=null&&_assistDoorRouteEpoch==epoch
-                    &&me.XYDistanceTo(previousWaypoint)>1f) {
-                    var check=AssistMapRead("corridor",new object[]{epoch,me.X,me.Y,me.Z,
-                        previousWaypoint.X,previousWaypoint.Y,previousWaypoint.Z,0.6f}) as Dictionary<string,object>;
-                    if(check!=null&&check.ContainsKey("state")&&(check["state"] as string)=="ClearCandidate") {
-                        _assistDoorWaypoint=previousWaypoint;_assistDoorApproachPoint=previousGoal;
-                        _assistDoorPathState="Ready";_assistDoorPathReason="validated-refresh-hop";
-                        return;
-                    }
+                // Pending clears current proof. Reuse only a same-context goal that
+                // a fresh direct walking segment proves reachable on this side now.
+                if(previousProof && _assistDoorPathState=="Pending" && previousGoal!=null
+                    && route.ContainsKey("requiresDoor") && !Convert.ToBoolean(route["requiresDoor"])
+                    && _assistDoorRouteEpoch==epoch && me.XYDistanceTo(previousGoal)<=AssistDashTravelLimit
+                    && AssistDoorInteractionPoint(door,previousGoal)
+                    && AssistDoorConnectedSegment(status,me,previousGoal,0.75f))
+                {
+                    _assistDoorConnectedProof=true;_assistDoorApproachPoint=_assistDoorWaypoint=previousGoal;
+                    _assistDoorPathState="Ready";_assistDoorPathReason="validated-current-walking-goal";return;
                 }
                 _assistDoorRouteEpoch=epoch;
                 var goal = route.ContainsKey("approachGoal") ? route["approachGoal"] as float[] : null;
@@ -10227,6 +11253,13 @@ private bool TryPickAssistDashPointPlanningBody(IMonster target, bool hazardEsca
                     _assistDoorApproachPoint = Hud.Window.CreateWorldCoordinate(goal[0],goal[1],goal[2]);
                 if (waypoint != null && waypoint.Length == 3)
                     _assistDoorWaypoint = Hud.Window.CreateWorldCoordinate(waypoint[0],waypoint[1],waypoint[2]);
+                // Both candidates come from the connected walking route. Prefer
+                // a roomy waypoint already within interaction reach over a tight endpoint.
+                if(_assistDoorConnectedProof && _assistDoorWaypoint!=null && AssistDoorInteractionPoint(door,_assistDoorWaypoint)
+                    && AssistDoorLandingClear(status,_assistDoorWaypoint,2f)
+                    && (_assistDoorApproachPoint==null || !AssistDoorLandingClear(status,_assistDoorApproachPoint,2f)))
+                    _assistDoorApproachPoint=_assistDoorWaypoint;
+                PlanAssistDoorFirstHop();
                 if (route.ContainsKey("remainingDistance")) _assistDoorRemaining = Convert.ToDouble(route["remainingDistance"]);
                 if (!double.IsNaN(_assistDoorRemaining)
                     && (double.IsNaN(_assistDoorBestRemaining) || _assistDoorRemaining <= _assistDoorBestRemaining-1.5))
@@ -10238,19 +11271,13 @@ private bool TryPickAssistDashPointPlanningBody(IMonster target, bool hazardEsca
                     if (_assistDoorDashWaypoint != null && !double.IsNaN(_assistDoorDashRemaining)
                         && _assistDoorRemaining <= _assistDoorDashRemaining-6.0)
                         _assistDoorDashWaypoint = null;
-                    if (_assistDoorDashWaypoint == null) { _assistDoorDashSpent = false; _assistDoorDashFailures = 0; }
+                    if (_assistDoorDashWaypoint == null) _assistDoorDashSpent = false;
                 }
             }
             catch { _assistDoorPathState = "map-unavailable"; _assistDoorPathReason = "query-failed"; }
         }
 
-        private bool WalkAssistDoorWaypoint(int now)
-        {
-            bool walking=WalkAssistGroundWaypoint(_assistDoorWaypoint,now,"door-route-walk",
-                ref _assistDoorWalkStage,ref _assistDoorWalkAimTick,ref _assistDoorWalkPoint,out _assistDoorWalkReason);
-            if(walking) {_assistDoorStage=_assistDoorWalkStage==1?6:7;_assistDoorStatus=_assistStatus;}
-            return walking;
-        }
+
 
         // Shared ground-input mechanism; callers keep separate route/door state.
         // Never adopt physical LMB, click an actor/UI, or hold owned standstill while walking.
@@ -10331,7 +11358,7 @@ private bool TryPickAssistDashPointPlanningBody(IMonster target, bool hazardEsca
         }
 
         private bool WalkAssistGroundWaypoint(IWorldCoordinate point,int now,string label,
-            ref int stage,ref int aimTick,ref IWorldCoordinate heldPoint,out string reason,bool combatRoute=false)
+            ref int stage,ref int aimTick,ref IWorldCoordinate heldPoint,out string reason,bool combatRoute=false,IActor intendedDoor=null)
         {
             reason="none";
             if (point == null || s7o_InputReleaseArbiter.HasPendingRelease
@@ -10370,14 +11397,20 @@ private bool TryPickAssistDashPointPlanningBody(IMonster target, bool hazardEsca
                 if(Hud.Game.CurrentGameTick==aimTick)return true;
                 // Fresh acknowledgement still gates DOWN. An eligible enemy is useful
                 // contact, not an obstruction to movement. Unsafe actors yield at once.
-                if(!IsAssistRouteHoverSafe(point,combatRoute) || !IsLeftClickSafe()) {
+                if((!IsAssistRouteHoverSafe(point,combatRoute) && !IsAssistDoorWalkHoverSafe(intendedDoor)) || !IsLeftClickSafe()) {
                     reason="unsafe-waypoint-hover";return false;
                 }
                 if(!s7o_GenMonkInput.Down(Owner,ActionKey.LeftSkill))return false;
                 _assistAttackKey=ActionKey.LeftSkill;_assistAttackStartedTick=now;
                 stage=2;reason="ground-held";
+                if(intendedDoor!=null && IsAssistDoorWalkHoverSafe(intendedDoor))
+                {
+                    ArmAssistDoorConfirmation(intendedDoor,false); // Observe native follow without spending its later close punch.
+                    TraceAssistDoorNative("walk-door-follow",intendedDoor,x,y,"exact-native-door-hover");
+                }
             }
-            if(!IsAssistRouteHoverSafe(point,combatRoute)||!s7o_GenMonkInput.Owns(ActionKey.LeftSkill)||!IsLeftClickSafe())
+            if((!IsAssistRouteHoverSafe(point,combatRoute) && !IsAssistDoorWalkHoverSafe(intendedDoor))
+                ||!s7o_GenMonkInput.Owns(ActionKey.LeftSkill)||!IsLeftClickSafe())
             { reason="unsafe-held-hover";return false; }
             _assistStatus=label;
             return true;
@@ -10827,36 +11860,66 @@ private bool CanAttackAssistFromCore(IWorldCoordinate point,IMonster target)
                     latest=warning.CreatedTick;
             return latest==int.MinValue?int.MinValue:latest+180;
         }
-        private IMonster TryResumeAssistMoltenEncounter(bool canDash,int now)
+        private IMonster TryResumeAssistHazardEncounter(bool canDash,int now)
         {
-            if(AssistBlastContactHold())return null;
-            if(!_assistHazardReturnMolten || _assistHazardReturnAcd==0u || _rangedCleanup
-                || (_groupCtrlMode && _juggerFocusAcd!=0u && _juggerFocusAcd!=_assistHazardReturnAcd)
-                || _panicMustAttack || _assistHealthFraction<0.60 || AssistMoltenEscapeDue()
-                || AssistReactiveEscapeDue() || !IsAssistPositionHazardFree(Hud.Game.Me.FloorCoordinate))return null;
+            if(_assistHazardReturnAcd==0u)return null;
+            double threshold=_assistArcaneResponseStage==2?AssistArcaneRecoveredHealth:0.60;
+            if(_rangedCleanup || (_groupCtrlMode && _juggerFocusAcd!=0u && _juggerFocusAcd!=_assistHazardReturnAcd))
+            {TraceAssistHazardReturnDecision("explicit-focus",null);return null;}
+            if(_panicMustAttack || _assistHealthFraction<threshold)
+            {TraceAssistHazardReturnDecision("health-or-panic-recovery",null);return null;}
+            if(AssistUrgentEscapeDue() || !IsAssistPositionHazardFree(Hud.Game.Me.FloorCoordinate)
+                || !IsAssistMalletPointFree(Hud.Game.Me.FloorCoordinate))
+            {TraceAssistHazardReturnDecision("current-danger",null);return null;}
             var target=ResolveAssistHazardReturn(now);
-            if(target==null || !IsAssistEligible(target) || IsAssistTargetTemporarilyBlocked(target)
-                || IsAssistRouteSuppressed(target))return null;
+            if(target==null || !IsAssistMonsterValid(target) || AssistTargetTier(target)<0)return null;
+            if(IsAssistTargetTemporarilyBlocked(target) || IsAssistRouteSuppressed(target))
+            {TraceAssistHazardReturnDecision("failed-route-memory",target);return null;}
             foreach(var candidate in _assistCandidates)
-                if(AssistTargetTier(candidate)>AssistTargetTier(target)
-                    && CanEngageAssistPosition(candidate,canDash,now))return null;
+                if(AssistTargetTier(candidate)>AssistTargetTier(target) && CanEngageAssistPosition(candidate,canDash,now))
+                {TraceAssistHazardReturnDecision("higher-priority-live-target",target);return null;}
             var preferred=PreferAssistProductiveReturn(target,canDash,now);
             if(preferred!=target || HasAssistSelectedPosition(target))return null;
-            _assistHazardReturnSelecting=true;
             IWorldCoordinate landing=null;string reason;
             if(!IsAssistStationaryCombat(target))
             {
-                if(!canDash || !(TryPickAssistCircleUpgrade(target,out landing,out reason)
-                    && IsAssistRecoveryLanding(landing,target,now)))
-                    if(!canDash || !TryPickAssistRecoveryLanding(target,now,out landing))
-                    { _assistHazardReturnSelecting=false;return null; }
+                if(!canDash){TraceAssistHazardReturnDecision("dash-unavailable",target);return null;}
+                bool contact=IsAssistEligible(target)
+                    && ((TryPickAssistCircleUpgrade(target,out landing,out reason) && IsAssistRecoveryLanding(landing,target,now))
+                        || TryPickAssistRecoveryLanding(target,now,out landing));
+                if(!contact)
+                {
+                    landing=AssistTargetGround(target).Offset(0,0,0);bool transit;
+                    if(!TryMapAssistApproach(target,ref landing,out transit)
+                        || !IsAssistHazardReturnLanding(landing,target,now) || !PrepareAssistDoorDash(landing))
+                    {TraceAssistHazardReturnDecision("safe-approach-unavailable:"+_assistMapPlanReason,target);return null;}
+                }
                 _assistSafetyApproachAcd=target.AcdId;_assistSafetyApproachLanding=landing;
             }
-            // A validated original contact supersedes a compulsory hit on temporary safety trash.
+            _assistHazardReturnSelecting=true;
+            // Recovered health and a validated live approach release the temporary
+            // minion requirement, without claiming a hit or clearing collision memory.
             _assistSafetyCombatPending=false;
-            TraceAssistMoltenReturn(target,landing);
+            TraceAssistHazardReturnDecision(landing==null?"resume-current-contact":"resume-safe-approach",target);
+            TraceAssistHazardReturn(target,landing);
             return target;
         }
+
+        private bool IsAssistHazardReturnLanding(IWorldCoordinate point,IMonster target,int now)
+        {
+            if(point==null || !IsAssistMonsterValid(target))return false;
+            if(CanAttackAssistFrom(point,target))return IsAssistRecoveryLanding(point,target,now);
+            var me=Hud.Game.Me.FloorCoordinate;int x,y;
+            return me.XYDistanceTo(point)>=2f && me.XYDistanceTo(point)<=AssistDashTravelLimit
+                && AssistUsefulApproachHop(point,target)
+                && point.XYDistanceTo(AssistTargetGround(target))+2f<me.XYDistanceTo(AssistTargetGround(target))
+                && IsAssistDashPointSafe(point,target,out x,out y,mapTransit:true)
+                && AllowAssistMovement(target,point,now,false,false);
+        }
+
+        [System.Diagnostics.Conditional("S7O_GENMONK_DIAGNOSTICS")]
+        private void TraceAssistHazardReturnDecision(string reason,IMonster target) { }
+
 
 
         private bool IsAssistMoltenOnlyEscape()
@@ -11394,10 +12457,66 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
                 && !AssistShieldPylonActive();
         }
 
+        private const float FrozenPulseContactMaxTravel=14f;
+        private int _assistFrozenPulseSearchAt=int.MinValue;
+
+        private bool IsAssistFrozenPulseContact(IWorldCoordinate point,IMonster target)
+        {
+            return IsAssistEligible(target) && IsAssistPositionElite(target) && target.Rarity!=ActorRarity.Boss
+                && AssistSameHeight(point,Hud.Game.Me.FloorCoordinate)
+                && AssistHitboxEdgeGap(point,target)<=AssistConfiguredStrikeReach()
+                && CanAttackAssistFrom(point,target) && !MapAssistAttackBlocked(point,target)
+                && IsAssistFrozenPulsePointFree(point,true,.75);
+        }
+
+        private bool TryStartFrozenPulseContactDash(IPlayerSkill dash,int now)
+        {
+            if(_lowHealthFields.Count==0 || _assistArcaneCoreUnsafe || _assistOrbiterCoreUnsafe
+                || _assistDamageEscapePending || AssistSoftRecoveryActive || _assistDoorTarget!=null
+                || _assistDoorReturnPending || _guardianStageAcd!=0 || !AutoDash
+                || _pulse!=ActionKey.Unknown || _targetKey!=ActionKey.Unknown || _selfDashKey!=ActionKey.Unknown
+                || ElapsedMs(now,_assistFrozenPulseSearchAt)<250)return false;
+            var me=Hud.Game.Me.FloorCoordinate;
+            if(IsAssistFrozenPulsePointFree(me,true) || AssistFrozenEscapeDue() || AssistSkeletonFireEscapeDue()
+                || AssistBossImpactEscapeDue() || AssistMalletEscapeDue() || AssistOrlashCoreDue()
+                || !CanApproachDash(dash) || s7o_GenMonkInput.IsDown(dash.Key)
+                || s7o_InputReleaseArbiter.HasPendingRelease)return false;
+            _assistFrozenPulseSearchAt=now;
+            var target=FindAssistCandidate(_assistTargetAcd);
+            if(!IsAssistPositionElite(target) || target.Rarity==ActorRarity.Boss || !IsAssistEligible(target))return false;
+            IWorldCoordinate best=null;
+            double bestScore=double.MaxValue;
+            uint currentCircle=AssistOculusAt(me);
+            bool arcaneClear=IsAssistArcaneRecoveryClear(me);
+            for(int ring=0;ring<5;ring++)
+            {
+                float travel=ring==0?3f:ring==1?5f:ring==2?8f:ring==3?11f:FrozenPulseContactMaxTravel;
+                for(int i=0;i<AssistEdgeX.Length;i++)
+                {
+                    var candidate=me.Offset(AssistEdgeX[i]*travel,AssistEdgeY[i]*travel,0);
+                    if(!IsAssistFrozenPulseContact(candidate,target) || (arcaneClear&&!IsAssistArcaneRecoveryClear(candidate)))continue;
+                    uint circle=AssistOculusAt(candidate);
+                    double score=travel-(circle!=0?(circle==currentCircle?3:1.5):0);
+                    if(score>=bestScore)continue;
+                    int x,y;
+                    if(!IsAssistDashPointSafe(candidate,target,out x,out y,escapeOnly:true))continue;
+                    best=candidate;bestScore=score;
+                }
+            }
+            if(best==null)return false;
+            _assistPositionReason="frozen-pulse-contact";
+            _assistPositionWorldX=best.X;_assistPositionWorldY=best.Y;
+            MaintainDash(dash,now,target,best,assistEscapeOnly:true,frozenPulseContact:true);
+            if(_selfDashKey==ActionKey.Unknown)return false;
+            _assistStatus="frozen-pulse-contact";
+            return true;
+        }
+
         private bool TryStartAssistHazardEscape(IPlayerSkill dash, int now)
         {
             if (!_assistActive || !AssistRequested()) return false;
             bool arcane = AssistReactiveEscapeDue(), molten = AssistMoltenEscapeDue();
+            if(!molten && TryStartFrozenPulseContactDash(dash,now))return true;
             bool walkingHazard = AssistMalletEscapeDue() || molten || (arcane && (_assistArcaneCoreUnsafe || _assistOrbiterCoreUnsafe
                 || LowHealthFieldEscapeDue() || AssistPanicWalkDue()));
             if (!walkingHazard)
@@ -11426,6 +12545,23 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
             bool found = arcane
                 ? TryPickAssistReactiveEscapePoint(target, out landing, out reason, out escapeOnly)
                 : TryPickAssistMoltenEscapePoint(target, out landing, out reason, out escapeOnly);
+            uint cycloneElite=0u,cycloneAnchor=0u,cycloneCircle=0u;
+            bool cycloneExit=false;
+            if(arcane && !molten && _assistCycloneSkill!=null)
+            {
+                try
+                {
+                    IWorldCoordinate cycloneLanding;
+                    if(TryPlanCycloneArcaneExit(target,dash,found?landing:null,now,
+                        out cycloneLanding,out cycloneElite,out cycloneAnchor,out cycloneCircle)
+                        && AllowAssistMovement(target,cycloneLanding,now,true,false))
+                    {
+                        landing=cycloneLanding;found=true;escapeOnly=true;reason="arcane-recovery-contact:cyclone";
+                        cycloneExit=true;
+                    }
+                }
+                catch {cycloneExit=false;}
+            }
             // Overlapping Arcane/Molten may need the wider Molten boundary samples.
             if (!found && molten)
                 found = TryPickAssistMoltenEscapePoint(target, out landing, out reason, out escapeOnly);
@@ -11455,6 +12591,8 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
             MapAssistFeedback(arcane?"reactive-escape-request":"explosion-escape-request",
                 target==null?0u:target.AcdId,landing);
             MaintainDash(dash, now, target, landing, true);
+            if(_selfDashKey!=ActionKey.Unknown && cycloneExit)
+                SetCycloneSetup(CycloneSetupKind.ArcaneExit,cycloneElite,cycloneAnchor,landing,now,cycloneCircle);
                     if (_selfDashKey != ActionKey.Unknown && !_rangedCleanup && target != null
                         && _assistDamageEscapeTrigger=="low-health-rapid-loss"
                         && reason.IndexOf(":reactive-contact",StringComparison.Ordinal)>=0)
@@ -11556,35 +12694,65 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
                 target = PreferAssistEncounterReturn(target, now);
             target = PreferAssistInitialContact(target,canDashNow,now);
             target = PreferAssistCircleCommitment(target,canDashNow);
-            bool circleBeforePursuit=_groupCtrlMode && _assistHealthFraction>0.40;
-            // Recovery owns selection until contact resumes; a circle optimizer must
-            // not replace its reachable elite or local healing target.
-            if (circleBeforePursuit && !_rangedCleanup && !_assistSafetyCombatOnly && _assistSafetyApproachAcd == 0u && !_assistHazardReturnSelecting)
-                target = PreferCurrentDamageCircleContact(target, canDashNow, now);
-            if (!HasAssistSelectedPosition(target) && TryAssistDistantPursuit(dash,now,canDashNow,ref target)) return true;
-            if (!HasAssistSelectedPosition(target) && TryAssistRememberedElitePursuit(dash,now,canDashNow,target)) return true;
-            if (!circleBeforePursuit && !_rangedCleanup && !_assistSafetyCombatOnly && _assistSafetyApproachAcd == 0u && !_assistHazardReturnSelecting)
-                target = PreferCurrentDamageCircleContact(target, canDashNow, now);
-            var retarget = FindAssistCandidate(_assistRetargetAcd);
-            if (!_pulseIsRetarget && !_assistWotHfResumePending && HasAssistAttackContact(retarget))
-                _assistRetargetAcd = _assistRetargetAnn = 0u;
-            bool retargetActive = _pulseIsRetarget || (_assistRetargetAcd != 0u && !Due(now,_assistRetargetResumeUntil));
-            if (retargetActive && IsAssistEligible(retarget) && !_assistSafetyCombatOnly && !_assistHazardReturnSelecting
-                && !AssistUrgentEscapeDue()
-                && (target == null || AssistTargetTier(retarget) >= AssistTargetTier(target))
-                && CanAttackAssistFrom(Hud.Game.Me.FloorCoordinate,retarget)
-                && !MapAssistAttackBlocked(Hud.Game.Me.FloorCoordinate,retarget)
-                && IsAssistPositionHazardFree(Hud.Game.Me.FloorCoordinate))
-                target = retarget;
-            else if (!_pulseIsRetarget) _assistRetargetAcd = _assistRetargetAnn = 0u;
-            target=PreferAssistGroupPack(target,canDashNow,now);
-            if (!HasAssistSelectedPosition(target) && !retargetActive && !_rangedCleanup && !_assistSafetyCombatOnly && _assistSafetyApproachAcd == 0u && !_assistHazardReturnSelecting)
+            // Door housekeeping owns one bounded trip before optional pursuit/circle
+            // movement. Mandatory avoidance/upkeep have already been serviced.
+            if(!AssistSoftRecoveryActive && !AssistUrgentEscapeDue() && UpdateAssistDoor(target,now,canDashNow))return true;
+            if(_assistDoorReturnPending && !AssistSoftRecoveryActive && !AssistUrgentEscapeDue()
+                && !IsAssistHealingRecovery() && !_assistSafetyCombatOnly && _assistSafetyApproachAcd==0u
+                && HoldAssistDoorReturnContact(now))return true;
+            if(_assistCycloneSkill!=null && HoldContactlessCycloneLanding(now))return true;
+            bool cycloneSetupMoving=false;
+            IMonster cycloneContact=null;
+            if(_cycloneSetup.Kind!=CycloneSetupKind.None)
             {
-                target = PreferAssistProductiveContact(target,now);
-                target = PreferAssistAttackLane(target,now);
+                try {cycloneContact=KeepCycloneSetup(target,dash,canDashNow,now,out cycloneSetupMoving);}
+                catch {_cycloneSetup=default(CycloneSetup);}
             }
-            target=PreferAssistCircleCommitment(target,canDashNow);
-            target=PreferAssistInitialContact(target,canDashNow,now);
+            if(cycloneSetupMoving)return true;
+            if(cycloneContact==null)cycloneContact=KeepCycloneOculusContact(target,now);
+            bool retargetActive=false;
+            if(cycloneContact!=null)
+            {
+                target=cycloneContact;
+                _assistSelectedPositionTarget=null;_assistSelectedPositionPoint=null;_assistSelectedPositionReason=null;
+            }
+            else if(canDashNow && TryStartCycloneOculus(target,dash,now))return true;
+            if(_assistCycloneSkill!=null && _cycloneSetup.Kind==CycloneSetupKind.None)
+                try {if(TryRecallCycloneElite(target,now))return true;}
+                catch { /* Optional recall yields to ordinary pursuit. */ }
+            if(cycloneContact==null)
+            {
+                bool circleBeforePursuit=_groupCtrlMode && _assistHealthFraction>0.40;
+                // Recovery owns selection until contact resumes; a circle optimizer must
+                // not replace its reachable elite or local healing target.
+                if (circleBeforePursuit && !_rangedCleanup && !_assistSafetyCombatOnly && _assistSafetyApproachAcd == 0u && !_assistHazardReturnSelecting)
+                    target = PreferCurrentDamageCircleContact(target, canDashNow, now);
+                if (!HasAssistSelectedPosition(target) && TryAssistDistantPursuit(dash,now,canDashNow,ref target)) return true;
+                if (!HasAssistSelectedPosition(target) && TryAssistRememberedElitePursuit(dash,now,canDashNow,target)) return true;
+                if (!circleBeforePursuit && !_rangedCleanup && !_assistSafetyCombatOnly && _assistSafetyApproachAcd == 0u && !_assistHazardReturnSelecting)
+                    target = PreferCurrentDamageCircleContact(target, canDashNow, now);
+                var retarget = FindAssistCandidate(_assistRetargetAcd);
+                if (!_pulseIsRetarget && !_assistWotHfResumePending && HasAssistAttackContact(retarget))
+                    _assistRetargetAcd = _assistRetargetAnn = 0u;
+                retargetActive = _pulseIsRetarget || (_assistRetargetAcd != 0u && !Due(now,_assistRetargetResumeUntil));
+                if (retargetActive && IsAssistEligible(retarget) && !_assistSafetyCombatOnly && !_assistHazardReturnSelecting
+                    && !AssistUrgentEscapeDue()
+                    && (target == null || AssistTargetTier(retarget) >= AssistTargetTier(target))
+                    && CanAttackAssistFrom(Hud.Game.Me.FloorCoordinate,retarget)
+                    && !MapAssistAttackBlocked(Hud.Game.Me.FloorCoordinate,retarget)
+                    && IsAssistPositionHazardFree(Hud.Game.Me.FloorCoordinate))
+                    target = retarget;
+                else if (!_pulseIsRetarget) _assistRetargetAcd = _assistRetargetAnn = 0u;
+                target=PreferAssistGroupPack(target,canDashNow,now);
+                TraceAssistActivation("target-selected",target);
+                if (!HasAssistSelectedPosition(target) && !retargetActive && !_rangedCleanup && !_assistSafetyCombatOnly && _assistSafetyApproachAcd == 0u && !_assistHazardReturnSelecting)
+                {
+                    target = PreferAssistProductiveContact(target,now);
+                    target = PreferAssistAttackLane(target,now);
+                }
+                target=PreferAssistCircleCommitment(target,canDashNow);
+                target=PreferAssistInitialContact(target,canDashNow,now);
+            }
             ObserveAssistBoundaryContact(target,now);
             ObserveExtendedCircleContact(target,now);
             // Selection owns priority. Dash availability changes travel, not the target tier.
@@ -11594,7 +12762,7 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
             bool moltenEscapeOnly = false;
             bool arcaneEscapeDue = AssistReactiveEscapeDue();
             bool hazardUrgent = arcaneEscapeDue || AssistMoltenEscapeDue() || AssistMalletEscapeDue() || AssistOrlashCoreDue();
-            if (!AssistSoftRecoveryActive && !hazardUrgent && !retargetActive && TryRunCloserContact(dash,now,canDashNow,target)) return true;
+            if (!AssistSoftRecoveryActive && !hazardUrgent && !retargetActive && cycloneContact==null && TryRunCloserContact(dash,now,canDashNow,target)) return true;
 
             bool moltenEscape = canDashNow && ((arcaneEscapeDue
                     && TryPickAssistReactiveEscapePoint(target, out moltenEscapePoint, out moltenEscapeReason, out moltenEscapeOnly))
@@ -11610,13 +12778,13 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
             _assistCircleCue = "none"; _assistCircleOpportunityAcd = 0u;
             // A newly usable circle has its own validated landing/failed-circle guard.
             // Travel retry timers must not hide this independent damage opportunity.
-            bool circleDash = !retargetActive && !hazardUrgent && canDashNow
+            bool circleDash = cycloneContact==null && !retargetActive && !hazardUrgent && canDashNow
                 && !_assistSafetyCombatOnly && _assistSafetyApproachAcd == 0u
                 && TryPickAssistCircleUpgrade(target, out circleLanding, out circleReason);
 
             // A validated circle entry wins over forecasting a moving pull.
             // Intercept otherwise uses the existing movement and safety owners.
-            if (!retargetActive && !hazardUrgent && !circleDash && !HasAssistSelectedPosition(target) && TryAssistPackIntercept(target, dash, now, canDashNow)) return true;
+            if (cycloneContact==null && !retargetActive && !hazardUrgent && !circleDash && !HasAssistSelectedPosition(target) && TryAssistPackIntercept(target, dash, now, canDashNow)) return true;
             if (circleDash) { _assistCircleCue = circleReason; CancelAssistDoor(); }
             if (!hazardUrgent && !circleDash) {
                 if(target==null||target.AcdId!=_assistMapGoalAcd)_assistMapDoorAcd=0;
@@ -11624,7 +12792,7 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
                 // is reachable; it cannot reclaim combat selection itself.
                 var doorGoal = target ?? (_assistNavigationReacquired
                     ? FindAssistCandidate(_assistNavigationTargetAcd) : null);
-                if(!AssistSoftRecoveryActive && UpdateAssistDoor(doorGoal,now,canDashNow))return true;
+                // Door ownership is evaluated once above, before combat movement.
             }
 
             IWorldCoordinate spacingLanding = null;
@@ -11633,6 +12801,7 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
             bool spacingNeeded = target != null && (AssistElectrifiedSpacingDue()
                 || AssistChainDistance(Hud.Game.Me.FloorCoordinate, target) < 3.0);
             bool spacingDash = !retargetActive && !hazardUrgent && !circleDash && (spacingNeeded || guardianClose) && CanAttemptAssistSpacing(target) && canDashNow
+                && !HasAssistSelectedPosition(target)
                 && !_assistNavigationPending && !_assistDashRetryNeedsAttack && Due(now, _nextDashAimTick)
                 && TryPickAssistDashPoint(target, false, out spacingLanding, out spacingReason)
                 && spacingLanding.XYDistanceTo(Hud.Game.Me.FloorCoordinate) > 1f
@@ -11692,22 +12861,7 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
                     : _assistHazardBlockedTargets ? "hazard-follow-blocked" : "no-target";
                 return true;
             }
-            if (target.AcdId != _assistTargetAcd)
-            {
-                ReleaseAssistAttack();
-                CancelTarget();
-                _assistTargetAcd = target.AcdId; 
-                ResetAssistContactRecovery();
-                _assistAimTick = now;
-                _assistAimGameTick = Hud.Game.CurrentGameTick;
-                _assistAimPending = true;
-                _assistHitVerified = false;
-                _assistApproachPending = true;
-                _assistDashRetryNeedsAttack = false;
-                _nextDashAimTick = now; // A previous target's cancelled aim must not delay this target.
-            }
-            _mainKey = _assistMainKey;
-            _combinationDisplayKey = _mainKey;
+            SetAssistAttackTarget(target,now);
             double meleeRange = AssistAttackReachYards;
             bool approaching = !CanAttackAssistFrom(Hud.Game.Me.FloorCoordinate, target)
                 || (!HasAssistAttackContact(target) && MapAssistTargetBlocked(target));
@@ -11769,11 +12923,13 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
             if (!hazardUrgent && canDashNow && target.AcdId == _assistSafetyApproachAcd
                 && _assistSafetyApproachLanding != null)
             {
-                if(!IsAssistRecoveryLanding(_assistSafetyApproachLanding,target,now))
+                bool encounterReturn=_assistHazardReturnSelecting && target.AcdId==_assistHazardReturnAcd;
+                if(!(encounterReturn?IsAssistHazardReturnLanding(_assistSafetyApproachLanding,target,now)
+                    :IsAssistRecoveryLanding(_assistSafetyApproachLanding,target,now)))
                 { _assistRecoverySkipAcd=target.AcdId;_assistRecoveryReselect=true;return true; }
                 shortcutLanding = _assistSafetyApproachLanding;
-                shortcutReason = "safety-contact";
-                shortcutTransit = !IsAssistEligible(target);
+                shortcutReason = encounterReturn?"hazard-encounter-return":"safety-contact";
+                shortcutTransit = !IsAssistEligible(target) || !CanAttackAssistFrom(shortcutLanding,target);
                 navigationRetry = true;
             }
             if (!moltenEscape&&!navigationRetry) AdvanceAssistNavigation(target, now, canDashNow, out navigationRetry);
@@ -11786,7 +12942,7 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
             bool refreshDash = dash != null && DashDue(dash, now) && !_assistNavigationPending;
             IWorldCoordinate densityLanding = null;
             bool selectedDensity=HasAssistSelectedPosition(target) && AssistLandingDamageCircle(_assistSelectedPositionPoint)==0u;
-            bool densityDash = !retargetActive && !hazardUrgent && !circleDash && !spacingDash && (selectedDensity || !approaching)
+            bool densityDash = cycloneContact==null && !retargetActive && !hazardUrgent && !circleDash && !spacingDash && (selectedDensity || !approaching)
                 && !_assistNavigationPending && !_assistSafetyCombatOnly && canDashNow
                 && (selectedDensity ? (densityLanding=_assistSelectedPositionPoint)!=null
                     : TryPickAssistDensityUpgrade(target, now, out densityLanding));
@@ -11823,7 +12979,8 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
                         : TryPickAssistDashPoint(target, false, out landing, out positionReason);
                 bool requiredUpkeep = refreshDash && !approaching && !moltenEscape
                     && !circleDash && !densityDash && !spacingDash && !contactCorrection;
-                if (planned && AllowAssistMovement(target,landing,now,moltenEscape || moltenEscapeOnly,requiredUpkeep,circleDash))
+                if (planned && AllowAssistMovement(target,landing,now,moltenEscape || moltenEscapeOnly,requiredUpkeep,circleDash)
+                    && PrepareAssistDoorDash(landing,moltenEscape || moltenEscapeOnly))
                 {
                     _assistPositionReason = navigationRetry ? "navigation-retry:" + positionReason
                         : continuationDash ? "dash-continue:" + positionReason
@@ -11886,6 +13043,31 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
                 BeginAssistNativeNavigation(target, Hud.Game.Me.FloorCoordinate, now);
                 if (HandleAssistNativeNavigation(target, now)) return true;
             }
+            return HoldAssistAttack(target,now,meleeRange,canAttackHere,approaching);
+        }
+
+        private void SetAssistAttackTarget(IMonster target,int now)
+        {
+            if (target.AcdId != _assistTargetAcd)
+            {
+                ReleaseAssistAttack();
+                CancelTarget();
+                _assistTargetAcd = target.AcdId;
+                ResetAssistContactRecovery();
+                _assistAimTick = now;
+                _assistAimGameTick = Hud.Game.CurrentGameTick;
+                _assistAimPending = true;
+                _assistHitVerified = false;
+                _assistApproachPending = true;
+                _assistDashRetryNeedsAttack = false;
+                _nextDashAimTick = now; // A previous target's cancelled aim must not delay this target.
+            }
+            _mainKey = _assistMainKey;
+            _combinationDisplayKey = _mainKey;
+        }
+
+        private bool HoldAssistAttack(IMonster target,int now,double meleeRange,bool canAttackHere,bool approaching)
+        {
             // A held DOWN can lose native attack continuity after a cast. Recover only the
             // assist-owned primary, with a bounded idle grace; never reclick manual input.
             if (_assistAttackKey != ActionKey.Unknown)
@@ -11970,6 +13152,7 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
                 if (!physicalPrimary && !s7o_GenMonkInput.Down(Owner, _assistMainKey))
                 { ReleaseAssistScopedStandstill(); _assistStatus = "input-busy"; return true; }
                 _assistAttackKey = _assistMainKey;
+                TraceAssistActivation("primary-down");
                 _assistAttackStartedTick = now;
                 _assistIdleSinceTick = int.MinValue;
                 _candidateKey = _mainKey; _candidateSinceTick = now;
@@ -11990,13 +13173,14 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
                 s7o_GenMonkInput.Up(Owner, _assistAttackKey);
             _assistAttackKey = ActionKey.Unknown;
             _assistExplosionRunStage = 0; _assistExplosionRunPoint = null;
-            _assistDoorWalkStage = 0; _assistDoorWalkPoint=null;
+            _assistDoorWalkStage = 0;
             _assistRouteWalkStage=0;_assistRouteWalkPoint=null;
             if (!keepScopedStandstill) ReleaseAssistScopedStandstill();
         }
 
         private void EndAssist()
         {
+            _oculusCarry=default(OculusCarry);
             _assistFirePoolAvoiding=false;
             ResetAssistSoftRecovery();
             _assistMoltenPlanLookahead=_assistMoltenPlanBypass=false;
@@ -12011,9 +13195,10 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
             _rangedEncounterOrigin=null; _rangedEncounterThreats.Clear();
             CancelAssistDoor();
             ClearAssistDoorReturn();
+            ResetAssistDoorAccess();
             _assistDoors.Clear();
             foreach(var id in _assistDoorFailures.Keys.ToArray())
-                if(!_assistDoorFailures[id].EarlyAttempted)_assistDoorFailures.Remove(id);
+                if(!_assistDoorFailures[id].RangedAttempt)_assistDoorFailures.Remove(id);
             ReleaseAssistAttack();
             CursorPoint current;
             if (_assistCursorOwned && Hud.Window.IsForeground && GetCursorPos(out current)
@@ -12022,6 +13207,11 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
                 if (IsHudMenuRestoreSafe(_assistCursorX,_assistCursorY))
                     SetCursorPos(_assistCursorX, _assistCursorY);
             _assistActive = _assistEnding = _assistCursorOwned = false;
+            _assistCycloneSkill=null;
+            _cycloneSetup=default(CycloneSetup);
+            ClearCycloneOculus();
+            _cycloneFollowTarget=0u;
+            RestoreCyclonePredicate();
             _assistAimPending = false;
             _assistTargetAcd = 0u;
             _assistMainKey = ActionKey.Unknown;
@@ -12065,7 +13255,7 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
             _assistDashLanding = null;
             _assistDashEscapeOnly = false;
             _assistDashLandingWorldId = 0u;
-            _assistHazardReturnAcd = 0u;
+            _assistHazardReturnAcd = _assistHazardReturnAnn = 0u;_assistHazardReturnElite=false;
             _assistHazardReturnPoint=null; _assistHazardReturnSelecting=false;
             _assistPositionReplanPending = false;
             _assistPositionGameTick = int.MinValue;
@@ -12136,16 +13326,14 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
         private bool IsAssistGuardianStageSafe()
         {
             if (!GuardianPreAttackEnabled || !_assistActive || !AssistRequested()
-                || _guardianStageAcd == 0 || !IsAssistGuardianPhase()) return false;
-            var boss = Hud.Game.AliveMonsters.FirstOrDefault(m => m != null && m.AcdId == _guardianStageAcd);
-            return boss != null && boss.IsAlive && boss.WorldId == Hud.Game.Me.WorldId
-                && (!boss.Attackable || boss.Invulnerable)
+                || _guardianStageAcd == 0 || (!IsAssistGuardianPhase() && !Hud.Game.Me.InGreaterRift)) return false;
+            var boss = Hud.Game.Monsters.FirstOrDefault(m => m != null && m.AcdId == _guardianStageAcd);
+            return AssistGuardianSpawnCandidate(boss)
                 && IsAssistPositionWorldPoint(boss.FloorCoordinate)
                 && AssistSameHeight(Hud.Game.Me.FloorCoordinate,boss.FloorCoordinate)
                 && CanAttackAssistFrom(Hud.Game.Me.FloorCoordinate,boss)
                 && !MapAssistAttackBlocked(Hud.Game.Me.FloorCoordinate,boss)
-                && RefreshAssistPositionActors() && !AssistMoltenEscapeDue() && !AssistReactiveEscapeDue()
-                && IsAssistPositionHazardFree(Hud.Game.Me.FloorCoordinate) && !IsAssistHealingRecovery();
+                && CanOwnAssistGuardianStage();
         }
 
         private bool IsAssistGuardianForceAttackSafe()
@@ -12167,51 +13355,92 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
                 && q.SnoQuest.Sno==382695 && q.QuestStepId==16);
         }
 
+        private IWorldCoordinate _guardianApproachPoint;
+        private string _guardianStageBlockReason;
+        private bool CanOwnAssistGuardianStage()
+        {
+            if(!RefreshAssistPositionActors()){_guardianStageBlockReason="unreadable-world";return false;}
+            if(AssistUrgentEscapeDue() || !IsAssistPositionHazardFree(Hud.Game.Me.FloorCoordinate))
+            { _guardianStageBlockReason="active-danger";return false; }
+            if(AssistSoftRecoveryActive)
+            { _guardianStageBlockReason="active-soft-recovery";return false; }
+            // The post-escape latch requires a real hit to clear. An invulnerable
+            // guardian cannot supply it. Preserve the latch, but permit safe buff
+            // preparation when there is no reachable real recovery contact.
+            if(IsAssistHealingRecovery())
+            {
+                var contact=PickAssistSafetyCombat();
+                if(contact!=null && (contact.AcdId!=_guardianStageAcd || _assistAttackKey==ActionKey.Unknown))
+                { _guardianStageBlockReason="reachable-recovery-contact";return false; }
+            }
+            _guardianStageBlockReason="safe-spawn-preparation";return true;
+        }
+        private bool IsAssistGuardianApproach(IWorldCoordinate point)
+        {
+            if(point==null || _guardianApproachPoint==null || _guardianStageAcd==0
+                || _guardianWorld!=Hud.Game.Me.WorldId || point.XYDistanceTo(_guardianApproachPoint)>0.25
+                || point.XYDistanceTo(Hud.Game.Me.FloorCoordinate)>AssistDashTravelLimit
+                || !IsAssistPositionHazardFree(point) || !CanOwnAssistGuardianStage())return false;
+            foreach(var boss in Hud.Game.Monsters)
+                if(boss.AcdId==_guardianStageAcd && AssistGuardianSpawnCandidate(boss))return true;
+            return false;
+        }
+        private static bool GuardianPrimaryNeedsRearm(bool tracked,bool down,bool owned,bool idle,int heldMs,int idleMs)
+        { return tracked && (!down || (owned && idle && heldMs>=150 && idleMs>=250)); }
+
         private bool TryAssistGuardianPreSpawn(IPlayerSkill dash, int now)
         {
             if (_guardianWorld!=Hud.Game.Me.WorldId)
-            { _guardianAttackableSeen.Clear();_guardianStageAcd=0;_guardianWorld=Hud.Game.Me.WorldId; }
+            { _guardianAttackableSeen.Clear();_guardianStageAcd=0;_guardianApproachPoint=null;_guardianWorld=Hud.Game.Me.WorldId; }
             IMonster boss=null;
-            foreach(var actor in Hud.Game.AliveMonsters)
+            foreach(var actor in Hud.Game.Monsters)
             {
-                if(actor==null || !actor.IsAlive || actor.Rarity!=ActorRarity.Boss || actor.Illusion
-                    || actor.WorldId!=Hud.Game.Me.WorldId || !IsAssistPositionWorldPoint(actor.FloorCoordinate)
-                    || (actor.SnoActor!=null && actor.SnoActor.Sno==ActorSnoEnum._x1_lr_boss_terrordemon_a_breathminion))continue;
-                if(actor.Attackable && !actor.Invulnerable) { _guardianAttackableSeen.Add(actor.AcdId);continue; }
+                if(!AssistGuardianSpawnCandidate(actor))continue;
+                if(AssistGuardianCombatReady(actor))
+                {
+                    if(HasAssistAttackContact(actor))_guardianAttackableSeen.Add(actor.AcdId);
+                    if(_guardianStageAcd==actor.AcdId)
+                    {
+                        _assistTargetAcd=actor.AcdId;_guardianStageAcd=0;_guardianApproachPoint=null;
+                        TraceAssistGuardianGate("combat-handoff",actor);
+                    }
+                    continue;
+                }
                 if(!_guardianAttackableSeen.Contains(actor.AcdId) && AssistSameHeight(Hud.Game.Me.FloorCoordinate,actor.FloorCoordinate)
                     && actor.FloorCoordinate.XYDistanceTo(Hud.Game.Me.FloorCoordinate)<=AssistVisibleTargetRange
                     && (boss==null || actor.NormalizedXyDistanceToMe<boss.NormalizedXyDistanceToMe))boss=actor;
             }
-            if(!GuardianPreAttackEnabled || !IsAssistGuardianPhase() || boss==null)
+            if(!GuardianPreAttackEnabled || (!IsAssistGuardianPhase() && !Hud.Game.Me.InGreaterRift) || boss==null)
             {
+                TraceAssistGuardianGate(boss==null?"no-staging-candidate":"disabled-or-context",boss);
                 if(_guardianStageAcd!=0)
                 { TraceAssistTrial("GUARDIAN_STAGE_END","boss="+_guardianStageAcd);ReleaseAssistAttack(); }
-                _guardianStageAcd=0;return false;
+                _guardianStageAcd=0;_guardianApproachPoint=null;return false;
             }
             // Admit staging before replacing the recovery/attack owner. A rejected
             // pre-spawn attempt must not restart the standstill handshake every tick.
-            if(!RefreshAssistPositionActors() || AssistMoltenEscapeDue() || AssistReactiveEscapeDue()
-                || !IsAssistPositionHazardFree(Hud.Game.Me.FloorCoordinate) || IsAssistHealingRecovery())
+            if(!CanOwnAssistGuardianStage())
             {
-                if(_guardianStageAcd!=0) { _guardianStageAcd=0;ReleaseAssistAttack(); }
+                TraceAssistGuardianGate(_guardianStageBlockReason,boss);
+                if(_guardianStageAcd!=0) { _guardianStageAcd=0;_guardianApproachPoint=null;ReleaseAssistAttack(); }
                 return false;
             }
             if(_guardianStageAcd!=boss.AcdId)
             {
-                _guardianStageAcd=boss.AcdId;_guardianStageTick=Hud.Game.CurrentGameTick;
+                _guardianStageAcd=boss.AcdId;_guardianStageTick=Hud.Game.CurrentGameTick;_guardianApproachPoint=null;
                 ReleaseAssistAttack();CancelTarget();
                 _assistTargetAcd=0u; // Staging replaces the previous combat owner.
                 TraceAssistTrial("GUARDIAN_STAGE_START","boss="+boss.AcdId+" xyz="+boss.FloorCoordinate);
             }
-            if(Hud.Game.CurrentGameTick-_guardianStageTick>600)
-            { _guardianAttackableSeen.Add(boss.AcdId);_guardianStageAcd=0;ReleaseAssistAttack();return false; }
+            TraceAssistGuardianGate("staging",boss);
             if(_pulse!=ActionKey.Unknown || _selfDashKey!=ActionKey.Unknown)return true;
             var me=Hud.Game.Me.FloorCoordinate;
             if(!CanAttackAssistFrom(me,boss) || MapAssistAttackBlocked(me,boss))
             {
                 ReleaseAssistAttack();
                 if(!AutoDash || !CanApproachDash(dash) || s7o_GenMonkInput.IsDown(dash.Key)
-                    || s7o_InputReleaseArbiter.HasPendingRelease)return false;
+                    || s7o_InputReleaseArbiter.HasPendingRelease)
+                { _assistStatus="guardian-pre-spawn-wait-dash";TraceAssistGuardianGate("wait-dash-or-input",boss);return true; }
                 IWorldCoordinate best=null;double distance=double.MaxValue;
                 float radius=boss.RadiusScaled+5f;
                 for(int i=0;i<AssistEdgeX.Length;i++)
@@ -12227,31 +13456,1139 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
                     if(length<distance && IsAssistDashPointSafe(point,null,out x,out y,mapTransit:true))
                     {best=point;distance=length;}
                 }
-                if(best==null)return false;
-                CancelTarget();MaintainDash(dash,now,null,best,mapTransit:true);
-                if(_selfDashKey==ActionKey.Unknown)return false;
-                _assistPositionReason=_assistStatus="guardian-pre-spawn-approach";return true;
+                if(best==null){_assistStatus="guardian-pre-spawn-no-landing";TraceAssistGuardianGate("no-safe-approach",boss);return true;}
+                CancelTarget();_guardianApproachPoint=best.Offset(0,0,0);
+                // Record this transaction before the generic Dash machinery reads
+                // the reason; it must not inherit the preceding Frozen/Molten exit.
+                _assistPositionReason=_assistStatus="guardian-pre-spawn-approach";
+                MaintainDash(dash,now,null,best,mapTransit:true);
+                if(_selfDashKey==ActionKey.Unknown)
+                { _guardianApproachPoint=null;TraceAssistGuardianGate("approach-not-admitted",boss); }
+                return true;
             }
+            _guardianApproachPoint=null;
             var screen=boss.FloorCoordinate.ToScreenCoordinate(true,true);
-            if(screen==null || !IsLeftClickPointSafe(screen.X,screen.Y))return false;
+            if(screen==null || !IsLeftClickPointSafe(screen.X,screen.Y)){TraceAssistGuardianGate("unsafe-spawn-screen",boss);return true;}
             CursorPoint cursor;
             int sx=(int)Math.Round(screen.X)+Hud.Window.Offset.X,sy=(int)Math.Round(screen.Y)+Hud.Window.Offset.Y;
-            if(!GetCursorPos(out cursor) || ((cursor.X!=sx || cursor.Y!=sy) && !SetCursorPos(sx,sy)))return false;
+            if(!GetCursorPos(out cursor) || ((cursor.X!=sx || cursor.Y!=sy) && !SetCursorPos(sx,sy))){TraceAssistGuardianGate("spawn-cursor-unavailable",boss);return true;}
             _assistAimX=sx;_assistAimY=sy;_assistCursorOwned=true;
             if(!EnsureAssistScopedStandstill()) { _assistStatus="guardian-pre-spawn-standstill";return true; }
+            if(_assistAttackKey!=ActionKey.Unknown)
+            {
+                bool idle=Hud.Game.Me.AnimationState==AcdAnimationState.Idle && ElapsedMs(now,_assistAttackStartedTick)>=150;
+                if(idle && _assistIdleSinceTick==int.MinValue)_assistIdleSinceTick=now;
+                if(!idle)_assistIdleSinceTick=int.MinValue;
+                if(GuardianPrimaryNeedsRearm(true,s7o_GenMonkInput.IsDown(_assistAttackKey),s7o_GenMonkInput.Owns(_assistAttackKey),idle,
+                    ElapsedMs(now,_assistAttackStartedTick),_assistIdleSinceTick==int.MinValue?0:ElapsedMs(now,_assistIdleSinceTick)))
+                {
+                    ReleaseAssistAttack();CancelTarget();_assistStatus="guardian-pre-spawn-rearm";
+                    TraceAssistGuardianGate("rearm-owned-primary",boss);return true;
+                }
+            }
             if(_assistAttackKey==ActionKey.Unknown)
             {
                 if(!IsLeftClickSafe()) { _assistStatus="guardian-pre-spawn-hover";return true; }
                 bool physical=_assistMainKey==ActionKey.LeftSkill && s7o_GenMonkInput.IsDown(_assistMainKey)
                     && !s7o_GenMonkInput.Owns(_assistMainKey);
-                if(!physical && !s7o_GenMonkInput.Down(Owner,_assistMainKey))return false;
+                if(!physical && !s7o_GenMonkInput.Down(Owner,_assistMainKey)){TraceAssistGuardianGate("spawn-input-busy",boss);return true;}
                 _assistAttackKey=_assistMainKey;_assistAttackStartedTick=now;
                 TraceAssistTrial("GUARDIAN_ATTACK_START","boss="+boss.AcdId+" key="+_assistMainKey
                     +" standstill="+s7o_GenMonkInput.IsStandstillDown());
                 _assistWotHfResumePending=true;_assistWotHfResumeGameTick=Hud.Game.CurrentGameTick;
             }
             _assistStatus="guardian-pre-spawn-attack";
-            return true; // No buff-maintenance pulses or resource-spending Mantra while staging.
+            return true; // Keep generator maintenance out of the guardian staging path.
+        }
+
+
+
+        private IPlayerSkill _assistCycloneSkill;
+        private uint _cycloneOculusCircle, _cycloneOculusElite, _cycloneOculusAnchor, _cycloneOculusLastCircle;
+        private int _cycloneOculusSearchAt=int.MinValue, _cycloneOculusDashAt=int.MinValue;
+        private int _cycloneOculusArrivedAt=int.MinValue;
+        private int _cycloneOculusDashSerial,_cycloneOculusMinElites;
+        private bool _cycloneOculusGround;
+
+        private static double CyclonePullRadius(IPlayerSkill skill) { return skill.Rune==1 ? 34.0 : 24.0; }
+
+        private bool IsCycloneOculusElite(IMonster elite, IWorldCoordinate point)
+        {
+            return IsAssistEligible(elite) && IsAssistPositionElite(elite) && elite.Rarity!=ActorRarity.Boss
+                && !IsAssistJuggerPackMember(elite) && !ShouldHandOffAssistElite(elite)
+                && AssistSameHeight(point,elite.FloorCoordinate)
+                && point.XYDistanceTo(elite.FloorCoordinate)<=CyclonePullRadius(_assistCycloneSkill)
+                && AssistHitboxEdgeGap(point,elite)>AssistConfiguredStrikeReach()+1
+                && !MapAssistAttackBlocked(point,elite);
+        }
+
+        private bool CycloneTrashPullAvailable(IWorldCoordinate point, IPlayerSkill skill)
+        {
+            int count=0;
+            double radius=CyclonePullRadius(skill), reach=AssistConfiguredStrikeReach();
+            foreach(var mob in _assistCandidates)
+                if(mob!=null && !IsAssistPositionElite(mob) && AssistSameHeight(point,mob.FloorCoordinate)
+                    && point.XYDistanceTo(mob.FloorCoordinate)<=radius && AssistHitboxEdgeGap(point,mob)>reach
+                    && IsAssistMonsterValid(mob) && !IsAssistJuggerPackMember(mob)
+                    && !MapAssistAttackBlocked(point,mob) && ++count>=4) return true;
+            return false;
+        }
+
+        private IMonster CycloneOculusAnchor(IWorldCoordinate point,bool allowElite=false)
+        {
+            foreach(var mob in _assistCandidates)
+                if(mob!=null && (allowElite || !IsAssistPositionElite(mob)) && AssistSameHeight(point,mob.FloorCoordinate)
+                    && AssistBodyGap(point,mob)>=1 && AssistHitboxEdgeGap(point,mob)<=AssistConfiguredStrikeReach()
+                    && IsAssistEligible(mob) && CanAttackAssistFrom(point,mob) && !MapAssistAttackBlocked(point,mob))
+                    return mob;
+            return null;
+        }
+
+        private void ClearCycloneOculus()
+        {
+            _cycloneOculusCircle=_cycloneOculusElite=_cycloneOculusAnchor=0;
+            _cycloneOculusDashSerial=_cycloneOculusMinElites=0;
+            _cycloneOculusGround=false;
+            _cycloneOculusArrivedAt=int.MinValue;
+        }
+
+        private IMonster KeepCycloneOculusContact(IMonster selected,int now)
+        {
+            if(_cycloneOculusCircle==0 || _cycloneOculusArrivedAt==int.MinValue)return null;
+            var point=Hud.Game.Me.FloorCoordinate;
+            var elite=FindAssistCandidate(_cycloneOculusElite);
+            if(_assistCycloneSkill==null || !CyclonePredicateInstalled(_cycloneOwner)
+                || !AssistOculusTrialContext() || !IsAssistPositionHazardFree(point)
+                || ElapsedMs(now,_cycloneOculusArrivedAt)>=AssistOculusTrialMs
+                || AssistOculusAt(point)!=_cycloneOculusCircle
+                || (_cycloneOculusElite!=0 ? !IsCycloneOculusElite(elite,point)
+                    : IsAssistPositionElite(selected) || !CycloneTrashPullAvailable(point,_assistCycloneSkill))
+                || (IsAssistPositionElite(selected) && (selected.Rarity==ActorRarity.Boss
+                    || HasAssistAttackContact(selected))))
+            {
+                ClearCycloneOculus();
+                return null;
+            }
+            var anchor=FindAssistCandidate(_cycloneOculusAnchor);
+            if(!IsAssistEligible(anchor) || !CanAttackAssistFrom(point,anchor) || MapAssistAttackBlocked(point,anchor))
+                anchor=CycloneOculusAnchor(point);
+            if(anchor==null){ClearCycloneOculus();return null;}
+            _cycloneOculusAnchor=anchor.AcdId;
+            return anchor;
+        }
+
+        private void MeasureCycloneOculus(IWorldCoordinate point,IMonster preferred,bool elitePlan,
+            out IMonster pull,out int coverage,out int direct,out int trash)
+        {
+            pull=null;coverage=direct=trash=0;
+            double radius=CyclonePullRadius(_assistCycloneSkill),reach=AssistConfiguredStrikeReach();
+            foreach(var body in _assistCandidates)
+            {
+                if(body==null || body.Rarity==ActorRarity.Boss || !AssistSameHeight(point,body.FloorCoordinate)
+                    || point.XYDistanceTo(body.FloorCoordinate)>radius || !IsAssistMonsterValid(body))continue;
+                double gap=AssistHitboxEdgeGap(point,body);
+                if(IsAssistPositionElite(body))
+                {
+                    if(!elitePlan || !IsAssistEligible(body))continue;
+                    if(gap<=reach+1)
+                    {
+                        if(CanAttackAssistFrom(point,body) && !MapAssistAttackBlocked(point,body)){++coverage;++direct;}
+                        continue;
+                    }
+                    if(IsAssistJuggerPackMember(body) || MapAssistAttackBlocked(point,body))continue;
+                    ++coverage;
+                    if(pull==null || body==preferred)pull=body;
+                }
+                else if(trash<8 && gap>reach && !IsAssistJuggerPackMember(body) && !MapAssistAttackBlocked(point,body))
+                    ++trash;
+            }
+        }
+
+        private static bool CycloneOculusCoverageEnough(int current,int projected)
+        {return projected>=Math.Max(1,current);}
+
+        private bool TryStartCycloneOculus(IMonster goal,IPlayerSkill dash,int now)
+        {
+            var skill=_assistCycloneSkill;
+            if(skill==null || goal==null || goal.Rarity==ActorRarity.Boss || ElapsedMs(now,_cycloneOculusSearchAt)<200)
+                return false;
+            _cycloneOculusSearchAt=now;
+            var me=Hud.Game.Me;
+            var point=me.FloorCoordinate;
+            if(_cycloneSetup.Kind!=CycloneSetupKind.None || _pulse!=ActionKey.Unknown
+                || _targetKey!=ActionKey.Unknown || _selfDashKey!=ActionKey.Unknown)
+            {return false; }
+            if(_assistSafetyApproachAcd!=0 || _assistDoorTarget!=null || _assistDoorReturnPending
+                || !AssistOculusTrialContext() || !RefreshAssistPositionActors() || !IsAssistEligible(goal))
+            {return false; }
+            if(AssistOculusAt(point)!=0)return false;
+            bool elitePlan=IsAssistPositionElite(goal);
+            if(!elitePlan)
+                foreach(var mob in _assistCandidates)
+                    if(IsAssistPositionElite(mob) && IsAssistEligible(mob)) {elitePlan=true;break;}
+            if(ElapsedMs(now,_cycloneCastAt)<(elitePlan?1250:2200)
+                || !CyclonePredicateInstalled(_cycloneOwner) || skill.IsOnCooldown)
+            {return false; }
+            bool fd=me.Powers.BuffIsActive(Hud.Sno.SnoPowers.FlyingDragon.Sno);
+            if(!CycloneSpiritAvailable(me.Stats.ResourceCurPri,me.Stats.ResourceMaxPri,
+                skill.GetResourceRequirement()+Math.Max(0,dash.GetResourceRequirement()),fd))
+            {return false; }
+
+            int currentElites=0;
+            if(elitePlan)
+            {
+                var active=FindAssistCandidate(_assistTargetAcd);
+                var from=HasAssistAttackContact(active)?active:goal;
+                int currentTrash;
+                if(CanAttackAssistFrom(point,from))AssistAttackCoverage(point,from,out currentElites,out currentTrash);
+            }
+            IWorldCoordinate best=null;
+            IMonster anchor=null,pullTarget=null;
+            uint circleAcd=0;
+            double bestScore=double.MinValue;
+            var ordinary=HasAssistSelectedPosition(goal)?_assistSelectedPositionPoint:null;
+            int rings=0;
+            foreach(var circle in _assistPositionCircles)
+            {
+                if(circle.Kind!=0 || circle.Actor==null || circle.Actor.IsDisabled || circle.Actor.WorldId!=me.WorldId)continue;
+                uint id=circle.Actor.AcdId;
+                var center=circle.Actor.FloorCoordinate;
+                if(!AssistSameHeight(point,center) || point.XYDistanceTo(center)>AssistDashTravelLimit+AssistCircleCoverageRadius)continue;
+                int entered;
+                if((id==_cycloneOculusLastCircle && ElapsedMs(now,_cycloneOculusDashAt)<AssistOculusTrialRevisitMs)
+                    || (_assistEnteredDamageCircles.TryGetValue(id,out entered)
+                        && ElapsedMs(now,entered)<AssistOculusTrialRevisitMs))
+                {continue; }
+                if(++rings>8)break;
+                double rim=Math.Min(9.0,AssistCircleFootprintRadius(circle)-.75);
+                for(int sample=0;sample<4;sample++)
+                {
+                    IWorldCoordinate landing=center;
+                    if(sample==3)
+                    {
+                        if(!AssistSameHeight(center,ordinary) || center.XYDistanceTo(ordinary)>rim)continue;
+                        landing=ordinary;
+                    }
+                    else if(sample!=0)
+                    {
+                        var toward=sample==1?goal.FloorCoordinate:point;
+                        double gap=center.XYDistanceTo(toward);
+                        if(gap<1)continue;
+                        float edge=(float)(Math.Min(rim,gap)/gap);
+                        landing=center.Offset((toward.X-center.X)*edge,(toward.Y-center.Y)*edge,0);
+                    }
+                    double travel=point.XYDistanceTo(landing);
+                    if(travel<2 || travel>AssistDashTravelLimit)
+                    {continue; }
+                    IMonster pull;
+                    int coverage,direct,trash;
+                    MeasureCycloneOculus(landing,goal,elitePlan,out pull,out coverage,out direct,out trash);
+                    if(elitePlan?pull==null:trash<4)
+                    {continue; }
+                    if(elitePlan && !CycloneOculusCoverageEnough(currentElites,coverage))
+                    {continue; }
+                    var local=CycloneOculusAnchor(landing,true);
+                    var contact=local??pull??goal;
+                    double score=coverage*100+direct*12+trash*2-travel*.4-(local==null?7:0);
+                    if(score<=bestScore)continue;
+                    int x,y;
+                    if(IsAssistFailedCircleContact(id,contact,landing))
+                    {continue; }
+                    if(local==null && !MapAssistLandingAllowed(landing,requireKnown:true))
+                    {continue; }
+                    if(!IsAssistDashPointSafe(landing,contact,out x,out y,mapTransit:local==null))
+                    {continue; }
+                    best=landing;anchor=local;pullTarget=pull;circleAcd=id;bestScore=score;
+                }
+            }
+            if(elitePlan && (best!=null || currentElites<2))
+                try {if(TryStartOculusCarry(goal,dash,now,best,circleAcd))return true;}
+                catch { /* Optional carry yields to ordinary Oculus use. */ }
+            if(best==null)
+            {
+                if(!elitePlan || currentElites>=2)return false;
+                try {return TryStartCycloneRelay(goal,dash,now);}
+                catch {return false;}
+            }
+            MaintainDash(dash,now,anchor??pullTarget??goal,best,mapTransit:anchor==null,circleUpgrade:true,cyclonePull:true);
+            if(_selfDashKey==ActionKey.Unknown)
+            {return false; }
+            BeginCycloneOculusLanding(circleAcd,pullTarget?.AcdId??0u,anchor,best,now,currentElites);
+            return true;
+        }
+
+        private void BeginCycloneOculusLanding(uint circle,uint elite,IMonster anchor,IWorldCoordinate point,int now,int minimumElites=0)
+        {
+            _cycloneOculusCircle=_cycloneOculusLastCircle=circle;
+            _cycloneOculusElite=elite;_cycloneOculusAnchor=anchor?.AcdId??0u;
+            _cycloneOculusDashSerial=_selfDashSerial;_cycloneOculusMinElites=minimumElites;
+            _cycloneOculusGround=anchor==null;
+            _cycloneOculusDashAt=now;_cycloneOculusArrivedAt=int.MinValue;
+            _assistPositionReason="cyclone-oculus";
+            _assistPositionWorldX=point.X;_assistPositionWorldY=point.Y;
+        }
+
+        private enum CycloneSetupKind { None, ArcaneExit, OculusRelay }
+        private struct CycloneSetup
+        {
+            internal CycloneSetupKind Kind;
+            internal uint World,Elite,Anchor,Circle;
+            internal IWorldCoordinate Stage,Landing;
+            internal int Started,Arrived,CastAt,DashSerial;
+            internal float EliteDistanceBefore;
+        }
+        private CycloneSetup _cycloneSetup;
+        private int _cycloneArcaneSearchAt=int.MinValue;
+
+        private void SetCycloneSetup(CycloneSetupKind kind,uint elite,uint anchor,IWorldCoordinate stage,
+            int now,uint circle=0u,IWorldCoordinate landing=null)
+        {
+            _cycloneSetup=new CycloneSetup{Kind=kind,World=Hud.Game.Me.WorldId,Elite=elite,Anchor=anchor,
+                Circle=circle,Stage=stage,Landing=landing,Started=now,Arrived=int.MinValue,CastAt=int.MinValue,
+                DashSerial=kind==CycloneSetupKind.ArcaneExit?_selfDashSerial:0};
+        }
+
+        private bool CycloneSetupReady(IPlayerSkill skill,double cost)
+        {
+            var me=Hud.Game.Me;
+            bool fd=me.Powers.BuffIsActive(Hud.Sno.SnoPowers.FlyingDragon.Sno);
+            return !skill.IsOnCooldown && CyclonePredicateInstalled(_cycloneOwner)
+                && CycloneSpiritAvailable(me.Stats.ResourceCurPri,me.Stats.ResourceMaxPri,cost,fd);
+        }
+
+        private int CountCycloneWells(IWorldCoordinate point,int enough)
+        {
+            int count=0;
+            foreach(var well in _assistPositionArcane)
+                if(well!=null && !well.IsDisabled && well.WorldId==Hud.Game.Me.WorldId
+                    && AssistSameHeight(point,well.FloorCoordinate) && point.XYDistanceTo(well.FloorCoordinate)<=25
+                    && ++count>=enough) break;
+            return count;
+        }
+
+        private uint FindCyclonePullElite(IWorldCoordinate point,IMonster preferred,bool arcane)
+        {
+            if(IsCycloneOculusElite(preferred,point) && (!arcane || CountCycloneWells(preferred.FloorCoordinate,1)>0))
+                return preferred.AcdId;
+            foreach(var body in _assistCandidates)
+                if(body!=preferred && IsCycloneOculusElite(body,point)
+                    && (!arcane || CountCycloneWells(body.FloorCoordinate,1)>0)) return body.AcdId;
+            return 0u;
+        }
+
+        private static int CycloneArcaneLandingPriority(bool hasElite,int circlePriority)
+        {return (hasElite?8:0)+circlePriority;}
+
+        private bool TryPlanCycloneArcaneExit(IMonster target,IPlayerSkill dash,IWorldCoordinate nativeLanding,
+            int now,out IWorldCoordinate landing,out uint elite,out uint anchor,out uint circleId)
+        {
+            landing=null;elite=anchor=circleId=0u;
+            var skill=_assistCycloneSkill;
+            if(skill==null || target?.Rarity==ActorRarity.Boss || _rangedCleanup
+                || (_assistArcaneResponseStage==0 && !_assistArcaneCoreUnsafe)
+                || ElapsedMs(now,_cycloneArcaneSearchAt)<500 || _assistOrbiterCoreUnsafe
+                || AssistSkeletonFireEscapeDue() || AssistFrozenEscapeDue() || AssistBossImpactEscapeDue()
+                || AssistMalletEscapeDue() || AssistOrlashCoreDue())return false;
+            _cycloneArcaneSearchAt=now;
+            var me=Hud.Game.Me;
+            var origin=me.FloorCoordinate;
+            if(CountCycloneWells(origin,2)<2 || !CycloneSetupReady(skill,
+                skill.GetResourceRequirement()+Math.Max(0,dash.GetResourceRequirement())))return false;
+
+            IWorldCoordinate best=null;
+            uint bestElite=0,bestCircle=0;
+            int bestPriority=-1,inspected=0;
+            double bestTravel=double.MaxValue;
+            Func<IWorldCoordinate,bool> safe=point=> {
+                if(point==null || !IsAssistArcaneRecoveryClear(point) || !IsAssistFrozenPulsePointFree(point,true))return false;
+                int x,y;
+                return IsAssistDashPointSafe(point,target,out x,out y,true);
+            };
+            Action<IWorldCoordinate,uint,int> consider=(point,id,circlePriority)=> {
+                if(point==null || !AssistSameHeight(origin,point))return;
+                double travel=origin.XYDistanceTo(point);
+                if(travel<1 || travel>AssistDashTravelLimit || !IsAssistArcaneRecoveryClear(point)
+                    || !IsAssistFrozenPulsePointFree(point,true))return;
+                uint pull=FindCyclonePullElite(point,target,true);
+                int priority=CycloneArcaneLandingPriority(pull!=0,circlePriority);
+                if(priority<bestPriority || (priority==bestPriority&&travel>=bestTravel)
+                    || (pull==0 && !CycloneTrashPullAvailable(point,skill)) || !safe(point))return;
+                best=point;bestCircle=id;bestElite=pull;bestPriority=priority;bestTravel=travel;
+            };
+            bool spiritPressure=me.Stats.ResourceCurPri<me.Stats.ResourceMaxPri*.65;
+            foreach(var circle in _assistPositionCircles)
+            {
+                var actor=circle.Actor;
+                if(actor==null || actor.IsDisabled || actor.WorldId!=me.WorldId)continue;
+                var center=actor.FloorCoordinate;
+                if(!AssistSameHeight(origin,center) || origin.XYDistanceTo(center)>55)continue;
+                if(++inspected>12)break;
+                int priority=circle.Kind==0?4:circle.Kind==1?(spiritPressure?2:3):circle.Kind==3?(spiritPressure?3:2):1;
+                if(CycloneArcaneLandingPriority(true,priority)<bestPriority)continue;
+                consider(center,actor.AcdId,priority);
+                var toward=target?.FloorCoordinate??origin;
+                double gap=center.XYDistanceTo(toward);
+                if(gap<1)continue;
+                float offset=(float)(Math.Min(8,gap)/gap);
+                consider(center.Offset((toward.X-center.X)*offset,(toward.Y-center.Y)*offset,0),actor.AcdId,priority);
+            }
+            if(bestElite==0)
+            {
+                consider(nativeLanding,0,0);
+                int wells=0;
+                foreach(var core in _assistPositionArcane)
+                {
+                    if(core==null || core.IsDisabled || core.WorldId!=me.WorldId || !AssistSameHeight(origin,core.FloorCoordinate)
+                        || origin.XYDistanceTo(core.FloorCoordinate)>25)continue;
+                    if(++wells>2)break;
+                    var center=core.FloorCoordinate;
+                    float clearance=AssistArcaneRecoveryClearance+.75f;
+                    for(int i=0;i<AssistEdgeX.Length;i++)
+                        consider(origin.Offset(center.X-origin.X+AssistEdgeX[i]*clearance,
+                            center.Y-origin.Y+AssistEdgeY[i]*clearance,0),0,0);
+                }
+                IWorldCoordinate ground;
+                if(bestElite==0 && TryPickAssistArcaneRecoveryContact(false,out ground,
+                    point=>safe(point)&&FindCyclonePullElite(point,target,true)!=0))consider(ground,0,0);
+                if(best==null && TryPickAssistArcaneRecoveryContact(false,out ground,
+                    point=>safe(point)&&CycloneTrashPullAvailable(point,skill)))consider(ground,0,0);
+            }
+            if(best==null)return false;
+            landing=best;elite=bestElite;circleId=bestCircle;
+            anchor=CycloneOculusAnchor(landing,true)?.AcdId??0u;
+            return true;
+        }
+
+        private bool TryStartCycloneRelay(IMonster elite,IPlayerSkill dash,int now)
+        {
+            var skill=_assistCycloneSkill;
+            if(skill.Rune!=1 || !IsAssistPositionElite(elite) || IsAssistJuggerPackMember(elite)
+                || ShouldHandOffAssistElite(elite) || _cycloneSetup.Kind!=CycloneSetupKind.None)return false;
+            var me=Hud.Game.Me.FloorCoordinate;
+            var mob=elite.FloorCoordinate;
+            IWorldCoordinate stage=null,landing=null;
+            IMonster anchor=null;
+            uint circleAcd=0u;
+            double best=double.MaxValue;
+            double dashCost=Math.Max(0,dash.GetResourceRequirement());
+            foreach(var circle in _assistPositionCircles)
+            {
+                if(circle.Kind!=0 || circle.Actor==null || circle.Actor.IsDisabled
+                    || circle.Actor.WorldId!=Hud.Game.Me.WorldId)continue;
+                var end=circle.Actor.FloorCoordinate;
+                if(!AssistSameHeight(mob,end) || !AssistSameHeight(me,end))continue;
+                double gap=mob.XYDistanceTo(end);
+                // A first pull from 30 yards leaves up to 32 yards to the ring.
+                // The second move still requires observed elite progress.
+                if(gap<=CyclonePullRadius(skill) || gap>62)continue;
+                uint id=circle.Actor.AcdId;
+                int entered;
+                if((id==_cycloneOculusLastCircle && ElapsedMs(now,_cycloneOculusDashAt)<AssistOculusTrialRevisitMs)
+                    || (_assistEnteredDamageCircles.TryGetValue(id,out entered)
+                        && ElapsedMs(now,entered)<AssistOculusTrialRevisitMs))continue;
+                var first=mob.Offset((float)((end.X-mob.X)*30/gap),(float)((end.Y-mob.Y)*30/gap),0);
+                bool alreadyPlaced=me.XYDistanceTo(end)<=32 && IsCycloneOculusElite(elite,me);
+                if(alreadyPlaced)first=me;
+                double distance=me.XYDistanceTo(first),score=distance+first.XYDistanceTo(end);
+                if(score>=best || distance>AssistDashTravelLimit || (!alreadyPlaced && dash.Charges<2)
+                    || !CycloneSetupReady(skill,skill.GetResourceRequirement()*2+dashCost*(alreadyPlaced?1:2))
+                    || !IsCycloneOculusElite(elite,first) || !IsAssistPositionHazardFree(first)
+                    || !IsAssistPositionHazardFree(end))continue;
+                var local=CycloneOculusAnchor(first);
+                var ringContact=CycloneOculusAnchor(end);
+                int x,y;
+                if(local==null || ringContact==null || IsAssistFailedCircleContact(id,ringContact,end)
+                    || (!alreadyPlaced && !IsAssistDashPointSafe(first,local,out x,out y)))continue;
+                stage=first;landing=end;anchor=local;circleAcd=id;best=score;
+            }
+            if(anchor==null)return false;
+            if(me.XYDistanceTo(stage)>1)
+            {
+                MaintainDash(dash,now,anchor,stage);
+                if(_selfDashKey==ActionKey.Unknown)return false;
+                _assistPositionReason="cyclone-relay-stage";
+                _assistPositionWorldX=stage.X;_assistPositionWorldY=stage.Y;
+            }
+            SetCycloneSetup(CycloneSetupKind.OculusRelay,elite.AcdId,anchor.AcdId,stage,now,circleAcd,landing);
+            _cycloneOculusLastCircle=circleAcd;_cycloneOculusDashAt=now;
+            return true;
+        }
+
+        private static bool CycloneRelayAdvanced(double before,double current,double radius)
+        {return current<=radius && before-current>=3;}
+
+        private IMonster KeepCycloneSetup(IMonster selected,IPlayerSkill dash,bool canDash,int now,out bool moving)
+        {
+            moving=false;
+            var plan=_cycloneSetup;
+            if(plan.Kind==CycloneSetupKind.None)return null;
+            // A pending pull observes the fight without taking over generator input.
+            if(plan.Kind==CycloneSetupKind.ArcaneExit && plan.CastAt==int.MinValue)return null;
+            var point=Hud.Game.Me.FloorCoordinate;
+            var skill=_assistCycloneSkill;
+            var elite=FindAssistCandidate(plan.Elite);
+            bool relay=plan.Kind==CycloneSetupKind.OculusRelay;
+            if(skill==null || !CyclonePredicateInstalled(_cycloneOwner) || plan.World!=Hud.Game.Me.WorldId
+                || selected?.Rarity==ActorRarity.Boss || ElapsedMs(now,plan.Started)>2200
+                || (plan.Arrived!=int.MinValue && ElapsedMs(now,plan.Arrived)>=1100)
+                || !AssistSameHeight(point,plan.Stage) || point.XYDistanceTo(plan.Stage)>3
+                || !IsAssistMonsterValid(elite) || AssistUrgentEscapeDue() || !IsAssistPositionHazardFree(point)
+                || (relay ? skill.Rune!=1 || !AssistOculusTrialContext() : !IsAssistArcaneRecoveryClear(point)))
+            {
+                _cycloneSetup=default(CycloneSetup);
+                return null;
+            }
+            if(relay && plan.CastAt!=int.MinValue && _pulse==ActionKey.Unknown
+                && CycloneRelayAdvanced(plan.EliteDistanceBefore,elite.FloorCoordinate.XYDistanceTo(plan.Landing),CyclonePullRadius(skill)))
+            {
+                var landing=plan.Landing;
+                var contact=CanAttackAssistFrom(landing,elite) && !MapAssistAttackBlocked(landing,elite)
+                    ?elite:CycloneOculusAnchor(landing);
+                int x,y;
+                if(canDash && contact!=null && AssistOculusAt(landing)==plan.Circle
+                    && (contact==elite || IsCycloneOculusElite(elite,landing))
+                    && CycloneSetupReady(skill,skill.GetResourceRequirement()+Math.Max(0,dash.GetResourceRequirement()))
+                    && IsAssistDashPointSafe(landing,contact,out x,out y))
+                {
+                    MaintainDash(dash,now,contact,landing,circleUpgrade:true);
+                    if(_selfDashKey!=ActionKey.Unknown)
+                    {
+                        if(contact!=elite)
+                            BeginCycloneOculusLanding(plan.Circle,elite.AcdId,contact,landing,now);
+                        moving=true;
+                    }
+                }
+                _cycloneSetup=default(CycloneSetup);
+                return null;
+            }
+            if((!relay || plan.CastAt==int.MinValue) && !IsCycloneOculusElite(elite,point))
+            {
+                _cycloneSetup=default(CycloneSetup);
+                return null;
+            }
+            var anchor=FindAssistCandidate(plan.Anchor);
+            if(!IsAssistEligible(anchor) || !CanAttackAssistFrom(point,anchor) || MapAssistAttackBlocked(point,anchor))
+                anchor=CycloneOculusAnchor(point,!relay);
+            if(anchor==null){_cycloneSetup=default(CycloneSetup);return null;}
+            if(plan.Arrived==int.MinValue)_cycloneSetup.Arrived=now;
+            _cycloneSetup.Anchor=anchor.AcdId;
+            return anchor;
+        }
+
+        private bool CycloneOculusAimStillUseful(IWorldCoordinate point)
+        {
+            var skill=Hud.Game.Me.Powers.GetUsedSkill(Hud.Sno.SnoPowers.Monk_CycloneStrike);
+            if(skill==null || !IsCycloneCastKey(skill.Key) || _assistCycloneSkill==null || _cycloneOwner==null
+                || skill.Rune!=_assistCycloneSkill.Rune || !_cycloneOwner.GetConditionalProfileEnabled(CycloneProfileCode)
+                || !CycloneSetupReady(skill,skill.GetResourceRequirement()) || !AssistOculusTrialContext()
+                || !RefreshAssistPositionActors() || !CycloneCircleContains(_cycloneOculusCircle,point)
+                || (_cycloneOculusGround && !MapAssistLandingAllowed(point,requireKnown:true)))return false;
+            if(_cycloneOculusElite==0)return CycloneTrashPullAvailable(point,skill);
+            var intended=FindAssistCandidate(_cycloneOculusElite);
+            uint stillPullable;
+            if(_cycloneOculusMinElites>=2)
+            {
+                IMonster pull;
+                int coverage,direct,trash;
+                MeasureCycloneOculus(point,intended,true,out pull,out coverage,out direct,out trash);
+                if(!CycloneOculusCoverageEnough(_cycloneOculusMinElites,coverage))return false;
+                stillPullable=pull?.AcdId??0u;
+            }
+            else stillPullable=FindCyclonePullElite(point,intended,false);
+            if(stillPullable==0)return false;
+            _cycloneOculusElite=stillPullable;
+            return true;
+        }
+
+        private const int CycloneArcaneFollowupMs=250;
+
+        private bool CycloneDashLanded()
+        {
+            return _selfDashApproach && !_selfDashUpkeep && _assistDashLandingConfirmed
+                && !_assistDashMovementFailed && _assistDashActualSafe;
+        }
+
+        private void ObserveCycloneArcaneLanding(int now)
+        {
+            var plan=_cycloneSetup;
+            if(plan.Kind!=CycloneSetupKind.ArcaneExit || plan.CastAt!=int.MinValue
+                || plan.DashSerial!=_selfDashSerial || plan.Arrived!=int.MinValue)return;
+            if(!CycloneDashLanded())
+            {
+                RejectCycloneArcane();
+                return;
+            }
+            _cycloneSetup.Arrived=now;
+        }
+
+        private bool RejectCycloneArcane()
+        {
+            _cycloneSetup=default(CycloneSetup);
+            return false;
+        }
+
+        private bool TryCycloneArcaneFollowup(int now)
+        {
+            var plan=_cycloneSetup;
+            if(plan.Kind!=CycloneSetupKind.ArcaneExit || plan.CastAt!=int.MinValue)return false;
+            if(plan.DashSerial!=_selfDashSerial)return RejectCycloneArcane();
+            if(plan.Arrived==int.MinValue)
+                return _selfDashKey==ActionKey.Unknown?RejectCycloneArcane():false;
+            if(ElapsedMs(now,plan.Arrived)>=CycloneArcaneFollowupMs)return RejectCycloneArcane();
+            var skill=_assistCycloneSkill;
+            if(skill==null || !CyclonePredicateInstalled(_cycloneOwner))return RejectCycloneArcane();
+
+            var me=Hud.Game.Me;
+            var point=me.FloorCoordinate;
+            if(plan.World!=me.WorldId || !AssistSameHeight(point,plan.Stage)
+                || (plan.Circle!=0 && !CycloneCircleContains(plan.Circle,point)))
+                return RejectCycloneArcane();
+            if(!RefreshAssistPositionActors() || !IsAssistArcaneRecoveryClear(point)
+                || !IsAssistFrozenPulsePointFree(point,true) || AssistUrgentEscapeDue()
+                || !IsAssistPositionHazardFree(point) || !IsAssistMalletPointFree(point))
+                return RejectCycloneArcane();
+            if(_assistDoorTarget!=null || _assistDoorReturnPending || _guardianStageAcd!=0)
+                return RejectCycloneArcane();
+
+            if(_pulse!=ActionKey.Unknown || _targetKey!=ActionKey.Unknown || s7o_InputReleaseArbiter.HasPendingRelease
+                || s7o_InputReleaseArbiter.HasOtherOwner(Owner) || ElapsedMs(now,_cycloneCastAt)<250)
+            {
+                return false;
+            }
+            if(!CycloneSetupReady(skill,skill.GetResourceRequirement()))
+            {
+                return false;
+            }
+
+            uint elite=FindCyclonePullElite(point,FindAssistCandidate(plan.Elite),true);
+            bool trash=elite==0 && CycloneTrashPullAvailable(point,skill);
+            if(elite==0 && !trash)return RejectCycloneArcane();
+            var anchor=CycloneOculusAnchor(point,true);
+            bool fd=me.Powers.BuffIsActive(Hud.Sno.SnoPowers.FlyingDragon.Sno);
+            if(!EmitCyclonePull(skill,anchor,elite,trash?4:0,now,fd,false,"arcane-exit"))
+            {
+                return false;
+            }
+
+            plan.Elite=elite;plan.Anchor=anchor?.AcdId??0u;plan.CastAt=now;
+            _cycloneSetup=plan;
+            _assistDashContinuationPending=false;
+            return true;
+        }
+
+        private const int OculusCarrySettleMs = 100, OculusCarryFollowupLimitMs = 250;
+        private enum OculusCarryPhase { None, Releasing, Dashing, Arrived, Settling }
+        private struct OculusCarry
+        {
+            internal OculusCarryPhase Phase;
+            internal uint World,Circle,Elite;
+            internal int Started,DashSerial,Arrived;
+            internal IWorldCoordinate Landing;
+        }
+        private OculusCarry _oculusCarry;
+        private int _oculusCarryAt=int.MinValue;
+
+        private bool IsOculusCarryElite(IMonster body,IWorldCoordinate origin,IWorldCoordinate landing,double radius)
+        {
+            return IsAssistPositionElite(body) && body.Rarity!=ActorRarity.Boss
+                && AssistSameHeight(origin,body.FloorCoordinate) && origin.XYDistanceTo(body.FloorCoordinate)<=radius
+                && landing.XYDistanceTo(body.FloorCoordinate)>radius+.5 && IsAssistEligible(body)
+                && !IsAssistJuggerPackMember(body) && !MapAssistAttackBlocked(origin,body)
+                && !MapAssistAttackBlocked(landing,body);
+        }
+
+        private bool TryStartOculusCarry(IMonster preferred,IPlayerSkill dash,int now,IWorldCoordinate planned,uint plannedCircle)
+        {
+            if(!CycloneDashCarry || _assistCycloneSkill==null || !AutoDash || !CanApproachDash(dash)
+                || _oculusCarry.Phase!=OculusCarryPhase.None || ElapsedMs(now,_oculusCarryAt)<8000
+                || _cycloneSetup.Kind!=CycloneSetupKind.None)return false;
+            var skill=_assistCycloneSkill;
+            var me=Hud.Game.Me;
+            var origin=me.FloorCoordinate;
+            if(!IsAssistPositionHazardFree(origin) || !IsAssistFrozenPulsePointFree(origin,true)
+                || !CycloneSetupReady(skill,2*skill.GetResourceRequirement()+Math.Max(0,dash.GetResourceRequirement())))
+            {return false; }
+            double radius=CyclonePullRadius(skill),bestTravel=double.MaxValue;
+            bool arcanePressure=CountCycloneWells(origin,2)>=2;
+            IWorldCoordinate landing=null;
+            IMonster elite=null;
+            uint circleId=0;
+            int evaluated=0;
+            foreach(var circle in _assistPositionCircles)
+            {
+                var actor=circle.Actor;
+                if(circle.Kind!=0 || actor==null || actor.IsDisabled || actor.WorldId!=me.WorldId)continue;
+                uint id=actor.AcdId;
+                if(planned!=null && id!=plannedCircle)continue;
+                int entered;
+                if((id==_cycloneOculusLastCircle && ElapsedMs(now,_cycloneOculusDashAt)<AssistOculusTrialRevisitMs)
+                    || (_assistEnteredDamageCircles.TryGetValue(id,out entered) && ElapsedMs(now,entered)<AssistOculusTrialRevisitMs))continue;
+                var point=planned??actor.FloorCoordinate;
+                if(!AssistSameHeight(origin,point))continue;
+                double travel=origin.XYDistanceTo(point);
+                if(travel<4 || travel>AssistDashTravelLimit || travel>=bestTravel || !IsAssistFrozenPulsePointFree(point,true)
+                    || (arcanePressure&&!IsAssistArcaneRecoveryClear(point)))continue;
+                if(++evaluated>8)break;
+                IMonster body=IsOculusCarryElite(preferred,origin,point,radius)?preferred:null;
+                if(body==null)
+                    foreach(var candidate in _assistCandidates)
+                        if(IsOculusCarryElite(candidate,origin,point,radius)){body=candidate;break;}
+                if(body==null)continue;
+                if(planned==null && CycloneOculusAnchor(point,true)==null && FindCyclonePullElite(point,body,false)==0
+                    && !CycloneTrashPullAvailable(point,skill))continue;
+                int x,y;
+                if(IsAssistFailedCircleContact(id,body,point) || !MapAssistLandingAllowed(point,requireKnown:true)
+                    || !IsAssistDashPointSafe(point,body,out x,out y,mapTransit:true))continue;
+                landing=point;circleId=id;elite=body;bestTravel=travel;
+            }
+            if(elite==null)
+            {return false; }
+            bool fd=me.Powers.BuffIsActive(Hud.Sno.SnoPowers.FlyingDragon.Sno);
+            if(!EmitCyclonePull(skill,FindAssistCandidate(_assistTargetAcd),elite.AcdId,0,now,fd,false,"dash-carry-start"))return false;
+            _oculusCarryAt=now;
+            _oculusCarry=new OculusCarry { Phase=OculusCarryPhase.Releasing,World=me.WorldId,Circle=circleId,
+                Elite=elite.AcdId,Started=now,DashSerial=_selfDashSerial,Landing=landing.Offset(0,0,0) };
+            return true;
+        }
+
+        private bool OculusCarryAimStillUseful(IWorldCoordinate point,int now)
+        {
+            var plan=_oculusCarry;
+            var skill=Hud.Game.Me.Powers.GetUsedSkill(Hud.Sno.SnoPowers.Monk_CycloneStrike);
+            return CycloneDashCarry && skill!=null && IsCycloneCastKey(skill.Key)
+                && _cycloneOwner!=null && _cycloneOwner.GetConditionalProfileEnabled(CycloneProfileCode)
+                && CyclonePredicateInstalled(_cycloneOwner) && plan.World==Hud.Game.Me.WorldId
+                && ElapsedMs(now,plan.Started)<400 && AssistOculusTrialContext()
+                && CycloneCircleContains(plan.Circle,point) && IsAssistFrozenPulsePointFree(point,true)
+                && MapAssistLandingAllowed(point,requireKnown:true);
+        }
+
+        private bool FinishOculusCarry()
+        {
+            _oculusCarry=default(OculusCarry);
+            return false;
+        }
+
+        private bool AdvanceOculusCarry(IPlayerSkill dash,int now,bool dashResolved)
+        {
+            var plan=_oculusCarry;
+            if(plan.Phase==OculusCarryPhase.None)return false;
+            var skill=_assistCycloneSkill;
+            var me=Hud.Game.Me;
+            var point=me.FloorCoordinate;
+            if(!CycloneDashCarry || skill==null || plan.World!=me.WorldId || plan.DashSerial!=_selfDashSerial
+                || !CyclonePredicateInstalled(_cycloneOwner))return FinishOculusCarry();
+            if(!AssistOculusTrialContext() || _assistDoorTarget!=null || _assistDoorReturnPending || _guardianStageAcd!=0)
+                return FinishOculusCarry();
+            if(plan.Phase==OculusCarryPhase.Releasing)
+            {
+                if(ElapsedMs(now,plan.Started)>=220)return FinishOculusCarry();
+                if(_cyclonePulse || s7o_InputReleaseArbiter.HasPendingRelease)return true;
+                var elite=FindAssistCandidate(plan.Elite);
+                if(!IsAssistMonsterValid(elite) || !OculusCarryAimStillUseful(plan.Landing,now))
+                    return FinishOculusCarry();
+                if(!CanApproachDash(dash))
+                    return FinishOculusCarry();
+                if(!CycloneSetupReady(skill,skill.GetResourceRequirement()+Math.Max(0,dash.GetResourceRequirement())))
+                    return FinishOculusCarry();
+                if(_pulse!=ActionKey.Unknown || _targetKey!=ActionKey.Unknown)
+                    return FinishOculusCarry();
+                string previousReason=_assistPositionReason;
+                _assistPositionReason="cyclone-carry-oculus";
+                MaintainDash(dash,now,elite,plan.Landing,mapTransit:true,circleUpgrade:true,cyclonePull:true);
+                if(_selfDashKey==ActionKey.Unknown)
+                { _assistPositionReason=previousReason;return FinishOculusCarry(); }
+                _cycloneOculusLastCircle=plan.Circle;_cycloneOculusDashAt=now;
+                _oculusCarry.Phase=OculusCarryPhase.Dashing;_oculusCarry.DashSerial=_selfDashSerial;
+                return true;
+            }
+            if(plan.Phase==OculusCarryPhase.Dashing)
+            {
+                if(!dashResolved || !CycloneDashLanded() || !CycloneCircleContains(plan.Circle,point))
+                    return FinishOculusCarry();
+                _oculusCarry.Phase=OculusCarryPhase.Arrived;_oculusCarry.Arrived=now;
+                _assistDashContinuationPending=false;
+                plan=_oculusCarry;
+            }
+            if(!RefreshAssistPositionActors() || !CycloneCircleContains(plan.Circle,point)
+                || !IsAssistPositionHazardFree(point) || !IsAssistFrozenPulsePointFree(point,true)
+                || !IsAssistMalletPointFree(point))
+                return FinishOculusCarry();
+
+            int landingAge = ElapsedMs(now,plan.Arrived);
+            if(plan.Phase==OculusCarryPhase.Settling)
+                return landingAge<OculusCarrySettleMs ? HoldOculusCarryContact(point,now)
+                    : FinishOculusCarry();
+            if(landingAge>=OculusCarryFollowupLimitMs)
+                return FinishOculusCarry();
+            if(landingAge<OculusCarrySettleMs || ElapsedMs(now,_cycloneCastAt)<250
+                || _pulse!=ActionKey.Unknown || _targetKey!=ActionKey.Unknown
+                || s7o_InputReleaseArbiter.HasPendingRelease || !CycloneSetupReady(skill,skill.GetResourceRequirement()))
+                return HoldOculusCarryContact(point,now);
+
+            uint wanted=FindCyclonePullElite(point,FindAssistCandidate(plan.Elite),false);
+            bool trash=wanted==0 && CycloneTrashPullAvailable(point,skill);
+            if(wanted==0 && !trash)return FinishOculusCarry();
+            var anchor=CycloneOculusAnchor(point,true);
+            bool fd=me.Powers.BuffIsActive(Hud.Sno.SnoPowers.FlyingDragon.Sno);
+            if(!EmitCyclonePull(skill,anchor,wanted,trash?4:0,now,fd,false,"dash-carry-finish"))
+                return HoldOculusCarryContact(point,now);
+            _cycloneOculusCircle=plan.Circle;_cycloneOculusElite=wanted;_cycloneOculusAnchor=anchor?.AcdId??0u;
+            _cycloneOculusArrivedAt=now;
+            _oculusCarry.Phase=OculusCarryPhase.Settling;
+            _oculusCarry.Arrived=now;
+            return true;
+        }
+
+        private bool HoldOculusCarryContact(IWorldCoordinate point,int now)
+        {
+            // Keep using a reachable generator target without giving movement another owner.
+            if(_pulse!=ActionKey.Unknown || _targetKey!=ActionKey.Unknown)return true;
+            var target=FindAssistCandidate(_assistTargetAcd);
+            if(!IsAssistEligible(target) || !CanAttackAssistFrom(point,target) || MapAssistAttackBlocked(point,target))
+                target=CycloneOculusAnchor(point,true);
+            if(target==null)
+            {
+                ReleaseAssistAttack();
+                _assistStatus="cyclone-await-contact";
+                return true;
+            }
+            SetAssistAttackTarget(target,now);
+            HoldAssistAttack(target,now,AssistAttackReachYards,true,false);
+            return true;
+        }
+
+
+        private bool TryCycloneLandingPull(int now)
+        {
+            var skill=_assistCycloneSkill;
+            if(skill==null)return false;
+            bool stagedOculus=_cycloneOculusCircle!=0 && _cycloneOculusDashSerial==_selfDashSerial;
+            if(!CycloneDashLanded())
+            {
+                if(stagedOculus)
+                {
+                    ClearCycloneOculus();
+                }
+                return false;
+            }
+            var me=Hud.Game.Me;
+            var point=me.FloorCoordinate;
+            uint circle=stagedOculus?_cycloneOculusCircle:AssistOculusAt(point);
+            bool activeCircle=circle!=0 && CycloneCircleContains(circle,point);
+            if(!stagedOculus && (circle==0 || _assistDashForHazard || _cycloneSetup.Kind!=CycloneSetupKind.None
+                || AssistOculusAt(_assistDashLanding.Offset(_assistDashOriginX-_assistDashLanding.X,
+                    _assistDashOriginY-_assistDashLanding.Y,_assistDashOriginZ-_assistDashLanding.Z))==circle))return false;
+
+            uint intended=stagedOculus?_cycloneOculusElite:_assistTargetAcd;
+            if(stagedOculus)ClearCycloneOculus();
+            if(AssistUrgentEscapeDue() || !IsAssistPositionHazardFree(point) || !IsAssistMalletPointFree(point)
+                || _assistDoorTarget!=null || _assistDoorReturnPending || _guardianStageAcd!=0
+                || !activeCircle || !AssistOculusTrialContext())
+            {return false; }
+
+            var target=FindAssistCandidate(intended);
+            uint elite=FindCyclonePullElite(point,target,false);
+            bool trash=elite==0 && CycloneTrashPullAvailable(point,skill);
+            if(elite==0 && !trash)
+            {return false; }
+            if(_pulse!=ActionKey.Unknown || _targetKey!=ActionKey.Unknown || s7o_InputReleaseArbiter.HasPendingRelease
+                || ElapsedMs(now,_cycloneCastAt)<250 || !CycloneSetupReady(skill,skill.GetResourceRequirement()))
+            {return false; }
+
+            var anchor=CycloneOculusAnchor(point,true);
+            bool fd=me.Powers.BuffIsActive(Hud.Sno.SnoPowers.FlyingDragon.Sno);
+            if(!EmitCyclonePull(skill,anchor,elite,trash?4:0,now,fd,false,"oculus-landing"))
+            {return false; }
+            _assistDashContinuationPending=false;
+            _cycloneOculusCircle=circle;_cycloneOculusElite=elite;_cycloneOculusAnchor=anchor?.AcdId??0u;
+            _cycloneOculusArrivedAt=now;
+            return true;
+        }
+
+        private bool HoldContactlessCycloneLanding(int now)
+        {
+            if(ElapsedMs(now,_cycloneCastAt)>=180)return false;
+            var point=Hud.Game.Me.FloorCoordinate;
+            var plan=_cycloneSetup;
+            bool arcane=plan.Kind==CycloneSetupKind.ArcaneExit && plan.CastAt==_cycloneCastAt && plan.Anchor==0;
+            bool waiting=arcane ? IsAssistArcaneRecoveryClear(point) && (plan.Circle==0 || CycloneCircleContains(plan.Circle,point))
+                : _cycloneOculusCircle!=0 && _cycloneOculusArrivedAt==_cycloneCastAt && _cycloneOculusAnchor==0
+                    && CycloneCircleContains(_cycloneOculusCircle,point);
+            if(!waiting || AssistUrgentEscapeDue() || !IsAssistPositionHazardFree(point)
+                || CycloneOculusAnchor(point,true)!=null)return false;
+            _assistStatus="cyclone-await-contact";
+            return true;
+        }
+
+        private bool CycloneCircleContains(uint id,IWorldCoordinate point)
+        {
+            foreach(var circle in _assistPositionCircles)
+            {
+                var actor=circle.Actor;
+                if(actor!=null && actor.AcdId==id && !actor.IsDisabled && actor.WorldId==Hud.Game.Me.WorldId
+                    && AssistSameHeight(point,actor.FloorCoordinate)
+                    && point.XYDistanceTo(actor.FloorCoordinate)<=AssistCircleFootprintRadius(circle))return true;
+            }
+            return false;
+        }
+
+        private int _cycloneRegroupCheckAt=int.MinValue;
+        private bool TryRecallCycloneElite(IMonster target,int now)
+        {
+            var skill=_assistCycloneSkill;
+            if(skill==null || !_assistHitVerified || _assistTargetAcd==0
+                || _assistAttackKey!=_assistMainKey || _assistAttackKey==ActionKey.Unknown
+                || !s7o_GenMonkInput.Owns(_assistAttackKey) || !s7o_GenMonkInput.IsDown(_assistAttackKey)
+                || _pulse!=ActionKey.Unknown || _targetKey!=ActionKey.Unknown
+                || ElapsedMs(now,_cycloneCastAt)<1250 || !AssistOculusTrialContext())return false;
+            var me=Hud.Game.Me;
+            var point=me.FloorCoordinate;
+            if(!IsAssistPositionHazardFree(point) || !CycloneSetupReady(skill,skill.GetResourceRequirement()))return false;
+
+            var anchor=FindAssistCandidate(_assistTargetAcd);
+            uint elite;
+            string context;
+            if(IsCycloneOculusElite(anchor,point))
+            {
+                elite=anchor.AcdId;context="recall";
+            }
+            else
+            {
+                if(!IsAssistPositionElite(anchor) || anchor.Rarity==ActorRarity.Boss
+                    || !HasAssistAttackContact(anchor) || ElapsedMs(now,_cycloneRegroupCheckAt)<150)return false;
+                _cycloneRegroupCheckAt=now;
+                elite=FindCyclonePullElite(point,target,false);
+                if(elite==0 || elite==anchor.AcdId)return false;
+                context="regroup";
+            }
+            return EmitCyclonePull(skill,anchor,elite,0,now,
+                me.Powers.BuffIsActive(Hud.Sno.SnoPowers.FlyingDragon.Sno),false,context);
+        }
+
+        private const string CycloneProfileCode = "Skill_MonkCycloneStrike";
+        private const int CyclonePulseMs = 45;
+        private s7o_AutoSkill _cycloneOwner;
+        private object _cycloneProfile;
+        private System.Collections.IList _cycloneProfiles;
+        private System.Reflection.FieldInfo _cyclonePredicateField;
+        private Delegate _cycloneOriginal, _cyclonePredicate;
+        private int _cycloneBindAt = int.MinValue, _cycloneCastAt = int.MinValue, _cycloneCheckAt = int.MinValue;
+        private int _cycloneCastGameTick;
+        private uint _cycloneFollowTarget;
+        private bool _cyclonePulse;
+
+        private static bool IsCycloneCastKey(ActionKey key)
+        {
+            return key == ActionKey.RightSkill || (key >= ActionKey.Skill1 && key <= ActionKey.Skill4);
+        }
+
+        private bool OwnsCycloneStrike()
+        {
+            if (_cycloneOwner == null || !Enabled || !_assistActive || _assistEnding || !MeleeAssistEnabled
+                || _assistCaptureSuppressed || _assistWaitForRelease
+                || !s7o_GenMonkInput.IsVirtualKeyDown(MeleeAssistVirtualKey)) return false;
+            try
+            {
+                var powers = Hud.Game.Me?.Powers;
+                var skill = powers?.GetUsedSkill(Hud.Sno.SnoPowers.Monk_CycloneStrike);
+                return skill != null && IsCycloneCastKey(skill.Key);
+            }
+            catch { return false; }
+        }
+
+        private Func<T, bool> WrapCyclonePredicate<T>(Func<T, bool> original)
+        {
+            return context => !OwnsCycloneStrike() && original(context);
+        }
+
+        private void RestoreCyclonePredicate()
+        {
+            if (_cycloneProfile == null) return;
+            try
+            {
+                if (ReferenceEquals(_cyclonePredicateField.GetValue(_cycloneProfile), _cyclonePredicate))
+                    _cyclonePredicateField.SetValue(_cycloneProfile, _cycloneOriginal);
+            }
+            catch { /* A detached guard yields to the original even if the field cannot be restored. */ }
+            finally
+            {
+                _cycloneOwner = null;
+                _cycloneProfile = null;
+                _cycloneProfiles = null;
+                _cyclonePredicateField = null;
+                _cycloneOriginal = _cyclonePredicate = null;
+                _cycloneBindAt = int.MinValue;
+            }
+        }
+
+        private bool CyclonePredicateInstalled(s7o_AutoSkill automatic)
+        {
+            if (automatic == null || !ReferenceEquals(automatic, _cycloneOwner)) return false;
+            try
+            {
+                return _cycloneProfiles.Contains(_cycloneProfile)
+                    && ReferenceEquals(_cyclonePredicateField.GetValue(_cycloneProfile), _cyclonePredicate);
+            }
+            catch { return false; }
+        }
+
+        // Only this live conditional profile yields during assist. AutoSkill retains its other casts.
+        private s7o_AutoSkill UpdateCycloneOwnership(IPlayerSkill skill, int now)
+        {
+            if (skill == null || !IsCycloneCastKey(skill.Key) || !_assistActive || _assistEnding)
+            {
+                RestoreCyclonePredicate();
+                return null;
+            }
+            s7o_AutoSkill automatic;
+            try
+            {
+                automatic = Hud.GetPlugin<s7o_AutoSkill>();
+                if (automatic == null || !automatic.Enabled || !automatic.EnableConditionalAutoCastProfiles
+                    || !automatic.GetConditionalProfileEnabled(CycloneProfileCode))
+                {
+                    RestoreCyclonePredicate();
+                    return null;
+                }
+            }
+            catch
+            {
+                RestoreCyclonePredicate();
+                return null;
+            }
+            if (ElapsedMs(now, _cycloneBindAt) < 1000)
+                return ReferenceEquals(automatic, _cycloneOwner) ? automatic : null;
+            try
+            {
+                if (CyclonePredicateInstalled(automatic))
+                {
+                    _cycloneBindAt = now;
+                    return automatic;
+                }
+                RestoreCyclonePredicate();
+                const System.Reflection.BindingFlags flags =
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+                var profiles = typeof(s7o_AutoSkill).GetField("_conditionalProfiles", flags)
+                    ?.GetValue(automatic) as System.Collections.IList;
+                object cycloneProfile = null;
+                if (profiles != null)
+                    foreach (var profile in profiles)
+                    {
+                        if (profile == null) continue;
+                        var type = profile.GetType();
+                        if (!Equals(type.GetField("Code")?.GetValue(profile), CycloneProfileCode)) continue;
+                        if (cycloneProfile != null || !Equals(type.GetField("Sno")?.GetValue(profile), skill.SnoPower.Sno))
+                            return null;
+                        cycloneProfile = profile;
+                    }
+                var field = cycloneProfile?.GetType().GetField("ShouldCast");
+                if (field == null || !field.FieldType.IsGenericType
+                    || field.FieldType.GetGenericTypeDefinition() != typeof(Func<,>)) return null;
+                var original = field.GetValue(cycloneProfile) as Delegate;
+                var parameters = field.FieldType.GetGenericArguments();
+                if (original == null || parameters[1] != typeof(bool)) return null;
+                var factory = typeof(s7o_GenMonk).GetMethod(nameof(WrapCyclonePredicate), flags);
+                var predicate = (Delegate)factory.MakeGenericMethod(parameters[0]).Invoke(this, new object[] { original });
+                field.SetValue(cycloneProfile, predicate);
+                _cycloneProfile = cycloneProfile;
+                _cycloneProfiles = profiles;
+                _cyclonePredicateField = field;
+                _cycloneOriginal = original;
+                _cyclonePredicate = predicate;
+                _cycloneOwner = automatic;
+                return automatic;
+            }
+            catch
+            {
+                RestoreCyclonePredicate();
+                return null;
+            }
+            finally { _cycloneBindAt = now; }
+        }
+
+        private static bool CycloneSpiritAvailable(double spirit, double maximum, double cost, bool flyingDragon)
+        {
+            return !double.IsInfinity(spirit) && !double.IsInfinity(maximum) && cost >= 0 && maximum > 0
+                && spirit - cost >= Math.Max(25, maximum * (flyingDragon ? 0.35 : 0.45));
+        }
+
+        private void TryAssistCyclone(IPlayerSkill skill, s7o_AutoSkill automatic, int now)
+        {
+            if (_cycloneSetup.Kind==CycloneSetupKind.ArcaneExit) return;
+            bool setupActive=_cycloneSetup.Kind!=CycloneSetupKind.None;
+            if (automatic == null || _assistAttackKey == ActionKey.Unknown
+                || !s7o_GenMonkInput.Owns(_assistAttackKey)
+                || _assistSafetyCombatOnly || _assistDamageEscapePending || IsAssistHealingRecovery()
+                || _assistDoorTarget != null || _assistDoorReturnPending || _guardianStageAcd != 0
+                || ElapsedMs(now, _cycloneCheckAt) < 150) return;
+            int sinceCast = ElapsedMs(now, _cycloneCastAt);
+            if (sinceCast < 250) return;
+            var me = Hud.Game.Me;
+            bool flyingDragon = me.Powers.BuffIsActive(Hud.Sno.SnoPowers.FlyingDragon.Sno);
+            int gameTick = Hud.Game.CurrentGameTick;
+            bool follow = !setupActive && flyingDragon && _cycloneFollowTarget != 0u && _cycloneFollowTarget == _assistTargetAcd
+                && sinceCast <= 650 && _assistWotHfLastGameTick > _cycloneCastGameTick
+                && gameTick - _assistWotHfLastGameTick <= 3;
+            if (!follow && sinceCast < (flyingDragon ? 950 : 1250)) return;
+
+            _cycloneCheckAt = now;
+            if (!CyclonePredicateInstalled(automatic) || skill.IsOnCooldown || _assistHealthFraction <= 0.40
+                || AssistUrgentEscapeDue() || s7o_InputReleaseArbiter.HasOtherOwner(Owner)) return;
+            double spirit = me.Stats.ResourceCurPri, cost = skill.GetResourceRequirement();
+            if (!CycloneSpiritAvailable(spirit, me.Stats.ResourceMaxPri, cost, flyingDragon)) return;
+            var target = FindAssistCandidate(_assistTargetAcd);
+            if (!HasAssistAttackContact(target)) return;
+
+            if(setupActive)
+            {
+                if(_cycloneSetup.Arrived==int.MinValue || _cycloneSetup.CastAt!=int.MinValue)return;
+                var wanted=FindAssistCandidate(_cycloneSetup.Elite);
+                if(!IsCycloneOculusElite(wanted,me.FloorCoordinate))return;
+                float before=_cycloneSetup.Landing==null?0f:wanted.FloorCoordinate.XYDistanceTo(_cycloneSetup.Landing);
+                if(EmitCyclonePull(skill,target,wanted.AcdId,0,now,flyingDragon,false,
+                    "relay-first"))
+                {
+                    _cycloneSetup.CastAt=now;
+                    _cycloneSetup.EliteDistanceBefore=before;
+                }
+                return;
+            }
+
+            // Evaluate pull benefit around the current fight without steering or releasing the primary.
+            double radius = CyclonePullRadius(skill);
+            int trashRequired = IsAssistPositionElite(target) ? 3 : 4, trash = 0;
+            uint elite = 0;
+            var point = me.FloorCoordinate;
+            double strikeReach = AssistConfiguredStrikeReach();
+            foreach (var body in _assistCandidates)
+            {
+                if (body == null || body.AcdId == target.AcdId || body.Rarity == ActorRarity.Boss
+                    || !IsAssistMonsterValid(body) || !AssistSameHeight(point, body.FloorCoordinate)
+                    || point.XYDistanceTo(body.FloorCoordinate) > radius
+                    || AssistHitboxEdgeGap(point, body) <= strikeReach || IsAssistJuggerPackMember(body)
+                    || MapAssistTargetBlocked(body)) continue;
+                if (IsAssistPositionElite(body))
+                {
+                    if (ShouldHandOffAssistElite(body) || AssistHitboxEdgeGap(point,body)<=strikeReach+1) continue;
+                    elite = body.AcdId;
+                    break;
+                }
+                if (trash < trashRequired) ++trash;
+            }
+            if (elite == 0u && (trash < trashRequired || sinceCast < 2200)) return;
+            EmitCyclonePull(skill,target,elite,trash,now,flyingDragon,follow && elite!=0u,"combat");
+        }
+
+        private bool EmitCyclonePull(IPlayerSkill skill,IMonster target,uint elite,int trash,int now,
+            bool flyingDragon,bool follow,string context)
+        {
+            if(s7o_InputReleaseArbiter.HasOtherOwner(Owner) || !StartPulse(skill.Key,now,CyclonePulseMs,false))return false;
+            _cyclonePulse=true;
+            _cycloneCastAt=now;
+            _cycloneCastGameTick=Hud.Game.CurrentGameTick;
+            _cycloneFollowTarget=context=="combat" && flyingDragon && elite!=0u && !follow?target.AcdId:0u;
+            return true;
         }
 
         // Temporarily arbitrate Healing only; AutoSkill's toggle and saved policy stay intact.
@@ -12326,85 +14663,89 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
         public int HealingMantraCombatRefreshMs = 100;
         private float _genMantraShieldSample=-1;
         private int _genMantraShieldSampleAt=int.MinValue;
-        private int _genMantraCastAt=int.MinValue, _genMantraTraceAt=int.MinValue;
+        private int _genMantraCastAt=int.MinValue;
         private uint _genMantraWorld;
-        private bool _genMantraPulse;
-        private int _genMantraCombatRequests, _genMantraTravelRequests;
-        private string _genMantraReason="idle";
-        private ActionKey _genMantraSkillKey=ActionKey.Unknown;
+        private ActionKey _genMantraPulseKey=ActionKey.Unknown;
+        private int _genMantraReleaseAt;
+        private bool _genMantraAssistPulse;
         private bool _genMantraExternalReported;
 
-        private static bool GenMonkMantraDue(bool combat,bool moving,bool active,double left,int since,int cadence)
-        { return S7oHealingMantraPolicy.Due(combat,false,active,false,left,since,cadence); }
-
-        private bool TryAssistHealingMantra(int now)
+        private void ReleaseHealingMantraPulse()
         {
-            if(_genMantraPulse && _pulse!=ActionKey.Unknown)return true;
-            _genMantraPulse=false;
-            _genMantraReason="idle";
-            if(!S7oHealingMantraPolicy.Allowed(Hud)) {_genMantraReason="context-or-rift-complete";return false;}
-            if(_pulse!=ActionKey.Unknown || _selfDashKey!=ActionKey.Unknown || _targetKey!=ActionKey.Unknown
-                || _assistWotHfResumePending || s7o_InputReleaseArbiter.HasPendingRelease
-                || (_assistActive && AssistUrgentEscapeDue()))
-            {_genMantraReason="input-or-safety";return false;}
+            if (_genMantraPulseKey == ActionKey.Unknown) return;
+            var key = _genMantraPulseKey;
+            _genMantraPulseKey = ActionKey.Unknown;
+            _genMantraAssistPulse = false;
+            s7o_GenMonkInput.Up(Owner, key);
+        }
+
+        private static bool GenMonkMantraCombat(bool assistHeld, AcdAnimationState animation)
+        {
+            return assistHeld || animation == AcdAnimationState.Attacking || animation == AcdAnimationState.Channeling;
+        }
+
+        private bool TryAssistHealingMantra(int now, bool assistHeld)
+        {
+            if(_genMantraPulseKey!=ActionKey.Unknown)return true;
+            if(!S7oHealingMantraPolicy.Allowed(Hud)) {return false;}
+            if(s7o_InputReleaseArbiter.HasPendingRelease)
+            {return false;}
+            // Manual play retains its existing priority. Held assist uses a separate key
+            // transaction and does not wait for movement or generator confirmation.
+            if(!assistHeld && (_pulse!=ActionKey.Unknown || _selfDashKey!=ActionKey.Unknown
+                || _targetKey!=ActionKey.Unknown || _assistWotHfResumePending))
+            {return false;}
             var me=Hud.Game.Me;
-            bool combat=me.AnimationState==AcdAnimationState.Attacking || me.AnimationState==AcdAnimationState.Channeling;
-            bool moving=me.AnimationState==AcdAnimationState.Running;
+            bool combat=GenMonkMantraCombat(assistHeld, me.AnimationState);
 
             if(_genMantraWorld!=me.WorldId) {_genMantraWorld=me.WorldId;_genMantraCastAt=int.MinValue;}
             var skill=me.Powers.UsedSkills.FirstOrDefault(p=>p!=null && p.SnoPower!=null
                 && p.SnoPower.Sno==Hud.Sno.SnoPowers.Monk_MantraOfHealing.Sno);
-            _genMantraSkillKey=skill==null?ActionKey.Unknown:skill.Key;
-            if(skill==null) {_genMantraReason="skill-not-found";return false;}
-            if(skill.IsOnCooldown) {_genMantraReason="skill-cooldown";return false;}
+            if(skill==null) {return false;}
+            if(skill.IsOnCooldown) {return false;}
             if(skill.Key==ActionKey.Unknown || skill.Key==ActionKey.LeftSkill)
-            {_genMantraReason="unsupported-binding";return false;}
-            // Healing is untargeted. RMB can use the existing owned pulse without
-            // moving the cursor; visible UI remains a hard exclusion in manual travel too.
+            {return false;}
+            // RMB remains cursor-safe. Keyboard Mantra leaves Dash's aim untouched.
             if(skill.Key==ActionKey.RightSkill && !IsAssistCursorUiSafe())
-            {_genMantraReason="right-click-ui-guard";return false;}
+            {return false;}
             // Preserve ownership: no AutoSkill settings or source are changed.
             var automatic=Hud.GetPlugin<s7o_AutoSkill>();
             if(automatic!=null && automatic.Enabled && automatic.EnableConditionalAutoCastProfiles
                 && automatic.GetConditionalProfileEnabled("Monk_MantraHealing_Defensive")
                 && (!_healingBridgeReady || !ReferenceEquals(automatic,_healingBridgeAutoSkill))) {
                 if(!_genMantraExternalReported)TraceAssistTrial("MANTRA_OWNER","reason=bridge-unavailable-autoskill-retained");
-                _genMantraExternalReported=true;_genMantraReason="autoskill-owner";return false;
+                _genMantraExternalReported=true;return false;
             }
             _genMantraExternalReported=false;
             double left=BuffLeft(373154u,1);
-            bool active=me.Powers.BuffIsActive(373154u,1) && me.Defense.CurShield>0;
+            float shieldSample=me.Defense?.CurShield??0;
+            bool active=me.Powers.BuffIsActive(373154u,1) && shieldSample>0;
             int since=ElapsedMs(now,_genMantraCastAt);
             bool channelPylon=me.Powers.BuffIsActive(Hud.Sno.SnoPowers.Generic_PagesBuffInfiniteCasting.Sno);
-            float shieldSample=me.Defense.CurShield;
             bool weakened=_genMantraShieldSample>0 && ElapsedMs(now,_genMantraShieldSampleAt)<=500
                 && shieldSample<_genMantraShieldSample-Math.Max(1,_genMantraShieldSample*0.005f);
             _genMantraShieldSample=shieldSample;_genMantraShieldSampleAt=now;
             if(!S7oHealingMantraPolicy.Due(combat,channelPylon,active,weakened,left,since,HealingMantraCombatRefreshMs))
-            {_genMantraReason=combat?"combat-cadence":moving?"travel-shield-active":"idle-shield-active";return false;}
-            if(S7oHealingMantraPolicy.UseIdleSpiritReserve(me.AnimationState,channelPylon))
+            {return false;}
+            if(!assistHeld && S7oHealingMantraPolicy.UseIdleSpiritReserve(me.AnimationState,channelPylon))
             {
                 double cost=skill.GetResourceRequirement(),maximum=me.Stats.ResourceMaxPri;
                 if(double.IsNaN(cost)||double.IsInfinity(cost)||cost<0||maximum<=0
                     ||me.Stats.ResourceCurPri<cost+maximum*Math.Max(0,Math.Min(0.9,automatic==null?0.35:automatic.HealingMantraSpiritReserve)))
-                {_genMantraReason="idle-spirit-reserve";return false;}
+                {return false;}
             }
-            if(!StartPulse(skill.Key,now,Math.Max(35,GeneratorPulseMinMs),false))
-            {_genMantraReason="input-busy";return false;}
-            _genMantraPulse=true;_genMantraCastAt=now;
-            _genMantraReason=channelPylon?"channeling-pylon":combat?"combat-refresh":moving?"travel-refresh":"idle-refresh";
-            if(combat)_genMantraCombatRequests++;else _genMantraTravelRequests++;
-            if(ElapsedMs(now,_genMantraTraceAt)>=1000) {
-                _genMantraTraceAt=now;
-                TraceAssistTrial("GENMONK_MANTRA","mode="+_genMantraReason+" key="+skill.Key+" gapMs="+since
-                    +" combatRequests="+_genMantraCombatRequests+" travelRequests="+_genMantraTravelRequests
-                    +" spirit="+me.Stats.ResourceCurPri+" shieldLeft="+left);
-            }
+            if(skill.Key==_assistAttackKey || skill.Key==_selfDashKey || skill.Key==_pulse
+                || !s7o_GenMonkInput.Down(Owner,skill.Key))
+            {return false;}
+            _genMantraPulseKey=skill.Key;
+            _genMantraAssistPulse=assistHeld;
+            _genMantraReleaseAt=unchecked(now+Math.Max(35,GeneratorPulseMinMs));
+            _genMantraCastAt=now;
             return true;
         }
 
         private void TraceAssistMoltenTiming() { }
-        private void TraceAssistMoltenReturn(IMonster target,IWorldCoordinate landing) { }
+        private void TraceAssistHazardReturn(IMonster target,IWorldCoordinate landing) { }
         private void TraceAssistDashContact(IMonster target,IWorldCoordinate landing,int now) { }
         private void TraceAssistRange(IMonster target,string phase,int now) { }
         private void TraceAssistHazardMemory(string reason) { }
@@ -12992,6 +15333,8 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
         private object AssistInvokeMap(Func<string,object[],object> provider,string operation,object[] args)
         {
             if(provider==null)return null;
+            if(DeferCompetingAssistDoorPath(provider,operation,args))
+                return new Dictionary<string,object>{{"state","Pending"},{"reason","DoorAccessQueryOwnsPath"}};
 
             try { return provider(operation,args); }
             finally {  }
@@ -13253,7 +15596,7 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
         }
 
         private void ResetMapAssist()
-        { _assistMapDoorAcd=0;_assistMapDashTransit=false;_assistMapRouteReady=false;_assistMapGoal=null;_assistMapGoalAcd=0;_assistGroundChecks.Clear();_assistGroundCheckTick=int.MinValue; }
+        { _assistMapDoorAcd=0;_assistMapDashTransit=false;_assistMapRouteReady=false;_assistMapGoal=null;_assistMapGoalAcd=0;_assistGroundChecks.Clear();_assistGroundCheckTick=int.MinValue;ResetAssistDoorAccess(); }
         private bool AttachMapAssist()
         {
             if(_assistMapGet!=null&&_assistMapPlugin!=null&&_assistMapPlugin.Enabled)return true;
@@ -13288,20 +15631,23 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
                 return status;
             }catch { _assistMapGet=null;_assistMapPlugin=null;return null; }
         }
-        private bool MapAssistLandingAllowed(IWorldCoordinate point)
+        private bool MapAssistLandingAllowed(IWorldCoordinate point,bool requireKnown=false)
         {
-            var status=MapAssistStatus();if(status==null)return true;
+            var status=MapAssistStatus();if(status==null)return !requireKnown;
             try {
                 var answer=AssistMapRead("point",new object[]{status["epoch"],point.X,point.Y,point.Z}) as Dictionary<string,object>;
-                if(answer==null)return true;
+                if(answer==null)return !requireKnown;
                 string state=answer.ContainsKey("state")?answer["state"] as string:null;
+                if(requireKnown&&state!="WalkCandidate")return false;
                 if(state=="BlockedCandidate"||state=="NoWalkCandidate")return false;
                 // Full landing clearance is independent of attack reach and source-wall escape.
                 // A short routed hop must not inherit the route origin's tapered margin.
                 float radius=Math.Max(0f,Math.Min(3f,MapWallClearance));
                 var edge=AssistMapRead("corridor",new object[]{status["epoch"],point.X,point.Y,point.Z,
                     point.X,point.Y,point.Z,radius}) as Dictionary<string,object>;
-                if (edge==null||!edge.ContainsKey("state")||(edge["state"] as string)!="BlockedCandidate")
+                string clearance=edge!=null&&edge.ContainsKey("state")?edge["state"] as string:null;
+                if(requireKnown && clearance!="ClearCandidate" && clearance!="BlockedCandidate")return false;
+                if (clearance!="BlockedCandidate")
                 { _mapLandingReason="preferred-clearance"; return true; }
                 // Prefer two yards, but allow a smaller verified margin in narrow spaces.
                 // Blocked centers, void, and actual prop hitboxes remain forbidden.
@@ -13311,7 +15657,7 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
                 bool allowed=tight!=null&&tight.ContainsKey("state")&&(tight["state"] as string)=="ClearCandidate";
                 _mapLandingReason=allowed?"tight-walkable":"blocked-clearance";
                 return allowed;
-            }catch { return true; }
+            }catch { return !requireKnown; }
         }
         private bool MapAssistTargetBlocked(IMonster target)
         { return target!=null && MapAssistAttackBlocked(Hud.Game.Me.FloorCoordinate,target); }
@@ -13320,7 +15666,7 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
             var status=MapAssistStatus();if(status==null||point==null)return;
             try {
                 AssistInvokeMap(_assistMapGet,"feedback",new object[]{status["epoch"],"GenMonk",action,target,point.X,point.Y,point.Z});
-                if(reset){AssistInvokeMap(_assistMapGet,"resetpath",new object[]{status["epoch"]});_assistMapGoal=null;}
+                if(reset){ClearAssistDoorQuery();AssistInvokeMap(_assistMapGet,"resetpath",new object[]{status["epoch"]});_assistMapGoal=null;}
             }catch {_assistMapGet=null;_assistMapPlugin=null;}
         }
         // Combat destination planning never authorizes an overrange cast. Only the
@@ -13472,6 +15818,8 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
                     _assistMapGoal=landing.Offset(0f,0f,0f);_assistMapTargetPosition=AssistTargetGround(target).Offset(0f,0f,0f);
                 }
                 landing=_assistMapGoal.Offset(0f,0f,0f);
+                if(!IsAssistDoorAccessAllowed(landing))
+                { _assistMapPlanReason="closed-door-access:"+_assistDoorAccessState;return false; }
                 // Validate the individual Dash before asking for a walking detour.
                 // Nearby doors and unresolved walking routes are not shortcut vetoes.
                 if (!sameBlockedDirection && !_assistNavigationTravelBlocked && (!_assistNavigationPending || _assistNavigationTargetAcd == target.AcdId)) {
@@ -13523,15 +15871,19 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
 
 
         private void MaintainDash(IPlayerSkill dash, int now, IMonster approachTarget = null,
-            IWorldCoordinate assistLanding = null, bool assistEscapeOnly = false, bool mapTransit = false, bool upkeep = false, bool circleUpgrade = false)
+            IWorldCoordinate assistLanding = null, bool assistEscapeOnly = false, bool mapTransit = false, bool upkeep = false, bool circleUpgrade = false, bool cyclonePull = false, bool frozenPulseContact = false)
         {
             try
             {
                 if(AssistSubmittedDashOwned(_assistActive,_selfDashApproach,_selfDashKey!=ActionKey.Unknown,_selfDashCastTick))return;
             if (!CanApproachDash(dash)) return;
+                // Final dispatch covers circle/density/pursuit callers as well as
+                // the ordinary approach planner. Required escape and owned door/
+                // guardian transactions retain their existing safety controllers.
+                if(!PrepareAssistDoorDash(assistLanding,assistEscapeOnly))return;
                 bool contactQualified=_assistActive && approachTarget!=null && HasAssistPackContact(approachTarget);
                 if (_assistActive && assistLanding != null
-                    && !AllowAssistMovement(approachTarget,assistLanding,now,assistEscapeOnly,upkeep,circleUpgrade)) return;
+                    && !AllowAssistMovement(approachTarget,assistLanding,now,assistEscapeOnly,upkeep,circleUpgrade,cyclonePull,frozenPulseContact)) return;
                 if (SelfDash || approachTarget != null || assistEscapeOnly
                     || (_assistActive && mapTransit && assistLanding != null))
                 {
@@ -13569,8 +15921,11 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
                     // Validate the destination before suspending owned combat.
                     if (_assistActive) ReleaseAssistAttack();
                     if (!SetCursorPos(_dashTargetX, _dashTargetY)) return;
-                    _selfDashUpkeep = upkeep;
+                    _selfDashUpkeep = upkeep;_selfDashFrozenPulse=frozenPulseContact;
                     _selfDashCircleUpgrade = circleUpgrade;
+                    _selfDashPositionUpgrade = _assistActive && !upkeep && _assistDoorTarget==null && !_assistDoorReturnPending && (HasAssistSelectedPosition(approachTarget)
+                        || (circleUpgrade && AssistLandingDamageCircle(assistLanding)!=0u));
+                    TraceAssistPositionDecision("POSITION_DISPATCH",approachTarget,assistLanding,_assistPositionReason);
                     _selfDashContactQualified = contactQualified;
                     _restoreCursor = true;
                     _selfDashKey = dash.Key;
@@ -13674,10 +16029,24 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
                     CancelAssistDashAim("cancelled-user-mouse",now);
                     return;
                 }
+                bool cycloneOculus=_cycloneOculusCircle!=0 && _cycloneOculusDashSerial==_selfDashSerial;
+                bool cycloneCarry=_oculusCarry.Phase==OculusCarryPhase.Dashing && _oculusCarry.DashSerial==_selfDashSerial;
                 if (_selfDashApproach && _assistDashLanding != null)
                 {
                     if (_assistDashLandingWorldId != Hud.Game.Me.WorldId) { CancelAssistDashAim("cancelled-world",now); return; }
                     int landingX, landingY;
+                    // A scored optional move must still deliver its benefit at key-down.
+                    // A stale optional landing cannot silently become a generic transit hop.
+                    if(cycloneOculus && !CycloneOculusAimStillUseful(_assistDashLanding))
+                    { ClearCycloneOculus();CancelAssistDashAim("cancelled-cyclone-benefit",now);return; }
+                    if(cycloneCarry && !OculusCarryAimStillUseful(_assistDashLanding,now))
+                    { CancelAssistDashAim("cancelled-cyclone-carry",now);return; }
+                    if(!cycloneOculus && !cycloneCarry && _selfDashPositionUpgrade && !_selfDashUpkeep && !_assistDashForHazard && !_assistDashEscapeOnly
+                        && !AssistOptionalLandingStillUseful(liveDashTarget,_assistDashLanding))
+                    {
+                        TraceAssistPositionDecision("POSITION_REJECTED",liveDashTarget,_assistDashLanding,"benefit-changed-before-press");
+                        CancelAssistDashAim("cancelled-position-benefit",now,true);return;
+                    }
                     // A moving target can leave the planned melee endpoint before
                     // key-down. Keep a safe progress hop instead of inventing collision
                     // evidence from that reach change and abandoning a valid shortcut.
@@ -13725,7 +16094,7 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
                     return;
                 }
                 if (_assistActive && _selfDashApproach && _assistDashLanding != null
-                    && !AllowAssistMovement(liveDashTarget,_assistDashLanding,now,_assistDashEscapeOnly,_selfDashUpkeep,_selfDashCircleUpgrade))
+                    && !AllowAssistMovement(liveDashTarget,_assistDashLanding,now,_assistDashEscapeOnly,_selfDashUpkeep,_selfDashCircleUpgrade,cycloneOculus||cycloneCarry,_selfDashFrozenPulse))
                 { CancelAssistDashAim("movement-held",now); return; }
                 if (_assistActive && _selfDashApproach && _assistDashLanding != null
                     && _assistDashLanding.XYDistanceTo(Hud.Game.Me.FloorCoordinate)>0.25f)
@@ -13738,9 +16107,12 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
                         CancelAssistDashAim("cancelled-live-arcane",now,true);return;
                     }
                 }
+                if(_assistDoorTarget!=null && _assistDoorStage==5 && !IsAssistClosedDoor(_assistDoorTarget))
+                { CancelAssistDashAim("door-opened-before-press",now);return; }
                 _selfDashAnimationBeforePress = GenMonkAnimationName(Hud.Game.Me.Animation);
                 _selfDashAnimationStartBeforePress = Hud.Game.Me.LoopingAnimationStartTick;
                 _selfDashPressGameTick = Hud.Game.CurrentGameTick;
+                TraceAssistActivation("dash-down");
                 if (_selfDashApproach)
                 {
                     // Aim/camera collection can include the previous cast's delayed timer.
@@ -13763,6 +16135,7 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
                 if (!StartPulse(_selfDashKey, now, Math.Max(20, Math.Min(80, DashPulseMs)), false))
                 { CancelTarget(); return; }
                 _selfDashCastTick = now;
+                CommitAssistDoorDashPress();
                 CommitAssistOrlashCoreDash();
                 // The movement ledger is updated only after fresh native landing evidence.
                 _selfDashResult = "press";
@@ -13870,7 +16243,8 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
                     coherent=worldPosition && _assistDashLanding!=null && AssistHazardMotionCoherent(
                         _assistDashOriginX,_assistDashOriginY,_assistDashLanding.X,_assistDashLanding.Y,position.X,position.Y);
                     hazardSafe=worldPosition && RefreshAssistPositionActors() && IsAssistPositionHazardFree(position)
-                        && IsAssistMalletPointFree(position) && !_assistDamageEscapePending;
+                        && IsAssistMalletPointFree(position) && !_assistDamageEscapePending
+                        && (!_selfDashFrozenPulse || IsAssistFrozenPulsePointFree(position,true));
                     freshNativeEnd=nativeEnded && Hud.Game.Me.LoopingAnimationStartTick>_selfDashAnimationStartBeforePress
                         && Hud.Game.Me.LoopingAnimationStartTick>=_selfDashPressGameTick;
                     // Key release remains independent. Ambiguous coordinates do not
@@ -14015,6 +16389,7 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
         private void Stop()
         {
             try {
+            ReleaseHealingMantraPulse();
 
             _dashUpkeepNeedsAttack = false;
             _panicMustAttack = false;
