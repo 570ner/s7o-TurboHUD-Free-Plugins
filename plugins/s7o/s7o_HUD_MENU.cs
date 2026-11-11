@@ -228,7 +228,7 @@ namespace Turbo.Plugins.s7o
                 || _draggingMainThumb || _draggingTtsScrollThumb || _draggingGlobalTtsSlider
                 || _draggingAutoGemSpecificScrollThumb || _playerBuffsHotkeyCapture
                 || _genMonkMeleeHotkeyCapture || _zbarbAutoSnapHotkeyCapture
-                || _playerCoeHotkeyCapture || _playerCoeElementHotkeyCapture
+                || _playerCoeHotkeyCapture || _playerCoeElementHotkeyCapture || _minimapHotkeyCapture
                 || _partyInspectorHotkeyCapture || _tipsPlayerMarkerHotkeyCapture
                 || _autoLootPauseHotkeyCapture || _pestilenceRgkJuggerHotkeyCapture
                 || _pestilenceRgkOculusHotkeyCapture || _inariusRgkJuggerHotkeyCapture
@@ -303,6 +303,16 @@ namespace Turbo.Plugins.s7o
         private IPlugin _mapViewerPlugin;
         private Func<string,object[],object> _mapViewerGet;
         private int _mapViewerLookupTick=int.MinValue;
+        private bool _minimapExpanded, _minimapHotkeyCapture;
+        private IPlugin _minimapPlugin;
+        private Action<bool, Key, Color, float> _configureMinimap;
+        private FieldInfo[] _minimapFields;
+        private int _minimapProbeAt = int.MinValue;
+        private Key _minimapHotkey = Key.Grave;
+        private Color _minimapColor = Color.FromArgb(80,185,220);
+        private float _minimapOpacity = 100f;
+        private bool _minimapEnabled;
+
         private bool _hudLanguageExpanded = false;
         private string _hudLanguageCode = "enUS";
         private readonly bool[] _hudLanguageAvailable = new bool[HudLanguageCodes.Length];
@@ -1525,6 +1535,20 @@ namespace Turbo.Plugins.s7o
             if (ConsumeProfileCloseEscapeSuppression(keyEvent.Key))
                 return;
 
+            if (_minimapHotkeyCapture)
+            {
+                _minimapHotkeyCapture = false;
+                if (IsCaptureCancelKey(keyEvent.Key))
+                    _status = T("minimap.key_cancelled", "Minimap hotkey assignment cancelled.");
+                else if (keyEvent.Key != Key.Unknown && RefreshMinimapControls())
+                {
+                    _minimapHotkey = keyEvent.Key;
+                    ApplyMinimapMenuSettings();
+                    _status = TF("minimap.key_set", "Minimap hotkey set to {0}.", MinimapHotkeyLabel());
+                }
+                return;
+            }
+
             if (_ttsCustomMessageHotkeyCaptureIndex >= 0)
             {
                 if (IsCaptureCancelKey(keyEvent.Key))
@@ -1648,12 +1672,14 @@ namespace Turbo.Plugins.s7o
                 if (IsCaptureCancelKey(keyEvent.Key))
                 {
                     _partyInspectorHotkeyCapture = false;
+            _minimapHotkeyCapture = false;
                     _status = "PARTY INSPECTOR HOTKEY CAPTURE CANCELLED";
                     return;
                 }
 
                 _partyInspectorHotkey = keyEvent.Key;
                 _partyInspectorHotkeyCapture = false;
+            _minimapHotkeyCapture = false;
                 ApplyPartyInspectorHotkeyToPlugin();
                 RequestPluginCacheRefresh();
                 _status = "PARTY INSPECTOR HOTKEY SET TO " + CaptureKeyLabel(_partyInspectorHotkey);
@@ -2382,6 +2408,7 @@ namespace Turbo.Plugins.s7o
                 if (!Contains(r, x, y))
                     continue;
 
+                _minimapHotkeyCapture = false;
                 _activePage = page;
                 if (_activePage == MenuPageTab.Plugins)
                     _activeTab = DefaultPluginsTabForPageEntry();
@@ -3408,6 +3435,7 @@ namespace Turbo.Plugins.s7o
             if (string.IsNullOrWhiteSpace(action))
                 return;
 
+            if (action != "visual:minimap:hotkey") _minimapHotkeyCapture = false;
             if (action.StartsWith("toggles:cat:", StringComparison.OrdinalIgnoreCase))
             {
                 string raw = action.Substring("toggles:cat:".Length);
@@ -9958,6 +9986,7 @@ namespace Turbo.Plugins.s7o
         {
             string[] p = action.Split(':');
             if (p.Length < 3) return;
+            if(p[1]=="minimap") {HandleMinimapAction(p);return;}
             if(p[1]=="mapviewer") {
                 if(p[2]=="expand") {_mapViewerExpanded=!_mapViewerExpanded;return;}
                 var controls=MapViewerControls();if(controls==null)return;
@@ -10023,6 +10052,7 @@ namespace Turbo.Plugins.s7o
             {
                 _partyInspectorHotkey = Key.F12;
                 _partyInspectorHotkeyCapture = false;
+            _minimapHotkeyCapture = false;
                 ApplyPartyInspectorHotkeyToPlugin();
                 RequestPluginCacheRefresh();
                 _status = "PARTY INSPECTOR HOTKEY RESET TO F12";
@@ -10144,6 +10174,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
         private void ToggleVisualFeature(string feature)
         {
+            if(feature=="minimap"){HandleMinimapAction(new[]{"visual","minimap","toggle"});return;}
             if(feature=="playerbuffs")
             {
                 var buffs=GetPlayerBuffsPlugin();
@@ -10333,6 +10364,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
         private void ToggleVisualExpanded(string feature)
         {
+            if(feature=="minimap"){_minimapExpanded=!_minimapExpanded;return;}
             if(feature=="playerbuffs"){_playerBuffsExpanded=!_playerBuffsExpanded;return;}
             if (feature == "minimapcursor")
             {
@@ -10683,6 +10715,130 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
         // Optional BCL bridge: hiding the grid never disables consumers' geometry.
         // The row exists only when the module and its data folder are installed.
+        private bool RefreshMinimapControls()
+        {
+            int now = Environment.TickCount;
+            try
+            {
+                if (_minimapPlugin == null)
+                {
+                    if (_minimapProbeAt != int.MinValue && unchecked(now-_minimapProbeAt) < 2000) return false;
+                    _minimapProbeAt = now;
+                    var plugin = Hud.AllPlugins.FirstOrDefault(item=>item.GetType().FullName=="Turbo.Plugins.s7o.s7o_Minimap");
+                    if (plugin == null) return false;
+                    var type = plugin.GetType();
+                    var method = type.GetMethod("ConfigureMenu",new[]{typeof(bool),typeof(Key),typeof(Color),typeof(float)});
+                    var fields = new[]{"ExpandKey","OutlineRed","OutlineGreen","OutlineBlue","CenteredOpacityPercent"}
+                        .Select(name=>type.GetField(name)).ToArray();
+                    if (method == null || fields.Any(field=>field==null)) return false;
+                    _configureMinimap = (Action<bool,Key,Color,float>)Delegate.CreateDelegate(
+                        typeof(Action<bool,Key,Color,float>),plugin,method);
+                    _minimapFields = fields;
+                    _minimapPlugin = plugin;
+                }
+                _minimapEnabled = _minimapPlugin.Enabled;
+                _minimapHotkey = (Key)_minimapFields[0].GetValue(_minimapPlugin);
+                _minimapColor = Color.FromArgb(ViClamp((int)_minimapFields[1].GetValue(_minimapPlugin),0,255),
+                    ViClamp((int)_minimapFields[2].GetValue(_minimapPlugin),0,255),
+                    ViClamp((int)_minimapFields[3].GetValue(_minimapPlugin),0,255));
+                _minimapOpacity = ViClampF((float)_minimapFields[4].GetValue(_minimapPlugin),0,100);
+                return true;
+            }
+            catch { _minimapPlugin=null;_configureMinimap=null; }
+            _minimapEnabled=false;
+            return false;
+        }
+
+        private void ApplyMinimapMenuSettings()
+        {
+            _configureMinimap?.Invoke(_minimapEnabled,_minimapHotkey,_minimapColor,_minimapOpacity);
+        }
+
+        private string MinimapHotkeyLabel()
+        {
+            return _minimapHotkey==Key.Grave ? "| / ~ / `" : CaptureKeyLabel(_minimapHotkey);
+        }
+
+        private void HandleMinimapAction(string[] parts)
+        {
+            if(parts.Length<3 || !RefreshMinimapControls())
+            { _status=T("minimap.unavailable","Install the updated Minimap plugin to use these controls.");return; }
+            switch(parts[2])
+            {
+                case "toggle": _minimapEnabled=!_minimapEnabled;break;
+                case "hotkey":
+                    _capturingHotkey=false;_capturingHudHotkeyIdx=-1;
+                    _ttsCustomMessageHotkeyCaptureIndex=-1;_autoSkillKeybindCaptureSlot=-1;
+                    _zbarbAutoSnapHotkeyCapture=_autoLootPauseHotkeyCapture=false;
+                    _playerCoeHotkeyCapture=_playerCoeElementHotkeyCapture=_playerBuffsHotkeyCapture=false;
+                    _partyInspectorHotkeyCapture=_tipsPlayerMarkerHotkeyCapture=_genMonkMeleeHotkeyCapture=false;
+                    _pestilenceRgkJuggerHotkeyCapture=_pestilenceRgkOculusHotkeyCapture=_inariusRgkJuggerHotkeyCapture=false;
+                    ClearAnySnapHotkeyCapture();
+                    _minimapHotkeyCapture=true;
+                    _status=T("minimap.key_prompt","Press a Minimap key. Escape cancels.");
+                    return;
+                case "color":
+                    int color;
+                    if(parts.Length<4 || !int.TryParse(parts[3],out color) || color<0 || color>8)return;
+                    _minimapColor=color==8?Color.FromArgb(80,185,220):VisualPicker8[color];
+                    break;
+                case "opacity":
+                    if(parts.Length<4)return;
+                    _minimapOpacity=ViClampF(_minimapOpacity+(parts[3]=="-1"?-5f:5f),10f,100f);
+                    break;
+                default:return;
+            }
+            ApplyMinimapMenuSettings();
+        }
+
+        private void DrawMinimapOptionsRow(RectangleF r,int rowIdx,int part)
+        {
+            string help=part==0?"minimap_hotkey":part==1?"minimap_color":"minimap_opacity";
+            SetHoverHelpContext("visual:"+help,T("minimap.title","Minimap"));
+            RegisterHoverHelp("row",r);
+            (rowIdx%2==0?_bRowAlt:_bRow).DrawRectangle(r.Left,r.Top,r.Width,r.Height);
+            bool available=_minimapPlugin!=null&&_configureMinimap!=null;
+            float textX=r.Left+14f;
+            if(part==1)
+            {
+                DrawOutlinedFittedText(_fRowTitle,_fRowTitleShadow,_fRowText,_fRowTextShadow,
+                    T("minimap.color_title","Unexplored color"),textX,r.Top+8f,r.Width-28f);
+                EnsureVisualPickerBrushes();
+                float box=Math.Min(20f,Math.Max(12f,(r.Width-60f)/9f-4f)),x=textX,y=r.Top+42f;
+                for(int i=0;i<9;i++)
+                {
+                    var color=i==8?Color.FromArgb(80,185,220):VisualPicker8[i];
+                    var swatch=new RectangleF(x,y,box,box);
+                    var fill=GetVisualBrush(255,color.R,color.G,color.B,0);
+                    fill.DrawRectangle(swatch);
+                    (_minimapColor.ToArgb()==color.ToArgb()?_visualPickerEdgeSelected:_visualPickerEdgeNormal).DrawRectangle(swatch);
+                    string action="visual:minimap:color:"+i;
+                    if(available)RegisterToggleHit(action,swatch);
+                    else RegisterHoverHelp(action,swatch);
+                    x+=box+4f;
+                }
+                return;
+            }
+            float controlW=Math.Min(172f,r.Width*.38f);
+            var control=new RectangleF(r.Right-controlW-8f,r.Top+20f,controlW,34f);
+            string title=part==0?T("minimap.hotkey_title","Map hotkey"):T("minimap.opacity_title","Centered map opacity");
+            string description=part==0?T("minimap.hotkey_description","Click, then press a key. Escape cancels.")
+                :T("minimap.opacity_description","Lower values are more transparent.");
+            DrawOutlinedFittedText(_fRowTitle,_fRowTitleShadow,_fRowText,_fRowTextShadow,
+                title,textX,r.Top+8f,control.Left-textX-12f);
+            var lines=WrapToggleDescription(description,ApproxCharsForToggleDescription(control.Left-textX-12f),3);
+            for(int i=0;i<lines.Length;i++)DrawOutlinedTextAt(_fRowText,_fRowTextShadow,lines[i],textX,r.Top+29f+15f*i);
+            if(part==0)
+            {
+                string label=_minimapHotkeyCapture?T("button.press","PRESS..."):MinimapHotkeyLabel();
+                DrawGlossButton(control,label,_minimapHotkeyCapture,false,available);
+                if(available)RegisterToggleHit("visual:minimap:hotkey",control);
+                else RegisterHoverHelp("visual:minimap:hotkey",control);
+            }
+            else DrawToggleStepper(control,_minimapOpacity.ToString("0",CultureInfo.InvariantCulture)+"%",
+                "visual:minimap:opacity:-1","visual:minimap:opacity:+1",available,26f,4f);
+        }
+
         private Dictionary<string,object> MapViewerControls()
         {
             if(_mapViewerGet==null||_mapViewerPlugin==null||!_mapViewerPlugin.Enabled) {
@@ -11002,12 +11158,13 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
                 private static bool IsCustomVisualFeature(string feature)
         {
-            return feature == "playerbuffs" || feature == "hudlanguage" || feature == "xptracker" || feature == "playercoe" || feature == "tipshelper" || feature == "dangeraffixes" || feature == "elitehp" || feature == "elitecircles" || feature == "simhp" || feature == "menubutton" || feature == "partyinspector";
+            return feature == "minimap" || feature == "playerbuffs" || feature == "hudlanguage" || feature == "xptracker" || feature == "playercoe" || feature == "tipshelper" || feature == "dangeraffixes" || feature == "elitehp" || feature == "elitecircles" || feature == "simhp" || feature == "menubutton" || feature == "partyinspector";
         }
 
 
                 private int GetCustomVisualExpandedRowCount(string feature)
         {
+            if(feature=="minimap")return 3;
             if(feature=="playerbuffs")return 6+PlayerBuffsPreviewRows();
             if (feature == "hudlanguage")
                 return HudLanguageCodes.Length;
@@ -12229,6 +12386,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
         {
             SetHoverHelpContext("visual:"+feature,DisplayText(feature=="playerbuffs"?"Player Buffs":_hoverHelpTitle));
             RegisterHoverHelp("row",r);
+            if(feature=="minimap"){DrawMinimapOptionsRow(r,rowIdx,part);return;}
             if(feature=="playerbuffs"){DrawPlayerBuffsOptionsRow(r,rowIdx,part);return;}
             if (feature == "hudlanguage")
             {
@@ -12434,6 +12592,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
         private void DrawToggleVisualCategory(RectangleF detail)
         {
+            RefreshMinimapControls();
             const float sbW = 18f;
             float x = detail.Left + 8f;
             float w = detail.Width - sbW - 22f;
@@ -12451,6 +12610,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             string[] feats =
             {
                 "hudlanguage",
+                "minimap",
                 "xptracker",
                 "playerbuffs",
                 "playercoe",
@@ -12477,6 +12637,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             string[] ftitles =
             {
                 "HUD Language",
+                T("minimap.title", "Minimap"),
                 T("xp.tracker.title", "XP Tracker"),
                 T("playerbuffs.title", "Player Buffs"),
                 "Player CoE Overlay",
@@ -12503,6 +12664,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             string[] fdescs =
             {
                 "Changes FreeHUD localized text. Restart HUD after selecting a language.",
+                T("minimap.description", "Expanded map and exploration colors."),
                 T("xp.tracker.description", "Inventory-only XP rates; reset each counter with its X."),
                 T("playerbuffs.description", "Movable buff and cooldown icons."),
                 T("hud.indirect.player_coe_party_overlays", "Movable Convention of Elements overlays for party members.") + "\n" +
@@ -12530,6 +12692,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             bool[] fenabled =
             {
                 true,
+                _minimapEnabled,
                 _xpTrackerEnabled,
                 GetPlayerBuffsPlugin()!=null && GetPlayerBuffsPlugin().ShowPlayerBuffs,
                 IsPlayerCoeOverlayEnabled(),
@@ -12556,6 +12719,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             bool[] fexpanded =
             {
                 _hudLanguageExpanded,
+                _minimapExpanded,
                 _xpTrackerExpanded,
                 _playerBuffsExpanded,
                 _visPlayerCoeExpanded,
@@ -12590,6 +12754,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 0,
                 0,
                 0,
+                0,
                 _visGuardianSentryColorIdx,
                 _visValleyOfDeathColorIdx,
                 0,
@@ -12607,6 +12772,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             int[] ftone =
             {
+                0,
                 0,
                 0,
                 0,
@@ -16058,6 +16224,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 _playerCoeHotkeyCapture = false; _playerBuffsHotkeyCapture = false;
                 _playerCoeElementHotkeyCapture = false;
                 _partyInspectorHotkeyCapture = false;
+            _minimapHotkeyCapture = false;
                 _autoSkillKeybindCaptureSlot = -1;
                 _tipsPlayerMarkerHotkeyCapture = false;
                 _pestilenceRgkJuggerHotkeyCapture = false;
@@ -16096,6 +16263,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             _playerCoeHotkeyCapture = false; _playerBuffsHotkeyCapture = false;
             _playerCoeElementHotkeyCapture = false;
             _partyInspectorHotkeyCapture = false;
+            _minimapHotkeyCapture = false;
             _autoSkillKeybindCaptureSlot = -1;
             _tipsPlayerMarkerHotkeyCapture = false;
             _pestilenceRgkJuggerHotkeyCapture = false;
@@ -19405,6 +19573,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 lines.Add("VISIBLE=False"); // start closed after HUD restart
                 lines.Add("SHOW_DOT=" + _showDot);
                 lines.Add("XP_TRACKER_ENABLED=" + _xpTrackerEnabled);
+                lines.Add("MINIMAP_EXPANDED=" + _minimapExpanded);
                 lines.Add("XP_TRACKER_EXPANDED=" + _xpTrackerExpanded);
                 lines.Add("PLAYER_BUFFS_EXPANDED=" + _playerBuffsExpanded);
                 lines.Add("XP_TRACKER_PERSIST=" + _xpTrackerPersist);
@@ -19963,6 +20132,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     }
                     else if (key == "SHOW_DOT") _showDot = ParseBool(val, _showDot);
                     else if (key == "XP_TRACKER_ENABLED") _xpTrackerEnabled = ParseBool(val, _xpTrackerEnabled);
+                    else if (key == "MINIMAP_EXPANDED") _minimapExpanded = ParseBool(val, _minimapExpanded);
                     else if (key == "XP_TRACKER_EXPANDED") _xpTrackerExpanded = ParseBool(val, _xpTrackerExpanded);
                     else if (key == "PLAYER_BUFFS_EXPANDED") _playerBuffsExpanded = ParseBool(val, _playerBuffsExpanded);
                     else if (key == "XP_TRACKER_PERSIST") _xpTrackerPersist = ParseBool(val, _xpTrackerPersist);
