@@ -4904,3 +4904,26 @@ macro.help.resource.Essence=esencja
 macro.help.resource.Mana=mana
 macro.help.resource.ArcanePower=moc tajemna
 macro.help.resource.Life=życie
+
+# Minimap HUD controls and extended hover help
+minimap.title=Minimapa
+minimap.description=Powiększona mapa i kolory eksploracji.
+minimap.hotkey_title=Klawisz mapy
+minimap.hotkey_description=Kliknij i naciśnij klawisz. Escape anuluje.
+minimap.color_title=Kolor niezbadanych miejsc
+minimap.opacity_title=Krycie dużej mapy
+minimap.opacity_description=Niższa wartość daje większą przezroczystość.
+minimap.unavailable=Zainstaluj aktualny plugin Minimap, aby używać tych opcji.
+minimap.key_prompt=Naciśnij klawisz mapy. Escape anuluje.
+minimap.key_cancelled=Anulowano przypisanie klawisza mapy.
+minimap.key_set=Ustawiono klawisz mapy na {0}.
+help.visual.minimap.title=Minimapa
+help.visual.minimap.description=Wyświetlaj i ukrywaj przesuwaną powiększoną mapę jej klawiszem. Domyślnie jest to fizyczny klawisz po lewej stronie 1. Gdy mapa jest otwarta, strzałki zmieniają jej położenie, a + i - przybliżają lub oddalają widok. Wybrany kolor oznacza niezbadany teren, jasne kontury zbadany teren, a fioletowe krawędzie brakującą geometrię. Wskazówki wejścia i wyjścia pojawiają się po rozpoznaniu ich w dostępnych danych mapy. Rozwiń ten wiersz, aby zmienić klawisz, kolor i krycie. Ustawienia zapisują się automatycznie.
+help.visual.minimap_hotkey.title=Klawisz mapy
+help.visual.minimap_hotkey.description=Kliknij przycisk klawisza, a następnie naciśnij nowy klawisz. Escape anuluje. Domyślny fizyczny klawisz po lewej stronie 1 może mieć oznaczenie |, ~ lub akcent ciężki, zależnie od klawiatury.
+help.visual.minimap_color.title=Kolor niezbadanych miejsc
+help.visual.minimap_color.description=Zmienia kolor konturów i wypełnienia niezbadanych obszarów na obu mapach. Ostatnia próbka przywraca oryginalny cyjan. Kontury zbadanych obszarów i fioletowe krawędzie zachowują osobne kolory.
+help.visual.minimap_opacity.title=Krycie dużej mapy
+help.visual.minimap_opacity.description=Reguluje krycie całej powiększonej mapy wraz ze znacznikami w krokach co 5%. Niższa wartość oznacza większą przezroczystość.
+help.plugin.minimap.title=Minimapa
+help.plugin.minimap.description=Wyświetlaj i ukrywaj przesuwaną powiększoną mapę jej klawiszem. Domyślnie jest to fizyczny klawisz po lewej stronie 1. Gdy mapa jest otwarta, strzałki zmieniają jej położenie, a + i - przybliżają lub oddalają widok. Wybrany kolor oznacza niezbadany teren, jasne kontury zbadany teren, a fioletowe krawędzie brakującą geometrię. Wskazówki wejścia i wyjścia pojawiają się po rozpoznaniu ich w dostępnych danych mapy. Rozwiń ten wiersz, aby zmienić klawisz, kolor i krycie. Ustawienia zapisują się automatycznie.

@@ -4904,3 +4904,26 @@ macro.help.resource.Essence=Essenza
 macro.help.resource.Mana=Mana
 macro.help.resource.ArcanePower=Potere arcano
 macro.help.resource.Life=Vita
+
+# Minimap HUD controls and extended hover help
+minimap.title=Minimappa
+minimap.description=Mappa ampliata e colori di esplorazione.
+minimap.hotkey_title=Tasto della mappa
+minimap.hotkey_description=Fai clic e premi un tasto. Esc annulla.
+minimap.color_title=Colore inesplorato
+minimap.opacity_title=Opacità mappa centrale
+minimap.opacity_description=Valori bassi rendono la mappa più trasparente.
+minimap.unavailable=Installa il plugin Minimap aggiornato per usare queste opzioni.
+minimap.key_prompt=Premi un tasto per la mappa. Esc annulla.
+minimap.key_cancelled=Assegnazione del tasto della mappa annullata.
+minimap.key_set=Tasto della mappa impostato su {0}.
+help.visual.minimap.title=Minimappa
+help.visual.minimap.description=Mostra o nascondi la mappa ampliata e spostabile con il suo tasto. Il predefinito è il tasto fisico a sinistra di 1. Quando la mappa è aperta, le frecce la spostano e + o - cambiano lo zoom. Il colore scelto indica il terreno inesplorato, i contorni chiari quello esplorato e le giunzioni viola la geometria mancante. Gli indizi di ingresso e uscita appaiono quando i dati disponibili li identificano. Espandi questa riga per modificare tasto, colore e opacità. Le impostazioni vengono salvate automaticamente.
+help.visual.minimap_hotkey.title=Tasto della mappa
+help.visual.minimap_hotkey.description=Fai clic sul pulsante del tasto, poi premi quello nuovo. Esc annulla. Il tasto fisico predefinito a sinistra di 1 può riportare |, ~ o un accento grave, a seconda della tastiera.
+help.visual.minimap_color.title=Colore inesplorato
+help.visual.minimap_color.description=Modifica contorni e riempimento delle aree inesplorate su entrambe le mappe. L’ultimo campione ripristina il ciano originale. I contorni esplorati e le giunzioni viola mantengono i propri colori.
+help.visual.minimap_opacity.title=Opacità mappa centrale
+help.visual.minimap_opacity.description=Regola l’opacità dell’intera mappa ampliata, inclusi i suoi indicatori, a passi del 5%. I valori bassi sono più trasparenti.
+help.plugin.minimap.title=Minimappa
+help.plugin.minimap.description=Mostra o nascondi la mappa ampliata e spostabile con il suo tasto. Il predefinito è il tasto fisico a sinistra di 1. Quando la mappa è aperta, le frecce la spostano e + o - cambiano lo zoom. Il colore scelto indica il terreno inesplorato, i contorni chiari quello esplorato e le giunzioni viola la geometria mancante. Gli indizi di ingresso e uscita appaiono quando i dati disponibili li identificano. Espandi questa riga per modificare tasto, colore e opacità. Le impostazioni vengono salvate automaticamente.

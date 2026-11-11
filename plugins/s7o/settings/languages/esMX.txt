@@ -4904,3 +4904,26 @@ macro.help.resource.Essence=Esencia
 macro.help.resource.Mana=Maná
 macro.help.resource.ArcanePower=Poder arcano
 macro.help.resource.Life=Vida
+
+# Minimap HUD controls and extended hover help
+minimap.title=Minimapa
+minimap.description=Mapa ampliado y colores de exploración.
+minimap.hotkey_title=Tecla del mapa
+minimap.hotkey_description=Haz clic y pulsa una tecla. Escape cancela.
+minimap.color_title=Color sin explorar
+minimap.opacity_title=Opacidad del mapa central
+minimap.opacity_description=Los valores bajos son más transparentes.
+minimap.unavailable=Instala el plugin Minimap actualizado para usar estas opciones.
+minimap.key_prompt=Pulsa una tecla para el mapa. Escape cancela.
+minimap.key_cancelled=Asignación de tecla del mapa cancelada.
+minimap.key_set=Tecla del mapa asignada a {0}.
+help.visual.minimap.title=Minimapa
+help.visual.minimap.description=Muestra u oculta el mapa ampliado y movible con su tecla. Por defecto es la tecla física a la izquierda del 1. Con el mapa abierto, las flechas lo mueven y + o - cambian el zoom. El color elegido indica terreno sin explorar; los contornos claros indican terreno explorado y las uniones moradas indican geometría pendiente. Las pistas de entrada y salida aparecen cuando los datos disponibles las identifican. Expande esta fila para cambiar la tecla, el color y la opacidad. La configuración se guarda automáticamente.
+help.visual.minimap_hotkey.title=Tecla del mapa
+help.visual.minimap_hotkey.description=Haz clic en el botón de la tecla y pulsa la nueva tecla. Escape cancela. La tecla física predeterminada, a la izquierda del 1, puede mostrar |, ~ o un acento grave según el teclado.
+help.visual.minimap_color.title=Color sin explorar
+help.visual.minimap_color.description=Cambia los contornos y el relleno de las zonas sin explorar en ambos mapas. La última muestra restaura el cian original. Los contornos explorados y las uniones moradas conservan sus colores.
+help.visual.minimap_opacity.title=Opacidad del mapa central
+help.visual.minimap_opacity.description=Ajusta la opacidad de todo el mapa ampliado, incluidos sus marcadores, en pasos del 5 %. Los valores bajos son más transparentes.
+help.plugin.minimap.title=Minimapa
+help.plugin.minimap.description=Muestra u oculta el mapa ampliado y movible con su tecla. Por defecto es la tecla física a la izquierda del 1. Con el mapa abierto, las flechas lo mueven y + o - cambian el zoom. El color elegido indica terreno sin explorar; los contornos claros indican terreno explorado y las uniones moradas indican geometría pendiente. Las pistas de entrada y salida aparecen cuando los datos disponibles las identifican. Expande esta fila para cambiar la tecla, el color y la opacidad. La configuración se guarda automáticamente.

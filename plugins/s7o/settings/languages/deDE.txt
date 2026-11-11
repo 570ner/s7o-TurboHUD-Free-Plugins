@@ -4904,3 +4904,26 @@ macro.help.resource.Essence=Essenz
 macro.help.resource.Mana=Mana
 macro.help.resource.ArcanePower=Arkankraft
 macro.help.resource.Life=Leben
+
+# Minimap HUD controls and extended hover help
+minimap.title=Minikarte
+minimap.description=Erweiterte Karte und Erkundungsfarben.
+minimap.hotkey_title=Kartentaste
+minimap.hotkey_description=Anklicken, dann Taste drücken. Escape bricht ab.
+minimap.color_title=Farbe für Unerkundetes
+minimap.opacity_title=Deckkraft der großen Karte
+minimap.opacity_description=Niedrigere Werte sind transparenter.
+minimap.unavailable=Installiere das aktualisierte Minimap-Plugin für diese Optionen.
+minimap.key_prompt=Kartentaste drücken. Escape bricht ab.
+minimap.key_cancelled=Zuweisung der Kartentaste abgebrochen.
+minimap.key_set=Kartentaste auf {0} gesetzt.
+help.visual.minimap.title=Minikarte
+help.visual.minimap.description=Die verschiebbare große Karte wird mit ihrer Taste ein- und ausgeblendet. Standard ist die physische Taste links neben 1. Bei geöffneter Karte verschieben Pfeiltasten die Position; + und - ändern den Zoom. Die gewählte Farbe zeigt unerkundetes Gelände, helle Konturen zeigen erkundetes Gelände und violette Übergänge zeigen fehlende Geometrie. Hinweise auf Ein- und Ausgänge erscheinen, sobald die verfügbaren Kartendaten sie erkennen. Klappe diese Zeile auf, um Taste, Farbe und Deckkraft zu ändern. Einstellungen werden automatisch gespeichert.
+help.visual.minimap_hotkey.title=Kartentaste
+help.visual.minimap_hotkey.description=Klicke auf die Tastenschaltfläche und drücke die neue Taste. Escape bricht ab. Die Standardtaste links neben 1 kann je nach Tastatur mit |, ~ oder einem Graviszeichen beschriftet sein.
+help.visual.minimap_color.title=Farbe für Unerkundetes
+help.visual.minimap_color.description=Ändert Konturen und Füllfarbe unerkundeter Bereiche auf beiden Karten. Das letzte Farbfeld stellt das ursprüngliche Cyan wieder her. Erkundete Konturen und violette Übergänge behalten ihre eigenen Farben.
+help.visual.minimap_opacity.title=Deckkraft der großen Karte
+help.visual.minimap_opacity.description=Ändert die Deckkraft der gesamten großen Karte samt Markierungen in Schritten von 5 %. Niedrigere Werte sind transparenter.
+help.plugin.minimap.title=Minikarte
+help.plugin.minimap.description=Die verschiebbare große Karte wird mit ihrer Taste ein- und ausgeblendet. Standard ist die physische Taste links neben 1. Bei geöffneter Karte verschieben Pfeiltasten die Position; + und - ändern den Zoom. Die gewählte Farbe zeigt unerkundetes Gelände, helle Konturen zeigen erkundetes Gelände und violette Übergänge zeigen fehlende Geometrie. Hinweise auf Ein- und Ausgänge erscheinen, sobald die verfügbaren Kartendaten sie erkennen. Klappe diese Zeile auf, um Taste, Farbe und Deckkraft zu ändern. Einstellungen werden automatisch gespeichert.

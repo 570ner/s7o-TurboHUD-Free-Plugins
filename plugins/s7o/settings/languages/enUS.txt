@@ -4904,3 +4904,26 @@ macro.help.resource.Essence=Essence
 macro.help.resource.Mana=Mana
 macro.help.resource.ArcanePower=Arcane Power
 macro.help.resource.Life=Life
+
+# Minimap HUD controls and extended hover help
+minimap.title=Minimap
+minimap.description=Expanded map and exploration colors.
+minimap.hotkey_title=Map hotkey
+minimap.hotkey_description=Click, then press a key. Escape cancels.
+minimap.color_title=Unexplored color
+minimap.opacity_title=Centered map opacity
+minimap.opacity_description=Lower values are more transparent.
+minimap.unavailable=Install the updated Minimap plugin to use these controls.
+minimap.key_prompt=Press a Minimap key. Escape cancels.
+minimap.key_cancelled=Minimap hotkey assignment cancelled.
+minimap.key_set=Minimap hotkey set to {0}.
+help.visual.minimap.title=Minimap
+help.visual.minimap.description=Toggle a movable expanded map with its hotkey. The default is the physical key left of 1. While expanded, arrow keys move it and + or - changes its zoom. The chosen color marks unexplored terrain; light outlines mark explored terrain and purple seams mark missing geometry. Entrance and exit hints appear when identified by available map data. Expand this row to change its key, color and opacity. Settings save automatically.
+help.visual.minimap_hotkey.title=Map hotkey
+help.visual.minimap_hotkey.description=Click the key button, then press a replacement key. Escape cancels. The default physical key left of 1 may be labelled |, ~ or a backtick, depending on the keyboard.
+help.visual.minimap_color.title=Unexplored color
+help.visual.minimap_color.description=Changes unexplored outlines and fill on both maps. The final swatch restores the original cyan. Explored outlines and purple seams keep their separate colors.
+help.visual.minimap_opacity.title=Centered map opacity
+help.visual.minimap_opacity.description=Adjusts the whole expanded map layer, including its markers, in 5% steps. Lower values are more transparent.
+help.plugin.minimap.title=Minimap
+help.plugin.minimap.description=Toggle a movable expanded map with its hotkey. The default is the physical key left of 1. While expanded, arrow keys move it and + or - changes its zoom. The chosen color marks unexplored terrain; light outlines mark explored terrain and purple seams mark missing geometry. Entrance and exit hints appear when identified by available map data. Expand this row to change its key, color and opacity. Settings save automatically.

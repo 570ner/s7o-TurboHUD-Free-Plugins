@@ -4904,3 +4904,26 @@ macro.help.resource.Essence=Essence
 macro.help.resource.Mana=Mana
 macro.help.resource.ArcanePower=Puissance arcanique
 macro.help.resource.Life=Vie
+
+# Minimap HUD controls and extended hover help
+minimap.title=Minicarte
+minimap.description=Carte agrandie et couleurs d’exploration.
+minimap.hotkey_title=Touche de carte
+minimap.hotkey_description=Cliquez, puis appuyez sur une touche. Échap annule.
+minimap.color_title=Couleur inexplorée
+minimap.opacity_title=Opacité de la grande carte
+minimap.opacity_description=Une valeur basse est plus transparente.
+minimap.unavailable=Installez le plugin Minimap à jour pour utiliser ces options.
+minimap.key_prompt=Choisissez une touche de carte. Échap annule.
+minimap.key_cancelled=Attribution de la touche de carte annulée.
+minimap.key_set=Touche de carte définie sur {0}.
+help.visual.minimap.title=Minicarte
+help.visual.minimap.description=Affichez ou masquez la carte agrandie et déplaçable avec sa touche. Par défaut, il s’agit de la touche physique à gauche de 1. Lorsque la carte est affichée, les flèches la déplacent et + ou - modifient le zoom. La couleur choisie indique le terrain inexploré, les contours clairs le terrain exploré et les raccords violets la géométrie manquante. Les repères d’entrée et de sortie apparaissent lorsque les données disponibles les identifient. Dépliez cette ligne pour changer la touche, la couleur et l’opacité. Les réglages sont enregistrés automatiquement.
+help.visual.minimap_hotkey.title=Touche de carte
+help.visual.minimap_hotkey.description=Cliquez sur le bouton de touche, puis appuyez sur la nouvelle touche. Échap annule. La touche physique par défaut, à gauche de 1, peut porter |, ~ ou un accent grave selon le clavier.
+help.visual.minimap_color.title=Couleur inexplorée
+help.visual.minimap_color.description=Modifie les contours et le remplissage des zones inexplorées sur les deux cartes. La dernière case rétablit le cyan d’origine. Les contours explorés et les raccords violets conservent leurs couleurs.
+help.visual.minimap_opacity.title=Opacité de la grande carte
+help.visual.minimap_opacity.description=Règle l’opacité de toute la carte agrandie, marqueurs compris, par pas de 5 %. Une valeur basse est plus transparente.
+help.plugin.minimap.title=Minicarte
+help.plugin.minimap.description=Affichez ou masquez la carte agrandie et déplaçable avec sa touche. Par défaut, il s’agit de la touche physique à gauche de 1. Lorsque la carte est affichée, les flèches la déplacent et + ou - modifient le zoom. La couleur choisie indique le terrain inexploré, les contours clairs le terrain exploré et les raccords violets la géométrie manquante. Les repères d’entrée et de sortie apparaissent lorsque les données disponibles les identifient. Dépliez cette ligne pour changer la touche, la couleur et l’opacité. Les réglages sont enregistrés automatiquement.

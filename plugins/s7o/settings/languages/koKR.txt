@@ -4902,3 +4902,26 @@ macro.help.resource.Essence=정수
 macro.help.resource.Mana=마나
 macro.help.resource.ArcanePower=비전력
 macro.help.resource.Life=생명력
+
+# Minimap HUD controls and extended hover help
+minimap.title=미니맵
+minimap.description=확장 지도와 탐험 상태 색상.
+minimap.hotkey_title=지도 단축키
+minimap.hotkey_description=클릭 후 키를 누르세요. Esc로 취소합니다.
+minimap.color_title=미탐험 색상
+minimap.opacity_title=확장 지도 불투명도
+minimap.opacity_description=값이 낮을수록 더 투명해집니다.
+minimap.unavailable=이 설정을 사용하려면 최신 Minimap 플러그인을 설치하세요.
+minimap.key_prompt=지도 단축키를 누르세요. Esc로 취소합니다.
+minimap.key_cancelled=지도 단축키 지정이 취소되었습니다.
+minimap.key_set=지도 단축키를 {0}(으)로 설정했습니다.
+help.visual.minimap.title=미니맵
+help.visual.minimap.description=단축키로 이동 가능한 확장 지도를 표시하거나 숨깁니다. 기본값은 숫자 1 바로 왼쪽의 물리 키입니다. 확장 지도를 켠 상태에서 방향키로 위치를 옮기고 + 또는 -로 확대와 축소를 조절합니다. 선택한 색상은 미탐험 지형, 밝은 윤곽선은 탐험한 지형, 보라색 경계는 아직 없는 지형 정보를 나타냅니다. 입구와 출구는 사용 가능한 지도 정보로 확인되면 표시됩니다. 이 행을 펼쳐 단축키, 색상, 불투명도를 바꿀 수 있습니다. 설정은 자동 저장됩니다.
+help.visual.minimap_hotkey.title=지도 단축키
+help.visual.minimap_hotkey.description=단축키 버튼을 클릭한 다음 새 키를 누르세요. Esc로 취소합니다. 기본값인 숫자 1 왼쪽의 물리 키에는 키보드에 따라 |, ~ 또는 억음 부호가 표시되어 있을 수 있습니다.
+help.visual.minimap_color.title=미탐험 색상
+help.visual.minimap_color.description=두 지도의 미탐험 지역 윤곽선과 채움 색상을 바꿉니다. 마지막 색상은 원래의 청록색으로 복원합니다. 탐험한 지역의 윤곽선과 보라색 경계는 각자의 색상을 유지합니다.
+help.visual.minimap_opacity.title=확장 지도 불투명도
+help.visual.minimap_opacity.description=표시물을 포함한 확장 지도 전체의 불투명도를 5% 단위로 조절합니다. 값이 낮을수록 더 투명해집니다.
+help.plugin.minimap.title=미니맵
+help.plugin.minimap.description=단축키로 이동 가능한 확장 지도를 표시하거나 숨깁니다. 기본값은 숫자 1 바로 왼쪽의 물리 키입니다. 확장 지도를 켠 상태에서 방향키로 위치를 옮기고 + 또는 -로 확대와 축소를 조절합니다. 선택한 색상은 미탐험 지형, 밝은 윤곽선은 탐험한 지형, 보라색 경계는 아직 없는 지형 정보를 나타냅니다. 입구와 출구는 사용 가능한 지도 정보로 확인되면 표시됩니다. 이 행을 펼쳐 단축키, 색상, 불투명도를 바꿀 수 있습니다. 설정은 자동 저장됩니다.

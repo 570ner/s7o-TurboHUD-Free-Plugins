@@ -4902,3 +4902,26 @@ macro.help.resource.Essence=魂能
 macro.help.resource.Mana=法力
 macro.help.resource.ArcanePower=秘能
 macro.help.resource.Life=生命值
+
+# Minimap HUD controls and extended hover help
+minimap.title=小地圖
+minimap.description=擴展地圖與探索狀態色彩。
+minimap.hotkey_title=地圖快捷鍵
+minimap.hotkey_description=點擊後按新鍵。Esc 取消。
+minimap.color_title=未探索色彩
+minimap.opacity_title=擴展地圖不透明度
+minimap.opacity_description=數值越低越透明。
+minimap.unavailable=請安裝更新後的 Minimap 外掛以使用這些設定。
+minimap.key_prompt=請按地圖快捷鍵。Esc 取消。
+minimap.key_cancelled=已取消地圖快捷鍵設定。
+minimap.key_set=地圖快捷鍵已設為 {0}。
+help.visual.minimap.title=小地圖
+help.visual.minimap.description=使用快捷鍵顯示或隱藏可移動的擴展地圖。預設使用數字 1 左側的實體按鍵。擴展地圖開啟時，方向鍵移動地圖，+ 和 - 調整縮放。所選色彩表示未探索地形，淺色輪廓表示已探索地形，紫色邊界表示缺少的地形資料。可用地圖資料辨識出入口後會顯示對應提示。展開此列可修改快捷鍵、色彩與不透明度。設定會自動儲存。
+help.visual.minimap_hotkey.title=地圖快捷鍵
+help.visual.minimap_hotkey.description=點擊快捷鍵按鈕，然後按下新鍵。Esc 取消。預設的數字 1 左側實體按鍵可能標有 |、~ 或反引號，依鍵盤配置而定。
+help.visual.minimap_color.title=未探索色彩
+help.visual.minimap_color.description=修改兩張地圖中未探索區域的輪廓及填滿色彩。最後一個色塊可恢復原始青色。已探索區域的輪廓與紫色邊界保留各自的色彩。
+help.visual.minimap_opacity.title=擴展地圖不透明度
+help.visual.minimap_opacity.description=以 5% 為單位調整整個擴展地圖圖層的不透明度，包括其標記。數值越低越透明。
+help.plugin.minimap.title=小地圖
+help.plugin.minimap.description=使用快捷鍵顯示或隱藏可移動的擴展地圖。預設使用數字 1 左側的實體按鍵。擴展地圖開啟時，方向鍵移動地圖，+ 和 - 調整縮放。所選色彩表示未探索地形，淺色輪廓表示已探索地形，紫色邊界表示缺少的地形資料。可用地圖資料辨識出入口後會顯示對應提示。展開此列可修改快捷鍵、色彩與不透明度。設定會自動儲存。
