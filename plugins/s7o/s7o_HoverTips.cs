@@ -228,6 +228,11 @@ namespace Turbo.Plugins.s7o
             { "visual.hudlanguage", new HelpText("HUD Language","Choose the language used by supported HUD text. Restart HUD after selecting it.") },
             { "visual.mapviewer", new HelpText("Map Viewer","Show the floor grid and obstacle outlines. Navigation helpers can still use the map when this display is hidden.") },
             { "visual.mapviewer_debug", new HelpText("Debug Logging","Save map troubleshooting information to a log. Leave this off unless you are investigating a problem.") },
+            { "visual.minimap", new HelpText("Minimap","Toggle a movable expanded map with its hotkey. The default is the physical key left of 1. While expanded, arrow keys move it and + or - changes its zoom. The chosen color marks unexplored terrain; light outlines mark explored terrain and purple seams mark missing geometry. Entrance and exit hints appear when identified by available map data. Expand this row to change its key, color and opacity. Settings save automatically.") },
+            { "visual.minimap_hotkey", new HelpText("Map hotkey","Click the key button, then press a replacement key. Escape cancels. The default physical key left of 1 may be labelled |, ~ or a backtick, depending on the keyboard.") },
+            { "visual.minimap_color", new HelpText("Unexplored color","Changes unexplored outlines and fill on both maps. The final swatch restores the original cyan. Explored outlines and purple seams keep their separate colors.") },
+            { "visual.minimap_opacity", new HelpText("Centered map opacity","Adjusts the whole expanded map layer, including its markers, in 5% steps. Lower values are more transparent.") },
+            { "plugin.minimap", new HelpText("Minimap","Toggle a movable expanded map with its hotkey. The default is the physical key left of 1. While expanded, arrow keys move it and + or - changes its zoom. The chosen color marks unexplored terrain; light outlines mark explored terrain and purple seams mark missing geometry. Entrance and exit hints appear when identified by available map data. Expand this row to change its key, color and opacity. Settings save automatically.") },
             { "visual.xptracker", new HelpText("XP Tracker","Show experience rates while your inventory is open. Each counter has its own reset button.") },
             { "visual.xptracker_persist", new HelpText("Persist Tracker","Keep the experience counters after restarting HUD instead of beginning a fresh tracking session.") },
             { "visual.playerbuffs", new HelpText("Player Buffs","Place selected buff icons and recovery timers near your hero. Expand to choose categories and adjust their appearance.") },
@@ -375,6 +380,7 @@ namespace Turbo.Plugins.s7o
         };
         private static readonly Dictionary<string,string> PluginKeys=new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase)
         {
+            {"s7o_Minimap","minimap"},
             { "s7o_armorybugfix","armorybugfix" },
             { "s7o_autogemupgradenavigator","autogem" },
             { "s7o_autoloot","autoloot" },
@@ -531,6 +537,9 @@ namespace Turbo.Plugins.s7o
             }
             if(a.StartsWith("visual:"))
             {
+                if(a.StartsWith("visual:minimap:hotkey"))return "visual.minimap_hotkey";
+                if(a.StartsWith("visual:minimap:color:"))return "visual.minimap_color";
+                if(a.StartsWith("visual:minimap:opacity:"))return "visual.minimap_opacity";
                 if(a.StartsWith("visual:tipstoggle:"))return ParentKey(a);
                 if(a.StartsWith("visual:toggle:"))return ParentKey("visual:"+a.Substring(14));
                 if(a.StartsWith("visual:mapviewer:"))return a.EndsWith(":debug")?"visual.mapviewer_debug":a.EndsWith(":grid")?"visual.mapviewer":Expand(label,out args);
