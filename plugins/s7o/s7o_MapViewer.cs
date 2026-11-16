@@ -1027,6 +1027,7 @@ private bool HasNativeBox(Obstacle o)
         private object Point(float x,float y,float z)
         {
             foreach(var b in _nativeBoxes) {
+                if(IsMovementPassableField(b.Definition.Sno))continue;
                 Interval span;if(!BoxInterval(b,x,y,z,x,y,z,0,out span))continue;
                 var blocked=Error("NativeCollisionBoxCandidate");blocked["state"]="BlockedCandidate";blocked["obstacleCandidate"]=BoxValue(b);return blocked;
             }
@@ -1377,7 +1378,7 @@ private bool HasNativeBox(Obstacle o)
         }
         private bool FootprintAt(float x,float y,float z,out Obstacle found)
         {
-            foreach(var o in _footprintCandidates)if(!HasNativeBox(o)&&o.Radius>0&&o.FloorZKnown&&Math.Abs(o.FloorZ-z)<=2&&DistanceSquared(x,y,o.X,o.Y)<o.Radius*o.Radius){found=o;return true;}
+            foreach(var o in _footprintCandidates)if(!IsMovementPassableField(o.Sno)&&!HasNativeBox(o)&&o.Radius>0&&o.FloorZKnown&&Math.Abs(o.FloorZ-z)<=2&&DistanceSquared(x,y,o.X,o.Y)<o.Radius*o.Radius){found=o;return true;}
             found=new Obstacle();return false;
         }
         private void DrawTerrainEdge(bool ground,float x,float y,float z,float tx,float ty,float tz)
@@ -1497,10 +1498,14 @@ private long RouteFingerprint()
             _fingerprintVersion=_version;_fingerprintEpoch=_epoch;_fingerprintTerrain=terrain;
             _fingerprintValue=hash;_fingerprintValid=true;return hash;
         }
+        // Zoltun Kulle's sand screen stops projectiles, not walking or Dash.
+        // Retain its native boxes/segment candidates; exclude it only from movement queries.
+        private static bool IsMovementPassableField(uint sno)
+        { return sno==(uint)ActorSnoEnum._a2dun_zolt_sand_wall; } // 3048
         private static bool RoutePropBlocks(Obstacle o)
         {
             // Portals and decorative selection bounds are not automatically solid.
-            return o.FloorZKnown&&o.Radius>0&&o.Kind!="Portal";
+            return !IsMovementPassableField(o.Sno)&&o.FloorZKnown&&o.Radius>0&&o.Kind!="Portal";
         }
         private RouteRequest CaptureRoute(float x,float y,float z,float tx,float ty,float tz,float radius,long fingerprint,bool tracked=true,uint approachAcd=0,float approachReach=0)
         {
@@ -1523,7 +1528,7 @@ private long RouteFingerprint()
             foreach(var o in _obstacles)if(!HasNativeBox(o)&&RoutePropBlocks(o))props.Add(o);
             return new RouteRequest {Serial=tracked?Interlocked.Increment(ref _routeSerial):0,Epoch=_epoch,Fingerprint=fingerprint,
                 X=x,Y=y,Z=z,TX=tx,TY=ty,TZ=tz,Radius=radius,ApproachAcd=approachAcd,ApproachReach=approachReach,
-                Scenes=scenes.ToArray(),Boxes=_nativeBoxes.ToArray(),Props=props.ToArray()};
+                Scenes=scenes.ToArray(),Boxes=_nativeBoxes.FindAll(b=>!IsMovementPassableField(b.Definition.Sno)).ToArray(),Props=props.ToArray()};
         }
         // Consumers pass a known actor identity. No generic switch is permission to click it.
         // Search reaches a walkable interaction point on the player's connected side;
