@@ -15,13 +15,16 @@ namespace Turbo.Plugins.s7o
     public class s7o_WaveOfLightCyclone : BasePlugin, IAfterCollectHandler, IS7oAutoLootInputHandoff, IS7oAutoLootPickupGuard
     {
         public Keys AssistKey = Keys.Space;
-        public int CycloneHoldMs = 800; // Timed continuous hold; Epiphany preempts when available.
+        public int CycloneHoldMs = 800; // Fallback time for two self-casts; doubled without Epiphany. Native evidence can finish early.
         public bool DashToCircles = true;
         public bool SpreadUnpullableBells = true;
         public bool RelayDistantTrash = true;
         public bool HoldPositionDuringHoly = true;
         public Keys ForceMoveKey = Keys.None; // Set to your in-game Force Move binding. None uses verified empty ground.
         public float CircleSearchYards = 70f;
+        // Preferred Dash landing clearance in yards (0..3). Narrow passages may
+        // use 0.35 yards only after MapViewer verifies floor and collision safety.
+        public float MapWallClearance = 2f;
         public float DefensiveDashHealth = .75f;
         public bool MaintainDashBuff = true;
         public bool MaintainEpiphany = true;
@@ -38,7 +41,7 @@ namespace Turbo.Plugins.s7o
         public Keys StandstillKey = Keys.ShiftKey; // Only pressed for a skill assigned to left-click.
 
         private const string InputOwner = "WaveOfLightCyclone";
-        private const int BellThreshold = 4, DashPulseMs = 45, MovementPulseMs = 55, CircleScanMs = 35;
+        private const int BellThreshold = 5, DashPulseMs = 45, MovementPulseMs = 55, CircleScanMs = 35;
         private const int BurstYieldMs = 140;
         private const int DashTapMs = 32, DashObservationMs = 350, DashChainGuardMs = 260;
         private const float CircleRadius = 10f, DashRange = 50f, EliteNear = 12f;
@@ -134,8 +137,7 @@ namespace Turbo.Plugins.s7o
         private IntPtr _snapWindow;
         private int _lastEscape = int.MinValue, _lastDashBuffTry = int.MinValue, _lastDashPress = int.MinValue;
         private bool _panicRecovering;
-        private int _healthSampleAt, _panicUntil;
-        private float _healthBaseline;
+        private int _panicUntil;
         private int _lastPotionTry = int.MinValue;
         private int _lastSerenityTry = int.MinValue;
 #if WOL_DIAGNOSTIC
@@ -154,6 +156,12 @@ namespace Turbo.Plugins.s7o
         private uint _lastObstructedElite, _obstructionRouteTarget;
         private IWorldCoordinate _obstructionRouteGoal, _obstructionRouteFocus;
         private int _obstructionRouteAt = int.MinValue;
+        private readonly List<FailedApproach> _failedApproaches = new List<FailedApproach>(4);
+        private struct FailedApproach
+        {
+            internal IWorldCoordinate Origin, Landing;
+            internal int At;
+        }
         private int _lineObstaclesTick = int.MinValue;
         private readonly List<IActor> _lineObstacles = new List<IActor>(16);
 
@@ -188,7 +196,7 @@ namespace Turbo.Plugins.s7o
             var retryRelease = arbiter?.GetMethod("RetryPending", new[] { typeof(int) });
             if (retryRelease != null)
                 _retryInputRelease = (Action<int>)Delegate.CreateDelegate(typeof(Action<int>), retryRelease);
-            Trace("REV45 loaded: bounded bell recovery and AutoLoot input handoff; shared claim=" + (_claimInput != null));
+            Trace("REV49 loaded: fresh-bell range independence, four-contribution bursts and native affix/boss avoidance; shared claim=" + (_claimInput != null));
             _blockingUi = new[] {
                 "Root.NormalLayer.chatentry_dialog_backgroundScreen.chatentry_content.chat_editline",
                 "Root.NormalLayer.SkillPane_main.LayoutRoot.SkillsList",
@@ -250,6 +258,7 @@ namespace Turbo.Plugins.s7o
                 ReleaseInput(Volatile.Read(ref _inputSerial));
             var game = Hud.Game;
             var me = game.Me;
+            ReportDeath(me);
             int tick = game.CurrentGameTick;
             Volatile.Write(ref _collectionTick, tick);
             bool ghostBuff = me?.Powers?.BuffIsActive(Hud.Sno.SnoPowers.Generic_ActorGhostedBuff.Sno) == true;
@@ -296,6 +305,7 @@ namespace Turbo.Plugins.s7o
             var wave = me.Powers.GetUsedSkill(power.Monk_WaveOfLight);
             var cyclone = me.Powers.GetUsedSkill(power.Monk_CycloneStrike);
             SampleCycloneEffects(me);
+            SampleBellBurstWork(me);
             var waveKey = wave == null ? Keys.None : Binding(wave.Key);
             var cycloneKey = cyclone == null ? Keys.None : Binding(cyclone.Key);
             bool assistKeyHeld = AssistKey != Keys.None && AssistKey != waveKey && Held(AssistKey);
@@ -320,6 +330,7 @@ namespace Turbo.Plugins.s7o
                 _hero = me.HeroId;
                 _packTick = int.MinValue;
                 _lineSamples.Clear();
+                _failedApproaches.Clear();
                 _lineObstacles.Clear();
                 _lineObstaclesTick = int.MinValue;
                 _lastObstructedElite = _obstructionRouteTarget = 0;
@@ -406,11 +417,11 @@ namespace Turbo.Plugins.s7o
             int pullRange = cyclone.Rune == 1 ? 34 : 24;
             CollectBells(game, me, pullRange);
             bool recoveringBells = assist && BellNeedsRecovery(point, ClosestElite(point));
-            bool bellCountReady = _bells.Count >= BellThreshold && cycloneKey != Keys.None
+            bool bellCountReady = FreshBellBatchReady() && cycloneKey != Keys.None
                 && cycloneKey != waveKey && cycloneKey != AssistKey;
             bool recoveryBurst = recoveringBells && !_recoveryDetonationSent
                 && cycloneKey != Keys.None && cycloneKey != waveKey && cycloneKey != AssistKey
-                && _bells.Count > 0 && CanCast(me, cyclone);
+                && FreshBellBatchReady() && CanCast(me, cyclone);
             if (assist && (bellCountReady || recoveryBurst) && !BurstYielding(now)) StopWave();
             float health = me.Defense != null && me.Defense.HealthMax > 0
                 ? me.Defense.HealthCur / me.Defense.HealthMax : 1f;
@@ -432,14 +443,17 @@ namespace Turbo.Plugins.s7o
             if (assist && TryProactiveSerenity(game, me, point, pullRange, waveKey, cycloneKey, dashKey, now)) return;
             bool holy = me.Powers.BuffIsActive(Hud.Sno.SnoPowers.ConventionOfElements.Sno, 4);
             string danger = assist ? DangerAt(point, landing: false) : null;
-            bool panic = assist && AvoidDanger && Age(_panicUntil, now) > 0 && health <= .40f;
-            if (_panicRecovering && health >= .60f && danger == null) _panicRecovering = false;
+            bool panic = assist && AvoidDanger && Age(_panicUntil, now) > 0 && health <= .60f;
+            if (_panicRecovering && PanicRecoveryCanEnd(_shielded,danger!=null,panic,
+                _damageWindow.LastDropAt==int.MinValue?int.MaxValue:Age(now,_damageWindow.LastDropAt)))
+                _panicRecovering = false;
+            if(assist)ReportDanger(me,danger,panic,now);
             if (_dashFlight != null)
             {
                 var flight = _dashFlight;
                 bool reached = flight.CircleId != 0
                     ? point.XYDistanceTo(flight.CircleCenter) <= CircleRadius - .5f
-                    : point.XYDistanceTo(flight.Landing) <= (flight.Escape || flight.RelayOut || flight.RelayReturn ? 4f : 8f);
+                    : point.XYDistanceTo(flight.Landing) <= (flight.BossCore ? 1.5f : flight.Escape || flight.RelayOut || flight.RelayReturn ? 4f : 8f);
                 // A primary-circle landing is complete even if the optional overlap was missed.
                 bool overlapReached = flight.OverlapCenter == null
                     || point.XYDistanceTo(flight.OverlapCenter) <= CircleRadius - .5f;
@@ -465,6 +479,11 @@ namespace Turbo.Plugins.s7o
                         + " landingGap=" + point.XYDistanceTo(flight.Landing).ToString("F1")
                         + " moved=" + moved.ToString("F1") + " accepted=" + flight.DashAccepted);
                     ReportDashSignals(flight, dash, me);
+                    if(flight.Escape && (!reached || DangerAt(point,false)!=null))RememberFailedEscape(flight,now);
+                    if (!reached && moved <= 1.5f && flight.EliteId != 0
+                        && flight.CircleId == 0 && flight.TransitCircle == 0 && !flight.Escape
+                        && !flight.RelayOut && !flight.RelayReturn && !flight.StageOut && !flight.StageReturn)
+                        RememberFailedApproach(flight.From, flight.Landing, now);
                     if (reached && !overlapReached)
                         Trace("Dash primary circle reached; overlap not reached (no extra Dash)");
                     if (reached && flight.CircleId != 0 && _circleRecoveryId == flight.CircleId)
@@ -539,6 +558,9 @@ namespace Turbo.Plugins.s7o
                 var landing = PickEscape(game, me, pullRange, panic && danger == null, health <= .40f, dashReady, out var safeCircle);
                 if (landing != null)
                 {
+                    // Mild close fields can be left on foot; urgent danger retains the last Dash.
+                    bool walkFirst=PreferEscapeWalk(point.XYDistanceTo(landing),danger,panic,_damageWindow.Loss);
+                    if(walkFirst && QueueEscapeWalk(game,point,landing,now))return;
                     // Keep an active burst unless an escape movement is actually queued.
                     if (dashReady && QueueDashAim(game, landing, danger ?? "low-health rapid loss", true, now))
                     {
@@ -549,18 +571,7 @@ namespace Turbo.Plugins.s7o
                         }
                         return;
                     }
-                    if (_walkOrigin == null && (_lastWalk == int.MinValue || Age(now, _lastWalk) >= 225))
-                    {
-                        var waypoint = MapWaypoint("path", point, landing, now);
-                        if (waypoint != null && DangerAt(waypoint, landing: true) == null
-                            && QueueDashAim(game, waypoint, "avoidance walk", true, now))
-                        {
-                            _dashAim.Walk = true;
-                            _dashAim.Goal = landing;
-                            _lastEscape = now;
-                            return;
-                        }
-                    }
+                    if(QueueEscapeWalk(game,point,landing,now))return;
                 }
             }
             if (assist && HealInPanic && health > 0 && health <= .40f && (escapeDue || _panicRecovering)
@@ -569,12 +580,20 @@ namespace Turbo.Plugins.s7o
             // Let defensive movement run above, but do not start an offensive action during Epiphany's key pulse.
             if (Volatile.Read(ref _epiphanyKey) != 0) return;
             pressed = Volatile.Read(ref _pressedKey);
+            if (assist && !escapeDue && !panic && (pressed == 0 || pressed == (int)cycloneKey)
+                && TryBreathCore(game, point, dashReady, now)) return;
             if (_burstStarted != int.MinValue)
             {
                 if (pressed == (int)cycloneKey)
                 {
-                    // The release task owns the timed hold. This is only a bounded failsafe.
-                    if (Age(now, _burstStarted) < _burstHoldMs + 250) return;
+                    int elapsed = Age(now, _burstStarted);
+                    bool gone = _bells.Count == 0 && elapsed >= 180;
+                    bool fallback = _bellBurstWork.TimedFallback(elapsed, BellBurstBaseMs());
+                    if (!_bellBurstWork.Complete && !gone && !fallback && elapsed < _burstHoldMs + 250) return;
+                    Trace("BELL_BURST finish ownCastEvidence=" + _bellBurstWork.Own
+                        + " effectiveInferred=" + _bellBurstWork.Effective + " nearby=" + _bells.Count
+                        + " reason=" + (_bellBurstWork.Complete ? "cast-quota" : gone ? "no-reachable-bells"
+                            : fallback ? "bounded-timed-fallback" : "bounded-ceiling"));
                     ReleaseInput(Volatile.Read(ref _inputSerial));
                     pressed = Volatile.Read(ref _pressedKey);
                 }
@@ -583,7 +602,12 @@ namespace Turbo.Plugins.s7o
                 Trace("bell burst ended after " + Age(now, _burstStarted) + "ms remaining=" + _bells.Count
                     + " heldMs=" + _burstHoldMs + " reason=continuous hold released");
                 ReportCycloneEffects();
-                if (_bells.Count >= BellThreshold) _burstYieldUntil = unchecked(now + BurstYieldMs);
+                Trace("BELL_BURST result ownCastEvidence=" + _bellBurstWork.Own
+                    + " effectiveInferred=" + _bellBurstWork.Effective + " quota=" + _bellBurstWork.Complete
+                    + " elapsedMs=" + Age(now, _burstStarted) + " nearby=" + _bells.Count);
+                _burstYieldUntil = int.MinValue;
+                BeginFreshBellBatch(game,"bounded-burst-finished");
+                bellCountReady=recoveryBurst=false; // Old survivors cannot start another offensive burst.
                 _burstStarted = int.MinValue;
                 _burstKey = 0;
                 _burstHoldMs = 0;
@@ -614,6 +638,7 @@ namespace Turbo.Plugins.s7o
                             || !RelayStageClear(aim.Landing, pullRange)
                             || RelayTrash(aim.Landing, _relayHome.Landing, pullRange) < 2
                         : aim.RelayReturn ? aim.CircleId != 0 && !IsLiveCircle(game, aim.CircleId)
+                        : aim.BossCore ? !BreathCoreStillUseful(aim)
                         : aim.Transit ? !TransitStillUseful(game, point, aim)
                         : aim.StageOut ? !StageOutboundStillUseful(game, aim)
                         : aim.StageReturn ? !IsLiveCircle(game, aim.CircleId)
@@ -734,7 +759,7 @@ namespace Turbo.Plugins.s7o
                 if (TryCircleArrivalPull(game, me, point, cyclone, cycloneKey, pullRange, now)) return;
             }
 
-            if (assist && !recoveringBells && CanCheckCircle(!escapeDue, escapeDue, now)
+            if (assist && !HoldingBreathCore(point) && !recoveringBells && CanCheckCircle(!escapeDue, escapeDue, now)
                 && TryAimCircle(game, point, pullRange, now, cyclone, cycloneKey, dashReady,
                     releaseBurst: bellCountReady)) return;
 
@@ -747,7 +772,7 @@ namespace Turbo.Plugins.s7o
             if (assist && _stagePhase == CircleStage.None && !escapeDue && !_panicRecovering
                 && _dashFlight == null && TryResolveObstructedFire(game, point, pullRange, dashReady, now)) return;
 
-            if (assist && _stagePhase == CircleStage.None && !escapeDue && dashReady && dash.Charges >= 2
+            if (assist && !HoldingBreathCore(point) && _stagePhase == CircleStage.None && !escapeDue && dashReady && dash.Charges >= 2
                 && TryStartCircleStage(game, point, pullRange, now)) return;
 
             if (assist && !escapeDue && !_panicRecovering && _stagePhase == CircleStage.None
@@ -777,7 +802,7 @@ namespace Turbo.Plugins.s7o
                 if (QueueDashAim(game, point, "defensive Dash buff upkeep", false, now, upkeep: true)) return;
             }
 
-            if (assist && RelayDistantTrash && !_usefulCircleSeen && !(holy && HoldPositionDuringHoly) && !batchReady && !escapeDue && !_panicRecovering
+            if (assist && !HoldingBreathCore(point) && RelayDistantTrash && !_usefulCircleSeen && !(holy && HoldPositionDuringHoly) && !batchReady && !escapeDue && !_panicRecovering
                 && _stagePhase == CircleStage.None && _dashFlight == null && dashReady && dash.Charges >= 2
                 && (_lastRelay == int.MinValue || Age(now, _lastRelay) >= 6000)
                 && TryStartRelay(game, me, cyclone, cycloneKey, pullRange, now)) return;
@@ -839,20 +864,68 @@ namespace Turbo.Plugins.s7o
 #endif
         }
 
+        // Native buff/resource edges are cast evidence, not per-bell damage events.
+        // Clone contribution is inferred only when Epiphany covers both observations.
+        private sealed class BellBurstWork
+        {
+            internal int Own, Effective, LastCast = int.MinValue;
+            private int _buffAt = int.MinValue, _costAt = int.MinValue;
+            private double _buff, _spirit;
+            private bool _buffMimic, _costMimic;
+            internal bool HadNoEpiphany;
+            internal bool Complete { get { return Own >= 2 && Effective >= 4; } }
+            internal void Begin(double buff, double spirit, bool epiphany)
+            {
+                Own = Effective = 0; LastCast = _buffAt = _costAt = int.MinValue;
+                _buff = buff; _spirit = spirit; HadNoEpiphany = !epiphany;
+            }
+            internal bool Observe(int now, double buff, double spirit, float cost, bool epiphany)
+            {
+                HadNoEpiphany |= !epiphany;
+                if (buff > _buff + .045) { _buffAt = now; _buffMimic = epiphany; }
+                if (cost > 0 && _spirit - spirit >= Math.Max(5, cost * .4))
+                { _costAt = now; _costMimic = epiphany; }
+                _buff = buff; _spirit = spirit;
+                if (_buffAt == int.MinValue || _costAt == int.MinValue
+                    || Math.Abs(unchecked(_buffAt - _costAt)) > 100
+                    || (LastCast != int.MinValue && Age(now, LastCast) < 130)) return false;
+                Own++; Effective += _buffMimic && _costMimic ? 2 : 1;
+                LastCast = now; _buffAt = _costAt = int.MinValue;
+                return true;
+            }
+            internal bool TimedFallback(int elapsed, int baseMs)
+            { return elapsed >= baseMs * (HadNoEpiphany ? 2 : 1); }
+        }
+        private readonly BellBurstWork _bellBurstWork = new BellBurstWork();
+        private int BellBurstBaseMs() { return Math.Max(550, Math.Min(1100, CycloneHoldMs)); }
+        private void SampleBellBurstWork(IPlayer me)
+        {
+            if (_burstStarted == int.MinValue || Volatile.Read(ref _pressedKey) != _burstKey) return;
+            var skill = me.Powers.GetUsedSkill(Hud.Sno.SnoPowers.Monk_CycloneStrike);
+            if (_bellBurstWork.Observe(Environment.TickCount,
+                ConventionLeft(me.Powers.GetBuff(Hud.Sno.SnoPowers.Monk_CycloneStrike.Sno), 0, 6),
+                me.Stats.ResourceCurPri, skill?.GetResourceRequirement() ?? 0,
+                me.Powers.BuffIsActive(Hud.Sno.SnoPowers.Monk_Epiphany.Sno)))
+                Trace("BELL_BURST castEvidence=" + _bellBurstWork.Own
+                    + " effectiveInferred=" + _bellBurstWork.Effective + " target=4 (mimic/hits not directly confirmed)");
+        }
+
         private bool BurstYielding(int now) => _burstYieldUntil != int.MinValue
             && Age(_burstYieldUntil, now) > 0;
 
         private bool StartBellBurst(IGameController game, Keys key, int now, bool holy, bool assist)
         {
-            if (BurstYielding(now)) return false;
+            if (!FreshBellBatchReady() || _bells.Count == 0 || BurstYielding(now)) return false;
             bool epiphany = game.Me.Powers.BuffIsActive(Hud.Sno.SnoPowers.Monk_Epiphany.Sno);
-            int holdMs = Math.Max(550, Math.Min(1100, CycloneHoldMs));
+            int holdMs = BellBurstBaseMs() * 2 + 300; // Bounded ceiling; live evidence/timed fallback releases earlier.
             if (!(assist ? CastCycloneAtFeet(game, key, holdMs, now, "bell burst")
                 : BeginCycloneInput(key, holdMs, null))) return false;
             _burstStarted = now;
             _burstKey = (int)key;
             _burstHoldMs = holdMs;
             BeginCycloneEffects(game.Me);
+            _bellBurstWork.Begin(ConventionLeft(game.Me.Powers.GetBuff(Hud.Sno.SnoPowers.Monk_CycloneStrike.Sno), 0, 6),
+                game.Me.Stats.ResourceCurPri, epiphany);
             Trace("Cyclone continuous burst started, bells=" + _bells.Count + " holdMs=" + holdMs
                 + " epiphany=" + epiphany + " phase=" + (holy ? "Holy" : "normal")
                 + " mode=" + (assist ? "space" : "manual"));
@@ -974,8 +1047,8 @@ namespace Turbo.Plugins.s7o
             else if (_serenityPending || Volatile.Read(ref _pressedKey) != 0) blocked = "skill pulse owns input";
             else if (InputBusy()) blocked = "another plugin owns input";
             else if (me.FloorCoordinate == null) blocked = "no player coordinate";
-            else if (canCycleBells && _bells.Count >= BellThreshold && !BurstYielding(Environment.TickCount))
-                blocked = "four bells ready, Cyclone next";
+            else if (canCycleBells && FreshBellBatchReady() && !BurstYielding(Environment.TickCount))
+                blocked = "five fresh bells ready, Cyclone next";
             else if (_releasedCycloneAim == null) blocked = AimAtSelf(game, me, wave, waveKey);
 
             if (blocked != null)
@@ -994,7 +1067,9 @@ namespace Turbo.Plugins.s7o
 
         private bool BeginCycloneInput(Keys key, int holdMs, Aim aim)
         {
-            return BeginInput(key, holdMs, aim);
+            bool sent=BeginInput(key, holdMs, aim);
+            if(sent)_bellCycleDetonating=true; // Reset deployment only after an actual Cyclone submission.
+            return sent;
         }
 
         private bool CastCycloneAtFeet(IGameController game, Keys key, int holdMs, int now, string reason)
@@ -1119,12 +1194,15 @@ namespace Turbo.Plugins.s7o
                 if (hazard.Imminent && (hazard.Reason == "Molten" || hazard.Reason == "Grotesque")
                     && InsideHazard(point, hazard, 0f))
                 { threat = hazard.Reason; break; }
-            if (threat == null) return false;
+            bool occupied=OccupiesCombatCircle(game,point,pullRange);
+            bool rapid=PanicDamageDue(_hazardHealth,_damageWindow.Loss);
+            if(threat==null && (_hazardHealth<=.60f || rapid))threat=DangerAt(point,false);
+            if(!SerenityThreatUseful(threat,_hazardHealth,rapid,occupied))return false;
+            if(threat==null)threat="low-health rapid loss";
 
             var power = Hud.Sno.SnoPowers.Monk_Serenity;
             var skill = me.Powers.GetUsedSkill(power);
-            if (skill == null || skill.IsOnCooldown || skill.BuffIsActive
-                || !OccupiesCombatCircle(game, point, pullRange)) return false;
+            if (skill == null || skill.IsOnCooldown || skill.BuffIsActive) return false;
             var key = Binding(skill.Key);
             if (key == Keys.None || key == AssistKey || key == waveKey || key == cycloneKey
                 || key == dashKey || Held(key)) return false;
@@ -1143,7 +1221,7 @@ namespace Turbo.Plugins.s7o
             }
             _lastSerenityTry = now;
             _serenityPending = true;
-            ReportSerenity(me, "pressed threat=" + threat + " circleOccupied=true"
+            ReportSerenity(me, "pressed threat=" + threat + " circleOccupied="+occupied
                 + " spirit=" + me.Stats.ResourceCurPri.ToString("F0"));
             return true;
         }
@@ -1307,7 +1385,8 @@ namespace Turbo.Plugins.s7o
                 || !ProjectileLineBlocked(origin, focus.Point, now, out var reason)
                 || ((NeedsDirectBellContact(focus) || HoldRangedCircle(game, origin, pullRange))
                     && HasOpenBellLane(origin, focus, pullRange, now))) return false;
-            StopWave();
+            // A navigation request owns combat only when it actually queues movement.
+            // Failed/pending routes leave the normal self-targeted bell cycle available.
             if (focus.Id != _lastObstructedElite || _lastObstructionLog == int.MinValue
                 || Age(now, _lastObstructionLog) >= 1200)
             {
@@ -1316,9 +1395,10 @@ namespace Turbo.Plugins.s7o
                 Trace("WOL line obstructed elite=" + focus.Id + " reason=" + reason
                     + " gap=" + origin.XYDistanceTo(focus.Point).ToString("F1"));
             }
-            if (_lastObstructionTry != int.MinValue && Age(now, _lastObstructionTry) < 300) return true;
+            if (InputBusy() || (_lastObstructionTry != int.MinValue
+                && Age(now, _lastObstructionTry) < 300)) return false;
             _lastObstructionTry = now;
-            // Reuse one route destination: changing it resets MapViewer's asynchronous path search.
+            // Keep the walking destination stable while checking alternate Dash landings.
             if (_obstructionRouteTarget != focus.Id || _obstructionRouteGoal == null
                 || Age(now, _obstructionRouteAt) >= 1600
                 || _obstructionRouteFocus.XYDistanceTo(focus.Point) > 5f)
@@ -1356,8 +1436,61 @@ namespace Turbo.Plugins.s7o
             }
             var plan = new Aim { Landing = _obstructionRouteGoal, Goal = _obstructionRouteGoal,
                 EliteId = focus.Id, PursuitId = focus.Id, Reason = "blocked WOL approach" };
-            TryTravel(game, origin, plan, dashReady, now);
-            return true;
+            return TryTravel(game, origin, plan, dashReady, now);
+        }
+
+        // Bounded endpoint search, like GenMonk: crossing static walls is permitted
+        // by MapViewer's Dash service; closed doors, hazards and bad floor remain vetoes.
+        private IWorldCoordinate ObstructionDashLanding(IWorldCoordinate origin, Body focus,
+            IWorldCoordinate goal, int pullRange, int now)
+        {
+            if (focus.Id == 0) return null;
+            for (int ring = 0; ring < 2; ring++)
+            {
+                IWorldCoordinate best = null;
+                double bestScore = double.MaxValue;
+                float radius = Math.Max(0f, focus.Radius) + (ring == 0 ? 4f : 8f);
+                for (int i = 0; i < 8; i++)
+                {
+                    double angle = i * Math.PI / 4;
+                    var candidate = focus.Point.Offset((float)Math.Cos(angle) * radius,
+                        (float)Math.Sin(angle) * radius, 0);
+                    if (!ValidDashLanding(origin, candidate, now)
+                        || FailedApproachLanding(origin, candidate, now)
+                        || LiveProjectileBarrier(origin, candidate, out _)) continue;
+                    var answer = MapDashHop(origin, candidate, now);
+                    if (!MapHopReaches(answer, candidate)) continue;
+                    var xyz = (float[])answer["waypoint"];
+                    var landing = Hud.Window.CreateWorldCoordinate(xyz[0], xyz[1], xyz[2]);
+                    if (!ValidDashLanding(origin, landing, now)
+                        || FailedApproachLanding(origin, landing, now)
+                        || LiveProjectileBarrier(origin, landing, out _)
+                        || (ProjectileLineBlocked(landing, focus.Point, now, out _)
+                            && !HasOpenBellLane(landing, focus, pullRange, now))) continue;
+                    double score = landing.XYDistanceTo(goal) + origin.XYDistanceTo(landing) * .05;
+                    if (score >= bestScore) continue;
+                    bestScore = score; best = landing;
+                }
+                if (best != null) return best;
+            }
+            return null;
+        }
+
+        private void RememberFailedApproach(IWorldCoordinate origin, IWorldCoordinate landing, int now)
+        {
+            if (_failedApproaches.Count == 4) _failedApproaches.RemoveAt(0);
+            _failedApproaches.Add(new FailedApproach { Origin = origin, Landing = landing, At = now });
+            Trace("approach landing made no progress; nearby alternatives remain eligible");
+        }
+
+        private bool FailedApproachLanding(IWorldCoordinate origin, IWorldCoordinate landing, int now)
+        {
+            foreach (var failure in _failedApproaches)
+                if (Age(now, failure.At) < 3000 && origin.XYDistanceTo(failure.Origin) < 4f
+                    && Math.Abs(origin.Z - failure.Origin.Z) < 4f
+                    && landing.XYDistanceTo(failure.Landing) < 3f
+                    && Math.Abs(landing.Z - failure.Landing.Z) < 4f) return true;
+            return false;
         }
 
         private static IWorldCoordinate BellSlotPoint(IWorldCoordinate origin, Body focus, int slot)
@@ -1488,7 +1621,10 @@ namespace Turbo.Plugins.s7o
             var focus = ClosestElite(feet);
             if (focus.Id != 0 && ProjectileLineBlocked(feet, target ?? focus.Point,
                 Environment.TickCount, out _) && target == null)
-                return "WOL line blocked by wall or closed door";
+                ReportBellFallback("blocked focus: self aim while navigation recovers", focus, feet,
+                    cyclone?.Rune == 1 ? 34 : 24);
+            // Do not aim bells through a known wall, but do not suppress local self-casts
+            // merely because the selected elite's navigation request has no waypoint.
             if (!TryProject(target ?? feet, out var aimed))
             {
                 if (target == null || !TryProject(feet, out aimed)) return "self projection failed";
@@ -2048,6 +2184,7 @@ namespace Turbo.Plugins.s7o
             bool canHop = PursuitCanHop(plan.PursuitId, now);
             float distance = origin.XYDistanceTo(plan.Landing);
             if (dashReady && (canHop || plan.CircleId != 0)
+                && !FailedApproachLanding(origin, plan.Landing, now)
                 && ValidDashLanding(origin, plan.Landing, now) && DashRouteClear(origin, plan.Landing, now))
             {
                 if (QueueCircleDash(game, plan, now))
@@ -2065,6 +2202,8 @@ namespace Turbo.Plugins.s7o
                     step = origin.Offset((plan.Landing.X - origin.X) * ratio, (plan.Landing.Y - origin.Y) * ratio, 0);
                 }
                 if (step != null && step.XYDistanceTo(plan.Landing) + 4 < distance
+                    && !FailedApproachLanding(origin, step, now)
+                    && !LiveProjectileBarrier(origin, step, out _)
                     && ValidDashLanding(origin, step, now) && QueueDashAim(game, step, plan.Reason + " transit", false, now))
                 {
                     CopyTransitGoal(_dashAim, plan);
@@ -2072,6 +2211,19 @@ namespace Turbo.Plugins.s7o
                 }
             }
 
+            if (dashReady && canHop && plan.Reason == "blocked WOL approach")
+            {
+                var focus = _pack.FirstOrDefault(body => body.Id == plan.EliteId);
+                var alternate = ObstructionDashLanding(origin, focus, plan.Landing,
+                    game.Me.Powers.GetUsedSkill(Hud.Sno.SnoPowers.Monk_CycloneStrike)?.Rune == 1 ? 34 : 24, now);
+                if (alternate != null && QueueDashAim(game, alternate, plan.Reason + " alternate", false, now))
+                {
+                    CopyTransitGoal(_dashAim, plan);
+                    Trace("obstruction alternate landing=" + alternate.X.ToString("F1")
+                        + "," + alternate.Y.ToString("F1") + " target=" + plan.EliteId);
+                    return true;
+                }
+            }
             if (_lastWalk != int.MinValue && Age(now, _lastWalk) < 225) return false;
             var waypoint = MapWaypoint("path", origin, plan.Landing, now);
             if (waypoint == null || DangerAt(waypoint, landing: true) != null
@@ -2118,6 +2270,7 @@ namespace Turbo.Plugins.s7o
                 return;
             }
             if (game.CurrentGameTick == aim.Tick || InputBusy()) return;
+            if (!WalkHazardsClear(origin, aim.Landing)) { CancelDashAim(); return; }
             var key = ForceMoveKey;
             var selected = game.SelectedActor;
             if (key == Keys.None)
@@ -2142,14 +2295,15 @@ namespace Turbo.Plugins.s7o
             Trace(aim.Reason + " waypoint dispatched");
         }
 
-        private IDictionary<string, object> MapMotion(string operation, IWorldCoordinate origin, IWorldCoordinate goal, int now)
+        private IDictionary<string, object> MapMotion(string operation, IWorldCoordinate origin, IWorldCoordinate goal, int now,
+            float clearance = .6f)
         {
             MapAllows(goal, now);
             if (_mapEpoch == null || _mapQuery == null) return null;
             try
             {
                 return _mapQuery(operation, new[] { _mapEpoch, origin.X, origin.Y, origin.Z,
-                    goal.X, goal.Y, goal.Z, .6f }) as IDictionary<string, object>;
+                    goal.X, goal.Y, goal.Z, clearance }) as IDictionary<string, object>;
             }
             catch { return null; }
         }
@@ -2233,21 +2387,45 @@ namespace Turbo.Plugins.s7o
             return false;
         }
 
+        private IDictionary<string, object> MapDashHop(IWorldCoordinate origin, IWorldCoordinate goal, int now)
+        {
+            float clearance = float.IsNaN(MapWallClearance) ? 2f : Math.Max(0f, Math.Min(3f, MapWallClearance));
+            var answer = MapMotion("dash", origin, goal, now, clearance);
+            if (clearance > .35f && answer != null && !answer.ContainsKey("waypoint")
+                && answer.TryGetValue("state", out var state) && Equals(state, "BlockedCandidate"))
+            {
+                answer = MapMotion("dash", origin, goal, now, .35f);
+                if (answer != null && answer.ContainsKey("waypoint"))
+                    ReportRouteWait("dash narrow verified landing", answer, now);
+            }
+            return answer;
+        }
+
+        private static bool MapHopReaches(IDictionary<string, object> answer, IWorldCoordinate goal)
+        {
+            return answer != null && answer.TryGetValue("ok", out var ok) && Equals(ok, true)
+                && (!answer.TryGetValue("requiresDoor", out var door) || !Equals(door, true))
+                && answer.TryGetValue("state", out var state) && Equals(state, "Ready")
+                && answer.TryGetValue("waypoint", out var value) && value is float[] xyz && xyz.Length >= 3
+                && goal.XYDistanceTo(xyz[0], xyz[1]) <= 1.5f && Math.Abs(goal.Z - xyz[2]) <= 2f;
+        }
+
         private bool DashRouteClear(IWorldCoordinate origin, IWorldCoordinate goal, int now)
         {
-            // Offensive Dash must not bypass an observed wall/door just because map routing is incomplete.
-            if (ProjectileLineBlocked(origin, goal, now, out _)) return false;
-            var answer = MapMotion("dash", origin, goal, now);
-            if (answer == null) return _mapEpoch == null;
-            if (answer.TryGetValue("state", out var state) && Equals(state, "Unknown")) return true;
-            if (answer.TryGetValue("waypoint", out var value) && value is float[] xyz && xyz.Length >= 3)
-                return goal.XYDistanceTo(xyz[0], xyz[1]) <= 3;
-            return false;
+            // Walking/attack corridor gaps are not Dash vetoes. MapViewer validates
+            // landing floor/clearance and retains closed-door collision checks.
+            if (LiveProjectileBarrier(origin, goal, out _)) return false;
+            var answer = MapDashHop(origin, goal, now);
+            if (answer == null) return _mapEpoch == null && !ProjectileLineBlocked(origin, goal, now, out _);
+            if (answer.TryGetValue("state", out var state) && Equals(state, "Unknown"))
+                return !ProjectileLineBlocked(origin, goal, now, out _);
+            return MapHopReaches(answer, goal);
         }
 
         private IWorldCoordinate MapWaypoint(string operation, IWorldCoordinate origin, IWorldCoordinate goal, int now)
         {
-            var answer = MapMotion(operation, origin, goal, now);
+            var answer = operation == "dash" ? MapDashHop(origin, goal, now)
+                : MapMotion(operation, origin, goal, now);
             if (answer == null) return null;
             if (answer.TryGetValue("requiresDoor", out var requiresDoor) && Equals(requiresDoor, true)) return null;
             if (answer.TryGetValue("ok", out var ok) && Equals(ok, true)
@@ -2265,7 +2443,14 @@ namespace Turbo.Plugins.s7o
             _lastRouteLog = now;
             answer.TryGetValue("state", out var state);
             answer.TryGetValue("reason", out var reason);
-            Trace("route " + operation + " state=" + state + " reason=" + reason);
+            answer.TryGetValue("clearanceRadius", out var clearance);
+            answer.TryGetValue("requiresDoor", out var door);
+            answer.TryGetValue("waypoint", out var value);
+            var xyz = value as float[];
+            Trace("route " + operation + " state=" + state + " reason=" + (reason ?? "provider-unspecified")
+                + " clearance=" + clearance + " requiresDoor=" + door
+                + " waypoint=" + (xyz == null || xyz.Length < 3 ? "none"
+                    : xyz[0].ToString("F1") + "," + xyz[1].ToString("F1") + "," + xyz[2].ToString("F1")));
         }
 
         private bool EliteApproachStillUseful(IWorldCoordinate origin, Aim aim)
@@ -2737,6 +2922,146 @@ namespace Turbo.Plugins.s7o
             }
         }
 
+
+        // A short, world-scoped health window; no attribution to a particular actor.
+        private sealed class DamageWindow
+        {
+            internal float Loss, Previous, Peak;
+            internal int LastAt=int.MinValue, PeakAt, LastDropAt=int.MinValue;
+            internal uint World;
+            internal void Reset(){Loss=Previous=Peak=0;LastAt=LastDropAt=int.MinValue;World=0;}
+            internal void Observe(float health,int now,uint world)
+            {
+                if(health<=0 || health>1 || float.IsNaN(health)){Reset();return;}
+                if(LastAt==int.MinValue || World!=world || Age(now,LastAt)>250)
+                {Reset();World=world;Previous=Peak=health;LastAt=PeakAt=now;return;}
+                if(Age(now,PeakAt)>250){Peak=Previous;PeakAt=LastAt;}
+                if(health>=Peak){Peak=health;PeakAt=now;}
+                if(Previous-health>=.005f)LastDropAt=now;
+                Loss=Math.Max(0,Peak-health);Previous=health;LastAt=now;
+            }
+        }
+        private readonly DamageWindow _damageWindow=new DamageWindow();
+        private static bool PanicDamageDue(float health,float loss)
+        {return health>0 && ((health<=.40f && loss>=.0499f) || (health<=.60f && loss>=.0999f));}
+        private static bool PanicRecoveryCanEnd(bool protectedNow,bool danger,bool panic,int sinceDamage)
+        {return protectedNow || (!danger && !panic && sinceDamage>=250);}
+        private static bool SerenityThreatUseful(string threat,float health,bool rapid,bool occupied)
+        {return rapid || (threat!=null && (health<=.60f || occupied && (threat=="Molten" || threat=="Grotesque")));}
+        private static bool PreferEscapeWalk(float distance,string threat,bool rapid,float loss)
+        {
+            return distance<=5.5f && !rapid && loss<.05f
+                && (threat=="Desecrator" || threat=="Plagued" || threat=="disease cloud"
+                    || threat=="boss fire pool" || threat=="boss cold pool");
+        }
+        private sealed class FailedEscape
+        {
+            internal IWorldCoordinate From,To;
+            internal uint World;
+            internal int At;
+        }
+        private readonly List<FailedEscape> _failedEscapes=new List<FailedEscape>(4);
+        private readonly List<IActor> _escapeCircles=new List<IActor>(24);
+        private void RememberFailedEscape(Aim aim,int now)
+        {
+            if(aim.From==null || aim.Landing==null)return;
+            if(_failedEscapes.Count>=4)_failedEscapes.RemoveAt(0);
+            _failedEscapes.Add(new FailedEscape{From=aim.From,To=aim.Landing,At=now,World=_world});
+        }
+        private bool FailedEscapeLanding(IWorldCoordinate from,IWorldCoordinate to,int now)
+        {
+            for(int i=_failedEscapes.Count-1;i>=0;i--)
+            {
+                var f=_failedEscapes[i];
+                if(f.World!=_world || Age(now,f.At)>1500 || from.XYDistanceTo(f.From)>3)
+                {_failedEscapes.RemoveAt(i);continue;}
+                if(to.XYDistanceTo(f.To)<2)return true;
+            }
+            return false;
+        }
+        private IActor EscapeCircleAt(IWorldCoordinate origin,IWorldCoordinate point,out bool same,out int overlaps)
+        {
+            same=false;overlaps=0;IActor best=null;int kind=0;
+            foreach(var circle in _escapeCircles)
+            {
+                if(point.XYDistanceTo(circle.FloorCoordinate)>CircleRadius-.5f)continue;
+                overlaps++;same|=origin.XYDistanceTo(circle.FloorCoordinate)<=CircleRadius-.5f;
+                int k=CircleKind(circle);
+                if(best==null || BetterCircle(k,1,kind,1)){best=circle;kind=k;}
+            }
+            return best;
+        }
+        private bool QueueEscapeWalk(IGameController game,IWorldCoordinate from,IWorldCoordinate landing,int now)
+        {
+            if(_walkOrigin!=null || _lastWalk!=int.MinValue && Age(now,_lastWalk)<225)return false;
+            var waypoint=MapWaypoint("path",from,landing,now);
+            if(waypoint==null || DangerAt(waypoint,true)!=null || !WalkHazardsClear(from,waypoint)
+                || !QueueDashAim(game,waypoint,"avoidance walk",true,now))return false;
+            _dashAim.Walk=true;_dashAim.Goal=landing;_lastEscape=now;return true;
+        }
+        // Existing GenMonk field clearances, deliberately gated to low health.
+        private void CollectExtraField(IActor actor,float health,bool boss,bool ember)
+        {
+            if(health>.40f)return;
+            var p=actor.FloorCoordinate;float radius;string reason;
+            switch(actor.SnoActor.Sno)
+            {
+                case ActorSnoEnum._x1_unique_monster_generic_aoe_dot_fire_10foot:
+                    radius=Math.Max(12,actor.RadiusScaled);reason="boss fire pool";break;
+                case ActorSnoEnum._x1_unique_monster_generic_aoe_dot_cold_10foot:
+                    radius=Math.Max(10,actor.RadiusScaled)+2;reason="boss cold pool";break;
+                case ActorSnoEnum._x1_unique_monster_generic_aoe_dot_cold_20foot:
+                    radius=Math.Max(20,actor.RadiusScaled)+2;reason="boss cold pool";break;
+                case ActorSnoEnum._x1_adria_geyser_pending:
+                case ActorSnoEnum._x1_adria_geyser:
+                    radius=Math.Max(10,actor.RadiusScaled)+2;reason="Adria geyser";break;
+                case ActorSnoEnum._x1_westmarchbrute_leap_telegraph:
+                case ActorSnoEnum._x1_westmarchbrute_b_leap_telegraph:
+                case ActorSnoEnum._p2_westmarchbrute_leap_telegraph:
+                    radius=Math.Max(15,actor.RadiusScaled)+2;reason="brute leap";break;
+                case ActorSnoEnum._coreelitedemon_droppod_warning:
+                    if(!boss)return;
+                    radius=Math.Max(10,actor.RadiusScaled)+2;reason="boss drop warning";break;
+                case ActorSnoEnum._morluspellcaster_meteor_pending:
+                case ActorSnoEnum._morluspellcaster_meteor_impact:
+                    if(!ember)return;
+                    radius=Math.Max(22,actor.RadiusScaled);reason="Ember meteor";break;
+                case ActorSnoEnum._generic_proxy:
+                    if(actor.GetAttributeValueAsInt(Hud.Sno.Attributes.Power_Buff_0_Visual_Effect_None,30227u,0)!=1)return;
+                    radius=12;reason="disease cloud";break;
+                default:return;
+            }
+            AddHazard(p,radius,true,reason);
+        }
+#if WOL_DIAGNOSTIC
+        private int _lastDangerLog=int.MinValue;
+        private bool _deathReported;
+        private string _lastDangerSnapshot="none";
+#endif
+        [System.Diagnostics.Conditional("WOL_DIAGNOSTIC")]
+        private void ReportDanger(IPlayer me,string danger,bool panic,int now)
+        {
+#if WOL_DIAGNOSTIC
+            var field=_hazards.FirstOrDefault(h=>h.Imminent && InsideHazard(me.FloorCoordinate,h,0));
+            _lastDangerSnapshot="hp="+_hazardHealth.ToString("F3")+" loss="+_damageWindow.Loss.ToString("F3")
+                +" protection="+_shielded+" serenity="+_serenityProtected+" danger="+(danger??"none")
+                +" panic="+panic+" recovering="+_panicRecovering+" fieldDistance="
+                +(field.Point==null?-1:HazardDistance(me.FloorCoordinate,field)).ToString("F1")
+                +" fieldSno="+field.Sno+" charges="+(me.Powers.GetUsedSkill(Hud.Sno.SnoPowers.Monk_DashingStrike)?.Charges??0);
+            if(_lastDangerLog==int.MinValue || Age(now,_lastDangerLog)>=750)
+            {_lastDangerLog=now;Trace("AVOIDANCE "+_lastDangerSnapshot);}
+#endif
+        }
+        [System.Diagnostics.Conditional("WOL_DIAGNOSTIC")]
+        private void ReportDeath(IPlayer me)
+        {
+#if WOL_DIAGNOSTIC
+            bool dead=me!=null && (me.IsDead || me.IsDeadSafeCheck || me.AnimationState==AcdAnimationState.Dead);
+            if(dead && !_deathReported)Trace("DEATH lastAvoidance="+_lastDangerSnapshot);
+            _deathReported=dead;
+#endif
+        }
+
         private sealed class TimedHazard
         {
             internal IWorldCoordinate Point;
@@ -2745,10 +3070,13 @@ namespace Turbo.Plugins.s7o
 
         private struct Hazard
         {
-            internal IWorldCoordinate Point;
-            internal float Radius;
+            internal IWorldCoordinate Point, End;
+            internal float Radius, InnerRadius;
             internal bool Imminent;
             internal string Reason;
+#if WOL_DIAGNOSTIC
+            internal ActorSnoEnum Sno;
+#endif
         }
 
         private readonly Dictionary<uint, TimedHazard> _corpses = new Dictionary<uint, TimedHazard>();
@@ -2760,15 +3088,98 @@ namespace Turbo.Plugins.s7o
         private float _hazardHealth = 1f;
         private bool _shielded, _serenityProtected;
 
+        private IMonster _breathBoss;
+        private bool _breathAttempted;
+        private readonly HashSet<ulong> _chainPairs = new HashSet<ulong>();
+        private static bool HasAffix(IMonster monster, MonsterAffix affix)
+        {
+            return monster.AffixSnoList != null && monster.AffixSnoList.Any(a => a != null && a.Affix == affix)
+                || monster.Pack?.AffixSnoList != null && monster.Pack.AffixSnoList.Any(a => a != null && a.Affix == affix);
+        }
+        private static bool MalletSmashing(IMonster monster)
+        {
+            bool mallet;
+            switch (monster.SnoActor.Sno)
+            {
+                case ActorSnoEnum._x1_lr_boss_malletdemon:
+                case ActorSnoEnum._p73_lr_boss_malletdemon:
+                case ActorSnoEnum._p76_lr_boss_malletdemon:
+                case ActorSnoEnum._malletdemon_a:
+                case ActorSnoEnum._malletdemon_a_unique_01:
+                case ActorSnoEnum._malletdemon_a_unique_02:
+                case ActorSnoEnum._p2_malletdemon_a_unique_01:
+                case ActorSnoEnum._p4_setdung_malletdemon_a_unique:
+                case ActorSnoEnum._x1_malletdemon_event_ancientjail: mallet = true; break;
+                default: mallet = false; break;
+            }
+            return mallet && (monster.IsElite || monster.SnoMonster != null && monster.SnoMonster.Priority >= MonsterPriority.keywarden)
+                && monster.Animation == AnimSnoEnum._malletdemon_attack_01
+                && (monster.AnimationState == AcdAnimationState.Attacking || monster.AnimationState == AcdAnimationState.Transform
+                    || monster.AnimationState == AcdAnimationState.Casting || monster.AnimationState == AcdAnimationState.Channeling);
+        }
+        private void CollectBossAndChains(IGameController game, IPlayer me, float health)
+        {
+            uint previous = _breathBoss?.AcdId ?? 0;
+            _breathBoss = null; _chainPairs.Clear();
+            if (game.AliveMonsters != null) foreach (var monster in game.AliveMonsters)
+            {
+                if (monster?.SnoActor == null || !monster.IsAlive || monster.IsDisabled || monster.Illusion
+                    || monster.WorldId != me.WorldId || monster.FloorCoordinate == null
+                    || monster.CentralXyDistanceToMe > 85
+                    || Math.Abs(monster.FloorCoordinate.Z - me.FloorCoordinate.Z) > 8) continue;
+                if (MalletSmashing(monster))
+                    _hazards.Add(new Hazard { Point = monster.FloorCoordinate,
+                        Radius = Math.Max(0, monster.RadiusScaled) + 12f + Math.Max(0, me.RadiusScaled),
+                        InnerRadius = 1f, Imminent = true, Reason = "Perendi/Mallet smash" });
+                if (monster.SnoActor.Sno == ActorSnoEnum._x1_lr_boss_terrordemon_a
+                    && monster.Animation == AnimSnoEnum._terrordemon_attack_firebreath)
+                    _breathBoss = monster;
+                if (health > .75f || !HasAffix(monster, MonsterAffix.FireChains)
+                    || monster.Pack?.MonstersAlive == null) continue;
+                foreach (var partner in monster.Pack.MonstersAlive)
+                {
+                    if (partner == null || !partner.IsAlive || partner.IsDisabled || partner.Illusion
+                        || partner.WorldId != me.WorldId || partner.AcdId == monster.AcdId
+                        || partner.FloorCoordinate == null || Math.Abs(partner.FloorCoordinate.Z - monster.FloorCoordinate.Z) > 8) continue;
+                    ulong pair = ((ulong)Math.Min(monster.AcdId, partner.AcdId) << 32) | Math.Max(monster.AcdId, partner.AcdId);
+                    if (_chainPairs.Count >= 64 || !_chainPairs.Add(pair)) continue;
+                    _hazards.Add(new Hazard { Point = monster.FloorCoordinate, End = partner.FloorCoordinate,
+                        Radius = 3f, Imminent = true, Reason = "Fire Chains" });
+                }
+            }
+            if (_breathBoss == null || previous != _breathBoss.AcdId) _breathAttempted = false;
+            if (_breathBoss != null && me.FloorCoordinate.XYDistanceTo(_breathBoss.FloorCoordinate) <= 1f)
+                _breathAttempted = true;
+        }
+        private bool HoldingBreathCore(IWorldCoordinate point)
+        { return AvoidDanger && !_shielded && _breathBoss != null && point.XYDistanceTo(_breathBoss.FloorCoordinate) <= 1.5f; }
+        private bool BreathCoreStillUseful(Aim aim)
+        { return _breathBoss != null && _breathBoss.AcdId == aim.EliteId && !_shielded; }
+        private bool TryBreathCore(IGameController game, IWorldCoordinate origin, bool dashReady, int now)
+        {
+            if (!AvoidDanger || _shielded || _breathBoss == null || _breathAttempted || !dashReady
+                || _dashAim != null || _dashFlight != null || _panicRecovering || _hazardHealth <= .40f
+                || DangerAt(origin, false) != null || InputBusy()) return false;
+            var center = _breathBoss.FloorCoordinate;
+            // GenMonk's known breath response: one safe Dash into the boss core per windup.
+            // No invented beam angle or generic boss hazard circle.
+            if (!ValidDashLanding(origin, center, now) || !DashRouteClear(origin, center, now)
+                || !QueueDashAim(game, center, "Orlash breath core", false, now)) return false;
+            _dashAim.BossCore = true; _dashAim.EliteId = _breathBoss.AcdId; _breathAttempted = true;
+            _relayHome = null; ClearStage();
+            return true;
+        }
+
         private void ClearDanger()
         {
+            _breathBoss = null; _breathAttempted = false; _chainPairs.Clear();
             _corpses.Clear();
             _molten.Clear();
             _hazards.Clear();
             _frozen.Clear();
             _hazardTick = int.MinValue;
             _shielded = _serenityProtected = false;
-            _healthBaseline = 0;
+            _damageWindow.Reset();_failedEscapes.Clear();_escapeCircles.Clear();
             _panicRecovering = false;
             _serenityPending = false;
             _postCirclePullId = 0;
@@ -2789,18 +3200,10 @@ namespace Turbo.Plugins.s7o
             _shielded = (shield?.Active == true && shield.TimeLeftSeconds != null
                 && shield.TimeLeftSeconds.Any(left => left > 1.5)) || serenitySafe;
             if (_shielded) _panicUntil = now;
-            if (_healthBaseline <= 0 || health >= _healthBaseline || Age(now, _healthSampleAt) > 220)
-            {
-                _healthBaseline = health;
-                _healthSampleAt = now;
-            }
-            if (!_shielded && health > 0 && health <= .40f && _healthBaseline - health >= .05f
-                && (_lastEscape == int.MinValue || Age(now, _lastEscape) >= 1100))
-            {
-                _panicUntil = unchecked(now + 350);
-                _healthBaseline = health;
-                _healthSampleAt = now;
-            }
+            _damageWindow.Observe(health,now,me.WorldId);
+            if (!_shielded && PanicDamageDue(health,_damageWindow.Loss)
+                && (_lastEscape == int.MinValue || Age(now,_lastEscape)>=1100))
+                _panicUntil=unchecked(now+350);
 
             int tick = game.CurrentGameTick;
             if (tick == _hazardTick) return;
@@ -2813,6 +3216,13 @@ namespace Turbo.Plugins.s7o
             _hazards.Clear();
             _frozen.Clear();
             _moltenFx.Clear();
+            bool bossPresent=false,emberPresent=false;
+            if(game.AliveMonsters!=null)foreach(var m in game.AliveMonsters)
+            {
+                if(m==null || !m.IsAlive || m.IsDisabled || m.WorldId!=me.WorldId)continue;
+                bossPresent|=m.Rarity==ActorRarity.Boss;
+                emberPresent|=m.SnoActor?.Sno==ActorSnoEnum._x1_lr_boss_morluspellcaster_fire;
+            }
             foreach (uint key in _molten.Where(p => (long)tick - p.Value.Seen > 240).Select(p => p.Key).ToArray())
                 _molten.Remove(key);
             foreach (uint key in _corpses.Where(p => (long)tick - p.Value.Seen > 600).Select(p => p.Key).ToArray())
@@ -2821,7 +3231,12 @@ namespace Turbo.Plugins.s7o
                 foreach (var actor in game.Actors)
                 {
                     if (actor?.SnoActor == null || actor.IsDisabled || actor.WorldId != me.WorldId
-                        || actor.FloorCoordinate == null || actor.CentralXyDistanceToMe > 85) continue;
+                        || actor.FloorCoordinate == null || actor.CentralXyDistanceToMe > 85
+                        || Math.Abs(actor.FloorCoordinate.Z-me.FloorCoordinate.Z)>8) continue;
+#if WOL_DIAGNOSTIC
+                    int before=_hazards.Count;
+#endif
+                    CollectExtraField(actor,health,bossPresent,emberPresent);
                     var point = actor.FloorCoordinate;
                     switch (actor.SnoActor.Sno)
                     {
@@ -2846,6 +3261,19 @@ namespace Turbo.Plugins.s7o
                         case ActorSnoEnum._skeletonmage_fire_groundimpact:
                             if (health <= .75f) AddHazard(point, 8, true, "ground fire");
                             break;
+                        case ActorSnoEnum._x1_monsteraffix_orbiter_focalpoint:
+                        case ActorSnoEnum._x1_monsteraffix_orbiter_projectile_focus:
+                        case ActorSnoEnum._x1_monsteraffix_avenger_orbiter_focalpoint:
+                        case ActorSnoEnum._x1_monsteraffix_avenger_orbiter_projectile_focus:
+                            AddHazard(point, Math.Max(4f, actor.RadiusScaled + me.RadiusScaled + 1f), true, "Orbiter core");
+                            break;
+                        case ActorSnoEnum._x1_monsteraffix_orbiter_projectile:
+                        case ActorSnoEnum._x1_monsteraffix_avenger_orbiter_projectile:
+                            if (health <= .75f) AddHazard(point, Math.Max(4f, actor.RadiusScaled + me.RadiusScaled + 1f), true, "Orbiter projectile");
+                            break;
+                        case ActorSnoEnum._x1_monsteraffix_corpsebomber_projectile:
+                            if(health<=.75f)AddHazard(point,3.5f,true,"Corpse Bomber");
+                            break;
                         case ActorSnoEnum._monsteraffix_desecrator_damage_aoe:
                             if (health <= .40f) AddHazard(point, 8, true, "Desecrator");
                             break;
@@ -2860,7 +3288,11 @@ namespace Turbo.Plugins.s7o
                             AddHazard(point, 6.5f, true, "Arcane core");
                             break;
                     }
+#if WOL_DIAGNOSTIC
+                    for(int i=before;i<_hazards.Count;i++){var h=_hazards[i];h.Sno=actor.SnoActor.Sno;_hazards[i]=h;}
+#endif
                 }
+            CollectBossAndChains(game, me, health);
             foreach (var warning in _molten.Values)
             {
                 int age = tick - warning.Start;
@@ -2916,8 +3348,43 @@ namespace Turbo.Plugins.s7o
 
         private static bool InsideHazard(IWorldCoordinate point, Hazard hazard, float margin)
         {
-            return Math.Abs(point.Z - hazard.Point.Z) <= 8f
-                && point.XYDistanceTo(hazard.Point) <= hazard.Radius + margin;
+            if (Math.Abs(point.Z - hazard.Point.Z) > 8f) return false;
+            float distance = HazardDistance(point, hazard);
+            return distance <= hazard.Radius + margin
+                && (hazard.InnerRadius <= 0 || distance > Math.Max(0, hazard.InnerRadius - margin));
+        }
+
+        private static float HazardDistance(IWorldCoordinate point, Hazard hazard)
+        {
+            if (hazard.End == null) return point.XYDistanceTo(hazard.Point);
+            float dx = hazard.End.X - hazard.Point.X, dy = hazard.End.Y - hazard.Point.Y;
+            float length = dx * dx + dy * dy;
+            float u = length < .001f ? 0 : Math.Max(0, Math.Min(1,
+                ((point.X - hazard.Point.X) * dx + (point.Y - hazard.Point.Y) * dy) / length));
+            return point.XYDistanceTo(hazard.Point.X + dx * u, hazard.Point.Y + dy * u);
+        }
+
+        private bool WalkHazardsClear(IWorldCoordinate from, IWorldCoordinate to)
+        {
+            if (!AvoidDanger || _shielded) return true;
+            int steps = Math.Max(1, (int)Math.Ceiling(from.XYDistanceTo(to) / 2f));
+            foreach (var hazard in _hazards)
+            {
+                bool leaving = InsideHazard(from, hazard, .5f);
+                if (leaving && InsideHazard(to, hazard, .5f)) return false;
+                float previous = HazardDistance(from, hazard);
+                for (int i = 1; i <= steps; i++)
+                {
+                    float u = (float)i / steps;
+                    var point = from.Offset((to.X - from.X) * u, (to.Y - from.Y) * u, (to.Z - from.Z) * u);
+                    bool inside = InsideHazard(point, hazard, .5f);
+                    float distance = HazardDistance(point, hazard);
+                    if (inside && (!leaving || distance < previous - .05f)) return false;
+                    if (!inside) leaving = false;
+                    previous = distance;
+                }
+            }
+            return true;
         }
 
         private string DangerAt(IWorldCoordinate point, bool landing)
@@ -2935,7 +3402,7 @@ namespace Turbo.Plugins.s7o
             return overlap >= 3 && (landing || imminent) ? "Frozen overlap" : null;
         }
 
-        private static readonly float[] EscapeDistances = { 5, 8, 12, 16, 22, 28, 34 };
+        private static readonly float[] EscapeDistances = { 2.5f, 5, 8, 12, 16, 22, 28, 34 };
         private static readonly float[] EscapeX = Enumerable.Range(0, 12)
             .Select(i => (float)Math.Cos(i * Math.PI / 6)).ToArray();
         private static readonly float[] EscapeY = Enumerable.Range(0, 12)
@@ -2944,91 +3411,141 @@ namespace Turbo.Plugins.s7o
         private IWorldCoordinate PickEscape(IGameController game, IPlayer me, int pullRange, bool panic, bool seekGlobe,
             bool dashReady, out IActor safeCircle)
         {
-            safeCircle = null;
-            var origin = me.FloorCoordinate;
-            var hostile = game.AliveMonsters?.Where(monster => monster != null && monster.WorldId == me.WorldId
-                && monster.IsAlive && monster.Attackable && monster.FloorCoordinate != null
-                && Math.Abs(monster.FloorCoordinate.Z - origin.Z) <= 8f && monster.CentralXyDistanceToMe <= 30)
-                .OrderBy(monster => monster.CentralXyDistanceToMe).FirstOrDefault()?.FloorCoordinate;
-            if (panic && hostile == null) return null;
-            int now = Environment.TickCount;
-            IWorldCoordinate best = null;
-            double bestScore = double.MaxValue;
-            foreach (float distance in EscapeDistances)
+            var origin=me.FloorCoordinate;int now=Environment.TickCount;
+            var hostile=game.AliveMonsters?.Where(m=>m!=null && m.WorldId==me.WorldId && m.IsAlive
+                && m.Attackable && m.FloorCoordinate!=null && Math.Abs(m.FloorCoordinate.Z-origin.Z)<=8
+                && m.CentralXyDistanceToMe<=30).OrderBy(m=>m.CentralXyDistanceToMe).FirstOrDefault()?.FloorCoordinate;
+            _escapeCircles.Clear();
+            if(DashToCircles && game.Actors!=null)foreach(var a in game.Actors)
             {
-                if (distance > bestScore + 3 || (panic && distance > 16)) break;
-                for (int i = 0; i < EscapeX.Length; i++)
+                if(a?.SnoActor==null || a.AcdId==0 || a.WorldId!=me.WorldId || a.IsDisabled
+                    || a.FloorCoordinate==null || Math.Abs(a.FloorCoordinate.Z-origin.Z)>8
+                    || a.FloorCoordinate.XYDistanceTo(origin)>42 || CircleKind(a)==0)continue;
+                if(_escapeCircles.Count<24)_escapeCircles.Add(a);
+            }
+            IWorldCoordinate best=null;IActor chosen=null;int bestRank=3,bestKind=0;double bestScore=double.MaxValue;
+            // Bounded candidates; map work occurs only after a candidate improves the geometric score.
+            void Consider(IWorldCoordinate point)
+            {
+                if(point==null || DangerAt(point,true)!=null)return;
+                float travel=origin.XYDistanceTo(point);
+                if(travel<2 || travel>(dashReady?(panic?20:34):12))return;
+                bool same;int overlaps;var circle=EscapeCircleAt(origin,point,out same,out overlaps);
+                if(panic && hostile==null && circle==null)return; // No fabricated threat direction.
+                if(panic && hostile!=null && point.XYDistanceTo(hostile)<origin.XYDistanceTo(hostile)+3)return;
+                int rank=same?0:circle!=null?1:2,kind=circle==null?0:CircleKind(circle);
+                double score=travel+(CircleKeepsEliteContact(origin,point,pullRange)?0:12)-Math.Min(3,overlaps)*2;
+                if(rank>bestRank || rank==bestRank && (CirclePriority(kind)<CirclePriority(bestKind)
+                    || CirclePriority(kind)==CirclePriority(bestKind) && score>=bestScore))return;
+                if(FailedEscapeLanding(origin,point,now) || !TryProject(point,out _) || !MapAllows(point,now))return;
+                best=point;chosen=circle;bestRank=rank;bestKind=kind;bestScore=score;
+            }
+            foreach(float distance in EscapeDistances)
+            {
+                if(panic && distance>16)break;
+                for(int i=0;i<EscapeX.Length;i++)Consider(origin.Offset(EscapeX[i]*distance,EscapeY[i]*distance,0));
+            }
+            foreach(var circle in _escapeCircles)
+            {
+                Consider(InsideRim(circle.FloorCoordinate,origin));Consider(circle.FloorCoordinate);
+                for(int i=0;i<EscapeX.Length;i++)Consider(circle.FloorCoordinate.Offset(EscapeX[i]*6,EscapeY[i]*6,0));
+            }
+            if(seekGlobe && HealInPanic && game.Actors!=null && bestRank>0)
+            {
+                double limit=Math.Min(dashReady?22:12,best==null?22:origin.XYDistanceTo(best)+5);
+                foreach(var a in game.Actors)
                 {
-                    var point = origin.Offset(EscapeX[i] * distance, EscapeY[i] * distance, 0);
-                    if (DangerAt(point, landing: true) != null || !TryProject(point, out _)) continue;
-                    double gap = hostile == null ? 0 : point.XYDistanceTo(hostile);
-                    if (panic && gap < origin.XYDistanceTo(hostile) + 3) continue;
-                    double score = distance + Math.Max(0, gap - pullRange);
-                    if (score - 3 >= bestScore) continue;
-                    var pack = CountPack(point, pullRange);
-                    if (pack.Elites > 0) score -= Math.Min(3, pack.PullTrash * .4);
-                    if (score >= bestScore || !MapAllows(point, now)) continue;
-                    best = point;
-                    bestScore = score;
+                    if(a?.SnoActor?.Kind!=ActorKind.HealthGlobe || a.IsDisabled || a.WorldId!=me.WorldId
+                        || a.FloorCoordinate==null || Math.Abs(a.FloorCoordinate.Z-origin.Z)>8)continue;
+                    var p=a.FloorCoordinate;float distance=origin.XYDistanceTo(p);
+                    if(distance<=2 || distance>=limit || DangerAt(p,true)!=null || FailedEscapeLanding(origin,p,now)
+                        || hostile!=null && (p.XYDistanceTo(hostile)>pullRange
+                            || panic && p.XYDistanceTo(hostile)<origin.XYDistanceTo(hostile)+3)
+                        || !TryProject(p,out _) || !MapAllows(p,now))continue;
+                    best=p;chosen=null;limit=distance;
                 }
             }
-            if (seekGlobe && HealInPanic && game.Actors != null)
-            {
-                // Globes collect by proximity. A detour is allowed only if the landing
-                // is safe, close to the normal escape, and still leaves room to fight.
-                IWorldCoordinate globe = null;
-                double bestGlobe = Math.Min(22, best == null ? 22 : origin.XYDistanceTo(best) + 5);
-                foreach (var actor in game.Actors)
-                {
-                    if (actor?.SnoActor?.Kind != ActorKind.HealthGlobe || actor.WorldId != me.WorldId
-                        || actor.IsDisabled || actor.FloorCoordinate == null) continue;
-                    var point = actor.FloorCoordinate;
-                    double distance = origin.XYDistanceTo(point);
-                    if (distance <= 2 || distance >= bestGlobe || Math.Abs(point.Z - origin.Z) > 8
-                        || (hostile != null && (point.XYDistanceTo(hostile) > pullRange
-                            || (panic && point.XYDistanceTo(hostile) < origin.XYDistanceTo(hostile) + 3)))
-                        || DangerAt(point, landing: true) != null || !TryProject(point, out _)
-                        || !MapAllows(point, now)) continue;
-                    globe = point;
-                    bestGlobe = distance;
-                }
-                if (globe != null) return globe;
-            }
-            if (!DashToCircles || game.Actors == null) return best;
-            int bestKind = 0;
-            double bestCircleScore = 0;
-            float reach = dashReady ? (panic ? 20f : 34f)
-                : Math.Min(12f, best == null ? 12f : origin.XYDistanceTo(best) + 3f);
-            bool eliteFight = NearElite(origin);
-            foreach (var actor in game.Actors)
-            {
-                if (actor?.SnoActor == null || actor.AcdId == 0 || actor.WorldId != me.WorldId
-                    || actor.IsDisabled || actor.FloorCoordinate == null) continue;
-                int kind = CircleKind(actor);
-                if (kind == 0) continue;
-                var landing = InsideRim(actor.FloorCoordinate, origin);
-                if (origin.XYDistanceTo(landing) > reach || !ValidDashLanding(origin, landing, now)
-                    || (!panic && !CircleKeepsEliteContact(origin, landing, pullRange))
-                    || (panic && hostile != null && landing.XYDistanceTo(hostile) < origin.XYDistanceTo(hostile) + 3))
-                    continue;
-                var coverage = CircleCoverage(landing, pullRange);
-                if (!CoverageEnough(coverage, eliteFight)) continue;
-                double value = CombatCircleScore(coverage, kind, landing, pullRange);
-                if (value == double.MinValue) value = CircleValue(coverage, kind) * .5; // Safety first during panic.
-                value -= origin.XYDistanceTo(landing) * .35;
-                if (!BetterCircle(kind, value, bestKind, bestCircleScore)) continue;
-                best = landing;
-                bestKind = kind;
-                bestCircleScore = value;
-                safeCircle = actor;
-            }
+            safeCircle=chosen;
+#if WOL_DIAGNOSTIC
+            if(best!=null)Trace("ESCAPE choice distance="+origin.XYDistanceTo(best).ToString("F1")
+                +" retainedCircle="+(bestRank==0)+" circle="+(chosen?.AcdId??0)+" panic="+panic
+                +" hp="+_hazardHealth.ToString("F3")+" loss="+_damageWindow.Loss.ToString("F3"));
+#endif
             return best;
+        }
+
+        // Deployment progress is independent of old/glitched bells still visible nearby.
+        private sealed class FreshBellBatch
+        {
+            internal readonly HashSet<ulong> Seen=new HashSet<ulong>();
+            internal int Fresh,StartedTick;
+            internal bool Seeded;
+            internal bool Ready {get{return Seeded && Fresh>=BellThreshold;}}
+            internal void Reset(){Seen.Clear();Seeded=false;Fresh=0;}
+            internal void Begin(int tick){StartedTick=tick;Fresh=0;Seeded=true;}
+            internal void Observe(ulong identity,int createdTick,bool credit)
+            {
+                if(identity==0 || !Seen.Add(identity))return;
+                // A known old actor cannot be credited again after leaving/re-entering range.
+                // Missing creation timing is unknown; new identity remains usable evidence.
+                if(credit && (createdTick<=0 || createdTick>=StartedTick))Fresh++;
+            }
+        }
+        private readonly FreshBellBatch _freshBellBatch=new FreshBellBatch();
+        private bool _bellCycleDetonating;
+        private bool FreshBellBatchReady()
+        {return _freshBellBatch.Ready && !_bellCycleDetonating;}
+        private void BeginFreshBellBatch(IGameController game,string reason)
+        {
+            _freshBellBatch.Begin(game.CurrentGameTick);_bellCycleDetonating=false;
+#if WOL_DIAGNOSTIC
+            _batchWaveCasts=_batchExpectedOutput=0;_batchWaveAnimation=int.MinValue;
+            Trace("FRESH_BELL_BATCH begin reason="+reason+" tick="+game.CurrentGameTick
+                +" existingNearby="+_bells.Count+" knownIdentities="+_freshBellBatch.Seen.Count);
+#endif
+        }
+#if WOL_DIAGNOSTIC
+        private int _batchWaveCasts,_batchExpectedOutput,_batchWaveAnimation=int.MinValue;
+        private int _batchTraceAt=int.MinValue;
+#endif
+        [System.Diagnostics.Conditional("WOL_DIAGNOSTIC")]
+        private void ObserveFreshBellCasts(IPlayer me)
+        {
+#if WOL_DIAGNOSTIC
+            int start=me.LoopingAnimationStartTick;
+            if(start==_batchWaveAnimation || me.Animation.ToString().IndexOf("waveoflight",StringComparison.OrdinalIgnoreCase)<0)return;
+            _batchWaveAnimation=start;
+            if(start<_freshBellBatch.StartedTick || _bellCycleDetonating)return;
+            bool epiphany=me.Powers.BuffIsActive(Hud.Sno.SnoPowers.Monk_Epiphany.Sno);
+            _batchWaveCasts++;_batchExpectedOutput+=epiphany?2:1;
+            Trace("FRESH_BELL_CAST tick="+Hud.Game.CurrentGameTick+" animationStart="+start
+                +" epiphany="+epiphany+" observedCasts="+_batchWaveCasts
+                +" expectedOutput="+_batchExpectedOutput+" verifiedFresh="+_freshBellBatch.Fresh);
+#endif
+        }
+        [System.Diagnostics.Conditional("WOL_DIAGNOSTIC")]
+        private void ReportFreshBellBatch(IGameController game)
+        {
+#if WOL_DIAGNOSTIC
+            int now=Environment.TickCount;if(_batchTraceAt!=int.MinValue && Age(now,_batchTraceAt)<300)return;_batchTraceAt=now;
+            Trace("FRESH_BELL_BATCH tick="+game.CurrentGameTick+" start="+_freshBellBatch.StartedTick
+                +" fresh="+_freshBellBatch.Fresh+" nearby="+_bells.Count
+                +" observedCasts="+_batchWaveCasts+" expectedOutput="+_batchExpectedOutput
+                +" ready="+FreshBellBatchReady()+" detonating="+_bellCycleDetonating
+                +" identityCount="+_freshBellBatch.Seen.Count);
+#endif
         }
 
         private void CollectBells(IGameController game, IPlayer me, int radius)
         {
             _bells.Clear();
             _ownSummoners.Clear();
+            if(_freshBellBatch.Seen.Count>4096)_freshBellBatch.Reset();
+            bool seed=!_freshBellBatch.Seeded;
+            if(seed)BeginFreshBellBatch(game,"initial-snapshot");
+            if(_bellCycleDetonating && _burstStarted==int.MinValue && Volatile.Read(ref _pressedKey)==0
+                && _releasedCycloneAim==null)BeginFreshBellBatch(game,"pull-or-interrupted-burst-finished");
+            ObserveFreshBellCasts(me);
             if (me.SummonerId != 0) _ownSummoners.Add(me.SummonerId);
             if (game.Actors == null) return;
 
@@ -3052,10 +3569,21 @@ namespace Turbo.Plugins.s7o
             {
                 if (actor?.SnoActor == null || actor.WorldId != me.WorldId || !IsBell(actor.SnoActor.Sno)
                     || actor.IsDisabled || actor.IsOperated || actor.FloorCoordinate == null
-                    || actor.CentralXyDistanceToMe > radius || actor.ZDistanceToMeAbsolute > 8
                     || (anotherMonk && !_ownSummoners.Contains(actor.SummonerAcdDynamicId))) continue;
                 uint id = actor.AnnId != 0 ? actor.AnnId : actor.AcdId;
-                if (id != 0) _bells.Add(id);
+                ulong identity=((ulong)actor.AnnId<<32)|actor.AcdId;
+#if WOL_DIAGNOSTIC
+                bool firstObservation=!_freshBellBatch.Seen.Contains(identity);int priorFresh=_freshBellBatch.Fresh;
+#endif
+                _freshBellBatch.Observe(identity,actor.CreatedAtInGameTick,!seed && !_bellCycleDetonating);
+#if WOL_DIAGNOSTIC
+                if(firstObservation)Trace("FRESH_BELL_ACTOR tick="+game.CurrentGameTick+" id="+actor.AcdId+":"+actor.AnnId
+                    +" createdTick="+actor.CreatedAtInGameTick+" batchStart="+_freshBellBatch.StartedTick
+                    +" credited="+(_freshBellBatch.Fresh>priorFresh)+" seed="+seed+" detonating="+_bellCycleDetonating
+                    +" summoner="+actor.SummonerAcdDynamicId+" distance="+actor.CentralXyDistanceToMe.ToString("F1")
+                    +" animationSno="+(uint)me.Animation+" animationName="+me.Animation);
+#endif
+                if (id != 0 && actor.CentralXyDistanceToMe<=radius && actor.ZDistanceToMeAbsolute<=8) _bells.Add(id);
             }
             bool newBell = false;
             foreach (var id in _bells)
@@ -3068,6 +3596,13 @@ namespace Turbo.Plugins.s7o
             }
             _previousBells.Clear();
             foreach (var id in _bells) _previousBells.Add(id);
+            if (FreshBellBatchReady() && _bells.Count == 0)
+            {
+                // All five fresh deployments are beyond our current pull reach. Replace
+                // the batch deliberately rather than waiting for proximity or casting endlessly.
+                BeginFreshBellBatch(game, "fresh-batch-outside-Cyclone-reach-replace");
+            }
+            ReportFreshBellBatch(game);
         }
 
         private void CheckBellPlacement(IGameController game, IPlayer me)
@@ -3182,7 +3717,7 @@ namespace Turbo.Plugins.s7o
         private void Trace(string text)
         {
 #if WOL_DIAGNOSTIC
-            try { Hud.TextLog.Log("s7o_WaveOfLightCyclone_REV45_DIAGNOSTIC", text); }
+            try { Hud.TextLog.Log("s7o_WaveOfLightCyclone_REV49_DIAGNOSTIC", text); }
             catch { } // Logging never owns input.
 #endif
         }
@@ -3372,6 +3907,7 @@ namespace Turbo.Plugins.s7o
         private void LeaveAssist()
         {
             _assistHeld = false;
+            _failedApproaches.Clear();
             _obstructionRouteTarget = 0;
             _obstructionRouteGoal = _obstructionRouteFocus = null;
             _obstructionRouteAt = _lastObstructionTry = int.MinValue;
@@ -3387,7 +3923,7 @@ namespace Turbo.Plugins.s7o
             _serenityPending = false;
             _postCirclePullId = 0;
             _panicUntil = Environment.TickCount;
-            _healthBaseline = 0;
+            _damageWindow.Reset();_failedEscapes.Clear();_escapeCircles.Clear();
             StopWave();
             CancelDashAim();
             _dashFlight = null;
@@ -3574,6 +4110,7 @@ namespace Turbo.Plugins.s7o
 
         private void CancelInput()
         {
+            _freshBellBatch.Reset();_bellCycleDetonating=false;
             _autoLootYieldPending = false;
             _holdActive = false;
             LeaveAssist();
@@ -3582,7 +4119,7 @@ namespace Turbo.Plugins.s7o
             _burstKey = 0;
             _burstHoldMs = 0;
             _burstYieldUntil = int.MinValue;
-            _healthBaseline = 0;
+            _damageWindow.Reset();_failedEscapes.Clear();_escapeCircles.Clear();
             _serenityPending = false;
             _postCirclePullId = 0;
             _panicUntil = Environment.TickCount;
@@ -3667,7 +4204,7 @@ namespace Turbo.Plugins.s7o
             internal int SharedDashKey, DashReleaseDue, ReleasedWaveKey;
             internal double ChargesBefore;
             internal string Reason;
-            internal bool Escape, Upkeep, RelayOut, RelayReturn, StageOut, StageReturn, Retried, DashAccepted, Transit, Walk;
+            internal bool Escape, Upkeep, RelayOut, RelayReturn, StageOut, StageReturn, Retried, DashAccepted, Transit, Walk, BossCore;
             internal bool AnimationObserved, ChargeObserved, ReleasedWave, IsCycloneAim;
         }
 
