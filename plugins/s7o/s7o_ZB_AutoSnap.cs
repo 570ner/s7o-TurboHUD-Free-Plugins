@@ -15,9 +15,9 @@ namespace Turbo.Plugins.s7o
         - Revalidates course-correction targets against the current cone and stacked-pack suppression before casting
         - Solves one native RadiusBottom ray across elite leaders first, then density after leaders are stacked
         - Uses native validity filters: illusion, knockback immunity, elite affixes, obstacles / elite walls
-        - Uses non-blocking cursor/input phases, manual-override detection, predictive restore, and held-RMB recovery
+        - Restores cursor after each spear; never synthesizes held Whirlwind input
         - Consumes SPACE while Urshi conversation/gem UI is visible so synthetic handoff input cannot cast Spear
-        - No hold-repeat or continuous cursor ownership
+        - One physical Space edge triggers one spear; no retry queue or repeat casting
     */
     public class s7o_ZB_AutoSnap : BasePlugin, IKeyEventHandler, IAfterCollectHandler, IInGameWorldPainter, INewAreaHandler
     {
@@ -30,7 +30,6 @@ namespace Turbo.Plugins.s7o
         [DllImport("user32.dll")]
         private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
 
-        private const byte VK_RBUTTON = 0x02;
         private const byte VK_SHIFT = 0x10;
         private const uint KEYEVENTF_KEYUP_SIMPLE = 0x0002;
 
@@ -50,9 +49,10 @@ namespace Turbo.Plugins.s7o
         public float CursorWorldRadiusFallbackYards { get; set; } = 45f;
         public float CursorWorldConeDegrees { get; set; } = 95f;
 
-        public float ForwardEliteScanMaxYards { get; set; } = 125f;
-        public float ForwardEliteCommittedMaxYards { get; set; } = 140f;
+        public float ForwardEliteScanMaxYards { get; set; } = 90f;
+        public float ForwardEliteCommittedMaxYards { get; set; } = 90f;
         public float PreferredVisibleEliteMaxYards { get; set; } = 85f;
+        public float FarEliteAimMaxYards { get; set; } = 115f; // Alignment only; Spear reach remains unchanged.
         public float ForwardEliteConeDegrees { get; set; } = 50f;
 
         public float HitboxRadiusPx { get; set; } = 65f;
@@ -77,7 +77,6 @@ namespace Turbo.Plugins.s7o
 
         // Keep held movement/channel input intact across the temporary spear cursor takeover.
         public bool RestoreCursorAfterSpear { get; set; } = true;
-        public bool ResumeHeldRmbWhirlwindAfterSpear { get; set; } = true;
         public bool PreferNativeHitboxPullPlan { get; set; } = true;
 
         // Rare minions are never standalone priority by default, but may contribute to a local yellow-pack overlap.
@@ -150,7 +149,7 @@ namespace Turbo.Plugins.s7o
 
         public float StraightPathPenaltyScale { get; set; } = 0.90f;
         public float NearbyAlternativeRadiusPx { get; set; } = 110f;
-        public float MaxSnapAngleDegrees { get; set; } = 30f;
+        public float MaxSnapAngleDegrees { get; set; } = 40f;
         public bool UseGeometrySafety { get; set; } = true;
         public float MapPullClearance { get; set; } = 1.25f; // Optional straight pull corridor, not a route.
         private IPlugin _mapPlugin;
@@ -160,6 +159,7 @@ namespace Turbo.Plugins.s7o
         private bool _mapPullSelecting;
         private readonly Dictionary<uint,bool> _mapPullBlockedTargets=new Dictionary<uint,bool>();
         private IWorldCoordinate _pendingMapRayEnd;
+        private bool _pendingManualBlockedRay;
 
         // Elite course correction is a small aim assist for near-miss spear casts.
         // It only corrects within the player's current spear direction, so it should not snap sideways.
@@ -224,10 +224,6 @@ namespace Turbo.Plugins.s7o
         private const float CoursePackMinionAngleGrace = 6f;
         private const float CourseLeaderSecureRadiusScale = 0.75f;
         private const float CourseLeaderSecureExtraYards = 0.75f;
-        private const int WhirlwindResumeFirstDelayTicks = 3;
-        private const int WhirlwindResumeRetryTicks = 4;
-        private const int WhirlwindResumeMaxAttempts = 3;
-        private const int WhirlwindResumeWindowTicks = 18;
         private const float SimpleLateralWeight = 13.0f;
         private const float SimpleCursorDistanceWeight = 0.85f;
         private const float SimpleFarPreferenceWeight = 0.60f;
@@ -237,12 +233,9 @@ namespace Turbo.Plugins.s7o
         private const float SimplePathRejectThreshold = 18f;
         private const float SimpleFarEliteBandYards = 18f;
         private const float PullRayExtraRadiusYards = 0.85f;
-        private const float PullPlanMaximumReachYards = 140f;
+        private const float PullPlanMaximumReachYards = 90f;
         private const float PullPlanMinimumAimYards = 48f;
         private const float PullPlanMaximumAimYards = 72f;
-        private const float CursorOwnershipTolerancePx = 12f;
-        private const float CursorRestoreMaximumLeadPx = 90f;
-        private const float CursorVelocityMaximumPxPerMs = 1.5f;
 
         private const float ObstaclePenaltyWeight = 10f;
         private const float EliteWallPenaltyWeight = 16f;
@@ -259,12 +252,9 @@ namespace Turbo.Plugins.s7o
         private readonly List<IUiElement> _textInputBlockers = new List<IUiElement>();
 
         private bool _hotkeyDownLatched;
+        private int _hotkeyPressedEvent;
+        private int _hotkeyReleasedEvent;
         private bool _castingNow;
-
-        private bool _whirlwindResumePending;
-        private int _whirlwindResumeNextTick;
-        private int _whirlwindResumeUntilTick;
-        private int _whirlwindResumeAttempts;
 
         private enum CastPhase
         {
@@ -277,26 +267,16 @@ namespace Turbo.Plugins.s7o
         private CastPhase _castPhase;
         private long _castPhaseDeadlineMs;
         private long _castStartedMs;
-        private float _aimX;
-        private float _aimY;
         private IWorldCoordinate _pendingMarkerWorld;
         private uint _pendingMarkerTargetAcdId;
         private bool _pendingMarkerFailed;
-        private bool _pendingResumeHeldWhirlwind;
         private bool _nativePullPlanUsed;
         private float _savedCursorX;
         private float _savedCursorY;
-        private bool _cursorOwned;
+        private bool _cursorRestorePending;
         private byte _syntheticKeyDown;
         private uint _syntheticMouseUpFlag;
         private bool _syntheticShiftOwned;
-
-        private bool _skipCursorMotionSample;
-        private long _lastCursorSampleMs;
-        private float _lastCursorSampleX;
-        private float _lastCursorSampleY;
-        private float _manualCursorVelocityX;
-        private float _manualCursorVelocityY;
 
         private ActionKey _spearKey = ActionKey.Unknown;
         private int _lastObservedGameTick = -1;
@@ -335,6 +315,7 @@ namespace Turbo.Plugins.s7o
         private readonly List<BlockerCircle> _cachedPylonBlockers = new List<BlockerCircle>(8);
         private readonly List<BlockerCircle> _cachedWallerBlockers = new List<BlockerCircle>(24);
         private readonly List<BlockerCircle> _cachedProjectileBlockers = new List<BlockerCircle>(32);
+        private readonly List<BlockerCircle> _cachedSandWallBlockers = new List<BlockerCircle>(8);
 
         private struct SpearImpactProbe
         {
@@ -475,9 +456,12 @@ namespace Turbo.Plugins.s7o
 
         public void OnKeyEvent(IKeyEvent keyEvent)
         {
-            // Intentionally no-op.
-            // Casting is handled by the native physical hotkey edge detector in AfterCollect().
-            // Do not start casts here, or key-repeat / duplicate input paths can double-cast.
+            if (!Enabled || keyEvent == null || keyEvent.Key != Hotkey) return;
+            if (_syntheticKeyDown != 0 && (int)KeyToWinKeys(Hotkey) == _syntheticKeyDown) return;
+            if (keyEvent.IsPressed)
+                System.Threading.Interlocked.Exchange(ref _hotkeyPressedEvent, 1);
+            else
+                System.Threading.Interlocked.Exchange(ref _hotkeyReleasedEvent, 1);
         }
 
 
@@ -501,6 +485,8 @@ namespace Turbo.Plugins.s7o
                 _lastObservedGameTick = tick;
 
                 bool hotkeyDown = IsHotkeyPhysicallyDownNative();
+                bool eventPress = System.Threading.Interlocked.Exchange(ref _hotkeyPressedEvent, 0) != 0;
+                bool eventRelease = System.Threading.Interlocked.Exchange(ref _hotkeyReleasedEvent, 0) != 0;
 
                 if (!CanRun())
                 {
@@ -508,31 +494,29 @@ namespace Turbo.Plugins.s7o
                     // It must not fire later when CanRun() becomes true.
                     _hotkeyDownLatched = hotkeyDown;
                     ClearPendingCastOnly();
-                    ClearHeldWhirlwindResume();
                     ClearEliteCourseCorrectionCache();
                     return;
                 }
 
+                if (_castPhase != CastPhase.Idle && _castStartedMs > 0
+                    && nowMs - _castStartedMs > 750)
+                    ClearPendingCastOnly();
                 ProcessPendingCast(tick, nowMs);
-                ProcessHeldWhirlwindResume(tick);
                 if (PreferNativeHitboxPullPlan)
                     ClearEliteCourseCorrectionCache();
                 else
                     UpdateEliteCourseCorrectionCache(tick);
                 UpdateSpearImpactProbe(tick);
                 PruneUnsafeImpactSamples(tick);
-                TrackManualCursorMotion(nowMs);
 
-                if (!hotkeyDown)
+                // Consume fast down/up events on the next collect, but never defer a press
+                // while another cast is active. There is no retry or pending-press queue.
+                if (!hotkeyDown || (eventRelease && eventPress)) _hotkeyDownLatched = false;
+                if ((eventPress || hotkeyDown) && !_hotkeyDownLatched)
                 {
-                    // Physical release rearms immediately.
-                    _hotkeyDownLatched = false;
-                }
-                else if (!_hotkeyDownLatched)
-                {
-                    // One physical down-edge = one spear.
-                    _hotkeyDownLatched = true;
-                    StartOneCast(tick, nowMs);
+                    _hotkeyDownLatched = hotkeyDown;
+                    if (_castPhase == CastPhase.Idle && !_castingNow)
+                        StartOneCast(tick, nowMs);
                 }
             }
             catch
@@ -570,12 +554,6 @@ namespace Turbo.Plugins.s7o
                 float cursorX = Hud.Window.CursorX;
                 float cursorY = Hud.Window.CursorY;
 
-                bool resumeHeldWhirlwind =
-                    ResumeHeldRmbWhirlwindAfterSpear &&
-                    _spearKey != ActionKey.RightSkill &&
-                    IsVirtualKeyDown(VK_RBUTTON) &&
-                    IsWhirlwindAssignedToRightSkill();
-
                 ComputeAimNearCursor(
                     me.FloorCoordinate,
                     cursorX,
@@ -600,39 +578,77 @@ namespace Turbo.Plugins.s7o
                         out courseCorrectTargetAcdId);
                 }
 
-                _aimX = aimX;
-                _aimY = aimY;
-
                 IWorldCoordinate finalMarkerWorld = markerWorld ?? GetScreenWorld(aimX, aimY) ?? me.FloorCoordinate;
                 uint finalMarkerTargetAcdId = courseCorrectTargetAcdId != 0
                     ? courseCorrectTargetAcdId
                     : FindMarkerTargetAcdId(finalMarkerWorld, aimX, aimY, failed);
 
-                var mapRayEnd=MapPullRayEnd(me.FloorCoordinate,aimX,aimY,finalMarkerWorld);
-                if(MapPullBlocked(me.FloorCoordinate,mapRayEnd,MapPullClearance)) {
-                    MapPullFeedback("blocked-pull",finalMarkerTargetAcdId,mapRayEnd);
-                    // One bounded alternative search, before taking cursor/key ownership.
-                    if(!TryMapReachablePullFallback(me.FloorCoordinate,cursorX,cursorY,
-                        out aimX,out aimY,out finalMarkerWorld,out finalMarkerTargetAcdId))return;
-                    failed=false;
-                    mapRayEnd=MapPullRayEnd(me.FloorCoordinate,aimX,aimY,finalMarkerWorld);
-                    MapPullFeedback("reachable-fallback",finalMarkerTargetAcdId,mapRayEnd);
+                // A farther known elite may determine the direction, not the actual hit range.
+                float farAimX, farAimY;
+                IWorldCoordinate farEliteWorld;
+                uint farEliteId;
+                if (TryFarEliteAim(me.FloorCoordinate, cursorX, cursorY,
+                    out farAimX, out farAimY, out farEliteWorld, out farEliteId))
+                {
+                    aimX = farAimX;
+                    aimY = farAimY;
+                    finalMarkerWorld = farEliteWorld;
+                    finalMarkerTargetAcdId = farEliteId;
+                    failed = true;
                 }
+
+                // Legacy fallback candidates can extend outside the viewport. Fit the
+                // chosen ray before geometry validation, never by clamping its axes.
+                if (!TryFitSpearAimToWindow(me.FloorCoordinate, ref aimX, ref aimY))
+                {
+                    aimX = cursorX;
+                    aimY = cursorY;
+                    if (!IsSpearAimInWindow(aimX, aimY)) return;
+                    finalMarkerWorld = GetScreenWorld(aimX, aimY) ?? me.FloorCoordinate;
+                    finalMarkerTargetAcdId = 0;
+                    failed = true;
+                }
+                var mapRayEnd = MapPullRayEnd(me.FloorCoordinate, aimX, aimY, finalMarkerWorld);
+                _pendingManualBlockedRay = false;
+                if (SpearPullRayBlocked(me.FloorCoordinate, mapRayEnd))
+                {
+                    uint blockedTarget = finalMarkerTargetAcdId;
+                    if (TryMapReachablePullFallback(me.FloorCoordinate, cursorX, cursorY,
+                        out aimX, out aimY, out finalMarkerWorld, out finalMarkerTargetAcdId))
+                    {
+                        mapRayEnd = MapPullRayEnd(me.FloorCoordinate, aimX, aimY, finalMarkerWorld);
+                        failed = false;
+                    }
+                    else if (blockedTarget != 0)
+                        return; // Never intentionally fire toward a known blocked actor.
+                    else
+                    {
+                        // No selected target: preserve the player's manual spear direction.
+                        _pendingManualBlockedRay = true;
+                        aimX = cursorX;
+                        aimY = cursorY;
+                        finalMarkerWorld = GetScreenWorld(cursorX, cursorY) ?? me.FloorCoordinate;
+                        finalMarkerTargetAcdId = 0;
+                        mapRayEnd = MapPullRayEnd(me.FloorCoordinate, aimX, aimY, finalMarkerWorld);
+                        failed = true;
+                    }
+                }
+                if (!IsSpearAimInWindow(aimX, aimY)) return;
                 _pendingMapRayEnd=mapRayEnd;
                 _castStartedMs = nowMs;
                 _savedCursorX = cursorX;
                 _savedCursorY = cursorY;
-                _aimX = aimX;
-                _aimY = aimY;
                 _pendingMarkerWorld = finalMarkerWorld;
                 _pendingMarkerTargetAcdId = finalMarkerTargetAcdId;
                 _pendingMarkerFailed = failed;
-                _pendingResumeHeldWhirlwind = resumeHeldWhirlwind;
-                _cursorOwned = SafeMouseMove(aimX, aimY);
-                _skipCursorMotionSample = true;
+                // A manual shot never moves the cursor. A snapped shot owns only its
+                // brief reposition, then restores immediately after releasing Spear.
+                bool needsSnap = Dist(aimX, aimY, cursorX, cursorY) > 0.5f;
+                if (needsSnap && !SafeMouseMove(aimX, aimY)) return;
+                _cursorRestorePending = needsSnap;
 
                 _castPhase = CastPhase.CursorSettle;
-                _castPhaseDeadlineMs = nowMs + ClampInt(SpearPreCastSettleMs, 0, 35);
+                _castPhaseDeadlineMs = nowMs + (needsSnap ? ClampInt(SpearPreCastSettleMs, 0, 35) : 0);
                 ProcessPendingCast(tick, nowMs);
             }
             catch
@@ -651,9 +667,6 @@ namespace Turbo.Plugins.s7o
         {
             if (_castPhase == CastPhase.Idle)
                 return;
-
-            if (_cursorOwned && !IsCursorNear(_aimX, _aimY, CursorOwnershipTolerancePx))
-                _cursorOwned = false;
 
             if (nowMs < _castPhaseDeadlineMs)
                 return;
@@ -689,8 +702,9 @@ namespace Turbo.Plugins.s7o
         private void BeginPendingSpearInput(int tick, long nowMs)
         {
             // Recheck immediately before synthetic DOWN; release only our owned transaction.
-            string mapState=MapPullCorridorState(Hud.Game.Me.FloorCoordinate,_pendingMapRayEnd,MapPullClearance);
-            if(mapState=="BlockedCandidate") {
+            string mapState = _pendingManualBlockedRay ? null
+                : MapPullCorridorState(Hud.Game.Me.FloorCoordinate, _pendingMapRayEnd, MapPullClearance);
+            if (mapState == "BlockedCandidate") {
                 MapPullFeedback("blocked-before-cast",_pendingMarkerTargetAcdId,_pendingMapRayEnd);
                 CompletePendingCast(tick,nowMs);return;
             }
@@ -770,13 +784,9 @@ namespace Turbo.Plugins.s7o
 
         private void CompletePendingCast(int tick, long nowMs)
         {
-            bool resumeHeldWhirlwind = _pendingResumeHeldWhirlwind;
             ReleaseSyntheticInput();
-            RestoreOwnedCursor(nowMs);
+            RestoreOwnedCursor();
             ClearPendingCastState();
-
-            if (resumeHeldWhirlwind)
-                QueueHeldWhirlwindResume(tick);
         }
 
         private void ReleaseSyntheticInput()
@@ -803,71 +813,15 @@ namespace Turbo.Plugins.s7o
             }
         }
 
-        private void RestoreOwnedCursor(long nowMs)
+        private void RestoreOwnedCursor()
         {
-            if (!RestoreCursorAfterSpear || !_cursorOwned || !Hud.Window.IsForeground
-                || !IsCursorNear(_aimX, _aimY, CursorOwnershipTolerancePx))
-                return;
-
-            double elapsedMs = Math.Max(0.0d, nowMs - _castStartedMs);
-            float leadX = _manualCursorVelocityX * (float)elapsedMs;
-            float leadY = _manualCursorVelocityY * (float)elapsedMs;
-            float leadLength = (float)Math.Sqrt((leadX * leadX) + (leadY * leadY));
-            if (leadLength > CursorRestoreMaximumLeadPx && leadLength > 0.001f)
-            {
-                float scale = CursorRestoreMaximumLeadPx / leadLength;
-                leadX *= scale;
-                leadY *= scale;
-            }
-
-            SafeMouseMove(_savedCursorX + leadX, _savedCursorY + leadY);
-            _skipCursorMotionSample = true;
+            if (!_cursorRestorePending) return;
+            _cursorRestorePending = false;
+            if (RestoreCursorAfterSpear && Hud?.Window != null && Hud.Window.IsForeground)
+                SafeMouseMove(_savedCursorX, _savedCursorY);
         }
 
-        private void TrackManualCursorMotion(long nowMs)
-        {
-            if (_castPhase != CastPhase.Idle)
-                return;
 
-            float x = Hud.Window.CursorX;
-            float y = Hud.Window.CursorY;
-
-            if (_skipCursorMotionSample || _lastCursorSampleMs <= 0 || nowMs <= _lastCursorSampleMs)
-            {
-                _skipCursorMotionSample = false;
-                _lastCursorSampleMs = nowMs;
-                _lastCursorSampleX = x;
-                _lastCursorSampleY = y;
-                return;
-            }
-
-            long elapsedMs = nowMs - _lastCursorSampleMs;
-            if (elapsedMs > 250)
-            {
-                _manualCursorVelocityX = 0f;
-                _manualCursorVelocityY = 0f;
-            }
-            else
-            {
-                float vx = ClampFloat((x - _lastCursorSampleX) / elapsedMs,
-                    -CursorVelocityMaximumPxPerMs, CursorVelocityMaximumPxPerMs);
-                float vy = ClampFloat((y - _lastCursorSampleY) / elapsedMs,
-                    -CursorVelocityMaximumPxPerMs, CursorVelocityMaximumPxPerMs);
-                _manualCursorVelocityX = (_manualCursorVelocityX * 0.65f) + (vx * 0.35f);
-                _manualCursorVelocityY = (_manualCursorVelocityY * 0.65f) + (vy * 0.35f);
-            }
-
-            _lastCursorSampleMs = nowMs;
-            _lastCursorSampleX = x;
-            _lastCursorSampleY = y;
-        }
-
-        private bool IsCursorNear(float x, float y, float radius)
-        {
-            float dx = Hud.Window.CursorX - x;
-            float dy = Hud.Window.CursorY - y;
-            return (dx * dx) + (dy * dy) <= radius * radius;
-        }
 
 
         // =========================
@@ -936,7 +890,13 @@ namespace Turbo.Plugins.s7o
             result = TryLocalAim(mePos, cursorWorld, useCone, vx, vy, cosTh, CursorWorldRadiusFallbackYards, cursorX, cursorY, false, out aimX, out aimY, out markerWorld, out failed);
             if (result == LocalAimResult.Chosen) return;
 
-            TrySimpleForwardEliteAim(mePos, cursorWorld, useCone, vx, vy, cursorX, cursorY, out aimX, out aimY, out markerWorld);
+            if (!TrySimpleForwardEliteAim(mePos, cursorWorld, useCone, vx, vy, cursorX, cursorY,
+                out aimX, out aimY, out markerWorld))
+            {
+                aimX = cursorX;
+                aimY = cursorY;
+                markerWorld = cursorWorld;
+            }
         }
 
         private bool TryNativeHitboxPullPlan(
@@ -976,6 +936,8 @@ namespace Turbo.Plugins.s7o
             _pullPackGroupIds.Clear();
             int nextPackGroup = 0;
             bool hasLeader = false;
+            int leaderCount = 0;
+            IMonster singleLeader = null;
 
             foreach (IMonster monster in Hud.Game.AliveMonsters)
             {
@@ -1062,6 +1024,7 @@ namespace Turbo.Plugins.s7o
                     PackGroup = packGroup,
                     Progression = progression,
                 });
+                if (tier == 3) { leaderCount++; singleLeader = monster; }
             }
 
             if (!hasLeader)
@@ -1072,6 +1035,22 @@ namespace Turbo.Plugins.s7o
             }
             if (bodies.Count == 0)
                 return false;
+
+            if (EnableSingleEliteCoreBias && leaderCount == 1 && singleLeader?.FloorCoordinate != null)
+            {
+                var center = singleLeader.FloorCoordinate;
+                float angle = (float)Math.Atan2(center.Y - mePos.Y, center.X - mePos.X);
+                if (Math.Abs(NormalizeAngle(angle - manualAngle)) <= maximumAngle
+                    && !SpearPullRayBlocked(mePos, center)
+                    && (!UseGeometrySafety || ComputeLineSafetyPenalty(mePos, center) < SimplePathRejectThreshold)
+                    && TryProjectSpearRayOnScreen(mePos, angle,
+                        ClampFloat(mePos.XYDistanceTo(center), PullPlanMinimumAimYards, PullPlanMaximumAimYards),
+                        out aimX, out aimY))
+                {
+                    markerWorld = center;
+                    return true;
+                }
+            }
 
             List<float> relativeCandidates = _pullRelativeCandidates;
             relativeCandidates.Clear();
@@ -1178,21 +1157,95 @@ namespace Turbo.Plugins.s7o
                 return true;
             }
 
-            IWorldCoordinate aimWorld = Hud.Window.CreateWorldCoordinate(
-                mePos.X + ((float)Math.Cos(bestPlan.Angle) * bestPlan.AimDistance),
-                mePos.Y + ((float)Math.Sin(bestPlan.Angle) * bestPlan.AimDistance),
-                mePos.Z);
-            if (aimWorld == null)
+            if (!TryProjectSpearRayOnScreen(mePos, bestPlan.Angle, bestPlan.AimDistance, out aimX, out aimY))
                 return false;
-
-            IScreenCoordinate aimScreen = aimWorld.ToScreenCoordinate();
-            if (aimScreen == null)
-                return false;
-
-            aimX = ClampFloat(aimScreen.X, 8f, Math.Max(8f, Hud.Window.Size.Width - 8f));
-            aimY = ClampFloat(aimScreen.Y, 8f, Math.Max(8f, Hud.Window.Size.Height - 8f));
-            markerWorld = bestPlan.Marker != null ? bestPlan.Marker.FloorCoordinate : aimWorld;
+            markerWorld = bestPlan.Marker != null ? bestPlan.Marker.FloorCoordinate : cursorWorld;
             return true;
+        }
+
+        private bool IsSpearAimInWindow(float x, float y)
+        {
+            var size = Hud.Window.Size;
+            return x >= 0f && y >= 0f && x <= size.Width - 1f && y <= size.Height - 1f;
+        }
+
+        private bool TryFitSpearAimToWindow(IWorldCoordinate from, ref float x, ref float y,
+            IWorldCoordinate directTarget = null)
+        {
+            if (IsSpearAimInWindow(x, y)) return true;
+            if (from == null || float.IsNaN(x) || float.IsNaN(y)
+                || float.IsInfinity(x) || float.IsInfinity(y)) return false;
+
+            var world = directTarget;
+            if (world == null)
+            {
+                // A blended screen aim is not necessarily the marker's centre. Intersect
+                // its ray with the viewport first, then recover the actual world direction.
+                var origin = from.ToScreenCoordinate();
+                var size = Hud.Window.Size;
+                const float margin = 18f;
+                if (origin == null || !IsComfortableScreenAim(origin.X, origin.Y, margin)) return false;
+                float dx = x - origin.X, dy = y - origin.Y;
+                float tx = dx > 0f ? (size.Width - margin - origin.X) / dx
+                    : dx < 0f ? (margin - origin.X) / dx : float.PositiveInfinity;
+                float ty = dy > 0f ? (size.Height - margin - origin.Y) / dy
+                    : dy < 0f ? (margin - origin.Y) / dy : float.PositiveInfinity;
+                float scale = Math.Min(tx, ty);
+                if (!(scale > 0f && scale <= 1f)) return false;
+                world = GetScreenWorld(origin.X + dx * scale, origin.Y + dy * scale);
+            }
+            if (world == null) return false;
+            float wx = world.X - from.X, wy = world.Y - from.Y;
+            float distance = (float)Math.Sqrt(wx * wx + wy * wy);
+            if (!(distance > 0.1f) || float.IsInfinity(distance)) return false;
+            float px, py;
+            if (!TryProjectSpearRayOnScreen(from, (float)Math.Atan2(wy, wx),
+                Math.Min(distance, PullPlanMaximumAimYards), out px, out py)) return false;
+            x = px;
+            y = py;
+            return true;
+        }
+
+        private bool TryProjectSpearRayOnScreen(IWorldCoordinate from, float angle, float requestedDistance,
+            out float screenX, out float screenY)
+        {
+            screenX = screenY = 0f;
+            if (from == null || Hud?.Window == null) return false;
+            float margin = 18f;
+            float width = Hud.Window.Size.Width, height = Hud.Window.Size.Height;
+            if (width <= margin * 2f || height <= margin * 2f) return false;
+            float dx = (float)Math.Cos(angle), dy = (float)Math.Sin(angle);
+            float low = 0f, high = Math.Max(4f, requestedDistance);
+            float bestX = 0f, bestY = 0f;
+            bool found = false;
+            try
+            {
+                for (int iteration = 0; iteration < 12; iteration++)
+                {
+                    float distance = iteration == 0 ? high : (low + high) * 0.5f;
+                    var world = Hud.Window.CreateWorldCoordinate(from.X + dx * distance,
+                        from.Y + dy * distance, from.Z);
+                    var screen = world?.ToScreenCoordinate();
+                    bool inside = screen != null && screen.X >= margin && screen.Y >= margin
+                        && screen.X <= width - margin && screen.Y <= height - margin;
+                    if (inside)
+                    {
+                        bestX = screen.X; bestY = screen.Y;
+                        low = distance; found = true;
+                        if (iteration == 0) break;
+                    }
+                    else high = distance;
+                }
+                if (!found) return false;
+                var check = GetScreenWorld(bestX, bestY);
+                if (check == null) return false;
+                float observed = (float)Math.Atan2(check.Y - from.Y, check.X - from.X);
+                if (Math.Abs(NormalizeAngle(observed - angle)) > 3f * (float)Math.PI / 180f)
+                    return false;
+                screenX = bestX; screenY = bestY;
+                return true;
+            }
+            catch { return false; }
         }
 
         private PullPlan EvaluatePullPlanGeometry(
@@ -1221,11 +1274,13 @@ namespace Turbo.Plugins.s7o
             {
                 PullBody body = bodies[i];
                 float projection = (body.RelX * directionX) + (body.RelY * directionY);
-                if (projection < 1.5f || projection > maximumReach + 4f)
+                if (projection < 1.5f || projection > maximumReach + body.Radius + PullRayExtraRadiusYards)
                     continue;
 
                 float lateral = Math.Abs((body.RelX * directionY) - (body.RelY * directionX));
-                if (lateral > body.Radius + PullRayExtraRadiusYards)
+                float hitRadius = body.Radius + PullRayExtraRadiusYards;
+                if (lateral > hitRadius || projection - (float)Math.Sqrt(
+                    Math.Max(0f, hitRadius * hitRadius - lateral * lateral)) > maximumReach)
                     continue;
 
                 if (projection > farthestProjection)
@@ -2017,6 +2072,8 @@ namespace Turbo.Plugins.s7o
 
                 aimX = best.ScreenX;
                 aimY = best.ScreenY;
+                if (!TryFitSpearAimToWindow(mePos, ref aimX, ref aimY, best.MarkerWorld))
+                    return false;
                 TryRefineCourseCorrectionToPack(mePos, cursorWorld, best.Monster, cursorX, cursorY, ref aimX, ref aimY);
                 markerWorld = best.MarkerWorld;
                 targetAcdId = best.TargetAcdId;
@@ -2632,11 +2689,14 @@ namespace Turbo.Plugins.s7o
                   playerDist <= 52f &&
                   IsComfortableScreenAim(tx, ty, SimpleDirectAimScreenMarginPx)));
 
-            if (directCenterOk)
+            if (directCenterOk || (!IsSpearAimInWindow(tx, ty)
+                && directPenalty < SimplePathRejectThreshold
+                && IsWithinMaxSnapAngle(mePos, cursorWorld, target.FloorCoordinate, MaxSnapAngleDegrees)))
             {
                 aimX = tx;
                 aimY = ty;
-                return true;
+                if (TryFitSpearAimToWindow(mePos, ref aimX, ref aimY, target.FloorCoordinate))
+                    return true;
             }
 
             float laneDist = proj > 0.001f ? proj : playerDist;
@@ -2657,19 +2717,7 @@ namespace Turbo.Plugins.s7o
             aimX = (aimX * (1f - snapBlend)) + (tx * snapBlend);
             aimY = (aimY * (1f - snapBlend)) + (ty * snapBlend);
 
-            if (Hud?.Window?.Size != null)
-            {
-                float minX = 8f;
-                float minY = 8f;
-                float maxX = Hud.Window.Size.Width - 8f;
-                float maxY = Hud.Window.Size.Height - 8f;
-                if (aimX < minX) aimX = minX;
-                if (aimY < minY) aimY = minY;
-                if (aimX > maxX) aimX = maxX;
-                if (aimY > maxY) aimY = maxY;
-            }
-
-            return true;
+            return TryFitSpearAimToWindow(mePos, ref aimX, ref aimY);
         }
 
         private bool IsComfortableScreenAim(float x, float y, float margin)
@@ -2797,7 +2845,9 @@ namespace Turbo.Plugins.s7o
                         aimX = leaderCenters[i].x;
                         aimY = leaderCenters[i].y;
                         primaryLeaderId = bestLeader;
-                        return true;
+                        if (TryFitSpearAimToWindow(mePos, ref aimX, ref aimY,
+                            leaderCenters[i].m.FloorCoordinate)) return true;
+                        break;
                     }
                 }
             }
@@ -2959,7 +3009,7 @@ namespace Turbo.Plugins.s7o
                 aimX = sx;
                 aimY = sy;
                 markerWorld = best.FloorCoordinate;
-                return true;
+                return TryFitSpearAimToWindow(mePos, ref aimX, ref aimY, markerWorld);
             }
             catch
             {
@@ -3507,6 +3557,19 @@ namespace Turbo.Plugins.s7o
         }
         private bool MapPullBlocked(IWorldCoordinate from,IWorldCoordinate to,float radius)
         { return MapPullCorridorState(from,to,radius)=="BlockedCandidate"; }
+        private bool SandWallSpearRayBlocked(IWorldCoordinate from, IWorldCoordinate to)
+        {
+            if (!IncludeProjectileBlockingActors || from == null || to == null) return false;
+            EnsureGeometryBlockerSnapshot();
+            return AccumulateBlockerPenalty(_cachedSandWallBlockers, from, to, 1f) > 0f;
+        }
+
+        private bool SpearPullRayBlocked(IWorldCoordinate from, IWorldCoordinate to)
+        {
+            return MapPullBlocked(from, to, MapPullClearance)
+                || SandWallSpearRayBlocked(from, to);
+        }
+
         private bool MapPullTargetBlocked(IMonster target)
         {
             if(!_mapPullSelecting||target==null||target.FloorCoordinate==null||Hud.Game.Me==null)return false;
@@ -3565,12 +3628,13 @@ namespace Turbo.Plugins.s7o
                     int side=probe==0?0:probe==1?-1:1;
                     var edge=Hud.Window.CreateWorldCoordinate(to.X-dy/len*r*side,to.Y+dx/len*r*side,to.Z);
                     if(!IsWithinMaxSnapAngle(from,intent,edge,MaxSnapAngleDegrees))continue;
-                    var screen=edge.ToScreenCoordinate();
-                    if(screen==null||!IsWithinWindow(screen.X,screen.Y))continue;
-                    var ray=MapPullRayEnd(from,screen.X,screen.Y,edge);
-                    if(MapPullBlocked(from,ray,MapPullClearance)
+                    float candidateX, candidateY;
+                    float direction=(float)Math.Atan2(edge.Y-from.Y,edge.X-from.X);
+                    if(!TryProjectSpearRayOnScreen(from,direction,Math.Min(PullPlanMaximumAimYards,len),out candidateX,out candidateY))continue;
+                    var ray=MapPullRayEnd(from,candidateX,candidateY,edge);
+                    if(SpearPullRayBlocked(from,ray)
                         ||ComputeLineSafetyPenalty(from,ray)>=SimplePathRejectThreshold)continue;
-                    aimX=screen.X;aimY=screen.Y;marker=edge;targetAcd=m.AcdId;
+                    aimX=candidateX;aimY=candidateY;marker=edge;targetAcd=m.AcdId;
                     return true;
                 }
             }
@@ -3592,7 +3656,7 @@ namespace Turbo.Plugins.s7o
             float dx=aim.X-from.X,dy=aim.Y-from.Y,length=(float)Math.Sqrt(dx*dx+dy*dy);
             if(length<0.1f)return marker;
             float reach=marker==null?length:Math.Max(1.5f,((marker.X-from.X)*dx+(marker.Y-from.Y)*dy)/length);
-            reach=Math.Min(140f,reach);
+            reach=Math.Min(PullPlanMaximumReachYards,reach);
             return Hud.Window.CreateWorldCoordinate(from.X+dx/length*reach,from.Y+dy/length*reach,marker==null?from.Z:marker.Z);
         }
         private void MapPullFeedback(string action,uint target,IWorldCoordinate point)
@@ -3691,6 +3755,7 @@ namespace Turbo.Plugins.s7o
             _cachedPylonBlockers.Clear();
             _cachedWallerBlockers.Clear();
             _cachedProjectileBlockers.Clear();
+            _cachedSandWallBlockers.Clear();
 
             try
             {
@@ -3709,8 +3774,7 @@ namespace Turbo.Plugins.s7o
                 }
 
                 bool needWaller = IncludeWallerAsPullBlockers;
-                bool needProjectile = IncludeProjectileBlockingActors
-                    && Hud?.Sno?.Attributes?.Blocks_Projectiles != null;
+                bool needProjectile = IncludeProjectileBlockingActors;
                 if ((!needWaller && !needProjectile) || Hud?.Game?.Actors == null)
                     return;
 
@@ -3718,6 +3782,14 @@ namespace Turbo.Plugins.s7o
                 {
                     if (actor == null || actor.FloorCoordinate == null) continue;
                     if (actor.CentralXyDistanceToMe > 145.0) continue;
+
+                    if (needProjectile && actor.SnoActor != null
+                        && (uint)actor.SnoActor.Sno == 3048u && !actor.IsDisabled)
+                    {
+                        float radius = actor.RadiusBottom;
+                        if (!(radius > 0f && radius <= 30f)) radius = 2.5f;
+                        _cachedSandWallBlockers.Add(MakeBlockerCircle(actor, radius));
+                    }
 
                     if (needWaller && actor.SnoActor != null)
                     {
@@ -3748,7 +3820,7 @@ namespace Turbo.Plugins.s7o
                         }
                     }
 
-                    if (needProjectile)
+                    if (needProjectile && Hud?.Sno?.Attributes?.Blocks_Projectiles != null)
                     {
                         int blocks = actor.GetAttributeValueAsInt(Hud.Sno.Attributes.Blocks_Projectiles, 0, 0);
                         if (blocks > 0 && !actor.IsDisabled && !actor.IsOperated)
@@ -3768,6 +3840,7 @@ namespace Turbo.Plugins.s7o
             _cachedPylonBlockers.Clear();
             _cachedWallerBlockers.Clear();
             _cachedProjectileBlockers.Clear();
+            _cachedSandWallBlockers.Clear();
         }
 
         private BlockerCircle MakeBlockerCircle(IActor actor, float radius)
@@ -4087,83 +4160,63 @@ namespace Turbo.Plugins.s7o
         // RUNTIME HELPERS
         // =========================
 
-        private void QueueHeldWhirlwindResume(int tick)
-        {
-            _whirlwindResumePending = true;
-            _whirlwindResumeAttempts = 0;
-            _whirlwindResumeNextTick = tick + WhirlwindResumeFirstDelayTicks;
-            _whirlwindResumeUntilTick = tick + WhirlwindResumeWindowTicks;
-        }
 
-        private void ProcessHeldWhirlwindResume(int tick)
-        {
-            if (!_whirlwindResumePending)
-                return;
 
-            if (tick > _whirlwindResumeUntilTick ||
-                !Hud.Window.IsForeground ||
-                !Hud.Game.IsInGame ||
-                Hud.Game.IsLoading ||
-                Hud.Game.Me == null ||
-                Hud.Game.Me.IsDead ||
-                !IsVirtualKeyDown(VK_RBUTTON) ||
-                !IsWhirlwindAssignedToRightSkill())
-            {
-                ClearHeldWhirlwindResume();
-                return;
-            }
 
-            if (tick < _whirlwindResumeNextTick)
-                return;
-
-            try { mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, UIntPtr.Zero); }
-            catch { }
-
-            _whirlwindResumeAttempts++;
-            if (_whirlwindResumeAttempts >= WhirlwindResumeMaxAttempts)
-            {
-                ClearHeldWhirlwindResume();
-            }
-            else
-            {
-                _whirlwindResumeNextTick = tick + WhirlwindResumeRetryTicks;
-            }
-        }
-
-        private void ClearHeldWhirlwindResume()
-        {
-            _whirlwindResumePending = false;
-            _whirlwindResumeNextTick = 0;
-            _whirlwindResumeUntilTick = 0;
-            _whirlwindResumeAttempts = 0;
-        }
-
-        private bool IsWhirlwindAssignedToRightSkill()
-        {
-            try
-            {
-                var skills = Hud?.Game?.Me?.Powers?.CurrentSkills;
-                if (skills == null)
-                    return false;
-
-                uint whirlwindSno = Hud.Sno.SnoPowers.Barbarian_Whirlwind.Sno;
-                foreach (var skill in skills)
-                {
-                    if (skill?.SnoPower != null &&
-                        skill.Key == ActionKey.RightSkill &&
-                        skill.SnoPower.Sno == whirlwindSno)
-                        return true;
-                }
-            }
-            catch { }
-
-            return false;
-        }
 
         private bool IsVirtualKeyDown(int virtualKey)
         {
             try { return Hud?.Input != null && Hud.Input.IsKeyDown((Keys)virtualKey); }
             catch { return false; }
+        }
+
+        private bool TryFarEliteAim(IWorldCoordinate from, float cursorX, float cursorY,
+            out float aimX, out float aimY, out IWorldCoordinate target, out uint targetId)
+        {
+            aimX = cursorX; aimY = cursorY; target = null; targetId = 0;
+            if (from == null || Hud?.Game?.AliveMonsters == null) return false;
+            var cursorWorld = GetScreenWorld(cursorX, cursorY);
+            if (cursorWorld == null) return false;
+            float dirX = cursorWorld.X - from.X, dirY = cursorWorld.Y - from.Y;
+            float length = (float)Math.Sqrt(dirX * dirX + dirY * dirY);
+            if (length < 0.1f) return false;
+            dirX /= length; dirY /= length;
+            float reach = ClampFloat(FarEliteAimMaxYards, 90f, 125f);
+            float maxAngleCos = (float)Math.Cos(ClampFloat(MaxSnapAngleDegrees, 8f, 45f) * Math.PI / 180.0);
+            IMonster best = null;
+            float bestScore = float.MinValue;
+            foreach (var monster in Hud.Game.AliveMonsters)
+            {
+                if (monster == null || !IsLeaderElite(monster) || IsEliteBlocked(monster)
+                    || !IsEliteAllowed(monster) || monster.FloorCoordinate == null)
+                    continue;
+                float dx = monster.FloorCoordinate.X - from.X;
+                float dy = monster.FloorCoordinate.Y - from.Y;
+                float distance = (float)Math.Sqrt(dx * dx + dy * dy);
+                if (distance <= 1f || distance > reach) continue;
+                float projection = dx * dirX + dy * dirY;
+                if (projection / distance < maxAngleCos) continue;
+                // Any closer unstacked elite wins the regular 90-yard pull solver.
+                if (distance <= PullPlanMaximumReachYards)
+                {
+                    if (!IsStackedLeaderElite(monster, from)) return false;
+                    continue;
+                }
+                float lateral = Math.Abs(dx * dirY - dy * dirX) - GetMonsterRadiusBottom(monster);
+                float score = projection - Math.Max(0f, lateral) * 7f;
+                if (score > bestScore) { bestScore = score; best = monster; }
+            }
+            if (best == null) return false;
+            float bestX = best.FloorCoordinate.X - from.X;
+            float bestY = best.FloorCoordinate.Y - from.Y;
+            float bestAngle = (float)Math.Atan2(bestY, bestX);
+            if (!TryProjectSpearRayOnScreen(from, bestAngle, PullPlanMaximumAimYards, out aimX, out aimY))
+                return false;
+            // Geometry vetoes still apply to unreachable offscreen attempts.
+            if (SpearPullRayBlocked(from, best.FloorCoordinate)) return false;
+            target = best.FloorCoordinate;
+            targetId = best.AcdId;
+            return true;
         }
 
         private void ResolveSpearKey()
@@ -4243,7 +4296,7 @@ namespace Turbo.Plugins.s7o
         private void ClearPendingCastOnly()
         {
             ReleaseSyntheticInput();
-            RestoreOwnedCursor(Hud?.Game != null ? Hud.Game.CurrentRealTimeMilliseconds : _castStartedMs);
+            RestoreOwnedCursor();
             ClearPendingCastState();
         }
 
@@ -4252,28 +4305,27 @@ namespace Turbo.Plugins.s7o
             _castPhase = CastPhase.Idle;
             _castPhaseDeadlineMs = 0;
             _castStartedMs = 0;
-            _aimX = 0f;
-            _aimY = 0f;
             _pendingMarkerWorld = null;
             _pendingMapRayEnd = null;
+            _pendingManualBlockedRay = false;
             _pendingMarkerTargetAcdId = 0;
             _pendingMarkerFailed = false;
-            _pendingResumeHeldWhirlwind = false;
             _nativePullPlanUsed = false;
             _savedCursorX = 0f;
             _savedCursorY = 0f;
-            _cursorOwned = false;
+            _cursorRestorePending = false;
             _castingNow = false;
         }
 
         private void ResetTransientState(bool resetHotkeyState)
         {
             if (resetHotkeyState)
-                _hotkeyDownLatched = false;
+                _hotkeyDownLatched = IsHotkeyPhysicallyDownNative();
+            System.Threading.Interlocked.Exchange(ref _hotkeyPressedEvent, 0);
+            System.Threading.Interlocked.Exchange(ref _hotkeyReleasedEvent, 0);
 
             _lastObservedGameTick = -1;
             ClearGeometryBlockerSnapshot();
-            ClearHeldWhirlwindResume();
 
             ClearPendingCastOnly();
 
@@ -4290,12 +4342,6 @@ namespace Turbo.Plugins.s7o
             if (resetHotkeyState)
                 _spearKey = ActionKey.Unknown;
 
-            _lastCursorSampleMs = 0;
-            _lastCursorSampleX = 0f;
-            _lastCursorSampleY = 0f;
-            _manualCursorVelocityX = 0f;
-            _manualCursorVelocityY = 0f;
-            _skipCursorMotionSample = true;
         }
 
 
