@@ -97,6 +97,14 @@ namespace Turbo.Plugins.s7o
             { "hotkey.debug_overlay", new HelpText("Debug Overlay","Choose the shortcut that shows diagnostic information used when troubleshooting HUD.") },
             { "hotkey.save_debug_data", new HelpText("Save Debug Data","Choose the shortcut that saves information useful for reporting a HUD problem.") },
             { "hotkey.reset_session", new HelpText("Reset Session","Choose the shortcut that resets HUD's current session statistics.") },
+            { "macro.sanctified_monk_dash_charges", new HelpText("Dash Charge Icons","Show native Dash charge icons. Shows up to three native charges, independently of the reserve bars. Hidden while native maps or menus are open.") },
+            { "macro.sanctified_monk_dash_reserves", new HelpText("Dash Reserve Bars","Estimate extra Dashes funded by Spirit. Uses current Spirit and live Dash cost with six-piece Raiment and at least one available charge. These bars are an estimate, not guaranteed Dashes.") },
+            { "macro.sanctified_monk_spirit", new HelpText("Spirit Indicator","Show current Spirit below the Dash meter. Red, orange, yellow and green indicate increasing Spirit reserves. This display does not change combat decisions.") },
+            { "macro.sanctified_monk_opacity", new HelpText("Dash Display Opacity","Adjust opacity of all Dash and Spirit visuals. Applies to charge icons, reserve bars and Spirit text together. 0% hides them; 100% preserves their normal appearance.") },
+            { "macro.sanctified_monk_mantra", new HelpText("Healing Mantra","Choose Conservative, Balanced or Aggressive shielding. Conservative: maintain the shield and react to damage; while engaged, allow one proactive cast per second with Flying Dragon active and Spirit above 50%. Balanced: keep the existing adaptive behavior. Aggressive: request rapid casts while engaged with at least 30% Spirit; below 30%, refresh only for damage or shield upkeep. All modes retain affordability, party protection and Shield Pylon checks.") },
+            { "macro.sanctified_monk_fd_test", new HelpText("Flying Dragon Dash Test","Experimental rapid Dashes before Flying Dragon expires. Off by default. Requires held combat assist and Auto Dash. May spend Spirit and interrupt attacks. Stops early on refresh, danger or reserve limits, and is suppressed during Channeling Pylon.") },
+            { "macro.sanctified_monk_fd_window", new HelpText("Flying Dragon Expiry Window","Begin the test this many milliseconds before expiry. 100–2000 ms in 100 ms steps; default 1500 ms. Sets how early the test can begin before Flying Dragon expires. Disabled until the test is enabled.") },
+            { "macro.sanctified_monk_fd_hold", new HelpText("Flying Dragon Dash Hold","Maximum rapid-Dash hold duration in milliseconds. 100–2000 ms in 100 ms steps; default 500 ms. Refresh, danger or Spirit limits may end the hold sooner. Disabled until the test is enabled.") },
             { "macro.sanctified_monk_auto_dash", new HelpText("Auto Dash","Refresh the Raiment and Dash rune buffs during combat. This also enables automatic Dash movement used by target assistance.") },
             { "macro.sanctified_monk_self_dash", new HelpText("Self-Dash","Use Shift to Dash in place for upkeep instead of toward the pointer. Target assistance chooses its own combat destination.") },
             { "macro.sanctified_monk_melee_assist", new HelpText("Melee Target Assist","Hold its hotkey to approach and attack enemies with elite priority. Release it to stop the assistance.") },
@@ -558,7 +566,16 @@ namespace Turbo.Plugins.s7o
             if(a.StartsWith("sanctifiedimpale:cadence"))return "macro.sanctified_impale_cadence";
             if(a=="sanctifiedimpale:bolasaim")return "macro.sanctified_impale_auto_aim";
             if(a=="sanctifiedmonk:option:hotkey"){args=new object[]{label};return "adjust.hotkey";}
-            if(a.StartsWith("sanctifiedmonk:option:"))return a.EndsWith(":1")?"macro.sanctified_monk_auto_dash":a.EndsWith(":2")?"macro.sanctified_monk_self_dash":"macro.sanctified_monk_melee_assist";
+            if(a.StartsWith("sanctifiedmonk:option:"))
+            {
+                string[] parts=a.Split(':'); int kind;
+                if(parts.Length>=3 && int.TryParse(parts[2],out kind))
+                {
+                    string[] codes={"","auto_dash","self_dash","melee_assist","dash_charges","dash_reserves","spirit","opacity","mantra","fd_test","fd_window","fd_hold"};
+                    if(kind>0 && kind<codes.Length)return "macro.sanctified_monk_"+codes[kind];
+                }
+                return null;
+            }
             if(a.StartsWith("zbarb:cone"))return "macro.zbarb_autosnap_cone";
             if(a.StartsWith("riftmap:")){args=new object[]{label};return "adjust.riftmap";}
             if(a.StartsWith("autoskill:")){args=new object[]{label};return "adjust.skill_key";}
@@ -1092,14 +1109,25 @@ namespace Turbo.Plugins.s7o
                     _boxHeight=22+_titleLines.Count*_titleHeight+_bodyLines.Count*_lineHeight;
                 }
             }
-            float x=Hud.Window.CursorX+18,y=Hud.Window.CursorY+22;
-            if(x+_width>width-8)x=Hud.Window.CursorX-_width-14;
-            if(y+_boxHeight>height-8)y=Hud.Window.CursorY-_boxHeight-14;
-            x=Math.Max(8,Math.Min(width-_width-8,x));y=Math.Max(8,Math.Min(height-_boxHeight-8,y));
+            var bounds=TooltipBounds(Hud.Window.CursorX,Hud.Window.CursorY,_width,_boxHeight,width,height);
+            float x=bounds.X,y=bounds.Y;
             _shadow.DrawRectangle(x+3,y+3,_width,_boxHeight);_background.DrawRectangle(x,y,_width,_boxHeight);_border.DrawRectangle(x,y,_width,_boxHeight);
             float ty=y+9;foreach(string line in _titleLines){_titleFont.DrawText(line,x+12,ty);ty+=_titleHeight;}
             ty+=4;foreach(string line in _bodyLines){_bodyFont.DrawText(line,x+12,ty);ty+=_lineHeight;}
         }
+        private static RectangleF TooltipBounds(float cursorX,float cursorY,float boxWidth,float boxHeight,int width,int height)
+        {
+            // Clear Diablo's larger cursor; flip sides near screen edges without moving the cursor.
+            float scale=Math.Max(.8f,Math.Min(1.4f,height/1080f));
+            float gapX=48f*scale,gapY=40f*scale;
+            float x=cursorX+gapX,y=cursorY+gapY;
+            if(x+boxWidth>width-8)x=cursorX-boxWidth-gapX;
+            if(y+boxHeight>height-8)y=cursorY-boxHeight-gapY;
+            x=Math.Max(8,Math.Min(width-boxWidth-8,x));
+            y=Math.Max(8,Math.Min(height-boxHeight-8,y));
+            return new RectangleF(x,y,boxWidth,boxHeight);
+        }
+
         private static float TextWidth(IFont font,string text)
         {
             // Intermediate wrapping candidates must not fill the engine's layout cache.
