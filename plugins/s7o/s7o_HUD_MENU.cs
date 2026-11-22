@@ -21,6 +21,135 @@ namespace Turbo.Plugins.s7o
     // macros, visual helpers, hotkeys, and persistent global plugin states.
     public class s7o_HUD_MENU : BasePlugin, IKeyEventHandler, IAfterCollectHandler, IInGameWorldPainter, IInGameTopPainter, IMouseClickHandler, INewAreaHandler
     {
+        // Hook-free wheel scrolling. Read only the wheel axis while this menu is visible.
+        public bool MouseWheelScrollingEnabled = true;
+        private MenuWheelReader _menuWheelReader;
+        private int _menuWheelRetryAt=int.MinValue, _menuWheelRemainder, _menuWheelLastTarget;
+        private RectangleF _autoGemSpecificWheelRect=RectangleF.Empty;
+        private enum MenuWheelTarget { None, Main, Plugins, Visual, Macros, Tts, GemList }
+
+        private sealed class MenuWheelReader : IDisposable
+        {
+            private NativeWindow _window;
+            private DirectInput _input;
+            private SharpDX.DirectInput.Mouse _mouse;
+            public MenuWheelReader(IntPtr window)
+            {
+                try
+                {
+                    // FreeHUD may expose no main HWND. This unshown, process-owned window
+                    // satisfies DirectInput's cooperative-level requirement; it installs no hooks.
+                    if(window==IntPtr.Zero)
+                    {
+                        _window=new NativeWindow();
+                        _window.CreateHandle(new CreateParams { Caption="s7o HUD menu wheel",Style=0 });
+                        window=_window.Handle;
+                    }
+                    _input=new DirectInput();
+                    _mouse=new SharpDX.DirectInput.Mouse(_input);
+                    _mouse.SetCooperativeLevel(window,CooperativeLevel.NonExclusive|CooperativeLevel.Background);
+                    _mouse.Acquire();
+                    _mouse.GetCurrentState(); // Discard history from before menu acquisition.
+                }
+                catch { Dispose(); throw; }
+            }
+            public int ReadDelta() { return _mouse.GetCurrentState().Z; }
+            public void Dispose()
+            {
+                if(_mouse!=null)
+                {
+                    try { _mouse.Unacquire(); } catch { }
+                    try { _mouse.Dispose(); } catch { }
+                    _mouse=null;
+                }
+                if(_input!=null) { try { _input.Dispose(); } catch { } _input=null; }
+                if(_window!=null) { try { _window.DestroyHandle(); } catch { } _window=null; }
+            }
+        }
+
+        private void DisposeMenuWheel()
+        {
+            var reader=_menuWheelReader;_menuWheelReader=null;
+            if(reader!=null) reader.Dispose();
+            _menuWheelRemainder=_menuWheelLastTarget=0;
+        }
+        private void OnMenuWheelExit(object sender,EventArgs e) { DisposeMenuWheel(); }
+
+        private bool MenuWheelDragging()
+        {
+            return _draggingWindow || _draggingDot || _draggingScrollThumb || _draggingMainThumb
+                || _draggingVisualThumb || _draggingMacrosThumb || _draggingTtsScrollThumb
+                || _draggingAutoGemSpecificScrollThumb || _draggingGlobalTtsSlider;
+        }
+        private MenuWheelTarget GetMenuWheelTarget(MenuLayout layout,float x,float y)
+        {
+            if(layout==null)return MenuWheelTarget.None;
+            RectangleF pane=_activePage==MenuPageTab.Main?layout.ContentPane:layout.MainPane;
+            if(!Contains(pane,x,y))return MenuWheelTarget.None;
+            if(_activePage==MenuPageTab.Main)
+                return _autoGemExpanded && _autoGemSpecificExpanded && Contains(_autoGemSpecificWheelRect,x,y)
+                    ?MenuWheelTarget.GemList:MenuWheelTarget.Main;
+            if(_activePage==MenuPageTab.Plugins)return MenuWheelTarget.Plugins;
+            return _activeToggleCategory==ToggleCategory.Visual?MenuWheelTarget.Visual
+                :_activeToggleCategory==ToggleCategory.Macros?MenuWheelTarget.Macros:MenuWheelTarget.Tts;
+        }
+        private bool ApplyMenuWheelDelta(MenuLayout layout,int delta,float x,float y)
+        {
+            if(!Enabled || !_visible || !MouseWheelScrollingEnabled || MenuWheelDragging())
+            { _menuWheelRemainder=_menuWheelLastTarget=0; return false; }
+            var target=GetMenuWheelTarget(layout,x,y);
+            if(target==MenuWheelTarget.None)
+            { _menuWheelRemainder=_menuWheelLastTarget=0; return false; }
+            if((int)target!=_menuWheelLastTarget)_menuWheelRemainder=0;
+            _menuWheelLastTarget=(int)target;
+            long total=(long)_menuWheelRemainder+delta;
+            int lines=-(int)(total/120); // One existing list step per wheel notch; high-resolution deltas accumulate.
+            _menuWheelRemainder=(int)(total%120);
+            if(lines!=0)
+            {
+                switch(target)
+                {
+                    case MenuWheelTarget.Main: ScrollMainBy(lines); break;
+                    case MenuWheelTarget.Plugins: ScrollBy(lines,layout); break;
+                    case MenuWheelTarget.Visual: ScrollVisualBy(lines); break;
+                    case MenuWheelTarget.Macros: ScrollMacrosBy(lines); MarkLayoutDirty(); break;
+                    case MenuWheelTarget.Tts: ScrollTtsAlertsBy(lines*TtsScrollStepPx); break;
+                    case MenuWheelTarget.GemList:
+                        _autoGemSpecificScroll=ClampAutoGemSpecificScroll(_autoGemSpecificScroll+lines);
+                        MarkLayoutDirty(); break;
+                }
+            }
+            return true;
+        }
+        private void UpdateMenuMouseWheel()
+        {
+            // Background cooperative mode keeps HUD's overlay unfocused. Our own foreground
+            // and visibility gates stop polling whenever the user leaves the game/menu.
+            if(!Enabled || !MouseWheelScrollingEnabled || !_visible || Hud==null || Hud.Game==null
+                || Hud.Window==null || Hud.Render==null || !Hud.Window.IsForeground
+                || Hud.Render.UiHidden || !Hud.Game.IsInGame || Hud.Game.IsLoading)
+            { DisposeMenuWheel(); return; }
+            int now=Environment.TickCount;
+            if(_menuWheelRetryAt!=int.MinValue && unchecked(now-_menuWheelRetryAt)<0)return;
+            try
+            {
+                if(_menuWheelReader==null)
+                {
+                    IntPtr window;
+                    using(var process=Process.GetCurrentProcess())window=process.MainWindowHandle;
+                    _menuWheelReader=new MenuWheelReader(window);
+                    _menuWheelRetryAt=int.MinValue;
+                }
+                int delta=_menuWheelReader.ReadDelta();
+                if(delta!=0)ApplyMenuWheelDelta(GetLayout(),delta,Hud.Window.CursorX,Hud.Window.CursorY);
+            }
+            catch
+            {
+                DisposeMenuWheel();
+                _menuWheelRetryAt=unchecked(now+5000); // No acquisition loops; existing scrollbar controls stay usable.
+            }
+        }
+
         private const string SettingsFileName = "s7o_HUD_MENU.ini";
         private const string LegacySettingsFileName = "s7o_HUD_MENU.settings.txt";
         private const string DebugLogFileName = "s7o_HUD_MENU.debug.log";
@@ -279,6 +408,12 @@ namespace Turbo.Plugins.s7o
         private RectangleF _macrosScrollTrackRect = RectangleF.Empty;
         private RectangleF _macrosScrollThumbRect = RectangleF.Empty;
         private readonly HashSet<string> _macroFavorites = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> _collapsedMacroSections = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private const string MacroFavoritesSection = "Favorites";
+        private const string MacroSectionAction = "macro:section:expand:";
+        private static readonly string[] MacroSectionNames = {
+            "Automation", "Barbarian", "Crusader", "Demon Hunter", "Monk", "Necromancer", "Witch Doctor", "Wizard"
+        };
         private readonly HashSet<string> _visualFavorites = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private Key _zbarbAutoSnapHotkey = Key.Space;
         private bool _zbarbAutoSnapHotkeyCapture = false;
@@ -1247,6 +1382,8 @@ namespace Turbo.Plugins.s7o
         public override void Load(IController hud)
         {
             base.Load(hud);
+            AppDomain.CurrentDomain.ProcessExit+=OnMenuWheelExit;
+            AppDomain.CurrentDomain.DomainUnload+=OnMenuWheelExit;
             s7o_Localization.Load();
             BuildLocalizedPowerNameCache();
             ResetTurboHudLogsDirectory();
@@ -1293,6 +1430,7 @@ namespace Turbo.Plugins.s7o
 
         public void OnNewArea(bool newGame, ISnoArea area)
         {
+            DisposeMenuWheel();
             if (!newGame) return;
             // Unavailable/loading frames are not proof that the game session ended.
             _xpGrRewardPending = false;
@@ -1365,6 +1503,7 @@ namespace Turbo.Plugins.s7o
             }
 
             RunCustomTtsBroadcastHotkeys();
+            UpdateMenuMouseWheel();
 
             bool leftDown = false;
             try { leftDown = Hud.Input.IsKeyDown(Keys.LButton); } catch { }
@@ -3579,6 +3718,19 @@ namespace Turbo.Plugins.s7o
                 bool isBuff = rest.StartsWith("buff:", StringComparison.OrdinalIgnoreCase);
                 string code = isBuff ? rest.Substring(5) : (rest.StartsWith("conditional:", StringComparison.OrdinalIgnoreCase) ? rest.Substring(12) : rest);
                 ToggleMacro(code, isBuff);
+                return;
+            }
+
+            if (action.StartsWith(MacroSectionAction, StringComparison.OrdinalIgnoreCase))
+            {
+                string section = action.Substring(MacroSectionAction.Length);
+                if (_activeToggleCategory != ToggleCategory.Macros || !IsMacroSection(section)) return;
+                if (!_collapsedMacroSections.Remove(section))
+                    _collapsedMacroSections.Add(section);
+                // Rebuild the hit rectangles before accepting clicks on the changed list.
+                _togglesHitRects.Clear();
+                MarkLayoutDirty();
+                SaveSettings();
                 return;
             }
 
@@ -6329,6 +6481,7 @@ namespace Turbo.Plugins.s7o
 
         private void DrawMainPage(MenuLayout l)
         {
+            _autoGemSpecificWheelRect=RectangleF.Empty;
             _mainHitRects.Clear();
 
             DrawContentPane(l);
@@ -6875,6 +7028,7 @@ namespace Turbo.Plugins.s7o
 
         private void DrawAutoGemSpecificList(RectangleF r)
         {
+            _autoGemSpecificWheelRect=r;
             _bTextDimBg.DrawRectangle(r.Left, r.Top, r.Width, r.Height);
             _bPaneBorder.DrawRectangle(r.Left, r.Top, r.Width, r.Height);
 
@@ -13130,6 +13284,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
         {
             public MacroListItemKind Kind;
             public string SectionTitle;
+            public string SectionKey;
             public MacroEntry Entry;
             public bool IsFavoriteDisplay;
             public bool IsCompactOpenGrMapRow;
@@ -13247,7 +13402,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             if (item.Entry.IsZdhHelperChild || item.Entry.IsGenMonkChild || item.Entry.IsImpaleAimOption)
                 return ZdhHelperChildSlotH;
 
-            if(item.Kind==MacroListItemKind.Section)return MacroListSlotH;
+            if (item.Kind == MacroListItemKind.Section) return MacroHeaderH + 8f;
             return MacroLayout(item.Entry,_macroMeasureWidth).Height+8;
         }
 
@@ -13259,13 +13414,19 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             _fLabel.DrawText(DisplayText("Autocast conditional rules and utility macros."), detail.Left + 14f, detail.Top + 34f);
         }
 
-        private void DrawMacroSectionItem(RectangleF r, string title)
+        private void DrawMacroSectionItem(RectangleF r, MacroListItem item)
         {
-            RectangleF rr = new RectangleF(r.Left, r.Top + 4f, r.Width, MacroHeaderH);
+            RectangleF rr = new RectangleF(r.Left, r.Top, r.Width, MacroHeaderH);
+            RectangleF button = new RectangleF(rr.Right - 36f, rr.Top + 4f, 28f, rr.Height - 8f);
+            string title = DisplayText(item.SectionTitle);
+            bool expanded = !_collapsedMacroSections.Contains(item.SectionKey);
 
             _bTitle.DrawRectangle(rr.Left, rr.Top, rr.Width, rr.Height);
             _bPaneBorder.DrawRectangle(rr.Left, rr.Top, rr.Width, rr.Height);
-            _fSection.DrawText(DisplayText(title), rr.Left + 12f, rr.Top + 7f);
+            _fSection.DrawText(title, rr.Left + 12f, rr.Top + 7f);
+            DrawGlossButton(button, expanded ? "-" : "+", expanded, false, true);
+            SetHoverHelpContext(MacroSectionAction + item.SectionKey, title);
+            RegisterToggleHit(MacroSectionAction + item.SectionKey, button);
         }
 
         private void DrawMacroEntryRow(RectangleF slot, MacroEntry entry, int rowIdx, bool isFav)
@@ -13631,7 +13792,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             DrawGlossButton(r, label, enabled, false, false);
         }
 
-        private List<MacroListItem> BuildMacroListItems(List<MacroEntry> allEntries, int[] classStarts, string[] classNames)
+        private List<MacroListItem> BuildMacroListItems(List<MacroEntry> allEntries, int[] classStarts)
         {
             var items = new List<MacroListItem>();
 
@@ -13649,9 +13810,13 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 items.Add(new MacroListItem
                 {
                     Kind = MacroListItemKind.Section,
-                    SectionTitle = "★  FAVORITES"
+                    SectionTitle = "★  FAVORITES",
+                    SectionKey = MacroFavoritesSection
                 });
+            }
 
+            if (favEntries.Count > 0 && !_collapsedMacroSections.Contains(MacroFavoritesSection))
+            {
                 foreach (MacroEntry entry in favEntries)
                 {
                     items.Add(new MacroListItem
@@ -13736,16 +13901,21 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 }
             }
 
-            for (int si = 0; si < classNames.Length; si++)
+            for (int si = 0; si < MacroSectionNames.Length; si++)
             {
                 int start = classStarts[si];
                 int end = si + 1 < classStarts.Length ? classStarts[si + 1] : allEntries.Count;
+                string section = MacroSectionNames[si];
 
                 items.Add(new MacroListItem
                 {
                     Kind = MacroListItemKind.Section,
-                    SectionTitle = classNames[si]
+                    SectionTitle = section,
+                    SectionKey = section
                 });
+
+                if (_collapsedMacroSections.Contains(section))
+                    continue;
 
                 for (int ei = start; ei < end; ei++)
                 {
@@ -13806,6 +13976,29 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
 
 
+        private IFont _genMonkDisabledFont;
+        private sealed class GenMonkMenuOption
+        {
+            public int Kind; public string Key, Field, Setter, Title, Description;
+            public GenMonkMenuOption(int kind,string key,string field,string setter,string title,string description)
+            { Kind=kind; Key=key; Field=field; Setter=setter; Title=title; Description=description; }
+        }
+        private static readonly GenMonkMenuOption[] GenMonkMenuOptions = {
+            new GenMonkMenuOption(4,"dash_charges","ShowDashChargeIndicator","SetDashChargeIndicator","Dash Charge Icons","Show native Dash charge icons."),
+            new GenMonkMenuOption(5,"dash_reserves","ShowDashReserveBars","SetDashReserveBars","Dash Reserve Bars","Estimate extra Dashes funded by Spirit."),
+            new GenMonkMenuOption(6,"spirit","ShowDashSpiritCounter","SetDashSpiritCounter","Spirit Indicator","Show current Spirit below the Dash meter."),
+            new GenMonkMenuOption(7,"opacity","DashVisualOpacityPercent","SetDashVisualOpacity","Dash Display Opacity","Adjust opacity of all Dash and Spirit visuals."),
+            new GenMonkMenuOption(8,"mantra","HealingMantraMode","SetHealingMantraMode","Healing Mantra","Choose Conservative, Balanced or Aggressive shielding."),
+            new GenMonkMenuOption(9,"fd_test","FlyingDragonDashTestEnabled","SetFlyingDragonDashTest","Flying Dragon Dash Test","Experimental rapid Dashes before Flying Dragon expires."),
+            new GenMonkMenuOption(10,"fd_window","FlyingDragonDashStartBeforeExpiryMs","SetFlyingDragonDashStartBeforeExpiry","Flying Dragon Expiry Window","Begin the test this many milliseconds before expiry."),
+            new GenMonkMenuOption(11,"fd_hold","FlyingDragonDashHoldMs","SetFlyingDragonDashHold","Flying Dragon Dash Hold","Maximum rapid-Dash hold duration in milliseconds."),
+        };
+        private static int GenMonkOptionNumber(IPlugin plugin,string field,int fallback)
+        {
+            try { return Convert.ToInt32(plugin.GetType().GetField(field).GetValue(plugin),CultureInfo.InvariantCulture); }
+            catch { return fallback; }
+        }
+
         private void AddGenMonkChildItems(List<MacroListItem> items, bool favoriteDisplay)
         {
             items.Add(new MacroListItem {
@@ -13831,6 +14024,14 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                         Description = T("sanctified.monk.melee_assist.description", "Hold to approach and attack. Prioritizes elites; release to stop."),
                         Code = "sanctified_monk_melee_assist", IsGenMonkChild = true,
                         GenMonkOptionKind = 3 }, IsFavoriteDisplay = favoriteDisplay });
+            if(monk!=null)
+                foreach(var option in GenMonkMenuOptions)
+                    if(monk.GetType().GetField(option.Field)!=null)
+                        items.Add(new MacroListItem {Kind=MacroListItemKind.Entry,IsFavoriteDisplay=favoriteDisplay,
+                            Entry=new MacroEntry {Title=T("sanctified.monk."+option.Key,option.Title),
+                                Description=T("sanctified.monk."+option.Key+".description",option.Description),
+                                MacroDescriptionKey="sanctified.monk."+option.Key+".description",
+                                Code="sanctified_monk_"+option.Key,IsGenMonkChild=true,GenMonkOptionKind=option.Kind} });
         }
 
         private void AddImpaleChildItems(List<MacroListItem> items,bool favoriteDisplay)
@@ -13889,6 +14090,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
         {
             (rowIdx % 2 == 0 ? _bRowAlt : _bRow).DrawRectangle(r.Left, r.Top, r.Width, r.Height);
             IPlugin plugin = FindPluginByTypeName("s7o_GenMonk");
+            if(entry.GenMonkOptionKind>=4) { DrawGenMonkSettingRow(r,entry,plugin); return; }
             bool autoDash = GetOptionalMacroBool(plugin, "AutoDash", true);
             bool selfDash = GetOptionalMacroBool(plugin, "SelfDash", true);
             bool available = plugin != null && (entry.GenMonkOptionKind != 2 || autoDash);
@@ -13920,6 +14122,43 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             }
         }
 
+        private void DrawGenMonkSettingRow(RectangleF r,MacroEntry entry,IPlugin plugin)
+        {
+            var option=GenMonkMenuOptions.FirstOrDefault(o=>o.Kind==entry.GenMonkOptionKind);
+            if(option==null)return;
+            bool timing=option.Kind==10 || option.Kind==11;
+            bool available=plugin!=null && (!timing || GetOptionalMacroBool(plugin,"FlyingDragonDashTestEnabled",false));
+            bool stepper=option.Kind==7 || option.Kind==8 || timing;
+            var control=new RectangleF(r.Right-(stepper?248f:128f),r.Top+9f,stepper?240f:120f,r.Height-18f);
+            float x=r.Left+44f,width=Math.Max(40f,control.Left-x-10f);
+            DrawOutlinedFittedText(_fRowText,_fRowTextShadow,_fSmall,_fSmallShadow,"• "+GetMacroTitleDisplay(entry),x,r.Top+7f,width);
+            var lines=WrapMeasuredDescription(_fSmall,GetMacroDescriptionDisplay(entry),width,2);
+            for(int i=0;i<lines.Length;i++)DrawOutlinedTextAtRaw(_fSmall,_fSmallShadow,lines[i],x,r.Top+28f+i*16f);
+            string action="sanctifiedmonk:option:"+option.Kind.ToString(CultureInfo.InvariantCulture);
+            if(stepper)
+            {
+                int value=GenMonkOptionNumber(plugin,option.Field,option.Kind==7?100:option.Kind==8?1:option.Kind==10?1500:500);
+                string label=option.Kind==8
+                    ? T("sanctified.monk.mantra."+new[]{"conservative","balanced","aggressive"}[Math.Max(0,Math.Min(2,value))],new[]{"Conservative","Balanced","Aggressive"}[Math.Max(0,Math.Min(2,value))])
+                    : value.ToString(CultureInfo.InvariantCulture)+(option.Kind==7?"%":" ms");
+                if(available)DrawToggleStepper(control,label,action+":-1",action+":+1",true,26f,4f);
+                else
+                {
+                    DrawGlossButton(control,"",false,false,true);
+                    if(_genMonkDisabledFont==null)_genMonkDisabledFont=Hud.Render.CreateFont("tahoma",9,190,150,150,150,true,false,false);
+                    DrawCenteredOutlinedTextExact(_genMonkDisabledFont,_fButtonShadow,"-   "+label+"   +",control);
+                    RegisterHoverHelp(action+":+1",control);
+                }
+            }
+            else
+            {
+                bool on=GetOptionalMacroBool(plugin,option.Field,option.Kind!=9);
+                DrawGlossButton(control,on?"ON":"OFF",available&&on,false,available);
+                RegisterHoverHelp(action,control);
+                if(available)RegisterToggleHit(action,control);
+            }
+        }
+
         private void HandleGenMonkOptionAction(string action)
         {
             if (string.Equals(action, "sanctifiedmonk:expand", StringComparison.OrdinalIgnoreCase))
@@ -13932,6 +14171,27 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             IPlugin plugin = FindPluginByTypeName("s7o_GenMonk");
             if (plugin == null) return;
             bool autoDash = GetOptionalMacroBool(plugin, "AutoDash", true);
+            string[] parts=action.Split(':'); int kind;
+            if(parts.Length>=3 && int.TryParse(parts[2],out kind) && kind>=4)
+            {
+                var option=GenMonkMenuOptions.FirstOrDefault(o=>o.Kind==kind);
+                if(option==null || ((kind==10 || kind==11) && !GetOptionalMacroBool(plugin,"FlyingDragonDashTestEnabled",false)))return;
+                try
+                {
+                    bool stepper=kind==7 || kind==8 || kind==10 || kind==11;
+                    if(stepper)
+                    {
+                        int direction;
+                        if(parts.Length!=4 || !int.TryParse(parts[3],out direction) || Math.Abs((long)direction)!=1)return;
+                        int current=GenMonkOptionNumber(plugin,option.Field,kind==7?100:kind==8?1:kind==10?1500:500);
+                        plugin.GetType().GetMethod(option.Setter).Invoke(plugin,new object[]{current+direction*(kind==7?5:kind==8?1:100)});
+                    }
+                    else if(parts.Length==3)
+                        plugin.GetType().GetMethod(option.Setter).Invoke(plugin,new object[]{!GetOptionalMacroBool(plugin,option.Field,kind!=9)});
+                }
+                catch { }
+                return;
+            }
             try
             {
                 if (string.Equals(action, "sanctifiedmonk:option:hotkey", StringComparison.OrdinalIgnoreCase))
@@ -14805,10 +15065,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 wizardStart++;
             }
             int[] classStarts = { 0, barbarianStart, crusaderStart, demonHunterStart, monkStart, necromancerStart, witchDoctorStart, wizardStart };
-            string[] classNames = { "Automation", "Barbarian", "Crusader", "Demon Hunter", "Monk", "Necromancer", "Witch Doctor", "Wizard" };
-
-
-            List<MacroListItem> items = BuildMacroListItems(allEntries, classStarts, classNames);
+            List<MacroListItem> items = BuildMacroListItems(allEntries, classStarts);
 
             _macrosTotalItems = items.Count;
 
@@ -14837,8 +15094,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 Math.Max(8f, _macrosScrollDownRect.Top - _macrosScrollUpRect.Bottom - 4f));
 
             _macroCurrentItems=items;_macroMeasureWidth=listRect.Width;_macroViewportHeight=listRect.Height;
-            _macrosVisibleItems = VisibleMacroItemCount(listRect);
             ClampMacroScroll();
+            _macrosVisibleItems = VisibleMacroItemCount(listRect);
 
             _hoverHelpClip=listRect;
             _macroPaintClip=listRect;
@@ -14859,7 +15116,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
                 if (item.Kind == MacroListItemKind.Section)
                 {
-                    DrawMacroSectionItem(slot, item.SectionTitle);
+                    DrawMacroSectionItem(slot, item);
                 }
                 else
                 {
@@ -16251,6 +16508,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
         private void HideMenuStateOnly()
         {
+            DisposeMenuWheel();
             ReleaseLeftMouseForMenuBoundary();
 
             _visible = false;
@@ -19601,6 +19859,8 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 lines.Add("HOTKEYS_EXPANDED=" + _hotkeysExpanded);
                 foreach (var fav in _macroFavorites)
                     lines.Add("MACRO_FAVORITE=" + fav);
+                foreach (var section in _collapsedMacroSections)
+                    lines.Add("MACRO_COLLAPSED_SECTION=" + section);
                 foreach (var fav in _visualFavorites)
                     lines.Add("VISUAL_FAVORITE=" + fav);
                 // VISUAL overlay settings
@@ -20085,10 +20345,17 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             if (float.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out parsed))
                 value = parsed;
         }
+        private static bool IsMacroSection(string section)
+        {
+            return string.Equals(section, MacroFavoritesSection, StringComparison.OrdinalIgnoreCase)
+                || MacroSectionNames.Contains(section, StringComparer.OrdinalIgnoreCase);
+        }
+
         private void LoadSettings()
         {
             bool settingsMigrationApplied = false;
             _loadedSettingsVersion = 0;
+            _collapsedMacroSections.Clear();
             _favorites.Clear();
             _pluginEnabledOverrides.Clear();
             _ttsCustomMessages.Clear();
@@ -20177,6 +20444,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     }
                     else if (key == "HOTKEYS_EXPANDED") _hotkeysExpanded = ParseBool(val, _hotkeysExpanded);
                     else if (key == "MACRO_FAVORITE"  && !string.IsNullOrWhiteSpace(val)) _macroFavorites.Add(val);
+                    else if (key == "MACRO_COLLAPSED_SECTION" && IsMacroSection(val)) _collapsedMacroSections.Add(val);
                     else if (key == "VISUAL_FAVORITE" && !string.IsNullOrWhiteSpace(val)) _visualFavorites.Add(val);
                     else if (key == "VIS_CLICK")
                     {
