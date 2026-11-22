@@ -417,6 +417,12 @@ namespace Turbo.Plugins.s7o
             if (!_running)
                 return;
 
+            if (_backpackProbe != null && (Hud?.Window == null || !Hud.Window.IsForeground))
+            {
+                StopRun("inventory alignment interrupted");
+                return;
+            }
+            _backpackCollect++;
             int now = Environment.TickCount;
             if (_runMode == RunMode.Merchant) AdvanceMerchantRun(now);
             else if (_runMode == RunMode.DropAll) AdvanceDropAllRun(now);
@@ -438,6 +444,7 @@ namespace Turbo.Plugins.s7o
 
         private void BeginStoreRun()
         {
+            _backpackLayout = null;
             if (!StoreStackables && !StoreLegendaryGems && !StorePrimals && !StoreAncients)
             {
                 ShowStatus("nothing selected", 1200);
@@ -528,6 +535,7 @@ namespace Turbo.Plugins.s7o
 
                     case StoreStage.ProbeTooltip:
                         CompleteStoreTooltipProbe(now);
+                        if (!_running || _backpackProbe != null) return;
                         continue;
 
                     case StoreStage.ClickItem:
@@ -538,6 +546,7 @@ namespace Turbo.Plugins.s7o
                         }
 
                         ClickCurrentCandidate(now);
+                        if (!_running || _backpackProbe != null) return;
                         continue;
 
                     case StoreStage.WaitAfterClick:
@@ -554,6 +563,7 @@ namespace Turbo.Plugins.s7o
 
         private void StopRun(string status)
         {
+            _backpackProbe = null;
             if (_runMode == RunMode.Store)
                 s7o_InventoryModInput.EndStoreCursor(Hud != null
                     && Hud.Window != null && Hud.Window.IsForeground);
@@ -601,6 +611,7 @@ namespace Turbo.Plugins.s7o
 
         private void BeginDropAllRun(bool filteredOnly)
         {
+            _backpackLayout = null;
             _dropAllQueue.Clear();
             _currentDropAllQueueIndex = 0;
             _dropAllCount = 0;
@@ -661,6 +672,7 @@ namespace Turbo.Plugins.s7o
                             continue;
                         }
                         DropCurrentInventoryItem(now);
+                        if (!_running || _backpackProbe != null) return;
                         continue;
 
                     case DropAllStage.WaitAfterDrop:
@@ -776,8 +788,7 @@ namespace Turbo.Plugins.s7o
             }
 
             RectangleF rect;
-            try { rect = Hud.Inventory.GetItemRect(item); }
-            catch { rect = RectangleF.Empty; }
+            if (!TryResolveBackpackTarget(item, now, out rect)) return;
 
             if (rect.Width <= 0 || rect.Height <= 0)
             {
@@ -844,6 +855,7 @@ namespace Turbo.Plugins.s7o
 
         private void BeginMerchantRun()
         {
+            _backpackLayout = null;
             if (!SellGifts && !SellScreams && !SellGems)
             {
                 ShowStatus("nothing selected", 1200);
@@ -920,6 +932,7 @@ namespace Turbo.Plugins.s7o
                         }
 
                         ClickCurrentMerchantCandidate(now);
+                        if (!_running || _backpackProbe != null) return;
                         continue;
 
                     case MerchantStage.ProbeTooltip:
@@ -1321,8 +1334,7 @@ private static bool IsSpecialStackableStorageSafe(IItem item, StashPlan plan)
             }
 
             RectangleF rect;
-            try { rect = Hud.Inventory.GetItemRect(item); }
-            catch { rect = RectangleF.Empty; }
+            if (!TryResolveBackpackTarget(item, now, out rect)) return;
 
             if (rect.Width <= 0 || rect.Height <= 0)
             {
@@ -1343,7 +1355,7 @@ private static bool IsSpecialStackableStorageSafe(IItem item, StashPlan plan)
                     return;
                 }
 
-                if (!s7o_InventoryModInput.MoveToRect(rect))
+                if (!MoveToBackpackTooltip(rect))
                 {
                     _skippedCount++;
                     _merchantStage = MerchantStage.WaitAfterClick;
@@ -2016,10 +2028,9 @@ private static bool IsSpecialStackableStorageSafe(IItem item, StashPlan plan)
             if (candidate.ProbeStartedTick == 0)
             {
                 RectangleF rect;
-                try { rect = Hud.Inventory.GetItemRect(item); }
-                catch { rect = RectangleF.Empty; }
+                if (!TryResolveBackpackTarget(item, now, out rect)) return;
 
-                if (rect.Width <= 0 || rect.Height <= 0 || !s7o_InventoryModInput.MoveToRect(rect))
+                if (rect.Width <= 0 || rect.Height <= 0 || !MoveToBackpackTooltip(rect))
                 {
                     _skippedCount++;
                     _stage = StoreStage.WaitAfterClick;
@@ -2089,8 +2100,7 @@ private static bool IsSpecialStackableStorageSafe(IItem item, StashPlan plan)
             }
 
             RectangleF rect;
-            try { rect = Hud.Inventory.GetItemRect(item); }
-            catch { rect = RectangleF.Empty; }
+            if (!TryResolveBackpackTarget(item, now, out rect)) return;
 
             if (rect.Width <= 0 || rect.Height <= 0)
             {
@@ -2841,9 +2851,233 @@ private static bool IsSpecialStackableStorageSafe(IItem item, StashPlan plan)
             return IsVisible(Hud != null && Hud.Inventory != null ? Hud.Inventory.StashMainUiElement : null);
         }
 
+        // Backpack coordinates are client-relative. Cache only layouts confirmed by native hover.
+        private const int BackpackColumns = 10;
+        private const int BackpackRows = 6;
+        private const int BackpackHoverTimeoutMs = 180;
+        private const string BackpackCacheVersion = "bag1|";
+        private readonly List<string> _verifiedBackpackLayouts = new List<string>(6);
+        private BackpackLayout _backpackLayout;
+        private BackpackProbe _backpackProbe;
+        private int _backpackCollect;
+
+        private sealed class BackpackLayout
+        {
+            public Size WindowSize;
+            public float UiRatio;
+            public RectangleF Grid;
+            public string GeometryKey;
+            public bool NeedsVerification;
+            public bool Verified;
+            public bool UseGrid;
+        }
+
+        private sealed class BackpackProbe
+        {
+            public uint Acd;
+            public int SlotX, SlotY, Collect, StartedAt;
+            public bool UseGrid;
+            public RectangleF Aim;
+            public Point WindowOffset;
+        }
+
+        private static bool RectInWindow(RectangleF rect, Size window)
+        {
+            return rect.Width > 0 && rect.Height > 0 && rect.Left >= 0 && rect.Top >= 0
+                && rect.Right <= window.Width && rect.Bottom <= window.Height;
+        }
+
+        private bool TryGetLiveBackpackGrid(out RectangleF grid)
+        {
+            grid = RectangleF.Empty;
+            try
+            {
+                var element = Hud.Inventory?.InventoryItemsUiElement;
+                if (element == null || !element.Visible) return false;
+                var candidate = element.Rectangle;
+                var size = Hud.Window.Size;
+                // Accept only a plausible 10-by-6 grid in the actual backpack area.
+                if (!RectInWindow(candidate, size) || candidate.Left < size.Width * 0.4f
+                    || candidate.Width / BackpackColumns < 12f || candidate.Height / BackpackRows < 12f
+                    || candidate.Width / candidate.Height < 1.35f || candidate.Width / candidate.Height > 2.0f)
+                    return false;
+                grid = candidate;
+                return true;
+            }
+            catch { return false; }
+        }
+
+        private static bool BackpackGridDiffers(RectangleF native, RectangleF live)
+        {
+            if (native.IsEmpty) return true;
+            float thresholdX = Math.Max(4f, live.Width / BackpackColumns * 0.35f);
+            float thresholdY = Math.Max(4f, live.Height / BackpackRows * 0.35f);
+            return Math.Abs(native.Left - live.Left) > thresholdX || Math.Abs(native.Right - live.Right) > thresholdX
+                || Math.Abs(native.Top - live.Top) > thresholdY || Math.Abs(native.Bottom - live.Bottom) > thresholdY;
+        }
+
+        private static string BackpackRectKey(RectangleF rect)
+        {
+            return FormattableString.Invariant($"{rect.X:0.0},{rect.Y:0.0},{rect.Width:0.0},{rect.Height:0.0}");
+        }
+
+        private BackpackLayout ReadBackpackLayout(RectangleF grid, Size window, float uiRatio)
+        {
+            RectangleF native = RectangleF.Empty;
+            try
+            {
+                var first = Hud.Inventory.GetRectInInventory(0, 0, 1, 1);
+                var last = Hud.Inventory.GetRectInInventory(BackpackColumns - 1, BackpackRows - 1, 1, 1);
+                if (RectInWindow(first, window) && RectInWindow(last, window)
+                    && last.Left > first.Left && last.Top > first.Top)
+                    native = RectangleF.FromLTRB(first.Left, first.Top, last.Right, last.Bottom);
+            }
+            catch { }
+
+            var layout = new BackpackLayout { WindowSize = window, UiRatio = uiRatio, Grid = grid,
+                NeedsVerification = BackpackGridDiffers(native, grid) };
+            if (!layout.NeedsVerification) return layout;
+
+            layout.GeometryKey = BackpackCacheVersion + FormattableString.Invariant($"{window.Width}x{window.Height}|{uiRatio:0.####}|")
+                + BackpackRectKey(grid) + "|" + BackpackRectKey(native);
+            layout.UseGrid = _verifiedBackpackLayouts.Contains(layout.GeometryKey + "|grid");
+            layout.Verified = layout.UseGrid || _verifiedBackpackLayouts.Contains(layout.GeometryKey + "|native");
+            if (!layout.Verified) TraceBackpackAlignment("checking", layout);
+            return layout;
+        }
+
+        private static RectangleF BackpackCellRect(RectangleF grid, int x, int y, int width, int height)
+        {
+            if (x < 0 || y < 0 || width < 1 || height < 1
+                || x > BackpackColumns - width || y > BackpackRows - height) return RectangleF.Empty;
+            float cellWidth = grid.Width / BackpackColumns, cellHeight = grid.Height / BackpackRows;
+            return new RectangleF(grid.Left + x * cellWidth, grid.Top + y * cellHeight, width * cellWidth, height * cellHeight);
+        }
+
+        private bool TryResolveBackpackTarget(IItem item, int now, out RectangleF rect)
+        {
+            rect = RectangleF.Empty;
+            try { rect = Hud.Inventory.GetItemRect(item); }
+            catch { }
+
+            RectangleF grid;
+            if (!TryGetLiveBackpackGrid(out grid))
+            {
+                if (_backpackProbe != null || (_backpackLayout != null && _backpackLayout.NeedsVerification))
+                {
+                    StopRun("inventory alignment changed");
+                    return false;
+                }
+                _backpackLayout = null;
+                return true; // Keep the existing path when no usable independent grid is exposed.
+            }
+
+            var window = Hud.Window.Size;
+            float uiRatio = Hud.Window.HeightUiRatio;
+            if (_backpackLayout == null || _backpackLayout.Grid != grid || _backpackLayout.WindowSize != window
+                || _backpackLayout.UiRatio != uiRatio)
+            {
+                if (_backpackProbe != null)
+                {
+                    StopRun("inventory alignment changed");
+                    return false;
+                }
+                _backpackLayout = ReadBackpackLayout(grid, window, uiRatio);
+            }
+
+            var layout = _backpackLayout;
+            if (!layout.NeedsVerification) return true;
+            if (layout.Verified && !layout.UseGrid) return true;
+
+            RectangleF fitted = item.SnoItem == null ? RectangleF.Empty : BackpackCellRect(grid,
+                item.InventoryX, item.InventoryY, item.SnoItem.ItemWidth, item.SnoItem.ItemHeight);
+            if (!RectInWindow(fitted, window))
+            {
+                StopRun("inventory slot could not be aligned");
+                return false;
+            }
+            if (layout.Verified)
+            {
+                rect = fitted;
+                return true;
+            }
+
+            if (_backpackProbe == null)
+            {
+                if (!StartBackpackProbe(item, fitted, true, now)) StopRun("inventory alignment unavailable");
+                return false;
+            }
+
+            var probe = _backpackProbe;
+            if (!MatchesBackpackProbe(item, probe)
+                || probe.WindowOffset != Hud.Window.Offset || !s7o_InventoryModInput.BackpackCursorAt(probe.Aim, probe.WindowOffset))
+            {
+                StopRun("inventory alignment interrupted");
+                return false;
+            }
+            if (probe.Collect == _backpackCollect) return false;
+
+            IItem hovered = null;
+            try { hovered = Hud.Inventory.HoveredItem; }
+            catch { }
+            if (MatchesBackpackProbe(hovered, probe))
+            {
+                layout.Verified = true;
+                layout.UseGrid = probe.UseGrid;
+                _backpackProbe = null;
+                string key = layout.GeometryKey + (layout.UseGrid ? "|grid" : "|native");
+                if (!_verifiedBackpackLayouts.Contains(key))
+                {
+                    if (_verifiedBackpackLayouts.Count == 6) _verifiedBackpackLayouts.RemoveAt(0);
+                    _verifiedBackpackLayouts.Add(key);
+                    SaveSettings();
+                }
+                TraceBackpackAlignment(layout.UseGrid ? "confirmed-grid" : "confirmed-native", layout);
+                if (layout.UseGrid) rect = fitted;
+                return true;
+            }
+
+            if (unchecked((uint)(now - probe.StartedAt)) < BackpackHoverTimeoutMs) return false;
+            if (probe.UseGrid && RectInWindow(rect, window) && StartBackpackProbe(item, rect, false, now)) return false;
+            TraceBackpackAlignment("unverified", layout);
+            StopRun("inventory alignment could not be verified");
+            return false;
+        }
+
+        private static bool MatchesBackpackProbe(IItem item, BackpackProbe probe)
+        {
+            return item != null && item.Location == ItemLocation.Inventory && item.AcdId == probe.Acd
+                && item.InventoryX == probe.SlotX && item.InventoryY == probe.SlotY;
+        }
+
+        private bool StartBackpackProbe(IItem item, RectangleF aim, bool useGrid, int now)
+        {
+            var offset = Hud.Window.Offset;
+            if (item.AcdId == 0 || !s7o_InventoryModInput.MoveToBackpackRect(aim, offset)) return false;
+            _backpackProbe = new BackpackProbe { Acd = item.AcdId, SlotX = item.InventoryX, SlotY = item.InventoryY,
+                Collect = _backpackCollect, StartedAt = now, Aim = aim, UseGrid = useGrid, WindowOffset = offset };
+            return true;
+        }
+
+        private bool MoveToBackpackTooltip(RectangleF rect)
+        {
+            return _backpackLayout != null && _backpackLayout.UseGrid
+                ? s7o_InventoryModInput.MoveToBackpackRect(rect, Hud.Window.Offset)
+                : s7o_InventoryModInput.MoveToRect(rect);
+        }
+
+        private void TraceBackpackAlignment(string state, BackpackLayout layout)
+        {
+            try { Hud.TextLog.Log("s7o_InventoryMOD_Layout", state + " " + layout.GeometryKey, false, true); }
+            catch { }
+        }
+
+
         private bool IsInventoryVisible()
         {
-            return IsVisible(Hud != null && Hud.Inventory != null ? Hud.Inventory.InventoryMainUiElement : null);
+            if (IsVisible(Hud != null && Hud.Inventory != null ? Hud.Inventory.InventoryMainUiElement : null)) return true;
+            RectangleF grid;
+            return TryGetLiveBackpackGrid(out grid);
         }
 
         private bool IsChatEntryOpen()
@@ -3043,6 +3277,12 @@ private static bool IsSpecialStackableStorageSafe(IItem item, StashPlan plan)
                     string value = line.Substring(eq + 1).Trim();
 
                     if (key.Equals("SettingsVersion", StringComparison.OrdinalIgnoreCase)) _settingsVersion = ParseInt(value, _settingsVersion);
+                    else if (key.Equals("VerifiedBackpackLayout", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (value.StartsWith(BackpackCacheVersion, StringComparison.Ordinal) && value.Length < 160
+                            && _verifiedBackpackLayouts.Count < 6 && !_verifiedBackpackLayouts.Contains(value))
+                            _verifiedBackpackLayouts.Add(value);
+                    }
                     else if (key.Equals("StoreItemsHotkey", StringComparison.OrdinalIgnoreCase))
                     {
                         try { StoreItemsHotkey = (Key)Enum.Parse(typeof(Key), value, true); } catch { }
@@ -3117,7 +3357,8 @@ private static bool IsSpecialStackableStorageSafe(IItem item, StashPlan plan)
                     "StoreItemsUiSettleDelayMs=" + StoreItemsUiSettleDelayMs + Environment.NewLine +
                     "StoreItemsTabSwitchDelayMs=" + StoreItemsTabSwitchDelayMs + Environment.NewLine +
                     "StoreItemsClickDelayMs=" + StoreItemsClickDelayMs + Environment.NewLine +
-                    "InventoryVirtualKey=" + InventoryVirtualKey + Environment.NewLine);
+                    "InventoryVirtualKey=" + InventoryVirtualKey + Environment.NewLine
+                    + string.Concat(_verifiedBackpackLayouts.Select(key => "VerifiedBackpackLayout=" + key + Environment.NewLine)));
             }
             catch { }
         }
@@ -3612,6 +3853,22 @@ private static bool IsSpecialStackableStorageSafe(IItem item, StashPlan plan)
             int x = (int)Math.Round(rect.X + rect.Width * 0.5f);
             int y = (int)Math.Round(rect.Y + rect.Height * 0.5f);
             return MoveOperationCursor(x, y);
+        }
+
+        public static bool MoveToBackpackRect(RectangleF rect, Point offset)
+        {
+            IntPtr game = FindWindow("D3 Main Window Class", null);
+            if (game == IntPtr.Zero || GetForegroundWindow() != game) return false;
+            return MoveOperationCursor(offset.X + (int)Math.Round(rect.Left + rect.Width * 0.5f),
+                offset.Y + (int)Math.Round(rect.Top + rect.Height * 0.5f));
+        }
+
+        public static bool BackpackCursorAt(RectangleF rect, Point offset)
+        {
+            POINT cursor;
+            return GetCursorPos(out cursor)
+                && Math.Abs(cursor.X - (offset.X + (int)Math.Round(rect.Left + rect.Width * 0.5f))) <= 2
+                && Math.Abs(cursor.Y - (offset.Y + (int)Math.Round(rect.Top + rect.Height * 0.5f))) <= 2;
         }
 
         public static bool RightClickRect(RectangleF rect)
