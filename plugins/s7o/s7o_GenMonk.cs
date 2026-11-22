@@ -52,6 +52,24 @@ namespace Turbo.Plugins.s7o
         public int GeneratorPulseMs = 250;
         public int GeneratorPulseMinMs = 35;
         public int DashPulseMs = 55;
+        // Optional screen-centered Dash display (visual only; safe for future HudMenu toggles).
+        // HUD Menu settings: 0 Conservative, 1 Balanced (existing policy), 2 Aggressive.
+        public int HealingMantraMode = 1;
+        public int DashVisualOpacityPercent = 100;
+        private int _dashAppliedOpacity = -1;
+        private readonly Dictionary<ITransparent,float> _dashVisualBaseOpacity = new Dictionary<ITransparent,float>();
+        public bool ShowDashChargeIndicator = true;
+        public bool ShowDashSpiritCounter = true;
+        public bool ShowDashReserveBars = true; // Estimated Spirit-funded Dashes beyond native charges.
+        public double DashIndicatorMinimumSpiritPerDash = 0.0; // 0 uses live cost; positive values impose a conservative floor.
+        public double DashIndicatorSpiritRedThreshold = 35.0;
+        public double DashIndicatorSpiritOrangeThreshold = 60.0;
+        public double DashIndicatorSpiritYellowThreshold = 90.0;
+        public float DashIndicatorOffsetX = 0.0f;
+        public float DashIndicatorOffsetY = 80.0f;
+        public float DashIndicatorRadius = 7.0f;
+        public float DashIndicatorGap = 11.0f;
+        public float DashSpiritCounterOffsetY = 16.0f;
         public int GeneratorRetryGapMs = 250;
         // Foresight needs a real third hit; WotHF's animation cannot verify that stage.
         // The current main generator remains manual; refresh the other due contributions
@@ -88,6 +106,10 @@ namespace Turbo.Plugins.s7o
         // Buff upkeep is not navigation: stationary renewal never resets wall recovery.
         private bool _selfDashUpkeep, _dashUpkeepNeedsAttack, _selfDashFrozenPulse;
         private int _dashConfirmedGameTick = int.MinValue, _dashUpkeepAttemptGameTick = int.MinValue;
+        private int _dashUpkeepSerial = int.MinValue, _dashUpkeepRetryAt = int.MinValue;
+        private bool _dashUpkeepRetryInPlace;
+        private const int AssistInPlaceUpkeepConfirmMs = 150;
+        private const int AssistInPlaceUpkeepRetryMs = 250;
         private uint _dashConfirmedWorld;
         private string _dashDeadlineReason = "none", _mapLandingReason = "none";
         private bool _panicMustAttack;
@@ -109,9 +131,14 @@ namespace Turbo.Plugins.s7o
         private int _cursorX, _cursorY, _dashTargetX, _dashTargetY;
         private string _settingsPath;
         private IFont _combinationFont;
+        private readonly IFont[] _dashSpiritFonts = new IFont[4]; // Red, orange, yellow, green.
+        private IFont _dashSpiritOutlineFont;
+        private readonly IBrush[] _dashChargeBrushes = new IBrush[4];
+        private IBrush _dashOutlineBrush, _dashGlossBrush, _dashReserveOutlineBrush;
         private IUiElement _combinationIcon;
         private IUiElement _chatEditLine;
         private readonly List<IUiElement> _clickUiElements = new List<IUiElement>();
+        private readonly List<IUiElement> _dashIndicatorPanels = new List<IUiElement>();
         private readonly List<RectangleF> _clickUiRects = new List<RectangleF>();
         private s7o_HUD_MENU _hudMenu;
         private bool _clickUiReadable;
@@ -727,8 +754,24 @@ namespace Turbo.Plugins.s7o
             _juggerFocusBrush = Hud.Render.CreateBrush(245, 255, 132, 0, 3.2f);
             _monkTargetRingOutline=Hud.Render.CreateBrush(245,0,0,0,4.8f);
             _monkTargetRingBrush=Hud.Render.CreateBrush(250,255,35,35,3.5f);
+            _dashOutlineBrush = Hud.Render.CreateBrush(175, 0, 0, 0, 3.8f);
+            _dashGlossBrush = Hud.Render.CreateBrush(155, 255, 255, 255, 0f);
+            _dashReserveOutlineBrush = Hud.Render.CreateBrush(230, 0, 0, 0, 0f);
+            _dashSpiritOutlineFont = Hud.Render.CreateFont("tahoma", 11, 255, 0, 0, 0, true, false, false);
+            int[,] colors = { { 230, 52, 44 }, { 246, 145, 33 }, { 239, 206, 63 }, { 40, 214, 95 } };
+            for (int i = 0; i < colors.GetLength(0); i++)
+            {
+                _dashChargeBrushes[i] = Hud.Render.CreateBrush(185, colors[i, 0], colors[i, 1], colors[i, 2], 0f);
+                _dashSpiritFonts[i] = Hud.Render.CreateFont("tahoma", 11, 255, colors[i, 0], colors[i, 1], colors[i, 2],
+                    true, false, 255, 0, 0, 0, true);
+            }
             _settingsPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory,
                 "plugins", "s7o", "settings", "s7o_GenMonk.ini");
+            LoadOptions();
+        }
+
+        private void LoadOptions()
+        {
             try
             {
                 string loadPath = _settingsPath;
@@ -746,8 +789,21 @@ namespace Turbo.Plugins.s7o
                         if (pair.Length == 2 && pair[0] == "MeleeAssistVirtualKey"
                             && ushort.TryParse(pair[1], out assistKey) && assistKey != 0)
                         { MeleeAssistVirtualKey = assistKey; continue; }
+                        int number;
+                        if(pair.Length==2 && int.TryParse(pair[1],System.Globalization.NumberStyles.Integer,
+                            System.Globalization.CultureInfo.InvariantCulture,out number))
+                        {
+                            if(pair[0]=="DashVisualOpacityPercent") { DashVisualOpacityPercent=Math.Max(0,Math.Min(100,number)); continue; }
+                            if(pair[0]=="HealingMantraMode") { HealingMantraMode=Math.Max(0,Math.Min(2,number)); continue; }
+                            if(pair[0]=="FlyingDragonDashStartBeforeExpiryMs") { FlyingDragonDashStartBeforeExpiryMs=ClampFlyingDragonDashTiming(number); continue; }
+                            if(pair[0]=="FlyingDragonDashHoldMs") { FlyingDragonDashHoldMs=ClampFlyingDragonDashTiming(number); continue; }
+                        }
                         bool value;
                         if (pair.Length != 2 || !bool.TryParse(pair[1], out value)) continue;
+                        if (pair[0] == "ShowDashChargeIndicator") ShowDashChargeIndicator = value;
+                        if (pair[0] == "ShowDashReserveBars") ShowDashReserveBars = value;
+                        if (pair[0] == "ShowDashSpiritCounter") ShowDashSpiritCounter = value;
+                        if (pair[0] == "FlyingDragonDashTestEnabled") FlyingDragonDashTestEnabled = value;
                         if (pair[0] == "AutoDash") AutoDash = value;
                         if (pair[0] == "SelfDash") SelfDash = value;
                         if (pair[0] == "MeleeAssistEnabled") MeleeAssistEnabled = value;
@@ -757,6 +813,27 @@ namespace Turbo.Plugins.s7o
             }
             catch { }
         }
+
+        private static int ClampFlyingDragonDashTiming(int value)
+        { return ((Math.Max(100,Math.Min(2000,value))+50)/100)*100; }
+        public void SetDashChargeIndicator(bool value) { ShowDashChargeIndicator=value; SaveOptions(); }
+        public void SetDashReserveBars(bool value) { ShowDashReserveBars=value; SaveOptions(); }
+        public void SetDashSpiritCounter(bool value) { ShowDashSpiritCounter=value; SaveOptions(); }
+        public void SetDashVisualOpacity(int value)
+        { DashVisualOpacityPercent=Math.Max(0,Math.Min(100,value)); ApplyDashIndicatorOpacity(); SaveOptions(); }
+        public void SetHealingMantraMode(int value)
+        { HealingMantraMode=Math.Max(0,Math.Min(2,value)); SaveOptions(); }
+        public void SetFlyingDragonDashTest(bool value)
+        {
+            FlyingDragonDashTestEnabled=value;
+            if(!value && _heldDashTrialActive && !_heldDashTrialAcquire)
+                EndHeldDashTrial(Environment.TickCount,"test-disabled");
+            SaveOptions();
+        }
+        public void SetFlyingDragonDashStartBeforeExpiry(int value)
+        { FlyingDragonDashStartBeforeExpiryMs=ClampFlyingDragonDashTiming(value); SaveOptions(); }
+        public void SetFlyingDragonDashHold(int value)
+        { FlyingDragonDashHoldMs=ClampFlyingDragonDashTiming(value); SaveOptions(); }
 
         public void SetAutoDash(bool value) { AutoDash = value; SaveOptions(); }
         public void SetSelfDash(bool value) { SelfDash = value; SaveOptions(); }
@@ -792,6 +869,14 @@ namespace Turbo.Plugins.s7o
                 Directory.CreateDirectory(Path.GetDirectoryName(_settingsPath));
                 File.WriteAllText(_settingsPath, "AutoDash=" + AutoDash + Environment.NewLine
                     + "SelfDash=" + SelfDash + Environment.NewLine
+                    + "ShowDashChargeIndicator=" + ShowDashChargeIndicator + Environment.NewLine
+                    + "ShowDashReserveBars=" + ShowDashReserveBars + Environment.NewLine
+                    + "ShowDashSpiritCounter=" + ShowDashSpiritCounter + Environment.NewLine
+                    + "DashVisualOpacityPercent=" + DashVisualOpacityPercent.ToString(System.Globalization.CultureInfo.InvariantCulture) + Environment.NewLine
+                    + "HealingMantraMode=" + HealingMantraMode.ToString(System.Globalization.CultureInfo.InvariantCulture) + Environment.NewLine
+                    + "FlyingDragonDashTestEnabled=" + FlyingDragonDashTestEnabled + Environment.NewLine
+                    + "FlyingDragonDashStartBeforeExpiryMs=" + FlyingDragonDashStartBeforeExpiryMs.ToString(System.Globalization.CultureInfo.InvariantCulture) + Environment.NewLine
+                    + "FlyingDragonDashHoldMs=" + FlyingDragonDashHoldMs.ToString(System.Globalization.CultureInfo.InvariantCulture) + Environment.NewLine
                     + "GuardianPreAttackEnabled=" + GuardianPreAttackEnabled + Environment.NewLine
                     + "ElitePrimaryReacquireEnabled=" + ElitePrimaryReacquireEnabled + Environment.NewLine
                     + "MeleeAssistEnabled=" + MeleeAssistEnabled + Environment.NewLine
@@ -1344,21 +1429,30 @@ namespace Turbo.Plugins.s7o
                 try { AddClickUi(Hud.Render.GetPlayerSkillUiElement(key)); } catch { }
             AddClickUi(Hud.Render.ParagonLevelUpSplashTextUiElement);
             if (Hud.Inventory != null) AddClickUi(Hud.Inventory.FollowerMainUiElement);
-            foreach (string path in new[] {
-                "Root.NormalLayer.Paragon_main.LayoutRoot.ParagonPointSelect",
-                "Root.NormalLayer.game_notify_dialog_backgroundScreen.dialog_new_paragon_button",
-                "Root.NormalLayer.SkillPane_main.LayoutRoot.SkillsList",
-                "Root.TopLayer.follower_swap",
-                "Root.NormalLayer.BattleNetProfile_main.LayoutRoot.OverlayContainer",
-                "Root.NormalLayer.BattleNetLeaderboard_main.LayoutRoot.OverlayContainer",
-                "Root.NormalLayer.BattleNetAchievements_main.LayoutRoot.OverlayContainer",
-                "Root.NormalLayer.BattleNetStore_main.LayoutRoot.OverlayContainer",
-                "Root.NormalLayer.Guild_main.LayoutRoot.OverlayContainer",
-                "Root.NormalLayer.gamemenu_dialog.gamemenu_bkgrnd",
-                "Root.NormalLayer.conversation_dialog_main",
-                "Root.TopLayer.BattleNetSocialDialogs_main.LayoutRoot.DialogWriteNote"
-            })
-                try { AddClickUi(Hud.Render.RegisterUiElement(path, null, null)); } catch { }
+            RegisterClickUi("Root.NormalLayer.Paragon_main.LayoutRoot.ParagonPointSelect", hidesDashIndicator: true);
+            RegisterClickUi("Root.NormalLayer.game_notify_dialog_backgroundScreen.dialog_new_paragon_button");
+            RegisterClickUi("Root.NormalLayer.SkillPane_main.LayoutRoot.SkillsList");
+            RegisterClickUi("Root.TopLayer.follower_swap");
+            RegisterClickUi("Root.NormalLayer.BattleNetProfile_main.LayoutRoot.OverlayContainer", hidesDashIndicator: true);
+            RegisterClickUi("Root.NormalLayer.BattleNetLeaderboard_main.LayoutRoot.OverlayContainer", hidesDashIndicator: true);
+            RegisterClickUi("Root.NormalLayer.BattleNetAchievements_main.LayoutRoot.OverlayContainer", hidesDashIndicator: true);
+            RegisterClickUi("Root.NormalLayer.BattleNetStore_main.LayoutRoot.OverlayContainer", hidesDashIndicator: true);
+            RegisterClickUi("Root.NormalLayer.Guild_main.LayoutRoot.OverlayContainer", hidesDashIndicator: true);
+            RegisterClickUi("Root.NormalLayer.gamemenu_dialog.gamemenu_bkgrnd", hidesDashIndicator: true);
+            RegisterClickUi("Root.NormalLayer.conversation_dialog_main");
+            RegisterClickUi("Root.TopLayer.BattleNetSocialDialogs_main.LayoutRoot.DialogWriteNote", hidesDashIndicator: true);
+        }
+
+        private void RegisterClickUi(string path, bool hidesDashIndicator = false)
+        {
+            try
+            {
+                var element = Hud.Render.RegisterUiElement(path, null, null);
+                AddClickUi(element);
+                if (element != null && hidesDashIndicator)
+                    _dashIndicatorPanels.Add(element);
+            }
+            catch { }
         }
 
         private void AddClickUi(IUiElement element)
@@ -2088,10 +2182,139 @@ namespace Turbo.Plugins.s7o
             }
             return true;
         }
+        private bool DashIndicatorUiBlocked()
+        {
+            // Side panels and vendor dialogs leave the center free. Combat input
+            // has its own UI guards; only maps and centered panels hide this display.
+            if (!Hud.Window.IsForeground || Hud.Game.MapMode != MapMode.Minimap
+                || IsInputUiVisible(Hud.Render.WorldMapUiElement)
+                || IsInputUiVisible(Hud.Render.ActMapUiElement)) return true;
+            foreach (var panel in _dashIndicatorPanels)
+                if (IsInputUiVisible(panel)) return true;
+            return false;
+        }
+
+        private static int DashIndicatorReserveCount(bool raiment, int charges, double spirit,
+            double cost, double minimum)
+        {
+            // Spirit refunds need an available charge and the set bonus. Unknown/free costs
+            // cannot express a finite Spirit reserve. Bound drawing even with edited settings.
+            if (!raiment || charges <= 0 || spirit <= 0 || double.IsNaN(spirit) || double.IsInfinity(spirit)
+                || cost <= 0 || double.IsNaN(cost) || double.IsInfinity(cost)) return 0;
+            if (!double.IsNaN(minimum) && !double.IsInfinity(minimum) && minimum > 0)
+                cost = Math.Max(cost, minimum);
+            return (int)Math.Min(64, Math.Floor(spirit / cost));
+        }
+
+        private void ApplyDashVisualOpacity(ITransparent visual,float opacity)
+        {
+            if(visual==null)return;
+            float baseline;
+            if(!_dashVisualBaseOpacity.TryGetValue(visual,out baseline))
+            { baseline=visual.Opacity; _dashVisualBaseOpacity.Add(visual,baseline); }
+            visual.Opacity=baseline*opacity;
+        }
+        private void ApplyDashIndicatorOpacity()
+        {
+            int percent=Math.Max(0,Math.Min(100,DashVisualOpacityPercent));
+            if(_dashAppliedOpacity==percent)return;
+            float opacity=percent/100f;
+            ApplyDashVisualOpacity(_dashOutlineBrush,opacity);
+            ApplyDashVisualOpacity(_dashGlossBrush,opacity);
+            ApplyDashVisualOpacity(_dashReserveOutlineBrush,opacity);
+            ApplyDashVisualOpacity(_dashSpiritOutlineFont,opacity);
+            for(int i=0;i<_dashChargeBrushes.Length;i++)
+            {
+                ApplyDashVisualOpacity(_dashChargeBrushes[i],opacity);
+                ApplyDashVisualOpacity(_dashSpiritFonts[i],opacity);
+            }
+            _dashAppliedOpacity=percent;
+        }
+
+        private void PaintDashIndicator()
+        {
+            if ((!ShowDashChargeIndicator && !ShowDashReserveBars && !ShowDashSpiritCounter) || !Enabled || Hud == null
+                || Hud.Game == null || Hud.Render == null || Hud.Window == null || Hud.Render.UiHidden
+                || !Hud.Game.IsInGame || Hud.Game.IsLoading || Hud.Game.IsPaused
+                || DashIndicatorUiBlocked()) return;
+            var me = Hud.Game.Me;
+            if (me == null || me.IsDead || me.Stats == null || me.HeroClassDefinition == null
+                || me.HeroClassDefinition.HeroClass != HeroClass.Monk || me.Powers == null
+                || me.Powers.UsedMonkPowers == null || me.Powers.UsedMonkPowers.DashingStrike == null) return;
+            ApplyDashIndicatorOpacity();
+            double spirit = me.Stats.ResourceCurPri;
+            if (double.IsNaN(spirit) || double.IsInfinity(spirit)) return;
+            int color = spirit <= DashIndicatorSpiritRedThreshold ? 0
+                : spirit <= DashIndicatorSpiritOrangeThreshold ? 1
+                : spirit <= DashIndicatorSpiritYellowThreshold ? 2 : 3;
+            float centerX = Hud.Window.Size.Width * 0.5f + DashIndicatorOffsetX;
+            float centerY = Hud.Window.Size.Height * 0.5f + DashIndicatorOffsetY;
+            if ((ShowDashChargeIndicator || ShowDashReserveBars) && _dashOutlineBrush != null && _dashGlossBrush != null)
+            {
+                var dash = me.Powers.UsedMonkPowers.DashingStrike;
+                int nativeCharges = Math.Max(0, Math.Min(3, dash.Charges));
+                int charges = ShowDashChargeIndicator ? nativeCharges : 0;
+                int reserves = 0;
+                if (ShowDashReserveBars && _dashReserveOutlineBrush != null)
+                    reserves = DashIndicatorReserveCount(me.GetSetItemCount(755275u) >= 6,
+                        nativeCharges, spirit, dash.GetResourceRequirement(25f), DashIndicatorMinimumSpiritPerDash);
+                float radius = Math.Max(4.0f, DashIndicatorRadius);
+                float step = radius * 2.0f + Math.Max(2.0f, DashIndicatorGap);
+                // The two standard native-charge slots stay centered over Spirit.
+                // Reserve count and missing/hidden charges never move these anchors.
+                float firstChargeX = centerX - step * 0.5f;
+                const float barWidth = 4f, barStep = 5f, barHeight = 10f;
+                float reserveWidth = reserves > 0 ? (reserves - 1) * barStep + barWidth : 0f;
+                for (int i = 0; i < charges; i++)
+                {
+                    // A third native charge uses an extra slot on the left; the
+                    // two standard slots and the reserve meter remain stationary.
+                    float x = firstChargeX + (i == 2 ? -step : i * step);
+                    _dashOutlineBrush.DrawEllipse(x, centerY, radius + 2.0f, radius + 2.0f);
+                    _dashChargeBrushes[color].DrawEllipse(x, centerY, radius, radius);
+                    _dashGlossBrush.DrawEllipse(x - radius * 0.35f, centerY - radius * 0.38f,
+                        Math.Max(1.6f, radius * 0.42f), Math.Max(1.2f, radius * 0.28f));
+                }
+                if (reserves > 0)
+                {
+                    float barX = centerX + step * 0.5f + radius + 8f;
+                    float barY = centerY - barHeight * 0.5f;
+                    // One dark backing outlines the meter and separates adjacent colored bars.
+                    _dashReserveOutlineBrush.DrawRectangle(barX - 1f, barY - 1f,
+                        reserveWidth + 2f, barHeight + 2f);
+                    for (int i = 0; i < reserves; i++)
+                        _dashChargeBrushes[color].DrawRectangle(barX + i * barStep, barY, barWidth, barHeight);
+                }
+            }
+            if (ShowDashSpiritCounter)
+            {
+                IFont font = _dashSpiritFonts[color];
+                if (font != null)
+                {
+                    string value = Math.Ceiling(Math.Max(0.0, spirit)).ToString(System.Globalization.CultureInfo.InvariantCulture);
+                    var layout = font.GetTextLayout(value);
+                    float x = centerX - layout.Metrics.Width * 0.5f;
+                    float y = centerY + DashSpiritCounterOffsetY;
+                    if (_dashSpiritOutlineFont != null)
+                    {
+                        var outline = _dashSpiritOutlineFont.GetTextLayout(value);
+                        const float edge = 1.25f;
+                        for (int dx = -1; dx <= 1; dx++)
+                            for (int dy = -1; dy <= 1; dy++)
+                                if (dx != 0 || dy != 0)
+                                    _dashSpiritOutlineFont.DrawText(outline, x + dx * edge, y + dy * edge);
+                    }
+                    font.DrawText(layout, x, y);
+                }
+            }
+        }
+
         public void PaintTopInGame(ClipState clipState)
         {
             if (clipState != ClipState.AfterClip) return;
             PaintJuggerFocus();
+            PaintCtrlEliteFocus();
+            PaintDashIndicator();
 
             _combinationIcon = null;
             if (!ShowCombinationCount || Hud.Render.UiHidden
@@ -2613,14 +2836,16 @@ namespace Turbo.Plugins.s7o
             }
             return best;
         }
-        private IMonster PickAssistManualElite()
+        private IMonster PickAssistManualElite(int now)
         {
             var ranked=_assistCandidates.Where(m=>IsAssistPositionElite(m) && m.Rarity!=ActorRarity.Boss
                 && !IsAssistJuggerPackMember(m) && IsAssistEligible(m) && !IsAssistTargetTemporarilyBlocked(m)
                 && !IsAssistRouteSuppressed(m)).OrderByDescending(m=>AssistFinishingRift() && AssistObjectiveFor(m).OrbFinish)
                 .ThenByDescending(m=>AssistLeaderObjectiveValue(m)).ThenBy(m=>m.AcdId).Take(32).ToList();
             var teammate=PickAssistSharedFocus();
-            uint id=AssistNextManualElite(_assistTargetAcd,_manualEliteCursor,teammate==null?0:teammate.AcdId,
+            uint current = _assistSharedFocusAcd != 0u && _assistSharedFocusWorld == Hud.Game.Me.WorldId
+                && !Due(now,_assistSharedFocusUntil) ? _assistSharedFocusAcd : _assistTargetAcd;
+            uint id=AssistNextManualElite(current,_manualEliteCursor,teammate==null?0:teammate.AcdId,
                 ranked.Select(m=>m.AcdId).ToList());
             if(id==0)return null;_manualEliteCursor=id;return ranked.First(m=>m.AcdId==id);
         }
@@ -6714,7 +6939,11 @@ private bool HasDamageCircleBuff()
             bool pressed=down&&!_juggerCtrlWasDown; _juggerCtrlWasDown=down;
             bool safe=Hud.Window.IsForeground && (_assistActive || AssistRequested());
             bool group=Hud.Game.Players.Count()>1;
-            if(group!=_groupCtrlMode) { ClearJuggerFocus("party-mode-change"); _rangedReturnPending=false; _groupCtrlMode=group; }
+            if(group!=_groupCtrlMode)
+            {
+                ClearJuggerFocus("party-mode-change"); ClearAssistSharedFocus();
+                _rangedReturnPending=false; _groupCtrlMode=group;
+            }
             if(_ctrlRouteWorld!=Hud.Game.Me.WorldId) { _ctrlRouteRetry.Clear(); _ctrlRouteWorld=Hud.Game.Me.WorldId; }
             if(group)
             {
@@ -6738,21 +6967,22 @@ private bool HasDamageCircleBuff()
                     TraceAssistJuggerFocus(_juggerFocusAcd!=0u?"ctrl-on":previousFocus!=0u?"ctrl-off":"ctrl-no-candidate",previousFocus);
                     if(previousFocus!=0u || _juggerFocusAcd!=0u)
                     {
-                        _assistSharedFocusAcd=0u;
+                        ClearAssistSharedFocus();
                         _assistCircleReturnElite=_assistCircleReturnCircle=0u;
                         ReleaseAssistAttack(); CancelTarget(true); CancelAssistDoor(true); ClearAssistDoorReturn();
                         _assistRetargetAcd=_assistRetargetAnn=0u;
                     }
                     else
                     {
-                        var shared=PickAssistManualElite();
+                        var shared=PickAssistManualElite(now);
                         if(shared!=null)
                         {
                             _assistSharedFocusAcd=shared.AcdId;_assistSharedFocusAnn=shared.AnnId;
                             _assistSharedFocusWorld=shared.WorldId;_assistSharedFocusUntil=unchecked(now+600);
-                            TraceAssistHandoff("CTRL_TEAMMATE_TARGET",shared,"one-shot-queued");
+                            _assistSharedFocusPending=true;_assistSharedFocusMarker=null;
+                            TraceAssistHandoff("CTRL_TEAMMATE_TARGET",shared,"focus-queued");
                         }
-                        // No native teammate target: leave our current attack untouched.
+                        // No eligible alternative: keep the current selection.
                     }
                 }
                 _juggerFocusPaintAllowed=safe && _juggerFocusMonster!=null;
@@ -6800,6 +7030,32 @@ private bool HasDamageCircleBuff()
                 || _juggerFocusBrush == null || _juggerFocusOutlineBrush == null
                 || (!_rangedCleanup && (!_groupCtrlMode || _juggerFocusMonster==null)) || Hud.Game.Me.IsDead) return;
             var center = _groupCtrlMode ? _juggerFocusMonster.FloorCoordinate : Hud.Game.Me.FloorCoordinate;
+            DrawOrangeFocusRing(center);
+        }
+
+        private static bool AssistCtrlFocusPulse(int elapsed)
+        {
+            return elapsed >= 0 && elapsed < 600 && elapsed % 200 < 120;
+        }
+
+        private void PaintCtrlEliteFocus()
+        {
+            if (!Enabled || !_assistActive || !_groupCtrlMode || _juggerFocusAcd!=0u
+                || _assistSharedFocusPending || _assistSharedFocusAcd==0u || _assistTargetAcd!=_assistSharedFocusAcd
+                || _juggerFocusBrush==null || _juggerFocusOutlineBrush==null) return;
+            int elapsed=unchecked(Environment.TickCount-(_assistSharedFocusUntil-AssistCtrlFocusMs));
+            if (!AssistCtrlFocusPulse(elapsed) || Hud.Render.UiHidden || !Hud.Window.IsForeground
+                || !Hud.Game.IsInGame || Hud.Game.IsLoading || DashIndicatorUiBlocked()) return;
+            var me=Hud.Game.Me; var target=_assistSharedFocusMarker;
+            if (me==null || me.IsDead || target==null || !target.IsAlive
+                || target.AcdId!=_assistSharedFocusAcd || target.AnnId!=_assistSharedFocusAnn
+                || target.WorldId!=me.WorldId || !IsAssistVisiblePoint(target.FloorCoordinate)) return;
+            DrawOrangeFocusRing(target.FloorCoordinate);
+        }
+
+        private void DrawOrangeFocusRing(IWorldCoordinate center)
+        {
+            if (center==null) return;
             const int segments = 28;
             const float radius = 10f;
             double step = Math.PI * 2.0 / segments;
@@ -8676,9 +8932,23 @@ private IMonster PickAssistAcquisitionContact(bool canDash, int now)
         private static bool AssistRangeProbeNeedsFallback(bool speculative,bool sameProbe,bool spent)
         {return speculative && sameProbe && spent;}
 
-        // CTRL copies a fresh teammate target once; it never changes target priority tiers.
+        // CTRL supplies a short score bonus after a safe target handoff.
+        private const int AssistCtrlFocusMs=1000;
+        private const double AssistCtrlFocusBonus=30.0;
         private uint _assistSharedFocusAcd,_assistSharedFocusAnn,_assistSharedFocusWorld;
         private int _assistSharedFocusUntil;
+        private bool _assistSharedFocusPending;
+        private IMonster _assistSharedFocusMarker;
+
+        private void ClearAssistSharedFocus()
+        {
+            _assistSharedFocusAcd=0u; _assistSharedFocusPending=false; _assistSharedFocusMarker=null;
+        }
+
+        private static bool AssistCtrlFocusKeepsTarget(double focusedScore,double challengerScore)
+        {
+            return focusedScore+AssistCtrlFocusBonus>=challengerScore;
+        }
         private static bool AssistSharedFocusFresh(int tick,int snapshotTick,int sampleTick,int samples,
             uint target,uint candidate,int until)
         {
@@ -8710,24 +8980,44 @@ private IMonster PickAssistAcquisitionContact(bool canDash, int now)
             if(_assistSharedFocusAcd==0)return selected;
             if(_assistSharedFocusWorld!=Hud.Game.Me.WorldId || Due(now,_assistSharedFocusUntil)
                 || _juggerFocusAcd!=0 || !_groupCtrlMode)
-            {_assistSharedFocusAcd=0;return selected;}
+            {ClearAssistSharedFocus();return selected;}
             // Submitted Dash/door/safety owners finish first. The request expires independently.
             if(_selfDashKey!=ActionKey.Unknown || _pulse!=ActionKey.Unknown || _assistDoorTarget!=null
                 || _assistDoorReturnPending || _cycloneSetup.Kind!=CycloneSetupKind.None
-                || _assistSafetyCombatOnly || _assistSafetyApproachAcd!=0 || _assistHazardReturnSelecting
+                || _assistSafetyCombatOnly || _assistSafetyCombatPending || _assistSafetyApproachAcd!=0 || _assistHazardReturnSelecting
                 || IsAssistHealingRecovery() || AssistUrgentEscapeDue())return selected;
             var target=FindAssistCandidate(_assistSharedFocusAcd);
             if(!IsAssistEligible(target) || target.AnnId!=_assistSharedFocusAnn
                 || !IsAssistPositionElite(target) || IsAssistTargetTemporarilyBlocked(target)
                 || IsAssistRouteSuppressed(target))
-            {_assistSharedFocusAcd=0;return selected;}
+            {ClearAssistSharedFocus();return selected;}
+            if(selected!=null && selected.Rarity==ActorRarity.Boss)return selected;
+            if(!_assistSharedFocusPending)
+            {
+                if(selected!=null && selected.AcdId==target.AcdId)
+                { _assistSharedFocusMarker=target;return selected; }
+                if(selected!=null && IsAssistPositionElite(selected))
+                {
+                    if(AssistLateFinishCompare(AssistObjectiveFor(selected),AssistObjectiveFor(target),AssistFinishingRift())>0)
+                        return selected;
+                    var challengerPosition=HasAssistSelectedPosition(selected)?_assistSelectedPositionPoint:null;
+                    if(!AssistCtrlFocusKeepsTarget(AssistLeaderObjectiveValue(target),
+                        AssistLeaderObjectiveValue(selected,challengerPosition)))return selected;
+                }
+            }
             if(!CanEngageAssistPosition(target,canDash,now))return selected;
-            _assistSharedFocusAcd=0;
-            _assistCircleReturnElite=_assistCircleReturnCircle=0u;
-            _assistRetargetAcd=_assistRetargetAnn=0u;
-            _assistSelectedPositionTarget=null;_assistSelectedPositionPoint=null;_assistSelectedPositionReason=null;
+            if(_assistSharedFocusPending)
+            {
+                _assistSharedFocusPending=false;
+                _assistSharedFocusUntil=unchecked(now+AssistCtrlFocusMs);
+                _assistCircleReturnElite=_assistCircleReturnCircle=0u;
+                _assistRetargetAcd=_assistRetargetAnn=0u;
+                TraceAssistHandoff("CTRL_TEAMMATE_TARGET",target,"focus-accepted");
+            }
+            _assistSharedFocusMarker=target;
+            if(!HasAssistSelectedPosition(target))
+            {_assistSelectedPositionTarget=null;_assistSelectedPositionPoint=null;_assistSelectedPositionReason=null;}
             SetAssistAttackTarget(target,now);
-            TraceAssistHandoff("CTRL_TEAMMATE_TARGET",target,"one-shot-consumed");
             return target;
         }
 
@@ -13774,6 +14064,15 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
                         : TryPickAssistDashPoint(target, false, out landing, out positionReason);
                 bool requiredUpkeep = refreshDash && !approaching && !moltenEscape
                     && !circleDash && !densityDash && !spacingDash && !contactCorrection;
+                bool upkeepCircle = refreshDash && circleDash && !hazardUrgent;
+                var origin = Hud.Game.Me.FloorCoordinate;
+                bool selfRefresh = SelfDash && (requiredUpkeep || upkeepCircle)
+                    && (_dashUpkeepRetryInPlace || (planned && !AssistUpkeepHasTravel(origin, landing)));
+                if (selfRefresh)
+                {
+                    landing = origin; planned = requiredUpkeep = true; mapTransit = circleDash = false;
+                    positionReason = "dash-upkeep-in-place";
+                }
                 if (planned && AllowAssistMovement(target,landing,now,moltenEscape || moltenEscapeOnly,requiredUpkeep,circleDash)
                     && PrepareAssistDoorDash(landing,moltenEscape || moltenEscapeOnly))
                 {
@@ -13784,7 +14083,7 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
                     _assistPositionWorldX = landing.X; _assistPositionWorldY = landing.Y;
                     CancelTarget();
                     if (moltenEscape && IsAssistPositionElite(target)) RememberAssistHazardReturn(target);
-                    MaintainDash(dash, now, target, landing, moltenEscape || moltenEscapeOnly,
+                    MaintainDash(dash, now, selfRefresh ? null : target, landing, moltenEscape || moltenEscapeOnly,
                         mapTransit, requiredUpkeep, circleDash);
                     if (_selfDashKey != ActionKey.Unknown && !_rangedCleanup && target != null
                         && _assistDamageEscapeTrigger=="low-health-rapid-loss"
@@ -13792,6 +14091,7 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
                     { _lastPanicContactTick=now; _lastPanicContactTarget=target.AcdId; }
                     if (_selfDashKey != ActionKey.Unknown)
                     {
+                        if ((requiredUpkeep && !hazardUrgent && !hazardApproach) || upkeepCircle) TrackAssistDashUpkeep();
                         if (spacingDash)
                         {
                             _assistSpacingAttemptAcd = target.AcdId;
@@ -13976,8 +14276,11 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
 
         private void EndAssist()
         {
-            _assistPrimaryHandoffAcd=_assistSharedFocusAcd=0u;
+            _assistPrimaryHandoffAcd=0u;
+            ClearAssistSharedFocus();
             if (_heldDashTrialActive) CancelTarget();
+            _dashUpkeepNeedsAttack = _dashUpkeepRetryInPlace = false;
+            _dashUpkeepSerial = _dashUpkeepAttemptGameTick = _dashUpkeepRetryAt = int.MinValue;
             _oculusCarry=default(OculusCarry);
             _assistFirePoolAvoiding=false;
             ResetAssistSoftRecovery();
@@ -15482,14 +15785,71 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
             return assistHeld || animation == AcdAnimationState.Attacking || animation == AcdAnimationState.Channeling;
         }
 
-        private static bool GenMonkMantraRapidRefresh(bool attacking,bool moving,bool eliteCombat,
-            double spirit,double maximum)
+        // Discretionary casts must not compete with Spirit recovery or Shenlong activation.
+        // Shield damage, missing protection and expiry remain independent urgent requests.
+        private bool _genMantraFullSpiritReady;
+        private double _genMantraCastHealth = double.NaN;
+
+        // A bounded retry interval, never a combat wait: callers continue attacking/moving.
+        // Only stable, healthy self-protection with a fresh native buff may await shield data.
+        private static bool GenMonkMantraConfirmPending(int since, bool nativeActive, double left,
+            bool shieldActive, bool damaged, bool allyObserved, double health, double castHealth)
         {
-            if(!(maximum>0) || double.IsNaN(maximum) || double.IsInfinity(maximum)
-                || double.IsNaN(spirit) || double.IsInfinity(spirit))return false;
-            // Below 30% even elite combat preserves shielding by need, not blind spam.
-            // Engaged elite Dash/avoidance transitions retain rapid protection at/above 30%.
-            return eliteCombat ? spirit>=maximum*0.30 : attacking && !moving && spirit>maximum*0.50;
+            return since >= 0 && since < 250 && nativeActive && left > 0.5
+                && !shieldActive && !damaged && !allyObserved
+                && health >= 0.95 && health <= 1 && castHealth >= 0.95 && castHealth <= 1
+                && health >= castHealth;
+        }
+        private static int GenMonkMantraSelectedCadence(int mode,bool engaged,bool flyingDragon,
+            double spirit,double maximum,double cost,bool fullSpiritReady,double lowestHealth,out bool proactive)
+        {
+            // Balanced delegates to the established policy without changing its thresholds.
+            if(mode!=0 && mode!=2)
+                return GenMonkMantraAdaptiveCadence(engaged,flyingDragon,spirit,maximum,cost,
+                    fullSpiritReady,lowestHealth,out proactive);
+            proactive=false;
+            if(!engaged || !(maximum>0) || double.IsNaN(maximum) || double.IsInfinity(maximum)
+                || double.IsNaN(spirit) || double.IsInfinity(spirit)
+                || double.IsNaN(cost) || double.IsInfinity(cost) || cost<0 || spirit<cost)return 100;
+            double ratio=Math.Max(0,Math.Min(1,spirit/maximum));
+            // Damage, missing protection and expiry are handled separately for every mode.
+            if(mode==0) { proactive=flyingDragon && ratio>0.50; return proactive?1000:100; }
+            proactive=ratio>=0.30;
+            return 100;
+        }
+
+        private static int GenMonkMantraAdaptiveCadence(bool engaged,bool flyingDragon,
+            double spirit,double maximum,double cost,bool fullSpiritReady,double lowestHealth,out bool proactive)
+        {
+            proactive=false;
+            if(!engaged || !(maximum>0) || double.IsNaN(maximum) || double.IsInfinity(maximum)
+                || double.IsNaN(spirit) || double.IsInfinity(spirit)
+                || double.IsNaN(cost) || double.IsInfinity(cost) || cost<0 || spirit<cost)return 100;
+            double ratio=Math.Max(0,Math.Min(1,spirit/maximum));
+            int cadence=100;
+            if(flyingDragon && ratio>=0.55 && spirit-cost>=maximum*0.35)
+            {
+                // FD's generator speed permits progressively faster proactive shielding.
+                double t=Math.Min(1,(ratio-0.55)/0.37);
+                cadence=(int)Math.Round(950-850*t);
+                proactive=true;
+            }
+            else if(!flyingDragon && fullSpiritReady && ratio>=0.75
+                && spirit-cost>=maximum*0.55)
+            {
+                // Reach full Spirit first; then retain a reserve as Shenlong drains it.
+                double t=Math.Min(1,(ratio-0.75)/0.25);
+                cadence=(int)Math.Round(1300-800*t);
+                proactive=true;
+            }
+            // Low Life on either Monk accelerates protection without removing the cast-cost guard.
+            if(lowestHealth<0.65 && spirit-cost>=maximum*(lowestHealth<0.35?0.10:0.20))
+            {
+                int healthCadence=lowestHealth<0.35?175:lowestHealth<0.50?300:500;
+                cadence=proactive?Math.Min(cadence,healthCadence):healthCadence;
+                proactive=true;
+            }
+            return proactive?Math.Max(100,cadence):100;
         }
         private bool GenMonkMantraEliteCombat(bool assistHeld,bool combat)
         {
@@ -15527,25 +15887,29 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
         private const float HealingMantraAllyRadius=60f;
         private readonly Dictionary<ulong,HealingMantraAllySample> _healingMantraAllySamples
             =new Dictionary<ulong,HealingMantraAllySample>();
-        private static bool HealingMantraPylonProtected(IPlayer player)
+        // A successful read from a valid ally can establish absence. Unreadable data cannot.
+        private static bool? ReadHealingMantraShieldPylon(IPlayer player)
         {
             try
             {
-                var buff=player?.Powers?.GetBuff(266254u);
-                if(buff==null || !buff.Active || buff.TimeLeftSeconds==null)return false;
-                foreach(double seconds in buff.TimeLeftSeconds)
-                    if(!double.IsNaN(seconds) && !double.IsInfinity(seconds) && seconds>0)return true;
+                var powers=player.Powers;
+                var buff=powers.GetBuff(266254u);
+                if(buff==null || !buff.Active)return false;
+                var remaining=buff.TimeLeftSeconds;
+                if(remaining!=null)
+                    foreach(double seconds in remaining)
+                        if(!double.IsNaN(seconds) && !double.IsInfinity(seconds) && seconds>0)return true;
             }
             catch { }
-            return false; // Missing/uncertain party data cannot prove invulnerability.
+            return null;
         }
-        private bool ObserveHealingMantraAllies(int now,out bool active,out bool damaged,out double left,
-            out int protectedCount,out int neededCount,out uint firstNeeded)
+        private bool ObserveHealingMantraAllies(int now,bool shieldPylon,out bool active,out bool damaged,out double left,
+            out double lowestHealth,out int protectedCount,out int neededCount,out uint firstNeeded)
         {
-            active=true;damaged=false;left=double.PositiveInfinity;
+            active=true;damaged=false;left=double.PositiveInfinity;lowestHealth=1;
             protectedCount=neededCount=0;firstNeeded=0u;
             var me=Hud.Game.Me;int examined=0;var players=Hud.Game.Players;
-            if(players==null){active=false;left=0;neededCount=1;return true;}
+            if(players==null)return false;
             foreach(var player in players)
             {
                 if(++examined>4)break;
@@ -15560,14 +15924,22 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
                     if(double.IsNaN(distance) || double.IsInfinity(distance))readable=false;
                     else if(distance>HealingMantraAllyRadius)continue;
                 }
-                if(readable && HealingMantraPylonProtected(player)){protectedCount++;continue;}
+                if(!readable)continue;
+                bool? allyPylon=ReadHealingMantraShieldPylon(player);
+                if(allyPylon==true){protectedCount++;continue;}
+                if(shieldPylon && (allyPylon!=false || player.AcdId==0u))continue;
                 neededCount++;if(firstNeeded==0u)firstNeeded=player.AcdId;
-                if(!readable){active=false;left=0;continue;}
                 // Only unprotected relevant Monks own these damage/expiry observations.
                 // Our own shield may never take damage during Shield Pylon.
                 try
                 {
                     var powers=player.Powers;var buff=powers.GetBuff(373154u);
+                    if(player.Defense!=null && player.Defense.HealthMax>0)
+                    {
+                        double health=player.Defense.HealthCur/player.Defense.HealthMax;
+                        if(!double.IsNaN(health) && !double.IsInfinity(health))
+                            lowestHealth=Math.Min(lowestHealth,Math.Max(0,health));
+                    }
                     double remaining=buff?.TimeLeftSeconds!=null && buff.TimeLeftSeconds.Length>1
                         ? buff.TimeLeftSeconds[1]:0;
                     if(double.IsNaN(remaining)||double.IsInfinity(remaining)||remaining<0)remaining=0;
@@ -15617,6 +15989,7 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
             {
                 _genMantraWorld=me.WorldId;_genMantraCastAt=int.MinValue;
                 _genMantraShieldSample=-1;_genMantraShieldSampleAt=int.MinValue;_genMantraShieldDamaged=false;
+                _genMantraFullSpiritReady=false;_genMantraCastHealth=double.NaN;
                 _healingMantraAllySamples.Clear();
             }
             var skill=me.Powers.UsedSkills.FirstOrDefault(p=>p!=null && p.SnoPower!=null
@@ -15637,21 +16010,22 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
                 _genMantraExternalReported=true;return false;
             }
             _genMantraExternalReported=false;
-            bool supportingMonk=false,allyActive=false,allyDamaged=false;double allyLeft=0;
-            if(AssistShieldPylonSeconds()>0)
+            bool allyObserved=false,allyActive=false,allyDamaged=false;double allyLeft=0,allyLowestHealth=1;
+            bool shieldPylon=AssistShieldPylonSeconds()>0;
+            int protectedCount,neededCount;uint firstNeeded;
+            allyObserved=ObserveHealingMantraAllies(now,shieldPylon,out allyActive,out allyDamaged,out allyLeft,
+                out allyLowestHealth,out protectedCount,out neededCount,out firstNeeded);
+            if(shieldPylon)
             {
-                int protectedCount,neededCount;uint firstNeeded;
-                supportingMonk=ObserveHealingMantraAllies(now,out allyActive,out allyDamaged,out allyLeft,
-                    out protectedCount,out neededCount,out firstNeeded);
-                TraceHealingMantraPylon(supportingMonk,protectedCount,neededCount,firstNeeded);
-                if(!supportingMonk)
+                TraceHealingMantraPylon(allyObserved,protectedCount,neededCount,firstNeeded);
+                if(!allyObserved)
                 {
                     _genMantraShieldDamaged=false;_genMantraShieldSample=-1;_genMantraShieldSampleAt=int.MinValue;
                     _healingMantraAllySamples.Clear();
                     return false;
                 }
             }
-            else _healingMantraAllySamples.Clear();
+            else if(!allyObserved)_healingMantraAllySamples.Clear();
             double left=BuffLeft(373154u,1);
             float shieldSample=me.Defense?.CurShield??0;
             bool active=me.Powers.BuffIsActive(373154u,1) && shieldSample>0;
@@ -15659,29 +16033,65 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
             bool channelPylon=me.Powers.BuffIsActive(Hud.Sno.SnoPowers.Generic_PagesBuffInfiniteCasting.Sno);
             ObserveGenMonkMantraShield(shieldSample,now);
             bool weakened=_genMantraShieldDamaged;
-            if(supportingMonk){active=allyActive;weakened=allyDamaged;left=allyLeft;}
+            double lowestHealth=1;
+            if(!shieldPylon && me.Defense!=null && me.Defense.HealthMax>0)
+            {
+                double health=me.Defense.HealthCur/me.Defense.HealthMax;
+                if(!double.IsNaN(health) && !double.IsInfinity(health))
+                    lowestHealth=Math.Max(0,Math.Min(1,health));
+            }
+            if(allyObserved)
+            {
+                active=shieldPylon?allyActive:active&&allyActive;
+                weakened=shieldPylon?allyDamaged:weakened||allyDamaged;
+                left=shieldPylon?allyLeft:Math.Min(left,allyLeft);
+                lowestHealth=Math.Min(lowestHealth,allyLowestHealth);
+            }
             bool eliteCombat=GenMonkMantraEliteCombat(assistHeld,combat);
             bool attacking=me.AnimationState==AcdAnimationState.Attacking || me.AnimationState==AcdAnimationState.Channeling
                 || (assistHeld && _assistAttackKey!=ActionKey.Unknown && _pulse==ActionKey.Unknown);
-            bool rapid=GenMonkMantraRapidRefresh(attacking,
-                me.AnimationState==AcdAnimationState.Running || _selfDashKey!=ActionKey.Unknown,
-                eliteCombat,me.Stats.ResourceCurPri,me.Stats.ResourceMaxPri);
-            // Maintenance/damage refreshes use the existing cadence and expiry rules.
-            // Space alone cannot turn low-Spirit trash attacks into unconditional spam.
-            if(!S7oHealingMantraPolicy.Due(rapid,channelPylon,active,weakened,left,since,HealingMantraCombatRefreshMs))
-            {return false;}
-            if(!assistHeld && S7oHealingMantraPolicy.UseIdleSpiritReserve(me.AnimationState,channelPylon))
+            bool moving=me.AnimationState==AcdAnimationState.Running || _selfDashKey!=ActionKey.Unknown;
+            double spirit=me.Stats.ResourceCurPri,maxSpirit=me.Stats.ResourceMaxPri;
+            // The legendary's base buff remains Active between procs; icon 1 is the actual effect timer.
+            double fdProcLeft,fdLockout;
+            bool fdTimerReadable=TryHeldDashTrialTimers(out fdProcLeft,out fdLockout);
+            bool flyingDragon=fdTimerReadable && fdProcLeft>0;
+            if(maxSpirit>0 && !double.IsNaN(spirit) && !double.IsInfinity(spirit))
             {
-                double cost=skill.GetResourceRequirement(),maximum=me.Stats.ResourceMaxPri;
+                if(spirit>=maxSpirit-0.1)_genMantraFullSpiritReady=true;
+                else if(spirit<maxSpirit*0.70)_genMantraFullSpiritReady=false;
+            }
+            else _genMantraFullSpiritReady=false;
+            bool fullSpiritReady=_genMantraFullSpiritReady;
+            double cost=skill.GetResourceRequirement();
+            bool rapid;
+            int cadence=GenMonkMantraSelectedCadence(HealingMantraMode,eliteCombat || (attacking && !moving)
+                || (combat && lowestHealth<0.65),
+                flyingDragon,spirit,maxSpirit,cost,fullSpiritReady,lowestHealth,out rapid);
+            if (!rapid && !channelPylon && GenMonkMantraConfirmPending(since,
+                me.Powers.BuffIsActive(373154u,1), left, active, weakened, allyObserved,
+                me.Defense != null && me.Defense.HealthMax > 0 ? lowestHealth : double.NaN,
+                _genMantraCastHealth))
+            {return false;}
+            // Emergency shielding must not be held behind the discretionary idle Spirit reserve.
+            bool urgentShield=weakened || !active || (left>0 && left<=0.3);
+            if(urgentShield)
+            {rapid=false;cadence=HealingMantraCombatRefreshMs;}
+            if(!S7oHealingMantraPolicy.Due(rapid,channelPylon,active,weakened,left,since,
+                rapid?Math.Max(cadence,HealingMantraCombatRefreshMs):HealingMantraCombatRefreshMs))
+            {return false;}
+            if(!assistHeld && !urgentShield && !(combat && lowestHealth<0.65)
+                && S7oHealingMantraPolicy.UseIdleSpiritReserve(me.AnimationState,channelPylon))
+            {
+                double maximum=me.Stats.ResourceMaxPri;
                 if(double.IsNaN(cost)||double.IsInfinity(cost)||cost<0||maximum<=0
                     ||me.Stats.ResourceCurPri<cost+maximum*Math.Max(0,Math.Min(0.9,automatic==null?0.35:automatic.HealingMantraSpiritReserve)))
                 {return false;}
             }
-            if(supportingMonk && !channelPylon)
+            if(!channelPylon)
             {
-                double cost=skill.GetResourceRequirement();
-                // An unavailable cast must not consume the ally's pending shield-damage request.
-                if(double.IsNaN(cost)||double.IsInfinity(cost)||cost<0||me.Stats.ResourceCurPri<cost)
+                // Do not account for a cast or discard damage evidence if Spirit cannot pay.
+                if(double.IsNaN(cost)||double.IsInfinity(cost)||cost<0||spirit<cost)
                 {return false;}
             }
             if(skill.Key==_assistAttackKey || skill.Key==_selfDashKey || skill.Key==_pulse
@@ -15691,6 +16101,7 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
             _genMantraAssistPulse=assistHeld;
             _genMantraReleaseAt=unchecked(now+Math.Max(35,GeneratorPulseMinMs));
             _genMantraCastAt=now;
+            _genMantraCastHealth=me.Defense!=null && me.Defense.HealthMax>0 ? lowestHealth : double.NaN;
             _genMantraShieldDamaged=false;_genMantraShieldSample=-1;_genMantraShieldSampleAt=int.MinValue;
             foreach(var sample in _healingMantraAllySamples.Values)
             {sample.Damaged=false;sample.Shield=-1;sample.At=int.MinValue;}
@@ -15710,31 +16121,63 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
         private void TraceAssistTrial(string kind,string detail) { }
 
 
+        private static bool AssistUpkeepHasTravel(IWorldCoordinate origin, IWorldCoordinate landing)
+        {
+            return landing != null && (origin.XYDistanceTo(landing) > 0.75f || Math.Abs(origin.Z - landing.Z) > 0.75f);
+        }
+
+        private void TrackAssistDashUpkeep()
+        {
+            _dashUpkeepSerial = _selfDashSerial;
+            _dashUpkeepAttemptGameTick = Hud.Game.CurrentGameTick;
+            _dashUpkeepNeedsAttack = _dashUpkeepRetryInPlace = true;
+        }
+
         private bool TryAssistDashUpkeep(IPlayerSkill dash, int now)
         {
             if (!_assistActive || !AssistRequested() || !AutoDash || AssistUrgentEscapeDue() || !DashDue(dash, now)) return false;
             var target = FindAssistCandidate(_assistTargetAcd);
-            if (!IsAssistEligible(target) || !CanAttackAssistFrom(Hud.Game.Me.FloorCoordinate, target)
-                || MapAssistTargetBlocked(target)) return false;
+            bool targetReady = IsAssistEligible(target) && CanAttackAssistFrom(Hud.Game.Me.FloorCoordinate, target)
+                && !MapAssistTargetBlocked(target);
+            // Guardian staging owns the primary before ordinary target selection can vouch for it.
+            // At the Raiment deadline, reuse the existing safe staging check and Dash in place.
+            bool guardianRefresh = _dashDeadlineReason == "raiment-deadline" && SelfDash
+                && _guardianStageAcd != 0 && IsAssistGuardianStageSafe();
+            if (guardianRefresh) target = null;
+            else if (!targetReady)
+            {
+                // Other target handoffs still require recent primary attack evidence.
+                int tick = Hud.Game.CurrentGameTick;
+                bool recentPrimary = Hud.Game.Me.AnimationState == AcdAnimationState.Attacking
+                    || (AssistWotHfHeartbeatEnabled() && _assistWotHfLastGameTick != int.MinValue
+                        && tick >= _assistWotHfLastGameTick && tick - _assistWotHfLastGameTick <= 18);
+                if (_dashDeadlineReason != "raiment-deadline" || !SelfDash || _assistAttackKey == ActionKey.Unknown
+                    || _assistAttackKey != _assistMainKey || !recentPrimary || !HasAttackableTargetNearby()) return false;
+                target = null; // Required upkeep at our feet, not an unverified monster landing.
+            }
             if (!CanApproachDash(dash) || s7o_GenMonkInput.IsDown(dash.Key)
                 || s7o_InputReleaseArbiter.HasPendingRelease) return false;
             if (dash.Key == ActionKey.LeftSkill || dash.Key == ActionKey.RightSkill) return false;
-            _dashUpkeepAttemptGameTick = Hud.Game.CurrentGameTick;
+            var origin = Hud.Game.Me.FloorCoordinate;
             IWorldCoordinate circle = null; string reason = "none";
-            // This runs before AssistTarget refreshes its safety-only flag.
-            // Required upkeep stays available; optional travel yields to healing.
-            bool circleUpgrade = !AssistFirstPrimaryPending() && !IsAssistHealingRecovery()
-                && TryPickAssistCircleUpgrade(target, out circle, out reason);
-            if(!circleUpgrade && !HasAssistAttackContact(target)
-                && AssistBodyGap(Hud.Game.Me.FloorCoordinate,target)>AssistPreferredOrdinaryEdge(AssistConfiguredStrikeReach())
-                && TryPickAssistRecoveryLanding(target,now,out circle))
+            bool allowTravel = target != null && (!_dashUpkeepRetryInPlace || !SelfDash);
+            // Only use a genuine landing upgrade. After a failed attempt, refresh in place.
+            bool circleUpgrade = allowTravel && !AssistFirstPrimaryPending() && !IsAssistHealingRecovery()
+                && TryPickAssistCircleUpgrade(target, out circle, out reason) && AssistUpkeepHasTravel(origin, circle);
+            if(allowTravel && !circleUpgrade && !HasAssistAttackContact(target)
+                && AssistBodyGap(origin,target)>AssistPreferredOrdinaryEdge(AssistConfiguredStrikeReach())
+                && TryPickAssistRecoveryLanding(target,now,out circle) && AssistUpkeepHasTravel(origin, circle))
             {circleUpgrade=true;reason="approach-with-dash-upkeep";}
+            bool selfRefresh = SelfDash && !circleUpgrade;
             CancelTarget();
             if (circleUpgrade)
             { _assistCircleCue = reason; _assistPositionReason = "upkeep-circle:" + reason; }
-            MaintainDash(dash, now, target, circleUpgrade ? circle : Hud.Game.Me.FloorCoordinate, false, false, !circleUpgrade);
+            MaintainDash(dash, now, selfRefresh ? null : target, circleUpgrade ? circle : origin, false, false, !circleUpgrade);
             if (_selfDashKey == ActionKey.Unknown) return false;
-            _dashUpkeepNeedsAttack = true;
+            TrackAssistDashUpkeep();
+            TraceAssistTrial("RAIMENT_UPKEEP", "reason="+_dashDeadlineReason+" fallback="+(target==null)+" guardianStage="+guardianRefresh
+                +" buffLeft="+BuffLeft(Hud.Sno.SnoPowers.Generic_P2ItemPassiveUniqueRing033.Sno,2)
+                +" charges="+dash.Charges+" inPlace="+selfRefresh);
             _assistStatus = "dash-upkeep"; return true;
         }
 
@@ -16009,21 +16452,27 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
             if (dash == null || _selfDashKey != ActionKey.Unknown) return false;
             if (!_assistActive && !Due(now, _nextDashAimTick)) return false; // Preserve manual mouse backoff.
             int tick = Hud.Game.CurrentGameTick;
+            double raiment = BuffLeft(Hud.Sno.SnoPowers.Generic_P2ItemPassiveUniqueRing033.Sno, 2);
+            bool raimentDue = Hud.Game.Me.GetSetItemCount(755275u) >= 6 && raiment <= 0.6;
             if (_assistActive && _dashUpkeepNeedsAttack)
             {
-                bool resumed = _pulse == ActionKey.Unknown && _assistAttackKey == _assistMainKey
-                    && (AssistWotHfHeartbeatEnabled() ? _assistWotHfLastGameTick > _dashUpkeepAttemptGameTick
-                        : tick > _dashUpkeepAttemptGameTick && HasAssistAttackContact(FindAssistCandidate(_assistTargetAcd)));
+                // Give a resumed primary a game update, even if the target has yet to take a hit.
+                bool resumed = _pulse == ActionKey.Unknown && _assistAttackKey != ActionKey.Unknown
+                    && _assistAttackKey == _assistMainKey && tick > _dashUpkeepAttemptGameTick
+                    && !_assistNavigationPending && s7o_GenMonkInput.IsDown(_assistAttackKey)
+                    && (_assistWotHfLastGameTick > _dashUpkeepAttemptGameTick
+                        || ElapsedMs(now, _assistAttackStartedTick) >= 35);
                 if (!resumed) { _dashDeadlineReason = "resume-primary-before-retry"; return false; }
                 _dashUpkeepNeedsAttack = false;
             }
             if (_assistActive && tick == _dashUpkeepAttemptGameTick) return false;
+            if (_assistActive && _dashUpkeepRetryAt != int.MinValue && !Due(now, _dashUpkeepRetryAt))
+            { _dashDeadlineReason = "upkeep-retry-backoff"; return false; }
+            if (raimentDue)
+            { _dashDeadlineReason = "raiment-deadline"; return true; }
             string rune = dash.RuneNameEnglish ?? "";
             bool shortRune = dash.Rune == 4 || rune.IndexOf("Radiance", StringComparison.OrdinalIgnoreCase) >= 0
                 || rune.IndexOf("Blinding Speed", StringComparison.OrdinalIgnoreCase) >= 0;
-            double raiment = BuffLeft(Hud.Sno.SnoPowers.Generic_P2ItemPassiveUniqueRing033.Sno, 2);
-            if (Hud.Game.Me.GetSetItemCount(755275u) >= 6 && raiment <= 0.6)
-            { _dashDeadlineReason = "raiment-deadline"; return true; }
             if (shortRune)
             {
                 var buff = Hud.Game.Me.Powers.GetBuff(Hud.Sno.SnoPowers.Monk_DashingStrike.Sno);
@@ -16851,7 +17300,7 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
                         && !s7o_GenMonkInput.IsStandstillDown() ? ManualAttackTarget() : null);
                     if (attackTarget != null)
                         self = attackTarget.FloorCoordinate.ToScreenCoordinate(true, true);
-                    if ((approachTarget != null || assistEscapeOnly || (_assistActive && mapTransit)) && assistLanding != null)
+                    if ((approachTarget != null || assistEscapeOnly || (_assistActive && (mapTransit || upkeep))) && assistLanding != null)
                     {
                         int landingX, landingY;
                         if (!IsAssistDashPointSafe(assistLanding, approachTarget, out landingX, out landingY, assistEscapeOnly, mapTransit, false, upkeep)) return;
@@ -17070,6 +17519,16 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
                 _selfDashAnimationStartBeforePress = Hud.Game.Me.LoopingAnimationStartTick;
                 _selfDashPressGameTick = Hud.Game.CurrentGameTick;
                 TraceAssistActivation("dash-down");
+                if (!_selfDashApproach && _dashUpkeepSerial == _selfDashSerial)
+                {
+                    int x, y;
+                    if (AssistUrgentEscapeDue() || !IsAssistDashPointSafe(Hud.Game.Me.FloorCoordinate, null, out x, out y, upkeep: true))
+                    { CancelAssistDashAim("cancelled-upkeep-unsafe",now); return; }
+                    if ((x != _dashTargetX || y != _dashTargetY) && !SetCursorPos(x,y))
+                    { CancelAssistDashAim("cancelled-cursor",now); return; }
+                    _dashTargetX = x; _dashTargetY = y;
+                    _selfDashRaimentBefore = BuffLeft(Hud.Sno.SnoPowers.Generic_P2ItemPassiveUniqueRing033.Sno, 2);
+                }
                 if (_selfDashApproach)
                 {
                     // Aim/camera collection can include the previous cast's delayed timer.
@@ -17116,11 +17575,14 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
             // Fast recasts can reuse the same animation and refresh by less than one second.
             // Compare the known six-second Raiment timer with its decay on the game clock.
             // Other Dash buff indices retain their existing conservative confirmation rule.
-            double assistTimerAge = _selfDashApproach
+            bool trackedUpkeep = _dashUpkeepSerial == _selfDashSerial;
+            bool inPlaceUpkeep = trackedUpkeep && !_selfDashApproach;
+            double assistTimerAge = _selfDashApproach || inPlaceUpkeep
                 ? Math.Max(0, Hud.Game.CurrentGameTick - _selfDashPressGameTick) / 60.0 : 0;
-            if (_selfDashApproach
+            bool raimentRenewed = (_selfDashApproach || inPlaceUpkeep) && Hud.Game.CurrentGameTick > _selfDashPressGameTick
                 && BuffLeft(Hud.Sno.SnoPowers.Generic_P2ItemPassiveUniqueRing033.Sno, 2)
-                    > Math.Max(0, _selfDashRaimentBefore - assistTimerAge) + 0.1) observed = true;
+                    > Math.Max(0, _selfDashRaimentBefore - assistTimerAge) + 0.1;
+            observed |= raimentRenewed;
             var buffNow = Hud.Game.Me.Powers.GetBuff(Hud.Sno.SnoPowers.Monk_DashingStrike.Sno);
             if (buffNow != null && buffNow.TimeLeftSeconds != null)
                 for (int i = 0; i < buffNow.TimeLeftSeconds.Length; i++)
@@ -17156,6 +17618,11 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
                 _dashConfirmedGameTick = Hud.Game.CurrentGameTick; _dashConfirmedWorld = Hud.Game.Me.WorldId;
             }
             _selfDashObserved |= observed;
+            if (trackedUpkeep && (raimentRenewed || (inPlaceUpkeep && _selfDashObserved && _selfDashRaimentBefore > 0.6)))
+            {
+                _dashUpkeepRetryInPlace = false;
+                _dashUpkeepRetryAt = int.MinValue;
+            }
             bool approachInFlight = _selfDashApproach
                 && Hud.Game.Me.AnimationState != AcdAnimationState.Idle
                 && Hud.Game.Me.AnimationState != AcdAnimationState.Running
@@ -17250,6 +17717,7 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
                     return; // Event-driven: leave on the first observed completion, never wait a fixed gap.
                 }
                 _assistDashLandingConfirmed = freshLanding;
+                if (trackedUpkeep && freshLanding && _selfDashRaimentBefore > 0.6) _dashUpkeepRetryInPlace = false;
                 _selfDashResult = freshLanding ? "confirmed" : nativeBlocked ? "native-collision"
                     : contactHandoff ? "contact-handoff-unconfirmed" : "landing-watchdog";
                 var actualLanding = Hud.Game.Me.FloorCoordinate;
@@ -17327,7 +17795,7 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
             // Wait for release too: the shared arbiter retries any failed synthetic UP.
             if (_pulse == ActionKey.Unknown && !s7o_InputReleaseArbiter.HasPendingRelease
                 && ((_selfDashObserved && (AssistRequested() || !_selfDashAimIsMonster || manualAttackResumed))
-                    || ElapsedMs(now, _selfDashCastTick) >= (_selfDashAimIsMonster ? 700 : 350)))
+                    || ElapsedMs(now, _selfDashCastTick) >= (inPlaceUpkeep ? AssistInPlaceUpkeepConfirmMs : _selfDashAimIsMonster ? 700 : 350)))
             {
                 _selfDashResult = _selfDashObserved
                     ? (AssistRequested() ? "assist-takeover" : (_selfDashAimIsMonster && !manualAttackResumed ? "resume-timeout" : "confirmed"))
@@ -17339,7 +17807,9 @@ private void ConsiderAssistCirclePoint(AssistPositionCircle circle, IWorldCoordi
                     _lastDashTick = _selfDashPreviousDashTick;
                     _dashAwaiting = false;
                     _nextDashAimTick = AssistRequested() ? now : unchecked(now + 250);
+                    if (inPlaceUpkeep) _dashUpkeepRetryAt = unchecked(now + AssistInPlaceUpkeepRetryMs);
                 }
+                if (inPlaceUpkeep) RequestAssistPrimaryHandoff(_assistTargetAcd, now);
                 _selfDashKey = ActionKey.Unknown;
                 _selfDashBuffBefore = null;
                 RestoreCursor();
