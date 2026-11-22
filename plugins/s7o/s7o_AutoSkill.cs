@@ -1761,7 +1761,7 @@ namespace Turbo.Plugins.s7o
             AddConditionalProfile(Hud.Sno.SnoPowers.Monk_Epiphany, 312307, "Monk_Epiphany_Combat", "Epiphany: Combat", "Monk", "Cooldown", "Casts Epiphany when elite/boss or density is nearby.", true, ctx => (IsEliteOrBossNearby(80, true) || CountAliveMonstersWithin(60) >= 8) && SkillBuffRemainingBelow(ctx.Skill, 50, 100), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
             AddConditionalProfile(Hud.Sno.SnoPowers.Monk_SweepingWind, 96090, "Monk_SweepingWind_KeepUp", "Sweeping Wind: Keep Up", "Monk", "Buff", "Keeps Sweeping Wind active near enemies.", true, ctx => CountAliveMonstersWithin(60) > 0 && SkillBuffRemainingBelow(ctx.Skill, 1000, 2000), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
             AddConditionalProfile(Hud.Sno.SnoPowers.Monk_MantraOfConviction, 375088, "Monk_MantraConviction_Elite", "Mantra of Conviction: Elite", "Monk", "Mantra", "Refreshes the 3-second Conviction active only while attacking nearby enemies.", true, ctx => IsMonkAttackingEnemies() && ShouldRefreshMonkMantra(ctx), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
-            AddConditionalProfile(Hud.Sno.SnoPowers.Monk_MantraOfSalvation, 375049, "Monk_MantraSalvation_Defensive", "Mantra of Salvation: Defensive", "Monk", "Mantra", "Refreshes the 3-second Salvation active near danger without repeating casts.", true, ctx => (HealthPctBelow(70) || IsEliteOrBossNearby(45, true)) && ShouldRefreshMonkMantra(ctx), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
+            AddConditionalProfile(Hud.Sno.SnoPowers.Monk_MantraOfSalvation, 375049, "Monk_MantraSalvation_Defensive", "Mantra of Salvation: Defensive", "Monk", "Mantra", "Refreshes the 3-second Salvation active near danger without repeating casts.", true, ctx => HasMantraShieldPylon(Hud.Game.Me) ? ShouldMaintainSalvation(ctx.Skill, ctx.Now) : (HealthPctBelow(70) || IsEliteOrBossNearby(45, true)) && ShouldRefreshMonkMantra(ctx), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
             AddConditionalProfile(Hud.Sno.SnoPowers.Monk_MantraOfHealing, 373143, "Monk_MantraHealing_Defensive", "Mantra of Healing: Defensive", "Monk", "Mantra", "Keeps the shield active; repeats in combat and during Channeling Pylon.", true, ctx => ShouldCastHealingMantra(ctx), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
             AddConditionalProfile(Hud.Sno.SnoPowers.Monk_MysticAlly, 362102, "Monk_MysticAlly_ResourceOrElite", "Mystic Ally: Resource/Elite", "Monk", "Resource", "Casts Mystic Ally when spirit is low or elite/boss is nearby.", true, ctx => PrimaryResourcePctBelow(35) || IsEliteOrBossNearby(50, true), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
             AddConditionalProfile(Hud.Sno.SnoPowers.Monk_Serenity, 96215, "Monk_Serenity_Defensive", "Serenity: Defensive", "Monk", "Defense", "Casts Serenity when health is low or elites are close.", true, ctx => (HealthPctBelow(55) || IsEliteOrBossNearby(30, true)) && SkillBuffRemainingBelow(ctx.Skill, 50, 100), ConditionalProfileDelayMinMs, ConditionalProfileDelayMaxMs, ConditionalProfileRecheckMs);
@@ -1794,27 +1794,71 @@ namespace Turbo.Plugins.s7o
             // Renew a three-second active effect; never turn this into combat spam.
             if(_lastCastTickByPower.TryGetValue(skill.SnoPower.Sno,out last)&&unchecked(now-last)<2700)return false;
             const uint buffSno=375050u;const int activeIcon=1;
-            var me=Hud.Game.Me;var buff=me.Powers.GetBuff(buffSno);
-            double left=buff!=null?S7oMacroData.Seconds(buff.TimeLeftSeconds,activeIcon):double.NaN;
-            bool selfDue=!me.Powers.BuffIsActive(buffSno,activeIcon)||double.IsNaN(left)||left<=0.3;
-            if(selfDue)return true;
-            // Only loaded, living allies in the same world and aura vicinity qualify.
-            foreach(var ally in Hud.Game.Players)
+            var me=Hud.Game.Me;
+            bool shieldPylon = HasMantraShieldPylon(me);
+            if (!shieldPylon && MantraBuffNeedsRenewal(me, buffSno, activeIcon)) return true;
+            foreach (var ally in NearbyMantraAllies(me))
             {
-                if(ally==null||ally.IsMe||!ally.IsInGame||ally.IsDead||!ally.HasValidActor||ally.Powers==null
-                    ||ally.WorldId!=me.WorldId||ally.FloorCoordinate==null||me.FloorCoordinate==null
-                    ||ally.FloorCoordinate.XYDistanceTo(me.FloorCoordinate)>60)continue;
-                var other=ally.Powers.GetBuff(buffSno);
-                double otherLeft=other!=null?S7oMacroData.Seconds(other.TimeLeftSeconds,activeIcon):double.NaN;
-                if(!ally.Powers.BuffIsActive(buffSno,activeIcon)||double.IsNaN(otherLeft)||otherLeft<=0.3)return true;
+                if (shieldPylon && !IsUnprotectedMantraMonk(ally)) continue;
+                if (MantraBuffNeedsRenewal(ally, buffSno, activeIcon)) return true;
             }
             return false;
+        }
+
+        private static bool HasMantraShieldPylon(IPlayer player)
+        {
+            var buff = player?.Powers?.GetBuff(266254u);
+            if (buff == null || !buff.Active || buff.TimeLeftSeconds == null) return false;
+            foreach (double seconds in buff.TimeLeftSeconds)
+                if (seconds > 0 && !double.IsInfinity(seconds)) return true;
+            return false;
+        }
+
+        private static bool IsUnprotectedMantraMonk(IPlayer ally)
+        {
+            return !ally.IsInTown && ally.HeroClassDefinition?.HeroClass == HeroClass.Monk
+                && !HasMantraShieldPylon(ally);
+        }
+
+        private IEnumerable<IPlayer> NearbyMantraAllies(IPlayer me)
+        {
+            var players = Hud.Game.Players;
+            if (players == null || me.FloorCoordinate == null) yield break;
+            foreach (var ally in players)
+            {
+                if (ally == null || ally.IsMe || !ally.IsInGame || ally.IsDead || !ally.HasValidActor
+                    || ally.Powers == null || ally.WorldId != me.WorldId || ally.FloorCoordinate == null
+                    || !(ally.FloorCoordinate.XYDistanceTo(me.FloorCoordinate) <= 60)) continue;
+                yield return ally;
+            }
+        }
+
+        private static bool MantraBuffNeedsRenewal(IPlayer player, uint sno, int icon)
+        {
+            var buff = player.Powers.GetBuff(sno);
+            double left = S7oMacroData.Seconds(buff?.TimeLeftSeconds, icon);
+            return !player.Powers.BuffIsActive(sno, icon) || double.IsNaN(left) || left <= 0.3;
         }
 
         private bool ShouldCastHealingMantra(ConditionalCastContext ctx)
         {
             if(ctx==null||ctx.Skill==null||!S7oHealingMantraPolicy.Allowed(Hud))return false;
             var me=Hud.Game.Me;var powers=me.Powers;
+            if (HasMantraShieldPylon(me))
+            {
+                _lastMonkHealingShieldAmount = -1f;
+                int lastAllyCast;
+                int sinceAlly = _lastConditionalProfileCastTickByCode.TryGetValue(ctx.Profile.Code, out lastAllyCast)
+                    ? unchecked(ctx.Now - lastAllyCast) : int.MaxValue;
+                if (sinceAlly < Math.Max(100, HealingMantraCombatRefreshMs)) return false;
+                foreach (var ally in NearbyMantraAllies(me))
+                {
+                    if (IsUnprotectedMantraMonk(ally) && ally.Defense != null
+                        && (ally.Defense.CurShield <= 0 || MantraBuffNeedsRenewal(ally, MonkHealingShieldBuffSno, MonkHealingShieldIcon)))
+                        return true;
+                }
+                return false;
+            }
             bool pylon=powers.BuffIsActive(Hud.Sno.SnoPowers.Generic_PagesBuffInfiniteCasting.Sno);
             bool combat=me.AnimationState==AcdAnimationState.Attacking||me.AnimationState==AcdAnimationState.Channeling;
             if(S7oHealingMantraPolicy.UseIdleSpiritReserve(me.AnimationState,pylon))
