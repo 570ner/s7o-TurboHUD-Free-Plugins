@@ -357,6 +357,7 @@ namespace Turbo.Plugins.s7o
                 || _draggingMainThumb || _draggingTtsScrollThumb || _draggingGlobalTtsSlider
                 || _draggingAutoGemSpecificScrollThumb || _playerBuffsHotkeyCapture
                 || _genMonkMeleeHotkeyCapture || _zbarbAutoSnapHotkeyCapture
+                || _waveOfLightAssistHotkeyCapture
                 || _playerCoeHotkeyCapture || _playerCoeElementHotkeyCapture || _minimapHotkeyCapture
                 || _partyInspectorHotkeyCapture || _tipsPlayerMarkerHotkeyCapture
                 || _autoLootPauseHotkeyCapture || _pestilenceRgkJuggerHotkeyCapture
@@ -417,6 +418,8 @@ namespace Turbo.Plugins.s7o
         private readonly HashSet<string> _visualFavorites = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private Key _zbarbAutoSnapHotkey = Key.Space;
         private bool _zbarbAutoSnapHotkeyCapture = false;
+        private Key _waveOfLightAssistHotkey = Key.Space;
+        private bool _waveOfLightAssistHotkeyCapture = false;
         private bool _zbarbAutoSnapExpanded = false;
         private bool _zdhHelperExpanded = false;
         private bool _genMonkExpanded = false;
@@ -1730,6 +1733,30 @@ namespace Turbo.Plugins.s7o
                 return;
             }
 
+            if (_waveOfLightAssistHotkeyCapture)
+            {
+                if (IsCaptureCancelKey(keyEvent.Key))
+                {
+                    _waveOfLightAssistHotkeyCapture = false;
+                    _status = "WAVE OF LIGHT ASSIST KEY CAPTURE CANCELLED";
+                    return;
+                }
+
+                if (KeyToWinKeys(keyEvent.Key) == Keys.None)
+                {
+                    _waveOfLightAssistHotkeyCapture = false;
+                    _status = "UNSUPPORTED WAVE OF LIGHT ASSIST KEY";
+                    return;
+                }
+
+                _waveOfLightAssistHotkey = keyEvent.Key;
+                _waveOfLightAssistHotkeyCapture = false;
+                ApplyWaveOfLightAssistHotkeyToPlugin();
+                _status = "WAVE OF LIGHT ASSIST KEY SET TO " + CaptureKeyLabel(_waveOfLightAssistHotkey);
+                SaveSettings();
+                return;
+            }
+
             if (_autoLootPauseHotkeyCapture)
             {
                 if (IsCaptureCancelKey(keyEvent.Key))
@@ -2745,6 +2772,18 @@ namespace Turbo.Plugins.s7o
             ApplyZBarbAutoSnapConeToPlugin();
         }
 
+        private void ApplyWaveOfLightAssistHotkeyToPlugin()
+        {
+            var plugin = FindPluginByTypeName("s7o_WaveOfLightCyclone") as s7o_WaveOfLightCyclone;
+            if (plugin != null)
+                plugin.SetAssistKey(KeyToWinKeys(_waveOfLightAssistHotkey));
+        }
+
+        private string GetWaveOfLightAssistHotkeyLabel()
+        {
+            return CaptureKeyLabel(_waveOfLightAssistHotkey);
+        }
+
         private void ApplyZBarbAutoSnapConeToPlugin()
         {
             try
@@ -3069,6 +3108,9 @@ namespace Turbo.Plugins.s7o
 
             if (action == "main:plugin:autoskill" || action == "toggles:plugin:autoskill")
                 return TogglePluginByTypeName("AUTOSKILL", "s7o_AutoSkill");
+
+            if (action == "toggles:plugin:waveoflight")
+                return TogglePluginByTypeName("WAVE OF LIGHT", "s7o_WaveOfLightCyclone");
 
             if (action == "toggles:plugin:pestilencergk")
             {
@@ -3660,6 +3702,13 @@ namespace Turbo.Plugins.s7o
             {
                 _zbarbAutoSnapHotkeyCapture = true;
                 _status = "PRESS Z-BARB AUTOSNAP HOTKEY";
+                return;
+            }
+
+            if (action == "macro:hotkey:waveoflight")
+            {
+                _waveOfLightAssistHotkeyCapture = true;
+                _status = "PRESS WAVE OF LIGHT ASSIST KEY";
                 return;
             }
 
@@ -5637,6 +5686,7 @@ namespace Turbo.Plugins.s7o
             ApplySimHpBarsSettingsToPlugin();
             ApplyAutoLootSettingsToPlugin();
             ApplyInventoryDropSettingsToPlugin();
+            ApplyWaveOfLightAssistHotkeyToPlugin();
             ApplyPestilenceRgkSettingsToPlugin();
             ApplyInariusRgkSettingsToPlugin();
         }
@@ -10923,7 +10973,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 case "hotkey":
                     _capturingHotkey=false;_capturingHudHotkeyIdx=-1;
                     _ttsCustomMessageHotkeyCaptureIndex=-1;_autoSkillKeybindCaptureSlot=-1;
-                    _zbarbAutoSnapHotkeyCapture=_autoLootPauseHotkeyCapture=false;
+                    _zbarbAutoSnapHotkeyCapture=_waveOfLightAssistHotkeyCapture=_autoLootPauseHotkeyCapture=false;
                     _playerCoeHotkeyCapture=_playerCoeElementHotkeyCapture=_playerBuffsHotkeyCapture=false;
                     _partyInspectorHotkeyCapture=_tipsPlayerMarkerHotkeyCapture=_genMonkMeleeHotkeyCapture=false;
                     _pestilenceRgkJuggerHotkeyCapture=_pestilenceRgkOculusHotkeyCapture=_inariusRgkJuggerHotkeyCapture=false;
@@ -13628,8 +13678,14 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
             if (entry.HasHotkeyButton)
             {
-                string hotkeyLabel = GetZBarbAutoSnapHotkeyLabel();
-                DrawGlossButton(hotkeyR, hotkeyLabel, _zbarbAutoSnapHotkeyCapture, false, false);
+                bool waveOfLightHotkey = entry.HotkeyAction == "macro:hotkey:waveoflight";
+                string hotkeyLabel = waveOfLightHotkey
+                    ? GetWaveOfLightAssistHotkeyLabel()
+                    : GetZBarbAutoSnapHotkeyLabel();
+                bool capturing = waveOfLightHotkey
+                    ? _waveOfLightAssistHotkeyCapture
+                    : _zbarbAutoSnapHotkeyCapture;
+                DrawGlossButton(hotkeyR, capturing ? "PRESS..." : hotkeyLabel, capturing, false, false);
                 RegisterToggleHit(entry.HotkeyAction, hotkeyR);
             }
 
@@ -15038,6 +15094,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                     PluginAction="toggles:plugin:exitarchon" });
             AddAutoSkillEntries(allEntries,"Wizard");
 
+            int monkSectionStart = monkStart;
             if (FindPluginByTypeName("s7o_Impale") != null)
             {
                 allEntries.Insert(monkStart, new MacroEntry {
@@ -15052,6 +15109,21 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 wizardStart++;
 
             }
+            allEntries.Insert(monkSectionStart, new MacroEntry {
+                Title="Wave of Light Assist",
+                Description="Set the key held to activate Wave of Light assist.",
+                Code="wave_of_light_assist",
+                IsPlugin=true,
+                PluginTypeNames=new[]{"s7o_WaveOfLightCyclone"},
+                PluginAction="toggles:plugin:waveoflight",
+                HasHotkeyButton=true,
+                HotkeyAction="macro:hotkey:waveoflight"
+            });
+            monkStart = monkSectionStart;
+            necromancerStart++;
+            witchDoctorStart++;
+            wizardStart++;
+
             if (FindPluginByTypeName("s7o_GenMonk") != null)
             {
                 allEntries.Insert(necromancerStart, new MacroEntry {
@@ -16477,6 +16549,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 _capturingHudHotkeyIdx = -1;
                 _ttsCustomMessageHotkeyCaptureIndex = -1;
                 _zbarbAutoSnapHotkeyCapture = false;
+                _waveOfLightAssistHotkeyCapture = false;
                 _autoLootPauseHotkeyCapture = false;
                 _playerCoeHotkeyCapture = false; _playerBuffsHotkeyCapture = false;
                 _playerCoeElementHotkeyCapture = false;
@@ -16517,6 +16590,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             _capturingHudHotkeyIdx = -1;
             _ttsCustomMessageHotkeyCaptureIndex = -1;
             _zbarbAutoSnapHotkeyCapture = false;
+            _waveOfLightAssistHotkeyCapture = false;
             _autoLootPauseHotkeyCapture = false;
             _playerCoeHotkeyCapture = false; _playerBuffsHotkeyCapture = false;
             _playerCoeElementHotkeyCapture = false;
@@ -20065,6 +20139,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 lines.Add("GLOBAL_TTS_ENABLED=" + _globalTtsEnabled);
                 lines.Add("GLOBAL_TTS_VOLUME=" + _globalTtsVolume.ToString(CultureInfo.InvariantCulture));
                 lines.Add("ZBARB_AUTOSNAP_HOTKEY=" + _zbarbAutoSnapHotkey);
+                lines.Add("WAVE_OF_LIGHT_ASSIST_HOTKEY=" + _waveOfLightAssistHotkey);
                 lines.Add("ZBARB_AUTOSNAP_EXPANDED=" + _zbarbAutoSnapExpanded.ToString(CultureInfo.InvariantCulture));
                 lines.Add("ZBARB_AUTOSNAP_CONE_DEGREES=" + _zbarbAutoSnapConeDegrees.ToString(CultureInfo.InvariantCulture));
                 TrimTtsCustomMessages();
@@ -20859,6 +20934,12 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                         Key k;
                         if (Enum.TryParse<Key>(val, true, out k) && k != Key.Unknown)
                             _zbarbAutoSnapHotkey = k;
+                    }
+                    else if (key == "WAVE_OF_LIGHT_ASSIST_HOTKEY")
+                    {
+                        Key k;
+                        if (Enum.TryParse<Key>(val, true, out k) && k != Key.Unknown)
+                            _waveOfLightAssistHotkey = k;
                     }
                     else if (key == "ZBARB_AUTOSNAP_EXPANDED")
                     {

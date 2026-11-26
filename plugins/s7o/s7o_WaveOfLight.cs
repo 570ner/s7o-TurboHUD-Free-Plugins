@@ -98,6 +98,7 @@ namespace Turbo.Plugins.s7o
         private Delegate _autoCycloneWrapper;
         private int _autoCycloneBindAt = int.MinValue;
         public bool CoordinateAutoSkillCyclone = true;
+        public bool AssistEnabled = true;
         private static readonly Func<bool> ClaimMarker = () => true;
         private uint _world, _hero;
         private int _lastDash = int.MinValue, _lastCircleCheck = int.MinValue, _pressedKey, _inputSerial;
@@ -112,6 +113,7 @@ namespace Turbo.Plugins.s7o
         private int _burstKey, _burstHoldMs, _burstYieldUntil = int.MinValue;
         private int _failedCircleUntil;
         private bool _assistHeld;
+        private bool _assistKeyCaptureSuppressed;
         private int _wavePress, _waveSerial, _waveStandstill, _waveHeartbeat;
         private System.Threading.Timer _waveWatch;
         private IntPtr _waveWindow;
@@ -175,6 +177,29 @@ namespace Turbo.Plugins.s7o
         }
 
         public s7o_WaveOfLightCyclone() { Enabled = true; Order = -100; }
+
+        public void SetAssistKey(Keys key)
+        {
+            if (key == Keys.None || key == AssistKey) return;
+            CancelInput();
+            AssistKey = key;
+            _waitForAssistRelease = true;
+        }
+
+        public void SetAssistEnabled(bool value)
+        {
+            if (AssistEnabled == value) return;
+            AssistEnabled = value;
+            _waitForAssistRelease = value && Held(AssistKey);
+            if (!value) CancelInput();
+        }
+
+        public void SetAssistKeyCapture(bool value)
+        {
+            _assistKeyCaptureSuppressed = value;
+            _waitForAssistRelease = true;
+            if (value) CancelInput();
+        }
 
         public override void Load(IController hud)
         {
@@ -308,7 +333,8 @@ namespace Turbo.Plugins.s7o
             SampleBellBurstWork(me);
             var waveKey = wave == null ? Keys.None : Binding(wave.Key);
             var cycloneKey = cyclone == null ? Keys.None : Binding(cyclone.Key);
-            bool assistKeyHeld = AssistKey != Keys.None && AssistKey != waveKey && Held(AssistKey);
+            bool assistKeyHeld = AssistEnabled && !_assistKeyCaptureSuppressed
+                && AssistKey != Keys.None && AssistKey != waveKey && Held(AssistKey);
             if (!assistKeyHeld) _waitForAssistRelease = false;
             bool assist = assistKeyHeld && !_waitForAssistRelease;
             if (!assist && _assistHeld)
@@ -3813,7 +3839,7 @@ namespace Turbo.Plugins.s7o
             lock (_inputLock)
             {
                 int vk = (int)key;
-                if (!Held(AssistKey) || !Hud.Window.IsForeground)
+                if (!AssistEnabled || !Held(AssistKey) || !Hud.Window.IsForeground)
                 {
                     StopWave();
                     return "Space or focus lost";
@@ -3863,7 +3889,8 @@ namespace Turbo.Plugins.s7o
             lock (_inputLock)
             {
                 if (_wavePress == 0 || (int)state != _waveSerial) return;
-                string reason = !Held(AssistKey) ? "Space released"
+                string reason = !AssistEnabled ? "assist disabled"
+                    : !Held(AssistKey) ? "Space released"
                     : GetForegroundWindow() != _waveWindow ? "foreground changed"
                     : Age(Environment.TickCount, _waveHeartbeat) >= 400 ? "collector heartbeat expired" : null;
                 if (reason == null) return;
