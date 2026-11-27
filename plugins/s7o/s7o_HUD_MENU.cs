@@ -356,7 +356,7 @@ namespace Turbo.Plugins.s7o
                 || _draggingScrollThumb || _draggingMacrosThumb || _draggingVisualThumb
                 || _draggingMainThumb || _draggingTtsScrollThumb || _draggingGlobalTtsSlider
                 || _draggingAutoGemSpecificScrollThumb || _playerBuffsHotkeyCapture
-                || _genMonkMeleeHotkeyCapture || _zbarbAutoSnapHotkeyCapture
+                || _genMonkMeleeHotkeyCapture || _genMonkTargetControlCapture || _zbarbAutoSnapHotkeyCapture
                 || _playerCoeHotkeyCapture || _playerCoeElementHotkeyCapture || _minimapHotkeyCapture
                 || _partyInspectorHotkeyCapture || _tipsPlayerMarkerHotkeyCapture
                 || _autoLootPauseHotkeyCapture || _pestilenceRgkJuggerHotkeyCapture
@@ -421,7 +421,7 @@ namespace Turbo.Plugins.s7o
         private bool _zdhHelperExpanded = false;
         private bool _genMonkExpanded = false;
         private bool _impaleExpanded = false;
-        private bool _genMonkMeleeHotkeyCapture = false;
+        private bool _genMonkMeleeHotkeyCapture, _genMonkTargetControlCapture;
         private int _zbarbAutoSnapConeDegrees = 30;
         private const int ZBarbAutoSnapConeMin = 8;
         private const int ZBarbAutoSnapConeMax = 45;
@@ -1842,28 +1842,33 @@ namespace Turbo.Plugins.s7o
             }
 
 
-            if (_genMonkMeleeHotkeyCapture)
+            if (_genMonkMeleeHotkeyCapture || _genMonkTargetControlCapture)
             {
-                IPlugin monk = FindPluginByTypeName("s7o_GenMonk");
-                ushort vk = 0;
-                bool cancelled = IsCaptureCancelKey(keyEvent.Key);
-                bool valid = !cancelled && TryGetVirtualKeyFromDirectInputKey(keyEvent.Key, out vk);
-                _genMonkMeleeHotkeyCapture = false;
+                bool targetControl=_genMonkTargetControlCapture;
+                bool cancelled=IsCaptureCancelKey(keyEvent.Key);
+                ushort vk=0;
+                bool valid=!cancelled && TryGetVirtualKeyFromDirectInputKey(keyEvent.Key,out vk);
                 try
                 {
-                    if (monk != null)
+                    var monk=FindPluginByTypeName("s7o_GenMonk");
+                    if (valid && monk!=null)
                     {
-                        if (valid)
+                        if (targetControl)
+                            valid=monk.GetType().GetMethod("TrySetTargetControlVirtualKey")?.Invoke(monk,new object[]{vk}) is bool accepted
+                                && accepted;
+                        else
                         {
-                            monk.GetType().GetMethod("SetMeleeAssistVirtualKey").Invoke(monk, new object[] { vk });
+                            monk.GetType().GetMethod("SetMeleeAssistVirtualKey")?.Invoke(monk,new object[]{vk});
+                            valid=GenMonkOptionNumber(monk,"MeleeAssistVirtualKey",0)==vk;
                         }
-                        monk.GetType().GetMethod("SetMeleeAssistCapture").Invoke(monk, new object[] { false });
                     }
+                    else valid=false;
                 }
-                catch { }
-                _status = cancelled ? "GEN MONK HOTKEY CAPTURE CANCELLED"
-                    : valid ? "GEN MONK HOTKEY SET TO " + CaptureKeyLabel(keyEvent.Key)
-                    : "UNSUPPORTED GEN MONK HOTKEY";
+                catch { valid=false; }
+                finally { EndGenMonkHotkeyCapture(); }
+                _status=cancelled ? T("hud.text.hotkey_capture_cancelled","Hotkey capture cancelled.")
+                    : valid ? string.Format(CultureInfo.CurrentCulture,T("status.hotkey_set_to","Hotkey set to {0}."),AutoSkillVirtualKeyLabel(vk))
+                    : T("sanctified.monk.target_control_key.invalid","Choose a supported key different from the other GenMonk hotkey.");
                 return;
             }
 
@@ -2547,6 +2552,7 @@ namespace Turbo.Plugins.s7o
                 if (!Contains(r, x, y))
                     continue;
 
+                EndGenMonkHotkeyCapture();
                 _minimapHotkeyCapture = false;
                 _activePage = page;
                 if (_activePage == MenuPageTab.Plugins)
@@ -3575,6 +3581,8 @@ namespace Turbo.Plugins.s7o
                 return;
 
             if (action != "visual:minimap:hotkey") _minimapHotkeyCapture = false;
+            if (action!="sanctifiedmonk:option:hotkey" && action!="sanctifiedmonk:option:12")
+                EndGenMonkHotkeyCapture();
             if (action.StartsWith("toggles:cat:", StringComparison.OrdinalIgnoreCase))
             {
                 string raw = action.Substring("toggles:cat:".Length);
@@ -10921,13 +10929,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             {
                 case "toggle": _minimapEnabled=!_minimapEnabled;break;
                 case "hotkey":
-                    _capturingHotkey=false;_capturingHudHotkeyIdx=-1;
-                    _ttsCustomMessageHotkeyCaptureIndex=-1;_autoSkillKeybindCaptureSlot=-1;
-                    _zbarbAutoSnapHotkeyCapture=_autoLootPauseHotkeyCapture=false;
-                    _playerCoeHotkeyCapture=_playerCoeElementHotkeyCapture=_playerBuffsHotkeyCapture=false;
-                    _partyInspectorHotkeyCapture=_tipsPlayerMarkerHotkeyCapture=_genMonkMeleeHotkeyCapture=false;
-                    _pestilenceRgkJuggerHotkeyCapture=_pestilenceRgkOculusHotkeyCapture=_inariusRgkJuggerHotkeyCapture=false;
-                    ClearAnySnapHotkeyCapture();
+                    CancelMenuHotkeyCaptures();
                     _minimapHotkeyCapture=true;
                     _status=T("minimap.key_prompt","Press a Minimap key. Escape cancels.");
                     return;
@@ -13984,6 +13986,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             { Kind=kind; Key=key; Field=field; Setter=setter; Title=title; Description=description; }
         }
         private static readonly GenMonkMenuOption[] GenMonkMenuOptions = {
+            new GenMonkMenuOption(12,"target_control_key","TargetControlVirtualKey","TrySetTargetControlVirtualKey","Target Control Hotkey","Cycle elite targets in groups or toggle ranged cleanup in solo play."),
             new GenMonkMenuOption(4,"dash_charges","ShowDashChargeIndicator","SetDashChargeIndicator","Dash Charge Icons","Show native Dash charge icons."),
             new GenMonkMenuOption(5,"dash_reserves","ShowDashReserveBars","SetDashReserveBars","Dash Reserve Bars","Estimate extra Dashes funded by Spirit."),
             new GenMonkMenuOption(6,"spirit","ShowDashSpiritCounter","SetDashSpiritCounter","Spirit Indicator","Show current Spirit below the Dash meter."),
@@ -14135,6 +14138,14 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             var lines=WrapMeasuredDescription(_fSmall,GetMacroDescriptionDisplay(entry),width,2);
             for(int i=0;i<lines.Length;i++)DrawOutlinedTextAtRaw(_fSmall,_fSmallShadow,lines[i],x,r.Top+28f+i*16f);
             string action="sanctifiedmonk:option:"+option.Kind.ToString(CultureInfo.InvariantCulture);
+            if (option.Kind==12)
+            {
+                ushort key=(ushort)GenMonkOptionNumber(plugin,option.Field,0x11);
+                DrawGlossButton(control,_genMonkTargetControlCapture?T("hud.text.press","PRESS"):AutoSkillVirtualKeyLabel(key),
+                    _genMonkTargetControlCapture,false,true);
+                if (available) RegisterToggleHit(action,control);
+                return;
+            }
             if(stepper)
             {
                 int value=GenMonkOptionNumber(plugin,option.Field,option.Kind==7?100:option.Kind==8?1:option.Kind==10?1500:500);
@@ -14159,6 +14170,42 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             }
         }
 
+        private void EndGenMonkHotkeyCapture()
+        {
+            if (!_genMonkMeleeHotkeyCapture && !_genMonkTargetControlCapture) return;
+            _genMonkMeleeHotkeyCapture=_genMonkTargetControlCapture=false;
+            var monk=FindPluginByTypeName("s7o_GenMonk");
+            try { monk?.GetType().GetMethod("SetMeleeAssistCapture")?.Invoke(monk,new object[]{false}); }
+            catch { }
+        }
+
+        private void CancelMenuHotkeyCaptures()
+        {
+            EndGenMonkHotkeyCapture();
+            _capturingHotkey=false;_capturingHudHotkeyIdx=-1;
+            _ttsCustomMessageHotkeyCaptureIndex=-1;_autoSkillKeybindCaptureSlot=-1;
+            _zbarbAutoSnapHotkeyCapture=_autoLootPauseHotkeyCapture=false;
+            _playerCoeHotkeyCapture=_playerCoeElementHotkeyCapture=_playerBuffsHotkeyCapture=false;
+            _partyInspectorHotkeyCapture=_tipsPlayerMarkerHotkeyCapture=_minimapHotkeyCapture=false;
+            _pestilenceRgkJuggerHotkeyCapture=_pestilenceRgkOculusHotkeyCapture=_inariusRgkJuggerHotkeyCapture=false;
+            ClearAnySnapHotkeyCapture();
+        }
+
+        private void BeginGenMonkHotkeyCapture(IPlugin plugin,bool targetControl)
+        {
+            if (targetControl && plugin.GetType().GetMethod("TrySetTargetControlVirtualKey")==null) return;
+            var capture=plugin.GetType().GetMethod("SetMeleeAssistCapture");
+            if (capture==null) return;
+            CancelMenuHotkeyCaptures();
+            capture.Invoke(plugin,new object[]{true});
+            _genMonkTargetControlCapture=targetControl;
+            _genMonkMeleeHotkeyCapture=!targetControl;
+            string title=targetControl ? T("sanctified.monk.target_control_key","Target Control Hotkey")
+                : T("sanctified.monk.melee_assist","Melee Target Assist");
+            _status=string.Format(CultureInfo.CurrentCulture,T("hud.pattern.press_key_for_arg0_esc_to_cancel",
+                "Press a key for {0}. Escape cancels."),title);
+        }
+
         private void HandleGenMonkOptionAction(string action)
         {
             if (string.Equals(action, "sanctifiedmonk:expand", StringComparison.OrdinalIgnoreCase))
@@ -14178,6 +14225,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
                 if(option==null || ((kind==10 || kind==11) && !GetOptionalMacroBool(plugin,"FlyingDragonDashTestEnabled",false)))return;
                 try
                 {
+                    if (kind==12) { BeginGenMonkHotkeyCapture(plugin,true); return; }
                     bool stepper=kind==7 || kind==8 || kind==10 || kind==11;
                     if(stepper)
                     {
@@ -14196,9 +14244,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
             {
                 if (string.Equals(action, "sanctifiedmonk:option:hotkey", StringComparison.OrdinalIgnoreCase))
                 {
-                    plugin.GetType().GetMethod("SetMeleeAssistCapture").Invoke(plugin, new object[] { true });
-                    _genMonkMeleeHotkeyCapture = true;
-                    _status = "PRESS GEN MONK MELEE ASSIST HOTKEY (ESC to cancel)";
+                    BeginGenMonkHotkeyCapture(plugin,false);
                     return;
                 }
                 if (string.Equals(action, "sanctifiedmonk:option:1", StringComparison.OrdinalIgnoreCase))
@@ -16508,6 +16554,7 @@ if ((cmd == "tone" || cmd == "yards" || cmd == "thick" || cmd == "size" || cmd =
 
         private void HideMenuStateOnly()
         {
+            EndGenMonkHotkeyCapture();
             DisposeMenuWheel();
             ReleaseLeftMouseForMenuBoundary();
 
